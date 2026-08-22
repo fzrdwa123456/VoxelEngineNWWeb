@@ -79,6 +79,32 @@ function capHitAtPoint(x: number, y: number): { code: string; el: HTMLButtonElem
 // chipDrag = 免捕获拖拽进行中: 同样吞掉一切点击 (防止另一只键的点击误触芯片/返回)。
 // 捕获相位注册: 先于所有元素自身的 onclick 执行; 两者皆无时零影响。
 let suppressNextClick = false;
+
+// 置位一次性吞除标志。清零时机按置位时机分两路:
+// - mousedown 置位 (捕获态绑定): 不能当场排 timeout —— 用户按住期间 timeout 会先于
+//   click 到期, 标志被提前清掉导致合成 click 放行、芯片自动重进捕获态 (回归)。
+//   由下面的全局 mouseup 兜底在松手后排队清零。
+// - mouseup 置位 (拖拽松手): 当场排 timeout —— 合成 click 紧随 mouseup 同步派发、
+//   先于 timeout 消费; 多键/无 click 路径由 timeout 清零。全局兜底监听器在拖拽
+//   处理器之前注册, 本次 mouseup 看到的还是旧值, 帮不上忙, 必须自己排。
+function armSuppressNextClick(schedSelf: boolean): void {
+  suppressNextClick = true;
+  if (schedSelf) {
+    setTimeout(() => {
+      suppressNextClick = false;
+    }, 0);
+  }
+}
+
+// 松手后兜底 (仅捕获态路径需要): 标志在 mousedown 置位, 松手时若仍活着
+// (无合成 click 可消费, 如拖拽中按过第二个鼠标键破坏了 Chromium 的 click 合成),
+// 0ms 定时器清掉, 防止残留标志吞掉下一次真实点击
+document.addEventListener("mouseup", () => {
+  if (!suppressNextClick) return;
+  setTimeout(() => {
+    suppressNextClick = false;
+  }, 0);
+});
 document.addEventListener(
   "click",
   (ev) => {
@@ -119,7 +145,7 @@ document.addEventListener("mouseup", (ev) => {
   hideCapLine();
   const dragged = Math.hypot(ev.clientX - anchorX, ev.clientY - anchorY) >= 6;
   if (!dragged) return; // 普通点击: 交给原生 click 走选中切换
-  suppressNextClick = true; // 拖拽结束后的合成 click 由 click 屏蔽层按此标志吞掉 (消费即清)
+  armSuppressNextClick(true); // mouseup 置位: 当场排 timeout 兜底 (合成 click 先到先消费)
   if (getCapturing()) return; // 拖拽中途进入了捕获态(异常路径), 放弃绑定
   const code = capHitAtPoint(ev.clientX, ev.clientY)?.code ?? null;
   sendLog(`KBCAP 拖拽松手 action=${action} code=${code ?? "未命中"}`);
@@ -272,6 +298,12 @@ export function buildSettingsPanel(
   enBtn.onmouseout = () => (enBtn.style.background = getLang() === "en" ? "#4a9eff" : "#444");
   enBtn.onclick = () => setLang("en");
   langCol.appendChild(enBtn);
+  const jaBtn = document.createElement("button");
+  jaBtn.style.cssText = langChoiceStyle;
+  jaBtn.onmouseover = () => (jaBtn.style.background = getLang() === "ja" ? "#3b83d6" : "#555");
+  jaBtn.onmouseout = () => (jaBtn.style.background = getLang() === "ja" ? "#4a9eff" : "#444");
+  jaBtn.onclick = () => setLang("ja");
+  langCol.appendChild(jaBtn);
   choiceWrap.appendChild(langCol);
 
   // 右栏: 字体
@@ -299,6 +331,7 @@ export function buildSettingsPanel(
   const renderLang = (): void => {
     zhBtn.style.background = getLang() === "zh" ? "#4a9eff" : "#444";
     enBtn.style.background = getLang() === "en" ? "#4a9eff" : "#444";
+    jaBtn.style.background = getLang() === "ja" ? "#4a9eff" : "#444";
   };
   const renderFont = (): void => {
     pixelBtn.style.background = getFontId() === "pixel" ? "#4a9eff" : "#444";
@@ -754,9 +787,9 @@ export function buildSettingsPanel(
     ev.stopImmediatePropagation();
     endCapture();
     // 一次性抑制标志: 合成 click 到达时捕获态已空, 由 click 屏蔽层按此标志拦截。
-    // 仅左键会合成 click —— 右/中/侧键只产生 contextmenu/auxclick, 若也置位,
-    // 标志将无人消费, 会吞掉下一次真实左键点击 (导致"要点两次才能再进捕获")
-    if (ev.button === 0) suppressNextClick = true;
+    // 仅左键会合成 click (右/中/侧键只产生 contextmenu/auxclick); mousedown 置位,
+    // 清零走全局 mouseup 兜底 (当场排会被按住时长抢先清掉)
+    if (ev.button === 0) armSuppressNextClick(false);
     const code = buttonToCode(ev.button); // 左/中/右/X1/X2 统一立即绑定
     if (!code) return;
     setBind(action, code);
@@ -874,6 +907,7 @@ export function buildSettingsPanel(
     fontColLabel.textContent = t("settings.font");
     zhBtn.textContent = t("lang.zh");
     enBtn.textContent = t("lang.en");
+    jaBtn.textContent = t("lang.ja");
     pixelBtn.textContent = t("fonts.pixel");
     systemBtn.textContent = t("fonts.system");
     renderLang();

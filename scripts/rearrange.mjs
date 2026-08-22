@@ -45,18 +45,20 @@ if (existsSync(rawNodeSrc)) {
   console.warn("警告: rawinput.node 不存在 (cd rawinput && cargo build --release), 游戏将无原始鼠标输入兜底");
 }
 
-// 默认贴图 -> 内置资源包 game\resourcepacks\default.zip (MC 式: 贴图封在压缩包里)
+// 默认贴图+语言 -> 内置资源包 game\resourcepacks\default.zip (MC 式: 资源封在压缩包里)
 const rpDir = path.join(release, "game", "resourcepacks");
 mkdirSync(rpDir, { recursive: true });
 const entries = {};
-(function collect(dir, base) {
+const collect = (dir, base) => {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, e.name);
     const rel = path.join(base, e.name).replace(/\\/g, "/");
     if (e.isDirectory()) collect(full, rel);
     else entries[rel] = readFileSync(full);
   }
-})(path.join(root, "src", "assets", "textures"), "");
+};
+collect(path.join(root, "src", "assets", "textures"), "");
+collect(path.join(root, "src", "assets", "lang"), "lang"); // 语言文件 -> 包内 lang\, i18n.ts 经 resolveBytes 同链读取
 writeFileSync(path.join(rpDir, "default.zip"), zipSync(entries, { level: 9 }));
 
 console.log(`打包完成 -> ${release}`);

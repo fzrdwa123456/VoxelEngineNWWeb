@@ -79,6 +79,12 @@ const MISSING_REL = "missing.png";
 
 const cache = new Map<string, string>();
 
+/** 按资源包语义解析原始字节 (用户包 > 内置 default.zip, 文件级整体覆盖); 语言文件等非贴图资源共用此链 */
+export function resolveBytes(rel: string): Bytes | null {
+  scanPacks();
+  return overrides.get(rel) ?? builtin?.get(rel) ?? null;
+}
+
 /** 按资源包语义解析贴图: 用户包 > 内置 default.zip > missing.png > 1x1 透明; 返回 data URL */
 export function resolveTexture(rel: string): string {
   const hit = cache.get(rel);

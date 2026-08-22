@@ -1,12 +1,12 @@
-// 下载并解压 NW.js v0.114.2 win-x64 到 nwjs\（幂等：已存在则跳过）
+// 下载并解压 NW.js v0.115.0 sdk win-x64 到 nwjs\（幂等：已存在则跳过; 与 rearrange.mjs 期望的目录名一致）
 import { existsSync, mkdirSync, createWriteStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const version = "0.114.2";
-const distName = `nwjs-v${version}-win-x64`;
+const version = "0.115.0";
+const distName = `nwjs-sdk-v${version}-win-x64`;
 const nwDir = path.join(root, "nwjs");
 const outDir = path.join(nwDir, distName);
 
