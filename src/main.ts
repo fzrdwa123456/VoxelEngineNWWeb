@@ -16,6 +16,8 @@ import { startRawInput, centerCursor } from "./rawinput";
 import { DebugLogForwarder } from "./debuglog";
 import { PerfSampler } from "./perf";
 import { loadBinds, getBind, getBindsAll, onBindsChange, isCapturing, buttonToAction, buttonToCode } from "./keybinds";
+import { menuBgKind } from "./ui/background";
+import { resolveTexture } from "./textures";
 
 // 像素字体 (Fusion Pixel, OFL 开源): 比例字体 UI 通用, 等宽字体 F3/数量面板
 import "@fontsource/fusion-pixel-12px-proportional-sc";
@@ -161,12 +163,13 @@ const menu = new Menu({
   getWindowMode: () => getWindowMode(),
   onSetWindowMode,
   onToMainMenu: () => {
-    // 回到主菜单: 停循环 + 清成黑色 (背景由主菜单 DOM 层的 missing.png 承担, 进游戏首帧自动恢复 3D)
+    // 回到主菜单: 停循环 + 清成黑色 (背景由主菜单背景系统承担, 进游戏首帧自动恢复 3D)
     started = false;
     stopLoop();
     renderer.setClearColor(0x000000);
     renderer.clear();
     mainMenu.show();
+    startMenuBgLoop(); // panorama 模式: 重新起全景循环
     pointerLock.applyCursor();
     sendLog("MENU 回到主菜单");
   },
@@ -285,6 +288,10 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (menuBgCamera) {
+    menuBgCamera.aspect = window.innerWidth / window.innerHeight;
+    menuBgCamera.updateProjectionMatrix();
+  }
 });
 
 const timer = new THREE.Timer();
@@ -384,17 +391,58 @@ function stopLoop(): void {
 function startLoop(): void {
   started = true;
   stopLoop();
+  stopMenuBgLoop(); // 进游戏: 菜单背景循环让位
   rafId = requestAnimationFrame(function tick() {
     renderFrame();
     rafId = requestAnimationFrame(tick);
   });
 }
 
+// ===== 主菜单全景背景循环 (仅 menuBgKind()=panorama 时启用) =====
+// 球体内壁贴等距柱状全景图, 相机固定球心绕 Y 轴慢转 (MC 主菜单式环视)。
+// 与游戏循环互斥: 主菜单显示期间渲染全景, startLoop 时停; 共用同一个 renderer。
+let menuBgRaf = 0;
+let menuBgScene: THREE.Scene | null = null;
+let menuBgCamera: THREE.PerspectiveCamera | null = null;
+let menuBgYaw = 0;
+let menuBgLastMs = 0;
+
+function startMenuBgLoop(): void {
+  if (menuBgRaf || menuBgKind() !== "panorama") return; // 已在跑 / 非 panorama 模式
+  if (!menuBgScene) {
+    // 懒初始化: SphereGeometry 默认 UV 即等距柱状映射; scale(-1,1,1) 翻转到内壁且不镜像
+    menuBgScene = new THREE.Scene();
+    const tex = new THREE.TextureLoader().load(resolveTexture("backgrounds/panorama.png"));
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const geo = new THREE.SphereGeometry(50, 64, 32);
+    geo.scale(-1, 1, 1);
+    menuBgScene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex })));
+    menuBgCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+  }
+  menuBgLastMs = performance.now();
+  const tick = (): void => {
+    const now = performance.now();
+    menuBgYaw += Math.min((now - menuBgLastMs) / 1000, 0.1) * 0.03; // 慢转 ~0.03 rad/s, 一圈约 3.5 分钟
+    menuBgLastMs = now;
+    menuBgCamera!.quaternion.setFromEuler(new THREE.Euler(0, menuBgYaw, 0));
+    renderer.render(menuBgScene!, menuBgCamera!);
+    menuBgRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopMenuBgLoop(): void {
+  if (!menuBgRaf) return;
+  cancelAnimationFrame(menuBgRaf);
+  menuBgRaf = 0;
+}
+
 sendLog(`BOOT 渲染=rAF(60Hz) world=${world.meshes().length} 方块 winFocused=${winFocused()}`);
 
-// 主界面: 黑色清屏兜底 (背景由主菜单 DOM 层的 missing.png 承担)。进游戏 startLoop 首帧 render 自动恢复 3D 世界。
+// 主界面: 黑色清屏兜底 (DOM 背景/全景由主菜单背景系统承担)。进游戏 startLoop 首帧 render 自动恢复 3D 世界。
 applyUIScale();
 renderer.setClearColor(0x000000);
 renderer.clear();
 mainMenu.show();
+startMenuBgLoop(); // panorama 模式: 球体全景渲染循环 (非 panorama 内部直接返回)
 pointerLock.applyCursor();

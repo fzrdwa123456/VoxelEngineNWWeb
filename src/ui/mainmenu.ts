@@ -1,10 +1,13 @@
 // ===== 主界面 (标题 voxelcraft + 单人/多人/设置/退出) =====
-// 背景: 资源包内的 missing.png (与贴图同一条覆盖链, 用户包可换图) 铺满整个主菜单,
-// 读不到时黑色兜底。视频/全景/3D 场景留待扩展: 需要主菜单专用渲染循环。
+// 背景: 资源包 backgrounds/background.json 选模式 (见 ui/background.ts 判定链):
+//   panorama = 球体全景 (root 透明让出画布, main.ts 的菜单渲染循环画)
+//   static   = backgrounds/mainmenu.png 铺满 (缺图退 missing.png -> 黑)
+//   checker  = 无配置/非法配置, 直接紫黑格子 (missing.png)
 import { buildSettingsPanel, type SettingsCallbacks } from "./menu";
 import { t, onLangChange } from "./i18n";
 import { uiStage } from "./uiscale";
 import { resolveTexture, FALLBACK_TEXTURE_URL } from "../textures";
+import { menuBgKind } from "./background";
 
 export interface MainMenuCallbacks extends SettingsCallbacks {
   onStartSingle: () => void;
@@ -53,15 +56,19 @@ export class MainMenu {
     this.root = document.createElement("div");
     this.root.style.cssText =
       "position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;" +
-      "background:#000 center/cover no-repeat;image-rendering:pixelated;";
-    // 背景图: 资源包 missing.png (用户包可覆盖); 原半透明压暗层由伪透明实现 ——
-    // 图片上叠暗化: 用第二个渐变层, 无图时纯黑兜底。
-    // image-rendering:pixelated: 2x2 紫黑棋盘格最近邻放大 (对齐游戏内贴图 NearestFilter),
-    // 否则 CSS 默认双线性插值会把棋盘糊成"纯紫渐变" (黑色被混合稀释)
-    const bgUrl = resolveTexture("missing.png");
-    const hasBg = bgUrl !== FALLBACK_TEXTURE_URL; // resolveTexture 读不到时返回 1x1 透明兜底 URL
-    if (hasBg) {
-      this.root.style.backgroundImage = `linear-gradient(rgba(0,0,0,.5),rgba(0,0,0,.5)), url(${bgUrl})`;
+      "image-rendering:pixelated;";
+    // 背景形态判定 (与 main.ts 渲染循环共用): panorama 让画布透出 + 半透明压暗;
+    // static/checker 设 DOM 背景图。checker 直连 missing.png (无配置 = 紫黑格子)
+    const kind = menuBgKind();
+    if (kind === "panorama") {
+      this.root.style.background = "rgba(0,0,0,.35)"; // 仅压暗层, 全景由画布渲染
+    } else {
+      this.root.style.background = "#000 center/cover no-repeat";
+      const bgUrl = resolveTexture(kind === "static" ? "backgrounds/mainmenu.png" : "missing.png");
+      const hasBg = bgUrl !== FALLBACK_TEXTURE_URL; // 整链空返回透明兜底 URL -> 不设图纯黑底
+      if (hasBg) {
+        this.root.style.backgroundImage = `linear-gradient(rgba(0,0,0,.5),rgba(0,0,0,.5)), url(${bgUrl})`;
+      }
     }
     uiStage.appendChild(this.root);
 
