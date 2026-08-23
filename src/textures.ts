@@ -71,8 +71,9 @@ function scanPacks(): void {
 }
 
 // 1x1 透明 PNG (R=0 G=0 B=0 A=0, 已验证), 整个资源链(用户包/内置包/missing)都没有时最后兜底 (永不炸)
-const FALLBACK =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY2BgYGAAAAAFAAGKM+MAAAAAAElFTkSuQmCC";
+// 导出: 主菜单背景需要区分"读到了真图"与"整个链都空" (空 = 黑色兜底, 不设 backgroundImage)
+export const FALLBACK_TEXTURE_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAABJRU5ErkJggg==";
 
 // 缺失贴图通用兜底: 包根目录的 missing.png (资源, 可被用户资源包覆盖/删除)
 const MISSING_REL = "missing.png";
@@ -91,7 +92,7 @@ export function resolveTexture(rel: string): string {
   if (hit !== undefined) return hit;
   scanPacks();
   const bytes = overrides.get(rel) ?? builtin?.get(rel) ?? overrides.get(MISSING_REL) ?? builtin?.get(MISSING_REL);
-  const url = bytes ? `data:image/png;base64,${bytesToB64(bytes)}` : FALLBACK;
+  const url = bytes ? `data:image/png;base64,${bytesToB64(bytes)}` : FALLBACK_TEXTURE_URL;
   cache.set(rel, url);
   return url;
 }

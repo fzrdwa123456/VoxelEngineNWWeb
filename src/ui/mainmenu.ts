@@ -1,7 +1,10 @@
-﻿// ===== 主界面 (标题 voxelcraft + 单人/多人/设置/退出) =====
+// ===== 主界面 (标题 voxelcraft + 单人/多人/设置/退出) =====
+// 背景: 资源包内的 missing.png (与贴图同一条覆盖链, 用户包可换图) 铺满整个主菜单,
+// 读不到时黑色兜底。视频/全景/3D 场景留待扩展: 需要主菜单专用渲染循环。
 import { buildSettingsPanel, type SettingsCallbacks } from "./menu";
 import { t, onLangChange } from "./i18n";
 import { uiStage } from "./uiscale";
+import { resolveTexture, FALLBACK_TEXTURE_URL } from "../textures";
 
 export interface MainMenuCallbacks extends SettingsCallbacks {
   onStartSingle: () => void;
@@ -50,7 +53,16 @@ export class MainMenu {
     this.root = document.createElement("div");
     this.root.style.cssText =
       "position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;" +
-      "background:rgba(0,0,0,.5);";
+      "background:#000 center/cover no-repeat;image-rendering:pixelated;";
+    // 背景图: 资源包 missing.png (用户包可覆盖); 原半透明压暗层由伪透明实现 ——
+    // 图片上叠暗化: 用第二个渐变层, 无图时纯黑兜底。
+    // image-rendering:pixelated: 2x2 紫黑棋盘格最近邻放大 (对齐游戏内贴图 NearestFilter),
+    // 否则 CSS 默认双线性插值会把棋盘糊成"纯紫渐变" (黑色被混合稀释)
+    const bgUrl = resolveTexture("missing.png");
+    const hasBg = bgUrl !== FALLBACK_TEXTURE_URL; // resolveTexture 读不到时返回 1x1 透明兜底 URL
+    if (hasBg) {
+      this.root.style.backgroundImage = `linear-gradient(rgba(0,0,0,.5),rgba(0,0,0,.5)), url(${bgUrl})`;
+    }
     uiStage.appendChild(this.root);
 
     this.panel = document.createElement("div");

@@ -161,10 +161,10 @@ const menu = new Menu({
   getWindowMode: () => getWindowMode(),
   onSetWindowMode,
   onToMainMenu: () => {
-    // 回到主菜单: 停循环 + 恢复主界面绿色背景 (进游戏 startLoop 首帧自动恢复 3D)
+    // 回到主菜单: 停循环 + 清成黑色 (背景由主菜单 DOM 层的 missing.png 承担, 进游戏首帧自动恢复 3D)
     started = false;
     stopLoop();
-    renderer.setClearColor(0x00ff00);
+    renderer.setClearColor(0x000000);
     renderer.clear();
     mainMenu.show();
     pointerLock.applyCursor();
@@ -392,9 +392,9 @@ function startLoop(): void {
 
 sendLog(`BOOT 渲染=rAF(60Hz) world=${world.meshes().length} 方块 winFocused=${winFocused()}`);
 
-// 主界面: 纯绿背景 (清屏色=绿, 只清屏不渲染世界)。进游戏 startLoop 首帧 render 自动恢复 3D 世界。
+// 主界面: 黑色清屏兜底 (背景由主菜单 DOM 层的 missing.png 承担)。进游戏 startLoop 首帧 render 自动恢复 3D 世界。
 applyUIScale();
-renderer.setClearColor(0x00ff00);
+renderer.setClearColor(0x000000);
 renderer.clear();
 mainMenu.show();
 pointerLock.applyCursor();
