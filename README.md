@@ -119,4 +119,4 @@ mypack.zip
 └─ lang/zh.json                # 覆盖语言词典 (免构建改文案)
 ```
 
-词典格式见 [src/assets/lang/zh.json](src/assets/lang/zh.json)，key 与 UI 一一对应，缺词自动回退中文。
+词典格式见 [src/assets/lang/zh.json](src/assets/lang/zh.json)，key 与 UI 一一对应，缺词自动回退英文（对齐 MC 的 en_us 兜底惯例）。

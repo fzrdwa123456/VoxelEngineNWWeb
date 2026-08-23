@@ -1,7 +1,7 @@
 // ===== 多语言: 词典文件化 (资源包内 lang\*.json) + t() + 运行时切换 =====
 // 词典不再硬编码: 构建时 src\assets\lang 打进 default.zip (lang/zh.json, lang/en.json),
-// 用户资源包放同名文件即可整体覆盖 (与贴图同一条覆盖链)。缺词回退中文, 再缺返回 key。
-// 只覆盖用户可见 UI 文案; debug.log 里的诊断行 (SPACE#/KBCAP 等) 保持中文。
+// 用户资源包放同名文件即可整体覆盖 (与贴图同一条覆盖链)。缺词回退英文 (对齐 MC 的
+// en_us 兜底惯例), 再缺返回 key。只覆盖用户可见 UI 文案; debug.log 诊断行保持中文。
 import { resolveBytes } from "../textures";
 import { sendLog } from "../shell";
 
@@ -27,9 +27,9 @@ const STRINGS: Record<Lang, Dict> = { zh: loadPackDict("zh"), en: loadPackDict("
 let current: Lang = "zh";
 const listeners = new Set<() => void>();
 
-/** 取当前语言的文案; 缺词回退中文, 再缺返回 key 本身 */
+/** 取当前语言的文案; 缺词回退英文, 再缺返回 key 本身 */
 export function t(key: string): string {
-  return STRINGS[current][key] ?? STRINGS.zh[key] ?? key;
+  return STRINGS[current][key] ?? STRINGS.en[key] ?? key;
 }
 
 export function getLang(): Lang {
