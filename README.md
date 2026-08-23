@@ -1,20 +1,24 @@
 # 📦 VoxelEngineNWWeb — MC 风格体素沙盒游戏
 
-基于 **NW.js + three.js (WebGPU)** 的 Minecraft 风格体素沙盒。浏览器技术栈做桌面游戏：WebGPU 渲染、像素风 UI、完整的键鼠绑定系统与资源包生态，打包为免安装绿色目录。
+基于 **NW.js + three.js (WebGPU)** 的 Minecraft 风格体素沙盒。浏览器技术栈做桌面游戏：WebGPU 渲染、像素风 UI、完整的键鼠绑定系统与 mod/资源包生态，打包为免安装绿色目录。
 
 ## ✨ 特性
 
-- 🧱 **体素世界**：准星射线破坏/放置方块，固定步长物理 + 渲染插值（当前为演示规模：固定生成小方块平台，无区块/地形生成/存档，方块 3 种：默认/草方块/缺失兜底）
+- 🧱 **体素世界**：准星射线破坏/放置方块，固定步长物理 + 渲染插值（当前为演示规模：固定出生平台，无区块/地形生成/存档）
+- 🧩 **内容 mod 系统**：方块注册表数据驱动（`blocks.json`），`game\mods\` 放文件夹/zip 即可**新增方块**或**改造已有方块**，免构建自带贴图
+- 🎨 **资源包系统**：MC 式三层命名空间（`assets/<ns>/...`），资源包可覆盖 mod 与本体的贴图/背景/语言（资源包 > mods 的优先级语义，与 MC 一致）
+- 🌐 **中/英/日三语**：词典文件化（`lang/*.json` 多层合并），mod/资源包可增量补词条；Fusion Pixel 像素字体 / 系统字体切换
+- 🖼️ **主菜单背景三模式**：球体全景环视（等距柱状全景图）/ 静态图 / 程序化紫黑棋盘格兜底，由资源包 `backgrounds/background.json` 配置
+- 🛡️ **全程序化兜底**：缺贴图/缺 mod/缺语言全部落到引擎内置紫黑棋盘格（硬编码 data URL），空环境永不崩溃、永不黑屏
+- 🚀 **MC 式多开**：双击多次自动分配独立数据目录（互斥体找槽：data → data2 → data3...），单机联机测试无需复制目录
 - 🎮 **游戏模式**：生存（跳跃）/ 创造（双击空格切飞行）/ 观察者三模式
-- 🎒 **背包与快捷栏**：E 键开背包，点击格子与选中快捷栏槽交换；方块图标由 3D 相机实时渲染生成
+- 🎒 **背包与快捷栏**：E 键开背包，物品栏自动填充注册表方块（mod 新方块自动出现）；方块图标由 3D 相机实时渲染生成
 - 🎮 **按键绑定**：可视化 104 键键盘布局（含小键盘/方向键/鼠标五键），点击换绑、拖拽绑定、Esc 解绑、冲突抢占，持久化到配置文件
-- 🖱️ **原始鼠标输入**：Rust 原生插件（napi-rs）绕过 Chromium 指针锁定限制——窗口拖出屏幕边缘也能转视角（插件缺失时自动降级，游戏可正常运行）
-- 🎨 **资源包系统**：MC 式 zip 资源包，贴图三级回退（用户包 > 内置 default.zip > missing.png 兜底）+ alphaTest 透明
-- 🌐 **中/英/日三语**：词典文件化（资源包内 `lang/*.json`），用户资源包放同名文件即可**免构建改文案**；Fusion Pixel 像素字体 / 系统字体切换
+- 🖱️ **原始鼠标输入**：Rust 原生插件（napi-rs）绕过 Chromium 指针锁定限制——窗口拖出屏幕边缘也能转视角（插件缺失时自动降级）
 - 🔍 **界面缩放**：rem 根字号方案，小/普通/大/自动四档
-- 🪟 **窗口模式**：窗口化 / 全屏（kiosk 直连，免重启切换）；GPU 垂直同步开关（写 manifest，重启生效）+ 帧率上限 30–240/无限
+- 🪟 **窗口模式**：窗口化 / 全屏（kiosk 直连，免重启切换）；GPU 垂直同步开关 + 帧率上限 30–240/无限
 - 📊 F3 调试面板（FPS / GPU 耗时 / 物理状态 / 输入日志）
-- 👥 多人模式为主菜单占位按钮（未实现，点击弹提示）
+- 👥 多人模式为主菜单占位按钮（未实现）
 
 ## 🛠 技术栈
 
@@ -24,21 +28,25 @@
 | 运行时 | NW.js 0.115 SDK（Chromium + Node.js 同进程） |
 | 语言 | TypeScript + Vite 8 构建 |
 | 原生插件 | Rust（napi-rs v3）→ `rawinput.node`，Win32 Raw Input |
-| 桌面工具 | C（MinGW gcc）：`launcher.exe` 启动器（传 `--user-data-dir` 隔离用户数据到 `game\data`，保证绿色目录可整体移动） |
-| 打包 | 自研 `rearrange.mjs`（绿色目录组装 + rcedit 进程改名 + fflate 打资源包） |
+| 桌面工具 | C（MinGW gcc）：`launcher.exe` 启动器（多实例槽位分配 + `--user-data-dir` 隔离，保证绿色目录可整体移动） |
+| 打包 | 自研 `rearrange.mjs`（绿色目录组装 + rcedit 进程改名） |
 
 ## 📁 目录结构
 
 ```
-├─ src/            # TypeScript 源码（渲染/UI/输入/设置）
-│  └─ assets/      #   贴图 + 语言文件（构建时打进 default.zip）
+├─ src/            # TypeScript 源码（渲染/UI/输入/设置/方块注册表）
 ├─ rawinput/       # Rust 原生鼠标输入插件
-├─ launcher/       # C 启动器源码
+├─ launcher/       # C 启动器源码（多实例槽位分配）
 ├─ scripts/        # get-nw 下载器 / rearrange 绿色打包
 ├─ app/            # NW.js manifest
 └─ release/VoxelEngineNWWeb/   # 构建产物（免安装目录）
-   └─ game/core/   # NW.js 运行时 + 游戏 + rawinput.node
+   └─ game/
+      ├─ core/           # NW.js 运行时 + 游戏 + rawinput.node
+      ├─ mods/           # 方块 mod（玩家手动放, 构建后为空）
+      └─ resourcepacks/  # 资源包（玩家手动放, 构建后为空）
 ```
+
+> **A 方案（全外部化）**：构建不生成任何内置资源包——`src/assets/` 已移除，语言/背景/方块贴图全部由玩家手动放入 `game\resourcepacks\` 与 `game\mods\`。空环境下游戏依靠程序化兜底（紫黑棋盘格 + key 显示）依然可运行。
 
 ## ⚙️ 环境要求
 
@@ -57,7 +65,9 @@ npm run build              # tsc + vite + 打包 + 编译启动器
 构建完成后直接运行：
 
 ```
-release/VoxelEngineNWWeb/launcher.exe
+release/VoxelEngineNWWeb/launcher.exe          # 客户端 1（数据目录 game\data）
+release/VoxelEngineNWWeb/launcher.exe          # 再双击 = 客户端 2（自动 game\data2）
+release/VoxelEngineNWWeb\launcher.exe --3      # 显式指定槽位 3
 ```
 
 ### 🔧 构建原生鼠标插件（可选）
@@ -97,26 +107,71 @@ npm run build:winctl   # 窗口控制备用工具 (winctl.exe)
 
 ## 📖 运行时目录（绿色版）
 
-游戏首次运行后会在 `release/VoxelEngineNWWeb/game/` 下生成：
-
 ```
 game/
 ├─ core/            # NW.js 运行时 + 游戏 (构建产物, 勿手改)
-├─ resourcepacks/   # 资源包: default.zip 内置; 用户 zip/文件夹放这里覆盖贴图/语言
-├─ config/          # settings.json (语言/字体/键位/缩放/窗口模式等持久化)
-├─ data/            # NW.js 用户数据 (localStorage/缓存, 由启动器隔离)
-└─ logs/            # debug.log / renderer.log / launcher.log
+├─ mods/            # 方块 mod: 每个文件夹/zip 一个, 放 blocks.json + 贴图
+├─ resourcepacks/   # 资源包: 贴图/背景/语言, 优先级最高 (可改 mod 的皮)
+├─ config/          # settings.json (语言/字体/键位/缩放/窗口模式等持久化, 多实例共享)
+├─ data/            # NW.js 用户数据 实例1 (localStorage/缓存)
+├─ data2/ data3/…   # 多开时 launcher 自动分配的独立实例目录
+├─ saves/           # 存档 (预留)
+└─ logs/            # debug.log / renderer.log / launcher.log / launcher2.log…
 ```
 
-## 🎨 自定义资源包
+## 🧩 制作方块 mod
 
-往 `game/resourcepacks/` 放 zip 或文件夹即可覆盖内置资源（用户包按目录名字典序倒序，后放的胜）：
+往 `game\mods\你的mod\` 放文件即可（文件夹或 zip 均可，重启生效）：
 
 ```
-mypack.zip
-├─ block/grass_block_top.png   # 覆盖贴图
-├─ missing.png                 # 覆盖缺失兜底图
-└─ lang/zh.json                # 覆盖语言词典 (免构建改文案)
+你的mod/
+└─ assets/voxel/
+   ├─ data/
+   │  └─ blocks.json          # 方块定义
+   └─ textures/
+      └─ block/xxx.png        # mod 自带贴图
 ```
 
-词典格式见 [src/assets/lang/zh.json](src/assets/lang/zh.json)，key 与 UI 一一对应，缺词自动回退英文（对齐 MC 的 en_us 兜底惯例）。
+`blocks.json` 条目格式：
+
+```json
+{
+  "grass": { "label": "草方块", "top": "block/grass_block_top.png", "side": "block/grass_block_side.png", "bottom": "block/dirt.png" },
+  "ruby":  { "label": "红宝石块", "all": "block/dirt.png" },
+  "neon":  { "label": "霓虹块", "color": "#ff00aa" }
+}
+```
+
+| 字段 | 作用 | 缺省 |
+|---|---|---|
+| `label` | 显示名（物品栏悬停） | 用 id |
+| `color` | 纯色方块（CSS 色值） | 绿色 |
+| `side` / `top` / `bottom` | 贴图路径（包内相对） | top/bottom 回退 side |
+| `all` | 六面同图（简写） | — |
+
+**合并规则**：多个 mod 的 `blocks.json` 逐层合并——不同 id 并集（新增方块）、同 id 高优先级胜（改造方块）。优先级：`resourcepacks` > `mods`（按目录名字典序倒序）。
+
+## 🎨 制作资源包
+
+往 `game\resourcepacks\你的包\` 放文件（与 mod 同构，优先级最高，可覆盖一切）：
+
+```
+你的包/
+└─ assets/voxel/
+   ├─ lang/zh.json                  # 增量词条或覆盖文案
+   ├─ backgrounds/                  # 主菜单背景
+   │  ├─ background.json            # {"mode": "panorama" | "static"}
+   │  ├─ mainmenu.png               # 静态背景图
+   │  └─ panorama.png               # 全景图 (2:1 等距柱状)
+   └─ textures/block/dirt.png       # 覆盖 mod/本体的同名贴图
+```
+
+**路径归一化**：包内 `assets/<命名空间>/` 前缀自动剥除（命名空间可任意命名），`textures/` 分类层可选——以下三种结构等价：
+
+```
+assets/voxel/textures/block/dirt.png   ≡   assets/voxel/block/dirt.png   ≡   block/dirt.png
+```
+
+**语言词典**：`lang/{zh,en,ja}.json` 多层合并，mod 可增量补词条，缺词回退英文再回退 key。
+
+**背景配置**：`backgrounds/background.json` 的 `mode` 决定主菜单背景——`panorama`（球体环视）需同目录 `panorama.png`；`static` 需 `mainmenu.png`；配置缺失/图缺失一律程序化紫黑棋盘格。

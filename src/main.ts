@@ -18,6 +18,7 @@ import { PerfSampler } from "./perf";
 import { loadBinds, getBind, getBindsAll, onBindsChange, isCapturing, buttonToAction, buttonToCode } from "./keybinds";
 import { menuBgKind } from "./ui/background";
 import { resolveTexture } from "./textures";
+import { loadBlockRegistry } from "./blockregistry";
 
 // 像素字体 (Fusion Pixel, OFL 开源): 比例字体 UI 通用, 等宽字体 F3/数量面板
 import "@fontsource/fusion-pixel-12px-proportional-sc";
@@ -44,6 +45,9 @@ onFontChange(saveSettings);
 onUIScaleModeChange(saveSettings);
 onWindowModeChange(saveSettings);
 onBindsChange(saveSettings);
+
+// 方块注册表: 合并所有资源包的 blocks.json (本体=default.zip 条目, 用户包可增改方块), 需在 BlockWorld/物品栏构建前
+loadBlockRegistry();
 
 const app = document.getElementById("app")!;
 
@@ -80,12 +84,17 @@ setInterval(() => {
 }, 8);
 
 const world = new BlockWorld(scene);
-for (let x = -1; x <= 1; x++) {
-  for (let z = -1; z <= 1; z++) {
-    world.set(x, 0, z, "grass");
+// 出生平台: 全部用注册表兜底方块 missing (引擎内置, 永远存在, 紫黑棋盘格)。
+// 不再偏好 grass —— 平台语义就是"引擎保底的可站立地面", 与任何 mod 内容解耦;
+// 玩家脚下想站什么, 自己放 (注册表第一个方块在物品栏第 1 格)
+{
+  for (let x = -1; x <= 1; x++) {
+    for (let z = -1; z <= 1; z++) {
+      world.set(x, 0, z, "missing");
+    }
   }
+  world.set(2, 0, 0, "missing");
 }
-world.set(2, 0, 0, "missing");
 fps.setWorld(world);
 
 const hud = new Hud();

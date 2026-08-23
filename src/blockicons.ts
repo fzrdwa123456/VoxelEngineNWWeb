@@ -4,6 +4,7 @@
 import * as THREE from "three/webgpu";
 import { resolveTexture } from "./textures";
 import type { BlockType } from "./blocks";
+import { getBlockDef } from "./blockregistry";
 
 const HALF_VIEW = 0.85;
 const MIN_SIZE = 32;
@@ -42,18 +43,20 @@ async function buildScene(type: BlockType): Promise<THREE.Scene> {
   const dir = new THREE.DirectionalLight(0xffffff, 1);
   dir.position.set(1, 1.5, 0.75);
   scene.add(dir);
-  if (type === "grass") {
-    // BoxGeometry 6 组 = +X -X +Y -Y +Z -Z, 与 blocks.ts 的 GRASS_SIDE/TOP/DIRT 一致
-    const side = new THREE.MeshLambertMaterial({ map: await loadTex(resolveTexture("block/grass_block_side.png")), color: 0xffffff, alphaTest: 0.5 });
-    const top = new THREE.MeshLambertMaterial({ map: await loadTex(resolveTexture("block/grass_block_top.png")), color: 0xffffff, alphaTest: 0.5 });
-    const dirt = new THREE.MeshLambertMaterial({ map: await loadTex(resolveTexture("block/dirt.png")), color: 0xffffff, alphaTest: 0.5 });
-    scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), [side, side, top, dirt, side, side]));
-  } else if (type === "missing") {
-    const m = new THREE.MeshLambertMaterial({ map: await loadTex(resolveTexture("block/nonexistent.png")), color: 0xffffff, alphaTest: 0.5 });
-    scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), [m, m, m, m, m, m]));
-  } else {
+  const def = getBlockDef(type);
+  if (!def) {
     scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0x4caf50 })));
+    return scene;
   }
+  // BoxGeometry 6 组 = +X -X +Y -Y +Z -Z -> [side, side, top, bottom, side, side]
+  const mk = async (tex?: string): Promise<THREE.MeshLambertMaterial> =>
+    tex
+      ? new THREE.MeshLambertMaterial({ map: await loadTex(resolveTexture(tex)), color: 0xffffff, alphaTest: 0.5 })
+      : new THREE.MeshLambertMaterial({ color: new THREE.Color(def.color ?? "#4caf50") });
+  const side = await mk(def.side);
+  const top = await mk(def.top);
+  const bottom = await mk(def.bottom);
+  scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), [side, side, top, bottom, side, side]));
   return scene;
 }
 

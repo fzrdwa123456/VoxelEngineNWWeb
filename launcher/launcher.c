@@ -28,11 +28,37 @@ int wmain(int argc, wchar_t *argv[]) {
   }
 
   // game\data 作为 NW.js user-data-dir (localStorage/缓存), game\logs 留渲染层日志
+  // MC 式多开: Chromium 对同一 user-data-dir 有进程单例锁, 双击两次第二个实例会静默退出。
+  // 解法: 每个实例分配独立数据目录 ——
+  //   显式参数 --N (如 --2): 固定用 game\dataN
+  //   无参数: 命名互斥体自动找空槽 (第1个 game\data, 第2个 game\data2, 第3个 game\data3...)
+  //          互斥体随进程退出自动释放, 下次启动重新从 data 开始填
   wchar_t gameDir[MAX_PATH], dataDir[MAX_PATH], logDir[MAX_PATH], logPath[MAX_PATH];
+  int slot = 0; // 0 = data, N = dataN
+  for (int i = 1; i < argc; i++) {
+    if (argv[i][0] == L'-' && argv[i][1] == L'-' && argv[i][2] >= L'2' && argv[i][2] <= L'9' && argv[i][3] == L'\0') {
+      slot = argv[i][2] - L'0'; // "--2" -> 槽位 2 (显式指定, 不做占用检查)
+      break;
+    }
+  }
+  HANDLE hMutex = NULL;
+  if (slot == 0) {
+    // 自动找空槽: 尝试 data, data2, data3... 直到拿到没人占用的互斥体
+    for (;; slot++) {
+      wchar_t mutexName[64];
+      wsprintfW(mutexName, L"VoxelEngineNWWeb_instance_%d", slot);
+      hMutex = CreateMutexW(NULL, TRUE, mutexName);
+      if (hMutex && GetLastError() != ERROR_ALREADY_EXISTS) break; // 空槽, 互斥体保持持有直到 launcher 退出
+      if (hMutex) CloseHandle(hMutex);
+      if (slot >= 16) { slot = 0; hMutex = NULL; break; } // 上限保护: 都满则挤默认槽 (靠 Chromium 自身行为)
+    }
+  }
   wsprintfW(gameDir, L"%s\\game", self);
-  wsprintfW(dataDir, L"%s\\game\\data", self);
+  if (slot == 0) wsprintfW(dataDir, L"%s\\game\\data", self);
+  else wsprintfW(dataDir, L"%s\\game\\data%d", self, slot);
   wsprintfW(logDir, L"%s\\game\\logs", self);
-  wsprintfW(logPath, L"%s\\game\\logs\\launcher.log", self);
+  if (slot == 0) wsprintfW(logPath, L"%s\\game\\logs\\launcher.log", self);
+  else wsprintfW(logPath, L"%s\\game\\logs\\launcher%d.log", self, slot);
   CreateDirectoryW(gameDir, NULL);
   CreateDirectoryW(dataDir, NULL);
   CreateDirectoryW(logDir, NULL);
@@ -41,10 +67,13 @@ int wmain(int argc, wchar_t *argv[]) {
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (hLog == INVALID_HANDLE_VALUE) die(L"cannot create launcher.log", GetLastError());
 
-  // 命令行: core.exe --user-data-dir="<game>\data" [透传外部参数]
+  // 命令行: core.exe --user-data-dir="<game>\dataN" [透传外部参数 (实例槽位参数除外)]
   wchar_t cmdline[4096];
   int pos = wsprintfW(cmdline, L"\"%s\" --user-data-dir=\"%s\"", target, dataDir);
   for (int i = 1; i < argc; i++) {
+    if (argv[i][0] == L'-' && argv[i][1] == L'-' && argv[i][2] >= L'2' && argv[i][2] <= L'9' && argv[i][3] == L'\0') {
+      continue; // --N 已转成槽位, 不透传
+    }
     pos += wsprintfW(cmdline + pos, L" %s", argv[i]);
   }
 

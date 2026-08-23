@@ -14,7 +14,7 @@ const coreDir = path.dirname(process.execPath);
 const configPath = path.join(gameRoot, "config", "settings.json");
 
 function ensureDirs(): void {
-  for (const d of ["logs", "saves", "config"]) {
+  for (const d of ["logs", "saves", "config", "mods"]) {
     fs.mkdirSync(path.join(gameRoot, d), { recursive: true });
   }
 }

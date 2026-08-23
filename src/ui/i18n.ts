@@ -1,25 +1,29 @@
-// ===== 多语言: 词典文件化 (资源包内 lang\*.json) + t() + 运行时切换 =====
+// ===== 多语言: 词典文件化 (包内 lang\*.json 多层合并) + t() + 运行时切换 =====
 // 词典不再硬编码: 构建时 src\assets\lang 打进 default.zip (lang/zh.json, lang/en.json),
-// 用户资源包放同名文件即可整体覆盖 (与贴图同一条覆盖链)。缺词回退英文 (对齐 MC 的
-// en_us 兜底惯例), 再缺返回 key。只覆盖用户可见 UI 文案; debug.log 诊断行保持中文。
-import { resolveBytes } from "../textures";
+// 所有包 (default.zip / mods / 资源包) 的同名词典逐层合并 —— mod/资源包放 lang\*.json
+// 即可增量补词条或覆盖已有词条 (同 key 高优先级层胜, 优先级: 资源包 > mods > default.zip)。
+// 缺词回退英文 (对齐 MC 的 en_us 兜底惯例), 再缺返回 key。只覆盖用户可见 UI 文案;
+// debug.log 诊断行保持中文。
+import { resolveAllBytes } from "../textures";
 import { sendLog } from "../shell";
 
 export type Lang = "zh" | "en" | "ja";
 
 type Dict = Record<string, string>;
 
-/** 从资源包链读词典: lang/{lang}.json (用户包 > default.zip, 文件级覆盖); 缺文件/坏 JSON 返回空词典 */
+/** 合并整条包链的词典: lang/{lang}.json 逐层并入 (低→高优先级, 同 key 后并入者胜);
+ *  mod 自带语言即此机制 —— 新词条增量进词典, 同 key 覆盖本体词条 */
 function loadPackDict(lang: Lang): Dict {
-  const bytes = resolveBytes(`lang/${lang}.json`);
-  if (!bytes) return {};
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    if (typeof parsed === "object" && parsed !== null) return parsed as Dict;
-  } catch {
-    /* 坏文件: 空词典, t() 回退显示 key */
+  const merged: Dict = {};
+  for (const bytes of resolveAllBytes(`lang/${lang}.json`)) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      if (parsed && typeof parsed === "object") Object.assign(merged, parsed);
+    } catch {
+      /* 坏 json: 该层忽略, 不影响其他层 */
+    }
   }
-  return {};
+  return merged;
 }
 
 const STRINGS: Record<Lang, Dict> = { zh: loadPackDict("zh"), en: loadPackDict("en"), ja: loadPackDict("ja") };
@@ -52,6 +56,6 @@ export function onLangChange(cb: () => void): void {
 export function loadLang(l: unknown): void {
   if (l === "zh" || l === "en" || l === "ja") current = l;
   sendLog(
-    `I18N 词典载入 (lang/*.json): zh=${Object.keys(STRINGS.zh).length} en=${Object.keys(STRINGS.en).length} ja=${Object.keys(STRINGS.ja).length} 词条`,
+    `I18N 词典载入 (lang/*.json 多层合并): zh=${Object.keys(STRINGS.zh).length} en=${Object.keys(STRINGS.en).length} ja=${Object.keys(STRINGS.ja).length} 词条 (${resolveAllBytes("lang/zh.json").length} 层 zh.json)`,
   );
 }

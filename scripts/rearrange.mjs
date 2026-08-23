@@ -45,21 +45,24 @@ if (existsSync(rawNodeSrc)) {
   console.warn("警告: rawinput.node 不存在 (cd rawinput && cargo build --release), 游戏将无原始鼠标输入兜底");
 }
 
-// 默认贴图+语言 -> 内置资源包 game\resourcepacks\default.zip (MC 式: 资源封在压缩包里)
+// 资源目录 (A 方案: 全外部化, 不打内置包)
+// - src\assets\ 已移除, 构建不再生成 default.zip / defaultmod.zip
+// - 资源包/方块 mod 全部由玩家手动放:
+//     game\resourcepacks\<包名>\  或 <包名>.zip   (assets\<ns>\<路径> 三层结构)
+//     game\mods\<mod名>\       或 <mod名>.zip    (blocks.json + block\*.png)
+// - 目录构建时清空重建 (mod/资源包属用户数据之外的可重建产物); 引擎兜底保证空环境可运行:
+//     词典空 -> 界面显示 key; 无方块 -> 注册表兜底 missing (紫黑棋盘格平台)
 const rpDir = path.join(release, "game", "resourcepacks");
 mkdirSync(rpDir, { recursive: true });
-const entries = {};
-const collect = (dir, base) => {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, e.name);
-    const rel = path.join(base, e.name).replace(/\\/g, "/");
-    if (e.isDirectory()) collect(full, rel);
-    else entries[rel] = readFileSync(full);
-  }
-};
-collect(path.join(root, "src", "assets", "textures"), "");
-collect(path.join(root, "src", "assets", "lang"), "lang"); // 语言文件 -> 包内 lang\, i18n.ts 经 resolveBytes 同链读取
-writeFileSync(path.join(rpDir, "default.zip"), zipSync(entries, { level: 9 }));
+for (const e of readdirSync(rpDir, { withFileTypes: true })) {
+  const full = path.join(rpDir, e.name);
+  if (e.isDirectory()) rmSync(full, { recursive: true, force: true });
+  else if (/\.zip$/i.test(e.name)) rmSync(full, { force: true });
+}
+const modsOut = path.join(release, "game", "mods");
+if (existsSync(modsOut)) rmSync(modsOut, { recursive: true, force: true });
+mkdirSync(modsOut, { recursive: true });
+console.log("A 方案: 不打内置包 (资源/方块全外部, 玩家手动放 resourcepacks\\ 与 mods\\)");
 
 console.log(`打包完成 -> ${release}`);
 console.log("  启动: release/VoxelEngineNWWeb/launcher.exe (core.exe 自动带 --user-data-dir=game\\data)");

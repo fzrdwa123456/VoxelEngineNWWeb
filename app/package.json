@@ -12,6 +12,5 @@
     "show": false,
     "focus": true
   },
-  "single-instance": true,
-  "chromium-args": "--autoplay-policy=no-user-gesture-required --no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist --disable-gpu-vsync --disable-gesture-requirement-for-presentation --disable-blink-features=RateLimitPointerLockRequests --remote-debugging-port=9222 --remote-allow-origins=*"
+  "chromium-args": "--autoplay-policy=no-user-gesture-required --no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist --disable-gpu-vsync --disable-gesture-requirement-for-presentation --disable-blink-features=RateLimitPointerLockRequests --remote-debugging-port=0 --remote-allow-origins=*"
 }

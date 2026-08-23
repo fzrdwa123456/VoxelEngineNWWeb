@@ -1,5 +1,6 @@
-﻿import type { BlockType } from "../blocks";
+import type { BlockType } from "../blocks";
 import { getBlockIcon } from "../blockicons";
+import { allBlockIds, getBlockDef } from "../blockregistry";
 import { t, onLangChange } from "./i18n";
 import { uiStage } from "./uiscale";
 
@@ -11,12 +12,6 @@ export interface InvItem {
 const HOTBAR = 9;
 const BAG = 27;
 const TOTAL = HOTBAR + BAG;
-
-const ICON_COLOR: Record<BlockType, string> = {
-  default: "#4caf50",
-  grass: "#6faa3f",
-  missing: "#800080",
-};
 
 export class Inventory {
   private readonly slots: (InvItem | null)[] = new Array(TOTAL).fill(null);
@@ -31,9 +26,12 @@ export class Inventory {
 
   constructor(onToggle: (open: boolean) => void) {
     this.onToggle = onToggle;
-    this.slots[0] = { type: "grass", count: 64 };
-    this.slots[1] = { type: "default", count: 64 };
-    this.slots[2] = { type: "missing", count: 64 };
+    // 初始物品栏 = 注册表前 9 个方块 (mod 新增方块自动出现, 选中即可放置)
+    allBlockIds()
+      .slice(0, HOTBAR)
+      .forEach((id, i) => {
+        this.slots[i] = { type: id, count: 64 };
+      });
 
     const hotbar = document.createElement("div");
     hotbar.style.cssText =
@@ -160,8 +158,10 @@ export class Inventory {
         icon.style.backgroundImage = "none";
         count.textContent = "";
       } else {
-        icon.style.backgroundColor = ICON_COLOR[it.type];
+        // 纯色兜底 = 注册表 color (无贴图 def), 3D 图标异步到达后覆盖
+        icon.style.backgroundColor = getBlockDef(it.type)?.color ?? "#4caf50";
         icon.style.backgroundImage = "none";
+        el.title = getBlockDef(it.type)?.label ?? it.type; // 悬停显示方块名
         count.textContent = it.count > 1 ? `${it.count}` : "";
         this.fetchIcon(el, i);
       }
