@@ -1,7 +1,7 @@
-// ===== 按键绑定注册表 =====
-// 动作 id -> KeyboardEvent.code。默认值 + settings.json 持久化 (keybinds 字段)。
-// 换绑冲突策略: 抢占 —— 新 code 已被其他动作占用时, 对方清为未绑定 ("")。
-// ESC 不允许绑定 (保留给菜单), 由捕获层拦截。
+// ===== Key bind registry =====
+// Action id -> KeyboardEvent.code. Defaults + settings.json persistence (keybinds field).
+// Rebind conflict policy: preemption — if the new code is taken by another action, that action is cleared to unbound ("").
+// ESC cannot be bound (reserved for menus); intercepted by the capture layer.
 
 export type BindAction =
   | "forward"
@@ -10,6 +10,7 @@ export type BindAction =
   | "right"
   | "jump"
   | "sneak"
+  | "sprint"
   | "inventory"
   | "break"
   | "place";
@@ -26,8 +27,10 @@ const DEFS: BindDef[] = [
   { action: "right", defaultCode: "KeyD" },
   { action: "jump", defaultCode: "Space" },
   { action: "sneak", defaultCode: "ControlLeft" },
+    // Sprint: shared speed-up for walk/fly/spectator (E:mc SPRINTM=1.65); Shift by default, no conflict with sneak (Ctrl)
+  { action: "sprint", defaultCode: "ShiftLeft" },
   { action: "inventory", defaultCode: "KeyE" },
-  // 鼠标键绑定: 存伪 code (MouseLeft/MouseRight), 与键盘码同一张表统一管理
+    // Mouse-button binds: stored as pseudo codes (MouseLeft/MouseRight), managed in the same table as keyboard codes
   { action: "break", defaultCode: "MouseLeft" },
   { action: "place", defaultCode: "MouseRight" },
 ];
@@ -40,7 +43,7 @@ function notify(): void {
   listeners.forEach((cb) => cb());
 }
 
-/** 启动时从 settings.json 的 keybinds 对象载入 (未知动作/非法值忽略, 回退默认) */
+/** Loaded at startup from settings.json's keybinds object (unknown actions/invalid values ignored, defaults kept) */
 export function loadBinds(raw: unknown): void {
   if (typeof raw !== "object" || raw === null) return;
   const obj = raw as Record<string, unknown>;
@@ -52,7 +55,7 @@ export function loadBinds(raw: unknown): void {
   }
 }
 
-/** 当前全部绑定快照 (存盘用) */
+/** Snapshot of all current binds (for saving) */
 export function getBindsAll(): Record<BindAction, string> {
   const out = {} as Record<BindAction, string>;
   for (const d of DEFS) out[d.action] = binds.get(d.action)!;
@@ -63,7 +66,7 @@ export function getBind(action: BindAction): string {
   return binds.get(action)!;
 }
 
-/** 换绑: 抢占冲突 (其他动作的同 code 清为未绑定), 通知订阅者刷新 UI */
+/** Rebind: preempt conflicts (same code on other actions cleared to unbound), notify subscribers to refresh the UI */
 export function setBind(action: BindAction, code: string): void {
   if (code !== "" && !isValidCode(code)) return;
   for (const d of DEFS) {
@@ -79,9 +82,9 @@ export function onBindsChange(cb: () => void): void {
   listeners.add(cb);
 }
 
-// ===== 换绑捕获状态 =====
-// UI 层点击某行进入捕获; 先于捕获监听器注册的旧监听器 (如背包 E 键)
-// 通过 isCapturing() 查询并让路, 避免换绑时误触游戏功能。
+// ===== Rebind capture state =====
+// The UI layer clicks a row to enter capture; older listeners registered before the capture listener (e.g. inventory E)
+// query isCapturing() and yield, avoiding accidental game triggers while rebinding.
 let capturing: BindAction | null = null;
 
 export function beginCapture(action: BindAction): void {
@@ -100,12 +103,12 @@ export function getCapturing(): BindAction | null {
   return capturing;
 }
 
-/** KeyboardEvent.code 合法性: 字母开头的标识符 (KeyW/Space/ControlLeft/ArrowUp/MouseLeft...) */
+/** KeyboardEvent.code validity: identifier starting with a letter (KeyW/Space/ControlLeft/ArrowUp/MouseLeft...) */
 function isValidCode(code: string): boolean {
   return /^[A-Z][A-Za-z0-9]*$/.test(code);
 }
 
-/** 绑定码 -> MouseEvent.button 编号 (仅鼠标伪码有映射, 键盘码返回 null) */
+/** Bind code -> MouseEvent.button number (only mouse pseudo codes map; keyboard codes return null) */
 export function codeToButton(code: string): number | null {
   if (code === "MouseLeft") return 0;
   if (code === "MouseMiddle") return 1;
@@ -115,7 +118,7 @@ export function codeToButton(code: string): number | null {
   return null;
 }
 
-/** MouseEvent.button -> 鼠标伪码 ("MouseLeft"/"MouseMiddle"/"MouseRight"/"MouseX1"/"MouseX2"), 其他按钮 null */
+/** MouseEvent.button -> mouse pseudo code ("MouseLeft"/"MouseMiddle"/"MouseRight"/"MouseX1"/"MouseX2"); other buttons null */
 export function buttonToCode(button: number): string | null {
   if (button === 0) return "MouseLeft";
   if (button === 1) return "MouseMiddle";
@@ -125,7 +128,7 @@ export function buttonToCode(button: number): string | null {
   return null;
 }
 
-/** MouseEvent.button -> 绑定了该鼠标键的动作 (查绑定表), 未绑定返回 null */
+/** MouseEvent.button -> action bound to that mouse button (registry lookup); null if unbound */
 export function buttonToAction(button: number): BindAction | null {
   const code = buttonToCode(button);
   if (!code) return null;
@@ -135,7 +138,7 @@ export function buttonToAction(button: number): BindAction | null {
   return null;
 }
 
-/** code -> 显示名 (KeyW->W, Digit1->1, ControlLeft->LCtrl, ArrowUp->↑ ...) */
+/** code -> display name (KeyW->W, Digit1->1, ControlLeft->LCtrl, ArrowUp->Up ...) */
 export function codeDisplayName(code: string): string {
   if (code === "") return "";
   const MAP: Record<string, string> = {

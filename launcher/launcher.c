@@ -1,7 +1,7 @@
-// ===== VoxelEngineNWWeb 绿色启动器 (NW.js 版, 简版) =====
-// 启动 game\core\core.exe (NW.js 改名) 并传 --user-data-dir 到 game\data
-// (localStorage/缓存落 game\data, 绿色版可整体移动)。
-// 无钩子/无管道: ESC 交给 NW.js 0.112 (#7907: keydown preventDefault 保持锁定)。
+// ===== VoxelEngineNWWeb portable launcher (NW.js edition, simplified) =====
+// Launches game\core\core.exe (renamed NW.js) and passes --user-data-dir pointing to game\data
+// (localStorage/cache land in game\data; the portable folder can be moved as a whole).
+// No hooks/no pipes: ESC is left to NW.js 0.112 (#7907: keydown preventDefault keeps the lock).
 #include <windows.h>
 #include <wchar.h>
 
@@ -27,30 +27,30 @@ int wmain(int argc, wchar_t *argv[]) {
     return 1;
   }
 
-  // game\data 作为 NW.js user-data-dir (localStorage/缓存), game\logs 留渲染层日志
-  // MC 式多开: Chromium 对同一 user-data-dir 有进程单例锁, 双击两次第二个实例会静默退出。
-  // 解法: 每个实例分配独立数据目录 ——
-  //   显式参数 --N (如 --2): 固定用 game\dataN
-  //   无参数: 命名互斥体自动找空槽 (第1个 game\data, 第2个 game\data2, 第3个 game\data3...)
-  //          互斥体随进程退出自动释放, 下次启动重新从 data 开始填
+    // game\data as the NW.js user-data-dir (localStorage/cache); game\logs keeps renderer-side logs
+    // MC-style multi-instance: Chromium has a process singleton lock per user-data-dir; launching twice exits the second instance silently.
+    // Fix: assign each instance its own data directory —
+    //   explicit arg --N (e.g. --2): fixed use of game\dataN
+    //   no arg: a named mutex finds a free slot automatically (1st game\data, 2nd game\data2, 3rd game\data3...)
+    //          the mutex releases on process exit; the next start fills from data again
   wchar_t gameDir[MAX_PATH], dataDir[MAX_PATH], logDir[MAX_PATH], logPath[MAX_PATH];
   int slot = 0; // 0 = data, N = dataN
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == L'-' && argv[i][1] == L'-' && argv[i][2] >= L'2' && argv[i][2] <= L'9' && argv[i][3] == L'\0') {
-      slot = argv[i][2] - L'0'; // "--2" -> 槽位 2 (显式指定, 不做占用检查)
+      slot = argv[i][2] - L'0';  // "--2" -> slot 2 (explicit, no occupancy check)
       break;
     }
   }
   HANDLE hMutex = NULL;
   if (slot == 0) {
-    // 自动找空槽: 尝试 data, data2, data3... 直到拿到没人占用的互斥体
+        // Find a free slot: try data, data2, data3... until one's mutex is unowned
     for (;; slot++) {
       wchar_t mutexName[64];
       wsprintfW(mutexName, L"VoxelEngineNWWeb_instance_%d", slot);
       hMutex = CreateMutexW(NULL, TRUE, mutexName);
-      if (hMutex && GetLastError() != ERROR_ALREADY_EXISTS) break; // 空槽, 互斥体保持持有直到 launcher 退出
+      if (hMutex && GetLastError() != ERROR_ALREADY_EXISTS) break;  // Free slot; keep holding the mutex until the launcher exits
       if (hMutex) CloseHandle(hMutex);
-      if (slot >= 16) { slot = 0; hMutex = NULL; break; } // 上限保护: 都满则挤默认槽 (靠 Chromium 自身行为)
+      if (slot >= 16) { slot = 0; hMutex = NULL; break; }  // Cap: all full -> squeeze into the default slot (rely on Chromium's own behavior)
     }
   }
   wsprintfW(gameDir, L"%s\\game", self);
@@ -67,12 +67,12 @@ int wmain(int argc, wchar_t *argv[]) {
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (hLog == INVALID_HANDLE_VALUE) die(L"cannot create launcher.log", GetLastError());
 
-  // 命令行: core.exe --user-data-dir="<game>\dataN" [透传外部参数 (实例槽位参数除外)]
+    // Command line: core.exe --user-data-dir="<game>\dataN" [forwarded external args (instance slot args excepted)]
   wchar_t cmdline[4096];
   int pos = wsprintfW(cmdline, L"\"%s\" --user-data-dir=\"%s\"", target, dataDir);
   for (int i = 1; i < argc; i++) {
     if (argv[i][0] == L'-' && argv[i][1] == L'-' && argv[i][2] >= L'2' && argv[i][2] <= L'9' && argv[i][3] == L'\0') {
-      continue; // --N 已转成槽位, 不透传
+      continue;  // --N already became a slot; do not forward
     }
     pos += wsprintfW(cmdline + pos, L" %s", argv[i]);
   }

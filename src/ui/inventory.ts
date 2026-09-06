@@ -1,8 +1,10 @@
-import type { BlockType } from "../blocks";
-import { getBlockIcon } from "../blockicons";
+import { getBlockIcon } from "../rendering/blockicons";
 import { allBlockIds, getBlockDef } from "../blockregistry";
 import { t, onLangChange } from "./i18n";
 import { uiStage } from "./uiscale";
+
+/** Block type id (alias from the old blocks.ts; block world removed, registry ids remain strings) */
+type BlockType = string;
 
 export interface InvItem {
   type: BlockType;
@@ -26,7 +28,7 @@ export class Inventory {
 
   constructor(onToggle: (open: boolean) => void) {
     this.onToggle = onToggle;
-    // 初始物品栏 = 注册表前 9 个方块 (mod 新增方块自动出现, 选中即可放置)
+        // Initial inventory = the registry's first 9 blocks (mod blocks appear automatically; select to place)
     allBlockIds()
       .slice(0, HOTBAR)
       .forEach((id, i) => {
@@ -121,13 +123,13 @@ export class Inventory {
     this.render();
   }
 
-  /** 当前选中物品栏槽位的方块类型 (空手返回 null) */
+    /** Block type of the currently selected hotbar slot (null when empty-handed) */
   selectedType(): BlockType | null {
     const it = this.slots[this.selected];
     return it ? it.type : null;
   }
 
-  /** 按当前图标尺寸异步烘培并回填槽位图标 (带尺寸守卫, 避免缩放切换时旧尺寸晚到覆盖) */
+    /** Bake and backfill the slot icon async at the current icon size (size-guarded, so a stale size after a scale switch cannot overwrite) */
   private fetchIcon(el: HTMLDivElement, i: number): void {
     const icon = el.children[0] as HTMLDivElement;
     const it = this.slots[i];
@@ -142,7 +144,7 @@ export class Inventory {
     });
   }
 
-  /** 缩放变化时重烘所有已填充槽位图标 */
+    /** Re-bake all filled slot icons when the scale changes */
   private refreshIcons(): void {
     this.hotbarEls.forEach((el, i) => this.fetchIcon(el, i));
     this.bagEls.forEach((el, i) => this.fetchIcon(el, i + HOTBAR));
@@ -158,10 +160,10 @@ export class Inventory {
         icon.style.backgroundImage = "none";
         count.textContent = "";
       } else {
-        // 纯色兜底 = 注册表 color (无贴图 def), 3D 图标异步到达后覆盖
+                // Solid-color fallback = registry color (no texture def); overwritten when the 3D icon arrives async
         icon.style.backgroundColor = getBlockDef(it.type)?.color ?? "#4caf50";
         icon.style.backgroundImage = "none";
-        el.title = getBlockDef(it.type)?.label ?? it.type; // 悬停显示方块名
+        el.title = getBlockDef(it.type)?.label ?? it.type;  // Tooltip shows the block name
         count.textContent = it.count > 1 ? `${it.count}` : "";
         this.fetchIcon(el, i);
       }

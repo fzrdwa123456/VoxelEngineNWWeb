@@ -1,5 +1,5 @@
-﻿// ===== MC 式游戏模式切换 (F3+F4): 生存 / 创造 / 观察者, 松开 F3 应用 =====
-import { FirstPersonCamera, MODE_NAMES, type MoveMode } from "../camera";
+﻿// ===== MC-style game mode switch (F3+F4): survival / creative / spectator, applies on F3 release =====
+import { MODE_NAMES, type MoveMode } from "../ecs/components/Player";
 import type { Hud } from "./hud";
 import { t, onLangChange } from "./i18n";
 import { uiStage } from "./uiscale";
@@ -17,7 +17,7 @@ export class GamemodeController {
 
   constructor(
     private readonly hud: Hud,
-    private readonly fps: FirstPersonCamera,
+    private readonly fps: { mode: MoveMode; setMode(mode: MoveMode): void },
     private readonly sendLog: (line: string) => void,
   ) {
     this.menu = document.createElement("div");
@@ -99,7 +99,7 @@ export class GamemodeController {
     const m = GM_MODES[this.sel];
     if (m !== this.fps.mode) {
       this.fps.setMode(m);
-      this.sendLog(`MODE 切换 → ${m} (${MODE_NAMES[m]})`);
+            this.sendLog(`MODE switch -> ${m} (${MODE_NAMES[m]})`);
     }
   }
 }

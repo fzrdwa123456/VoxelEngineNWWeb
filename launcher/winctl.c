@@ -2,14 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-// winctl.exe: 原生窗口控制工具。绕开 NW.js 窗口 API 对最大化窗口的不可靠行为:
-// moveTo/setInnerWidth 在最大化窗口上会先还原到窗口化几何 (rcNormalPosition 小窗)
-// 导致闪烁帧, 且 resizeTo/setInnerWidth 连续调用异步丢尺寸 (nwjs/nw.js#7303)。
-//   winctl.exe fill          -- 找到游戏窗口, 清除 WS_MAXIMIZE 并铺满屏幕 (最大化->全屏切换用)
-//   winctl.exe move x y w h  -- 移动窗口并设置客户区尺寸 (参数为逻辑像素, 内部按 DPI 换算)
-//   winctl.exe topmost 0|1   -- 取消/设置窗口置顶 (kiosk 进全屏后取消 HWND_TOPMOST,
-//                               恢复普通全屏 Z 序行为, 任务栏让位不受影响)
-// 窗口标题固定为 manifest 的 "VoxelEngineWeb", 找不到时回退前台窗口
+// winctl.exe: native window control tool. Works around NW.js window API unreliability on maximized windows:
+// moveTo/setInnerWidth on a maximized window first restores windowed geometry (rcNormalPosition small window)
+// causing a flicker frame, and consecutive resizeTo/setInnerWidth calls asynchronously drop sizes (nwjs/nw.js#7303).
+//   winctl.exe fill          -- find the game window, clear WS_MAXIMIZE and fill the screen (maximize->fullscreen switch)
+//   winctl.exe move x y w h  -- move the window and set the client size (logical pixel args, converted by DPI internally)
+//   winctl.exe topmost 0|1   -- cancel/set window topmost (after kiosk fullscreen, cancel HWND_TOPMOST,
+//                               restoring normal fullscreen Z-order; the taskbar still yields)
+// The window title is fixed to the manifest's "VoxelEngineWeb"; falls back to the foreground window when not found
 static HWND find_window(void) {
   HWND hwnd = FindWindowW(NULL, L"VoxelEngineWeb");
   if (hwnd == NULL)
@@ -36,7 +36,7 @@ static double dpi_scale(HWND hwnd) {
   return dpi / 96.0;
 }
 
-// 客户区尺寸 -> 窗口外框尺寸 (SetWindowPos 的 cx/cy 是外框; 用实测差最可靠)
+// Client size -> window frame size (SetWindowPos's cx/cy are the frame; measured deltas are the most reliable)
 static void client_to_outer(HWND hwnd, int* w, int* h) {
   RECT win_rect, client_rect;
   GetWindowRect(hwnd, &win_rect);
@@ -46,8 +46,8 @@ static void client_to_outer(HWND hwnd, int* w, int* h) {
 }
 
 static int do_fill(HWND hwnd) {
-  // 清除 WS_MAXIMIZE 后窗口回落到 rcNormalPosition, 立即 SetWindowPos 铺满;
-  // 两步同步完成, 中间无重绘间隙 (比 Chromium 异步 restore 确定)
+    // After clearing WS_MAXIMIZE the window falls back to rcNormalPosition; SetWindowPos fills immediately;
+    // both steps complete synchronously with no repaint gap in between (more deterministic than Chromium's async restore)
   LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
   SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~WS_MAXIMIZE);
   int w = GetSystemMetrics(SM_CXSCREEN);

@@ -1,13 +1,13 @@
-// ===== NW.js 渲染层 Node 直连 (替代旧 Electron 的 preload.cjs + main.cjs, 无需 IPC) =====
-// NW.js 渲染层自带 Node: 直接 fs/execFile, 日志与光标居中不再走主进程。
-// 用 eval("require") 拿 Node require: 避免 vite/rolldown 把 node: 模块 externalize
-// 成空对象(浏览器兼容处理), 那会导致 fs 为 undefined 运行时崩溃。NW.js 无 CSP, eval 可用。
+// ===== NW.js renderer-side direct Node access (replaces the old Electron preload.cjs + main.cjs; no IPC needed) =====
+// The NW.js renderer ships Node: use fs/execFile directly; logging and cursor centering no longer go through a main process.
+// Use eval("require") to obtain the Node require: prevents vite/rolldown from externalizing node: modules
+// into empty objects (browser-compat handling), which would make fs undefined and crash at runtime. NW.js has no CSP, so eval works.
 const req = eval("require") as (id: string) => any;
 const fs = req("node:fs");
 const path = req("node:path");
 const { execFile } = req("node:child_process");
 
-// game\ 根目录: process.execPath = game\core\core.exe -> 上级即 game\
+// game\ root: process.execPath = game\core\core.exe -> parent is game\
 const gameRoot = path.join(path.dirname(process.execPath), "..");
 const logsDir = path.join(gameRoot, "logs");
 const coreDir = path.dirname(process.execPath);
@@ -19,7 +19,7 @@ function ensureDirs(): void {
   }
 }
 
-// 启动初始化: 建目录 + 清空日志 + 挂错误落盘 (对应旧 main.cjs 的日志功能)
+// Startup init: create dirs + truncate logs + attach error persistence (replaces old main.cjs logging)
 export function initShell(): void {
   ensureDirs();
   trackWindowFocus();
@@ -33,7 +33,7 @@ export function initShell(): void {
     appendLog(`REJECT ${String(e.reason)}`);
   });
 
-  // console error/warning 级写 logs\renderer.log (对应旧 main.cjs console-message)
+    // console error/warning levels go to logs\renderer.log (replaces old main.cjs console-message)
   const origError = console.error;
   const origWarn = console.warn;
   console.error = (...a) => {
@@ -46,14 +46,14 @@ export function initShell(): void {
   };
 }
 
-// 调试日志 -> game\logs\debug.log (启动已清空), 失败静默 (不打断游戏)
+// Debug log -> game\logs\debug.log (truncated at startup), silent on failure (never breaks the game)
 export function appendLog(line: string): void {
   try {
     fs.appendFileSync(path.join(logsDir, "debug.log"), `${line}\n`, "utf8");
   } catch {}
 }
 
-// 用户设置 -> game\config\settings.json (不存在返回空对象, 读写失败静默)
+// User settings -> game\config\settings.json (empty object when missing; silent on read/write failure)
 export function readSettings(): Record<string, unknown> {
   try {
     return JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -68,7 +68,7 @@ export function writeSettings(s: Record<string, unknown>): void {
   } catch {}
 }
 
-// 带相对启动时刻时间戳的调试日志 (各模块共用)
+// Debug log with a relative-to-start timestamp (shared by all modules)
 export function sendLog(line: string): void {
   appendLog(`[${performance.now().toFixed(0)}ms] ${line}`);
 }
@@ -79,8 +79,8 @@ function appendRender(line: string): void {
   } catch {}
 }
 
-// 光标居中到屏幕中心: nw.Window 坐标 -> cursor.exe (SetCursorPos)。
-// 菜单/背包打开时光标落在准星位置 (旧 Electron 主进程 setCursorPos 的等价物)
+// Center the cursor on screen center: nw.Window coords -> cursor.exe (SetCursorPos).
+// The cursor lands on the crosshair when menus/inventory open (equivalent of the old Electron main-process setCursorPos)
 export function centerCursor(): void {
   try {
     const win = nw.Window.get();
@@ -90,8 +90,8 @@ export function centerCursor(): void {
   } catch {}
 }
 
-// 显示窗口: manifest "show": false -> 首帧渲染后调用 (对应旧 Electron ready-to-show, 防启动闪白)。
-// 窗口默认不获取焦点 (NW.js 特性), show 后显式 focus 对齐原生/DOM 焦点状态
+// Show window: manifest "show": false -> called after the first frame renders (replaces Electron ready-to-show; prevents startup white flash).
+// The window does not take focus by default (NW.js behavior); show() then explicit focus() to align native/DOM focus state
 export function showWindow(): void {
   try {
     const win = nw.Window.get();
@@ -100,13 +100,13 @@ export function showWindow(): void {
   } catch {}
 }
 
-// ===== 原生窗口焦点 (NW.js 官方 API: win.on('focus'/'blur') 事件, 无 isFocused 属性) =====
-// 官方 Window 参考文档没有 isFocused 属性, 只有 focus/blur 事件与 focus()/blur() 方法。
-// 这里用事件维护一个窗口焦点布尔, 供诊断/门控使用。
+// ===== Native window focus (NW.js official API: win.on('focus'/'blur') events; no isFocused property) =====
+// The official Window reference has no isFocused property, only focus/blur events and focus()/blur() methods.
+// We maintain a focus boolean from those events for diagnostics/gating.
 
 let windowFocused = false;
 
-// 初始化焦点追踪 (initShell 调用): 注册原生 focus/blur 事件
+// Init focus tracking (called by initShell): register native focus/blur events
 export function trackWindowFocus(): void {
   try {
     const win = nw.Window.get();
@@ -116,7 +116,7 @@ export function trackWindowFocus(): void {
     win.on("blur", () => {
       windowFocused = false;
     });
-    // showWindow 已调用 win.focus(), 乐观初始为聚焦; 后续 blur 事件会纠正
+        // showWindow already called win.focus(); optimistically start focused; later blur events correct it
     windowFocused = true;
   } catch {}
 }
@@ -131,7 +131,7 @@ export function focusWindow(): void {
   } catch {}
 }
 
-// 退出游戏: 关闭窗口 (唯一窗口关闭后应用退出)
+// Quit the game: close the window (the app exits when its only window closes)
 export function quitApp(): void {
   try {
     nw.Window.get().close();
@@ -150,11 +150,11 @@ export function onWinBlur(cb: () => void): void {
   } catch {}
 }
 
-// ===== GPU 垂直同步开关 (--disable-gpu-vsync) =====
-// 直接改写自身 manifest (game\core\package.json) 的 chromium-args, 重启游戏生效
+// ===== GPU vsync switch (--disable-gpu-vsync) =====
+// Rewrites chromium-args in its own manifest (game\core\package.json); takes effect after a game restart
 const manifestPath = path.join(coreDir, "package.json");
 
-// 当前是否关闭了垂直同步 (manifest 含 --disable-gpu-vsync)
+// Whether vsync is currently disabled (manifest contains --disable-gpu-vsync)
 export function getGpuVsyncState(): boolean {
   try {
     const pkg = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -164,14 +164,14 @@ export function getGpuVsyncState(): boolean {
   }
 }
 
-// ===== 窗口模式: 窗口化 / 全屏 (NW.js 运行时 kiosk 切换, 免重启) =====
-// 对齐 Electron 菜单 F11 (togglefullscreen role = win.setFullScreen 切换):
-// 不做任何窗口状态保存/恢复, 窗口化几何与最大化状态全部交给 Chromium 自行管理
+// ===== Window mode: windowed / fullscreen (NW.js runtime kiosk switch, no restart) =====
+// Mirrors the Electron menu F11 (togglefullscreen role = win.setFullScreen switch):
+// no window-state save/restore; windowed geometry and maximized state are left entirely to Chromium
 export type WindowMode = "windowed" | "fullscreen";
 
 const modeListeners = new Set<() => void>();
 
-// 当前窗口模式 (来自设置持久化, 默认窗口化)
+// Current window mode (from persisted settings, default windowed)
 export function getWindowMode(): WindowMode {
   return readSettings().windowMode === "fullscreen" ? "fullscreen" : "windowed";
 }
@@ -184,11 +184,11 @@ function notifyWindowMode(): void {
   modeListeners.forEach((cb) => cb());
 }
 
-// 启动应用: 设置存的是全屏则进入全屏 (showWindow 后调用)。
-// 全屏内 ESC 不退出全屏 (游戏 ESC 用于弹菜单), 退出全屏走设置面板"窗口化"按钮
+// At startup: enter fullscreen if settings say so (called after showWindow).
+// ESC inside fullscreen does not exit it (the game ESC opens the menu); exiting fullscreen goes through the settings panel "windowed" button
 export function applyWindowModeAtStart(): void {
   try {
-    // NW.js Window API 类型定义缺失 isFullscreen/enterFullscreen, 用 any 调用
+        // NW.js Window API typings lack isFullscreen/enterFullscreen; call via any
     const win = nw.Window.get() as any;
     if (getWindowMode() === "fullscreen" && !win.isFullscreen) {
       win.enterKioskMode();
@@ -197,12 +197,12 @@ export function applyWindowModeAtStart(): void {
   } catch {}
 }
 
-// 进入全屏前的窗口是否处于最大化 (win.width/height 在最大化时=含边框的屏幕尺寸)
+// Whether the window was maximized before entering fullscreen (win.width/height while maximized = screen size incl. frame)
 let wasMaximizedBeforeFullscreen = false;
 
-// kiosk 进全屏会自动置顶 (HWND_TOPMOST), 立即取消, 恢复普通全屏 Z 序行为。
-// 优先用 NW.js 自带 JS 接口 setAlwaysOnTop(false) (chrome.windows.update alwaysOnTop 分支,
-// 不碰 state 逻辑)。备用: winctl.exe topmost 0 (SetWindowPos 同步原生, 已测可靠)
+// kiosk fullscreen auto-sets TOPMOST (HWND_TOPMOST); cancel immediately to restore normal fullscreen Z-order behavior.
+// Prefer NW.js's own JS API setAlwaysOnTop(false) (the chrome.windows.update alwaysOnTop branch,
+// without touching state logic). Fallback: winctl.exe topmost 0 (SetWindowPos, synchronous native, verified reliable)
 function unTopmost(): void {
   try {
     const win = nw.Window.get() as any;
@@ -211,12 +211,12 @@ function unTopmost(): void {
   } catch {}
 }
 
-// 切换窗口模式: 写设置 + 通知 UI + 运行时切换窗口 (免重启)。
-// 对齐 Electron togglefullscreen (win.setFullScreen 切换): 直接切换, 不做任何预处理。
-// 注意: NW.js kNWNewWin 下 win.enterFullscreen() → chrome.windows.update({state:"fullscreen"})
-// 内部会先 Restore() 取消最大化再全屏 (WindowsUpdateFunction), 产生 1280x720 中间帧且丢失最大化。
-// 改用 kiosk 模式: enterKioskMode/leaveKioskMode 走 C++ BrowserWidget::SetFullscreen 直连路径
-// (ProcessFullscreen 保存/恢复完整样式含 WS_MAXIMIZE), 无中间帧且退出自动恢复最大化, 与 Electron 一致。
+// Switch window mode: write settings + notify UI + switch the window at runtime (no restart).
+// Mirrors Electron togglefullscreen (win.setFullScreen switch): flip directly, no preprocessing.
+// Note: under NW.js kNWNewWin, win.enterFullscreen() -> chrome.windows.update({state:"fullscreen"})
+// internally Restores the maximized window before going fullscreen (WindowsUpdateFunction), producing a 1280x720 intermediate frame and losing maximized.
+// Use kiosk instead: enterKioskMode/leaveKioskMode go through the C++ BrowserWidget::SetFullscreen direct path
+// (ProcessFullscreen saves/restores the full style incl. WS_MAXIMIZE); no intermediate frame and exit restores maximized, matching Electron.
 export function setWindowMode(mode: WindowMode): void {
   try {
     const s = readSettings();
@@ -237,7 +237,7 @@ export function setWindowMode(mode: WindowMode): void {
   } catch {}
 }
 
-// 写入开关状态: on=true 加旗标(关闭垂直同步), false 移除; 返回是否成功
+// Write the switch state: on=true adds the flag (disable vsync), false removes it; returns success
 export function setGpuVsyncState(on: boolean): boolean {
   try {
     const pkg = JSON.parse(fs.readFileSync(manifestPath, "utf8"));

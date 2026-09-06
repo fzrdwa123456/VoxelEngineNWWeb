@@ -1,5 +1,5 @@
-// ===== 字体切换: CSS 变量 --font-ui / --font-mono, 切换即时生效 (无需重启) =====
-// 所有 UI 的 font 简写引用 var(--font-ui) / var(--font-mono), 改这两个变量即全局换字体。
+// ===== Font switching: CSS variables --font-ui / --font-mono, takes effect immediately (no restart) =====
+// Every UI's font shorthand references var(--font-ui) / var(--font-mono); changing these two variables swaps fonts globally.
 
 export type FontId = "pixel" | "system";
 
@@ -22,7 +22,7 @@ const FONTS: Record<FontId, FontDef> = {
 let current: FontId = "pixel";
 const listeners = new Set<() => void>();
 
-/** 把当前字体写入 CSS 变量 (UI 全部引用 var(), 即时更新) */
+/** Write the current font into the CSS variables (all UI reference var(); updates immediately) */
 function applyFont(): void {
   const f = FONTS[current];
   document.documentElement.style.setProperty("--font-ui", f.ui);
@@ -44,7 +44,7 @@ export function onFontChange(cb: () => void): void {
   listeners.add(cb);
 }
 
-/** 启动时从配置载入字体 (无效值回退像素字体) */
+/** Load the font from config at startup (invalid values fall back to the pixel font) */
 export function loadFont(v: unknown): void {
   if (v === "pixel" || v === "system") current = v;
   applyFont();

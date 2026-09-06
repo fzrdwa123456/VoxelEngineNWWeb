@@ -1,4 +1,4 @@
-// 下载并解压 NW.js v0.115.0 sdk win-x64 到 nwjs\（幂等：已存在则跳过; 与 rearrange.mjs 期望的目录名一致）
+// Download and extract NW.js v0.115.0 (normal flavor, no SDK/devtools) win-x64 into nwjs\ (idempotent: skipped when present; matches the directory name rearrange.mjs expects)
 import { existsSync, mkdirSync, createWriteStream } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const version = "0.115.0";
-const distName = `nwjs-sdk-v${version}-win-x64`;
+const distName = `nwjs-v${version}-win-x64`;
 const nwDir = path.join(root, "nwjs");
 const outDir = path.join(nwDir, distName);
 
 if (existsSync(path.join(outDir, "nw.exe"))) {
-  console.log(`已存在: ${outDir}\\nw.exe, 跳过`);
+    console.log(`Already present: ${outDir}\\nw.exe, skipping`);
   process.exit(0);
 }
 
@@ -26,7 +26,7 @@ const urls = [
 let got = false;
 for (const url of urls) {
   try {
-    console.log(`下载 ${url}`);
+        console.log(`Downloading ${url}`);
     const res = await fetch(url, { redirect: "follow" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const total = Number(res.headers.get("content-length") || 0);
@@ -42,26 +42,26 @@ for (const url of urls) {
     }
     file.end();
     await new Promise((r) => file.on("finish", r));
-    console.log("\n下载完成");
+        console.log("\nDownload complete");
     got = true;
     break;
   } catch (e) {
-    console.log(`失败: ${e.message}, 换下一个源`);
+        console.log(`Failed: ${e.message}, trying the next mirror`);
   }
 }
 if (!got) {
-  console.error("所有下载源均失败");
+    console.error("All download mirrors failed");
   process.exit(1);
 }
 
-console.log("解压...");
+console.log("Extracting...");
 const tar = spawnSync("tar", ["-xf", zipPath, "-C", nwDir], { stdio: "inherit" });
 if (tar.status !== 0) {
-  console.error("tar 解压失败");
+    console.error("tar extraction failed");
   process.exit(1);
 }
 if (!existsSync(path.join(outDir, "nw.exe"))) {
-  console.error(`解压后未找到 ${outDir}\\nw.exe`);
+    console.error(`${outDir}\\nw.exe not found after extraction`);
   process.exit(1);
 }
-console.log(`完成 -> ${outDir}`);
+console.log(`Done -> ${outDir}`);

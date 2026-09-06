@@ -1,24 +1,56 @@
-// ===== 暂停菜单 + 共享设置面板 (帧率上限/垂直同步/语言/界面缩放/窗口模式), 主菜单也复用设置面板 =====
+// ===== Pause menu + shared settings panel (FPS cap/vsync/language/UI scale/window mode); the main menu reuses the settings panel =====
+//
+// Structure of this file:
+//   1. Shared cross-instance state     — all panel instances (pause menu + main menu) sync
+//                                        through keybindRenderers/capRegistry; never query a
+//                                        single instance's DOM.
+//   2. Binding interaction state       — the click shield + capture-free drag + physical
+//                                        capture listeners. This is timing-sensitive: it works
+//                                        around Chromium click synthesis. Read the block
+//                                        comments before touching anything.
+//   3. DOM helpers                     — el()/panelCss()/button()/choiceButton().
+//   4. buildSettingsPanel()            — the settings panels (shared by pause menu + main menu).
+//   5. Menu                            — the pause menu class.
+//
+// Behavior contracts (do not break; verified flows: click-rebind, drag-bind, Esc unbind,
+// double-instance redraw, wheel blocking, click-synthesis suppression):
+//   - A left-button mousedown in capture mode binds immediately; Chromium synthesizes a click
+//     afterwards which would re-trigger panel handlers -> one-shot click shield, armed WITHOUT
+//     a self-clearing timeout (a long press would fire the timeout before the synthetic click
+//     arrives and let it through, re-entering capture on the chip). Cleared by the click shield
+//     when consumed, or by the global mouseup fallback when no click is synthesized.
+//   - A capture-free drag RELEASE arms the same shield WITH a 0ms timeout (the synthetic click
+//     follows mouseup synchronously and consumes it first; drags that pressed a second mouse
+//     button break click synthesis, so the timeout is the fallback). The two arm paths differ
+//     on purpose — merging them reintroduces the regression.
+//   - Only the left button synthesizes clicks (right/middle/side produce contextmenu/auxclick),
+//     which is why only mousedown-with-button-0 arms the shield in capture mode.
 import { t, getLang, setLang, onLangChange } from "./i18n";
 import { getUIScaleMode, setUIScaleMode, onUIScaleModeChange, onResizeMerged, getCurrentScale, uiStage } from "./uiscale";
 import { getFontId, setFontId, onFontChange, type FontId } from "./fonts";
-import { listPacks } from "../textures";
-import { onWindowModeChange, type WindowMode, sendLog } from "../shell";
-import { getBind, setBind, beginCapture, endCapture, getCapturing, onBindsChange, codeDisplayName, codeToButton, buttonToCode, type BindAction } from "../keybinds";
+import { listPacks } from "../rendering/textures";
+import { onWindowModeChange, type WindowMode, sendLog } from "../platform/shell";
+import { getBind, setBind, beginCapture, endCapture, getCapturing, onBindsChange, codeDisplayName, codeToButton, buttonToCode, type BindAction } from "../platform/keybinds";
 
-// 按键绑定面板渲染器注册表: buildSettingsPanel 会被暂停菜单/主菜单各实例化一次,
-// 各自持有独立的 DOM 与 renderBinds。文档级键盘捕获监听器是共享状态,
-// 必须让所有实例一起重绘 —— 否则会刷到隐藏面板, 可见面板芯片停留在选中态 (跨实例失同步 bug)
+// ===== 1. Shared cross-instance state =====
+// buildSettingsPanel is instantiated once by the pause menu and once by the main menu, each
+// with independent DOM and renderBinds. The document-level capture listeners are shared state,
+// so all instances redraw together — otherwise a refresh would hit a hidden panel and the
+// visible panel's chips would stay stuck selected (cross-instance desync bug).
 const keybindRenderers = new Set<() => void>();
 
-// ===== 键帽全局注册表与免捕获拖拽绑定 (跨面板实例, 模块级) =====
-// 全局键帽注册表: 两套面板 DOM 各自注册, elementFromPoint 命中的是可见实例的元素,
-// 落点探测/hover 必须查这张跨实例表 —— 只查单实例闭包内的表会全部落空
+// Every keycap element from every instance registers here; elementFromPoint hits the visible
+// instance's elements, so drag hit-testing must consult this cross-instance table — looking up
+// by code alone would hit a hidden panel's twin keycap registered earlier.
 const capRegistry: { code: string; el: HTMLButtonElement }[] = [];
 
-// 免捕获拖拽绑定状态: 按住互动按钮直接拖到键帽上松开即绑定, 无需先点选进入捕获态。
-// 左右键都可起手; button 记录发起键 —— 进行中另一只键的按下/松开必须被无视 (防打断/误绑)。
-// 位移超过阈值判定为拖拽; 普通点击仍走原生 click 的选中切换
+// ===== 2. Binding interaction state (click shield + capture-free drag + physical capture) =====
+
+// Capture-free drag binding: hold an action chip and drop it onto a keycap — no capture mode
+// needed first. Either mouse button can start; button records the initiator — presses/releases
+// of the OTHER button during the drag must be ignored (no interruptions/misbinds). Movement
+// beyond the threshold makes it a drag; a plain click falls through to the native click's
+// select toggle.
 let chipDrag: {
   action: BindAction;
   button: number;
@@ -28,15 +60,29 @@ let chipDrag: {
 } | null = null;
 let capHoverEl: HTMLButtonElement | null = null;
 
+/** One-shot synthetic-click shield. See the arm paths below for why clearing differs per gesture. */
+let suppressNextClick = false;
+
+/** Arm the shield. schedSelf=false (capture-mode mousedown): cleared by the click shield when
+ *  the synthetic click is consumed, or by the global mouseup fallback if none is synthesized.
+ *  schedSelf=true (drag release): also schedule a 0ms self-clear — the synthetic click follows
+ *  mouseup synchronously and consumes the flag first; the timeout only covers the no-click paths. */
+function armSuppressNextClick(schedSelf: boolean): void {
+  suppressNextClick = true;
+  if (schedSelf) {
+    setTimeout(() => {
+      suppressNextClick = false;
+    }, 0);
+  }
+}
+
+/** Drag rubber band (single reusable SVG overlay) */
 function showCapLine(x1: number, y1: number, x2: number, y2: number): void {
   let svg = document.getElementById("cap-line-svg") as SVGSVGElement | null;
   if (!svg) {
     svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.id = "cap-line-svg";
-    svg.setAttribute(
-      "style",
-      "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:9999;display:none;",
-    );
+    svg.setAttribute("style", "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:9999;display:none;");
     const lineEl = document.createElementNS("http://www.w3.org/2000/svg", "line");
     lineEl.setAttribute("stroke", "#4a9eff");
     lineEl.setAttribute("stroke-width", "2");
@@ -61,75 +107,65 @@ function hideCapLine(): void {
   }
 }
 
-/** 落点探测: 命中任意实例注册的键帽, 返回码与实际命中的键帽元素。
- *  高亮必须用这里带回的 el —— 按 code 回查会命中注册顺序靠前的隐藏面板孪生键帽 */
+/** Hit test: matches keycaps registered by any instance, returning the code and the actual
+ *  keycap element hit. Highlighting must use the el returned here — looking up by code would
+ *  hit a hidden panel's twin keycap registered earlier. */
 function capHitAtPoint(x: number, y: number): { code: string; el: HTMLButtonElement } | null {
-  const el = document.elementFromPoint(x, y) as HTMLElement | null;
-  if (!el) return null;
+  const elAt = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!elAt) return null;
   for (const c of capRegistry) {
-    if (c.el === el || c.el.contains(el)) return { code: c.code, el: c.el };
+    if (c.el === elAt || c.el.contains(elAt)) return { code: c.code, el: c.el };
   }
   return null;
 }
 
-// 捕获态吞掉一切合成 click: 物理按下已经作为输入完成绑定,
-// 其后浏览器合成的 click 不得再触发任何面板交互 (芯片重选/键帽点选/返回按钮)。
-// 注意: 捕获态在 mousedown 阶段就已结束, 合成 click 到达时状态已空 ——
-// 因此还需要一次性抑制标志 suppressNextClick 配合 (onCaptureMouseDown 设置)。
-// chipDrag = 免捕获拖拽进行中: 同样吞掉一切点击 (防止另一只键的点击误触芯片/返回)。
-// 捕获相位注册: 先于所有元素自身的 onclick 执行; 两者皆无时零影响。
-let suppressNextClick = false;
-
-// 置位一次性吞除标志。清零时机按置位时机分两路:
-// - mousedown 置位 (捕获态绑定): 不能当场排 timeout —— 用户按住期间 timeout 会先于
-//   click 到期, 标志被提前清掉导致合成 click 放行、芯片自动重进捕获态 (回归)。
-//   由下面的全局 mouseup 兜底在松手后排队清零。
-// - mouseup 置位 (拖拽松手): 当场排 timeout —— 合成 click 紧随 mouseup 同步派发、
-//   先于 timeout 消费; 多键/无 click 路径由 timeout 清零。全局兜底监听器在拖拽
-//   处理器之前注册, 本次 mouseup 看到的还是旧值, 帮不上忙, 必须自己排。
-function armSuppressNextClick(schedSelf: boolean): void {
-  suppressNextClick = true;
-  if (schedSelf) {
-    setTimeout(() => {
-      suppressNextClick = false;
-    }, 0);
-  }
+/** Redraw every panel instance's bindings (the visible one is necessarily included) */
+function renderAllPanels(reason: string): void {
+  let panels = 0;
+  keybindRenderers.forEach((r) => {
+    r();
+    panels++;
+  });
+  sendLog(`KBCAP ${reason} (panels=${panels})`);
 }
 
-// 松手后兜底 (仅捕获态路径需要): 标志在 mousedown 置位, 松手时若仍活着
-// (无合成 click 可消费, 如拖拽中按过第二个鼠标键破坏了 Chromium 的 click 合成),
-// 0ms 定时器清掉, 防止残留标志吞掉下一次真实点击
-document.addEventListener("mouseup", () => {
-  if (!suppressNextClick) return;
-  setTimeout(() => {
-    suppressNextClick = false;
-  }, 0);
-});
+// Global click shield (capture phase: runs before all elements' own onclick). Swallows every
+// synthetic click while capture/drag is active or the shield is armed — the physical press
+// already completed the binding, so the browser-generated click must not re-trigger chip
+// reselect/keycap pick/back button. Consuming the shield clears it (except during drags,
+// where a drag may outlive one click — preserving the original semantics).
 document.addEventListener(
   "click",
   (ev) => {
     if (getCapturing() || chipDrag || suppressNextClick) {
       ev.preventDefault();
       ev.stopImmediatePropagation();
-      if (!chipDrag) suppressNextClick = false; // 消费即清 (拖拽中不消费, 保持原语义)
+      if (!chipDrag) suppressNextClick = false;
     }
   },
   true,
 );
 
-// 免捕获芯片拖拽: 全局单份 move/up 处理 (元素级 mousedown 只负责记录起点)
+// Capture-mode mouseup fallback: if the shield armed at mousedown is still alive after release
+// (no synthetic click to consume — e.g. the drag pressed a second mouse button, breaking
+// Chromium's click synthesis), a 0ms timer clears it so the next real click is not swallowed.
+document.addEventListener("mouseup", () => {
+  if (!suppressNextClick) return;
+  setTimeout(() => {
+    suppressNextClick = false;
+  }, 0);
+});
+
+// Capture-free drag move: past the 6px threshold the gesture becomes a drag — draw the rubber
+// band and highlight the keycap under the cursor.
 document.addEventListener("mousemove", (ev) => {
   if (!chipDrag) return;
-  if (
-    !chipDrag.moved &&
-    Math.hypot(ev.clientX - chipDrag.anchorX, ev.clientY - chipDrag.anchorY) < 6
-  ) {
-    return; // 阈值内视为普通点击
+  if (!chipDrag.moved && Math.hypot(ev.clientX - chipDrag.anchorX, ev.clientY - chipDrag.anchorY) < 6) {
+    return; // Within the threshold, treated as a plain click
   }
   chipDrag.moved = true;
   showCapLine(chipDrag.anchorX, chipDrag.anchorY, ev.clientX, ev.clientY);
-  const hit = capHitAtPoint(ev.clientX, ev.clientY);
-  const hitEl = hit?.el ?? null;
+  const hitEl = capHitAtPoint(ev.clientX, ev.clientY)?.el ?? null;
   if (capHoverEl !== hitEl) {
     if (capHoverEl) capHoverEl.style.outline = "";
     capHoverEl = hitEl;
@@ -137,30 +173,28 @@ document.addEventListener("mousemove", (ev) => {
   }
 });
 
+// Capture-free drag end: releasing the initiating button beyond the threshold binds the
+// keycap under the cursor; a plain release falls back to the native click (select toggle).
 document.addEventListener("mouseup", (ev) => {
   if (!chipDrag) return;
-  if (ev.button !== chipDrag.button) return; // 非发起键的松开: 无视, 不打断进行中的拖拽
+  if (ev.button !== chipDrag.button) return; // Release of the non-initiating button: ignore, do not interrupt the drag
   const { action, anchorX, anchorY } = chipDrag;
   chipDrag = null;
   hideCapLine();
   const dragged = Math.hypot(ev.clientX - anchorX, ev.clientY - anchorY) >= 6;
-  if (!dragged) return; // 普通点击: 交给原生 click 走选中切换
-  armSuppressNextClick(true); // mouseup 置位: 当场排 timeout 兜底 (合成 click 先到先消费)
-  if (getCapturing()) return; // 拖拽中途进入了捕获态(异常路径), 放弃绑定
+  if (!dragged) return; // Plain click: hand over to the native click for the select toggle
+  armSuppressNextClick(true); // mouseup-armed: schedule the timeout fallback immediately (the synthetic click consumes it first)
+  if (getCapturing()) return; // A capture started mid-drag (abnormal path): abort the bind
   const code = capHitAtPoint(ev.clientX, ev.clientY)?.code ?? null;
-  sendLog(`KBCAP 拖拽松手 action=${action} code=${code ?? "未命中"}`);
-  if (!code) return; // 空白处松开: 无操作
+  sendLog(`KBCAP drag release action=${action} code=${code ?? "no hit"}`);
+  if (!code) return; // Released on empty space: no-op
   setBind(action, code);
-  let panels = 0;
-  keybindRenderers.forEach((r) => {
-    r();
-    panels++;
-  });
-  sendLog(`KBCAP 拖拽绑定完成 (${code}, panels=${panels})`);
+  renderAllPanels(`drag bind done (${code})`);
 });
 
-// 捕获态 / 免捕获拖拽进行中: 禁止一切滚轮滚动 (防止绑定选项列表位置漂移干扰操作)。
-// passive:false 必须显式声明 —— Chrome 对 document 级 wheel 监听默认被动化, 否则 preventDefault 无效
+// Capture state / capture-free drag in progress: forbid all wheel scrolling (prevents the bind
+// options list drifting under the operation). passive:false must be explicit — Chrome makes
+// document-level wheel listeners passive by default, otherwise preventDefault is ineffective.
 document.addEventListener(
   "wheel",
   (ev) => {
@@ -172,6 +206,106 @@ document.addEventListener(
   { passive: false },
 );
 
+// Physical key capture (module-level: behavior is instance-independent, and per-instance
+// registration used to double every diagnostic log). Esc during a drag cancels the drag;
+// with an action selected every key binds (Esc = unbind) without closing the menu.
+document.addEventListener("keydown", (ev) => {
+  const action = getCapturing();
+  if (!action && chipDrag) {
+    // Drag in progress: keys have no default role here — Space/Enter/Tab would otherwise
+    // scroll the panel or jump focus (browser defaults; the wheel is already blocked above).
+    // Esc cancels the drag; every other key is swallowed (default prevented, other
+    // listeners unaffected — matching the old non-intervention except for the default).
+    ev.preventDefault();
+    if (ev.code === "Escape") {
+      ev.stopImmediatePropagation();
+      endCapture();
+      chipDrag = null;
+      hideCapLine();
+      sendLog("KBCAP Esc cancels drag");
+    }
+    return;
+  }
+  sendLog(`KBCAP keydown code=${ev.code} capturing=${action ?? "null"}`);
+  if (!action) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  endCapture();
+  setBind(action, ev.code === "Escape" ? "" : ev.code); // Esc = unbind the action
+  try {
+    renderAllPanels(`renderBinds done (code=${ev.code})`);
+  } catch (e) {
+    sendLog(`KBCAP renderBinds error!! ${e instanceof Error ? e.stack : String(e)}`);
+  }
+});
+
+// Capture-state mouse capture: any mouse button (incl. left) binds its code on press.
+// preventDefault stops the focused button being activated by Space/Enter and middle-click
+// autoscroll; stopImmediatePropagation blocks the later-registered main.ts ESC handler and
+// F3/F4 (the earlier-registered inventory E key yields via isCapturing()).
+document.addEventListener("mousedown", (ev) => {
+  const action = getCapturing();
+  sendLog(`KBCAP mousedown button=${ev.button} capturing=${action ?? "null"}`);
+  if (!action) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  endCapture();
+  // One-shot shield for the upcoming synthetic click: only button 0 synthesizes one
+  // (right/middle/side produce contextmenu/auxclick). Armed without a self-timeout —
+  // cleared by the click shield on consumption or by the mouseup fallback above.
+  if (ev.button === 0) armSuppressNextClick(false);
+  const code = buttonToCode(ev.button); // Left/middle/right/X1/X2 all bind immediately
+  if (!code) return;
+  setBind(action, code);
+  renderAllPanels(`mousedown bind done (${code})`);
+});
+
+// ===== 3. DOM helpers =====
+
+/** Create an element with a cssText style and optional text content */
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, css: string, text?: string): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  e.style.cssText = css;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+/** Standard menu button with the static hover shade */
+function button(css: string): HTMLButtonElement {
+  const b = el("button", css);
+  b.onmouseover = () => (b.style.background = "#555");
+  b.onmouseout = () => (b.style.background = "#444");
+  return b;
+}
+
+/** Selection button: hover/backgrounds reflect isSel() (blue when selected); onPick runs on click.
+ *  Text content and background are driven by the caller's render callback. */
+function choiceButton(css: string, isSel: () => boolean, onPick: () => void): HTMLButtonElement {
+  const b = el("button", css);
+  b.onmouseover = () => (b.style.background = isSel() ? "#3b83d6" : "#555");
+  b.onmouseout = () => (b.style.background = isSel() ? "#4a9eff" : "#444");
+  b.onclick = onPick;
+  return b;
+}
+
+const BTN_CSS =
+  "display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:0.9375rem var(--font-ui);color:#fff;" +
+  "background:#444;border:none;border-radius:0.375rem;cursor:pointer;";
+const panelCss = (width: string) =>
+  `width:${width};background:#222;border-radius:0.625rem;padding:1.25rem;text-align:center;color:#fff;` +
+  "font:1rem var(--font-ui);box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);display:none;";
+const TITLE_CSS = "font-size:1.375rem;margin-bottom:0.875rem;";
+const LABEL_CSS = "text-align:left;font-size:0.9375rem;margin:0.5rem 0 0.25rem;";
+const COL_CSS = "flex:1;text-align:left;";
+const COL_LABEL_CSS = "font-size:0.9375rem;color:#bbb;margin-bottom:0.5rem;";
+const CHOICE_CSS =
+  "display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:0.9375rem var(--font-ui);color:#fff;" +
+  "background:#444;border:none;border-radius:0.375rem;cursor:pointer;text-align:center;";
+const CAP_MAIN_CSS =
+  "font-family:var(--font-ui);font-size:0.6875rem;line-height:1.15;white-space:nowrap;overflow:hidden;max-width:100%;";
+
+// ===== 4. Shared settings panel =====
+
 export interface SettingsCallbacks {
   getFpsCap: () => number;
   onFpsCap: (cap: number) => void;
@@ -181,48 +315,38 @@ export interface SettingsCallbacks {
   onSetWindowMode: (mode: WindowMode) => void;
 }
 
-// 暂停菜单回调: 设置面板六项 + 回到游戏/回到主菜单
+// Pause menu callbacks: the settings panel's six items + resume / back to main menu
 export interface MenuCallbacks extends SettingsCallbacks {
   onResume: () => void;
   onToMainMenu: () => void;
 }
 
-// 共享设置面板: 帧率上限滑条 + 垂直同步开关 + 语言合集 + 资源包合集 + 按键绑定 + 窗口模式 + 界面缩放 + 返回 (暂停菜单/主菜单共用)
-// 返回 { settingsPanel, langPanel, packPanel, keybindPanel } 四个面板, 调用方挂到同一根容器切换显示
-export function buildSettingsPanel(
-  opts: SettingsCallbacks & { onBack: () => void },
-): { settingsPanel: HTMLDivElement; langPanel: HTMLDivElement; packPanel: HTMLDivElement; keybindPanel: HTMLDivElement } {
-  const btnStyle =
-    "display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:0.9375rem var(--font-ui);color:#fff;" +
-    "background:#444;border:none;border-radius:0.375rem;cursor:pointer;";
-
-  const settingsPanel = document.createElement("div");
-  settingsPanel.style.cssText =
-    "width:17.5rem;background:#222;border-radius:0.625rem;padding:1.25rem;text-align:center;color:#fff;" +
-    "font:1rem var(--font-ui);box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);display:none;";
-
-  const sTitle = document.createElement("div");
-  sTitle.style.cssText = "font-size:1.375rem;margin-bottom:0.875rem;";
+// Shared settings panel: FPS cap slider + vsync toggle + language collection + resource pack
+// collection + key binds + window mode + UI scale + back (shared by pause menu/main menu).
+// Returns four panels; the caller mounts them on the same root container and toggles visibility.
+export function buildSettingsPanel(opts: SettingsCallbacks & { onBack: () => void }): {
+  settingsPanel: HTMLDivElement;
+  langPanel: HTMLDivElement;
+  packPanel: HTMLDivElement;
+  keybindPanel: HTMLDivElement;
+} {
+  const settingsPanel = el("div", panelCss("17.5rem"));
+  const sTitle = el("div", TITLE_CSS);
   settingsPanel.appendChild(sTitle);
 
-  const capLabel = document.createElement("div");
-  capLabel.style.cssText = "text-align:left;font-size:0.9375rem;margin:0.5rem 0 0.25rem;";
+  // --- FPS cap slider: 30..240, maxed = unlimited (0) ---
+  const capLabel = el("div", LABEL_CSS);
   settingsPanel.appendChild(capLabel);
-
-  const capValue = document.createElement("div");
-  capValue.style.cssText =
-    "text-align:center;font-size:1.25rem;font-weight:600;color:#fff;margin:0.125rem 0 0.375rem;";
+  const capValue = el("div", "text-align:center;font-size:1.25rem;font-weight:600;color:#fff;margin:0.125rem 0 0.375rem;");
   settingsPanel.appendChild(capValue);
-
   const CAP_MIN = 30;
-  const CAP_MAX = 240; // 拉满 = 无限
-  const capSlider = document.createElement("input");
+  const CAP_MAX = 240;
+  const capSlider = el("input", "width:100%;margin:0 0 0.625rem;accent-color:#4a9eff;cursor:pointer;");
   capSlider.type = "range";
   capSlider.min = String(CAP_MIN);
   capSlider.max = String(CAP_MAX);
   capSlider.step = "2";
   capSlider.value = String(Math.max(CAP_MIN, Math.min(CAP_MAX, opts.getFpsCap() || CAP_MAX)));
-  capSlider.style.cssText = "width:100%;margin:0 0 0.625rem;accent-color:#4a9eff;cursor:pointer;";
   const renderCap = (): void => {
     capValue.textContent = Number(capSlider.value) >= CAP_MAX ? t("settings.unlimited") : `${capSlider.value} FPS`;
   };
@@ -232,11 +356,9 @@ export function buildSettingsPanel(
   };
   settingsPanel.appendChild(capSlider);
 
+  // --- GPU vsync toggle ---
   let gpuVsyncOn = opts.getGpuVsyncState();
-  const gpuBtn = document.createElement("button");
-  gpuBtn.style.cssText = btnStyle;
-  gpuBtn.onmouseover = () => (gpuBtn.style.background = "#555");
-  gpuBtn.onmouseout = () => (gpuBtn.style.background = "#444");
+  const gpuBtn = button(BTN_CSS);
   const renderGpuBtn = (): void => {
     gpuBtn.textContent = gpuVsyncOn ? t("settings.vsyncOff") : t("settings.vsyncOn");
   };
@@ -249,110 +371,53 @@ export function buildSettingsPanel(
   };
   settingsPanel.appendChild(gpuBtn);
 
-  // 语言与字体合集: 按钮进入子面板 (左: 语言, 右: 字体)
-  const langBtn = document.createElement("button");
-  langBtn.style.cssText = btnStyle;
-  langBtn.onmouseover = () => (langBtn.style.background = "#555");
-  langBtn.onmouseout = () => (langBtn.style.background = "#444");
+  // --- Language & fonts: entry button + two-column sub-panel ---
+  const langBtn = button(BTN_CSS);
   langBtn.onclick = () => {
     settingsPanel.style.display = "none";
     langPanel.style.display = "block";
   };
   settingsPanel.appendChild(langBtn);
 
-  // 语言与字体子面板: 左右双栏, 与设置面板同级切换
-  const langPanel = document.createElement("div");
-  langPanel.style.cssText =
-    "width:34rem;background:#222;border-radius:0.625rem;padding:1.25rem;text-align:center;color:#fff;" +
-    "font:1rem var(--font-ui);box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);display:none;";
-
-  const langTitle = document.createElement("div");
-  langTitle.style.cssText = "font-size:1.375rem;margin-bottom:0.875rem;";
+  const langPanel = el("div", panelCss("34rem"));
+  const langTitle = el("div", TITLE_CSS);
   langPanel.appendChild(langTitle);
-
-  const choiceWrap = document.createElement("div");
-  choiceWrap.style.cssText = "display:flex;gap:1.25rem;margin-bottom:0.875rem;";
+  const choiceWrap = el("div", "display:flex;gap:1.25rem;margin-bottom:0.875rem;");
   langPanel.appendChild(choiceWrap);
 
-  const colStyle = "flex:1;text-align:left;";
-  const colLabelStyle = "font-size:0.9375rem;color:#bbb;margin-bottom:0.5rem;";
-  const langChoiceStyle =
-    "display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:0.9375rem var(--font-ui);color:#fff;" +
-    "background:#444;border:none;border-radius:0.375rem;cursor:pointer;text-align:center;";
-
-  // 左栏: 语言
-  const langCol = document.createElement("div");
-  langCol.style.cssText = colStyle;
-  const langColLabel = document.createElement("div");
-  langColLabel.style.cssText = colLabelStyle;
-  langCol.appendChild(langColLabel);
-  const zhBtn = document.createElement("button");
-  zhBtn.style.cssText = langChoiceStyle;
-  zhBtn.onmouseover = () => (zhBtn.style.background = getLang() === "zh" ? "#3b83d6" : "#555");
-  zhBtn.onmouseout = () => (zhBtn.style.background = getLang() === "zh" ? "#4a9eff" : "#444");
-  zhBtn.onclick = () => setLang("zh");
-  langCol.appendChild(zhBtn);
-  const enBtn = document.createElement("button");
-  enBtn.style.cssText = langChoiceStyle;
-  enBtn.onmouseover = () => (enBtn.style.background = getLang() === "en" ? "#3b83d6" : "#555");
-  enBtn.onmouseout = () => (enBtn.style.background = getLang() === "en" ? "#4a9eff" : "#444");
-  enBtn.onclick = () => setLang("en");
-  langCol.appendChild(enBtn);
-  const jaBtn = document.createElement("button");
-  jaBtn.style.cssText = langChoiceStyle;
-  jaBtn.onmouseover = () => (jaBtn.style.background = getLang() === "ja" ? "#3b83d6" : "#555");
-  jaBtn.onmouseout = () => (jaBtn.style.background = getLang() === "ja" ? "#4a9eff" : "#444");
-  jaBtn.onclick = () => setLang("ja");
-  langCol.appendChild(jaBtn);
+  const langCol = el("div", COL_CSS);
+  langCol.appendChild(el("div", COL_LABEL_CSS));
+  const langBtns = (["zh", "en", "ja"] as const).map((lang) => {
+    const b = choiceButton(CHOICE_CSS, () => getLang() === lang, () => setLang(lang));
+    langCol.appendChild(b);
+    return [lang, b] as const;
+  });
   choiceWrap.appendChild(langCol);
 
-  // 右栏: 字体
-  const fontCol = document.createElement("div");
-  fontCol.style.cssText = colStyle;
-  const fontColLabel = document.createElement("div");
-  fontColLabel.style.cssText = colLabelStyle;
-  fontCol.appendChild(fontColLabel);
-  const fontChoiceStyle = langChoiceStyle;
-  const mkFontBtn = (id: FontId): HTMLButtonElement => {
-    const b = document.createElement("button");
-    b.style.cssText = fontChoiceStyle;
-    b.onmouseover = () => (b.style.background = getFontId() === id ? "#3b83d6" : "#555");
-    b.onmouseout = () => (b.style.background = getFontId() === id ? "#4a9eff" : "#444");
-    b.onclick = () => setFontId(id);
-    return b;
-  };
-  const pixelBtn = mkFontBtn("pixel");
-  const systemBtn = mkFontBtn("system");
-  fontCol.appendChild(pixelBtn);
-  fontCol.appendChild(systemBtn);
+  const fontCol = el("div", COL_CSS);
+  fontCol.appendChild(el("div", COL_LABEL_CSS));
+  const fontBtns = (["pixel", "system"] as const).map((id) => {
+    const b = choiceButton(CHOICE_CSS, () => getFontId() === id, () => setFontId(id));
+    fontCol.appendChild(b);
+    return [id, b] as const;
+  });
   choiceWrap.appendChild(fontCol);
 
-  // 按当前语言/字体刷新高亮 (切换后立即重绘)
   const renderLang = (): void => {
-    zhBtn.style.background = getLang() === "zh" ? "#4a9eff" : "#444";
-    enBtn.style.background = getLang() === "en" ? "#4a9eff" : "#444";
-    jaBtn.style.background = getLang() === "ja" ? "#4a9eff" : "#444";
+    for (const [lang, b] of langBtns) b.style.background = getLang() === lang ? "#4a9eff" : "#444";
   };
   const renderFont = (): void => {
-    pixelBtn.style.background = getFontId() === "pixel" ? "#4a9eff" : "#444";
-    systemBtn.style.background = getFontId() === "system" ? "#4a9eff" : "#444";
+    for (const [id, b] of fontBtns) b.style.background = getFontId() === id ? "#4a9eff" : "#444";
   };
-
-  const langBackBtn = document.createElement("button");
-  langBackBtn.style.cssText = btnStyle;
-  langBackBtn.onmouseover = () => (langBackBtn.style.background = "#555");
-  langBackBtn.onmouseout = () => (langBackBtn.style.background = "#444");
+  const langBackBtn = button(BTN_CSS);
   langBackBtn.onclick = () => {
     langPanel.style.display = "none";
     settingsPanel.style.display = "block";
   };
   langPanel.appendChild(langBackBtn);
 
-  // 资源包合集: 按钮进入资源包子面板 (列出 game\resourcepacks\ 下的包)
-  const packBtn = document.createElement("button");
-  packBtn.style.cssText = btnStyle;
-  packBtn.onmouseover = () => (packBtn.style.background = "#555");
-  packBtn.onmouseout = () => (packBtn.style.background = "#444");
+  // --- Resource packs: entry button + sub-panel listing game\resourcepacks\ ---
+  const packBtn = button(BTN_CSS);
   packBtn.onclick = () => {
     settingsPanel.style.display = "none";
     packPanel.style.display = "block";
@@ -360,22 +425,12 @@ export function buildSettingsPanel(
   };
   settingsPanel.appendChild(packBtn);
 
-  // 资源包子面板: 列出 resourcepacks 目录下的资源包 (内置 default.zip + 用户 zip/文件夹)
-  const packPanel = document.createElement("div");
-  packPanel.style.cssText =
-    "width:17.5rem;background:#222;border-radius:0.625rem;padding:1.25rem;text-align:center;color:#fff;" +
-    "font:1rem var(--font-ui);box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);display:none;";
-
-  const packTitle = document.createElement("div");
-  packTitle.style.cssText = "font-size:1.375rem;margin-bottom:0.875rem;";
+  const packPanel = el("div", panelCss("17.5rem"));
+  const packTitle = el("div", TITLE_CSS);
   packPanel.appendChild(packTitle);
-
-  const packList = document.createElement("div");
-  packList.style.cssText = "max-height:12.5rem;overflow-y:auto;margin-bottom:0.375rem;";
+  const packList = el("div", "max-height:12.5rem;overflow-y:auto;margin-bottom:0.375rem;");
   packPanel.appendChild(packList);
-
-  const packEmpty = document.createElement("div");
-  packEmpty.style.cssText = "font-size:0.9375rem;color:#999;padding:0.5rem 0;";
+  const packEmpty = el("div", "font-size:0.9375rem;color:#999;padding:0.5rem 0;");
   packPanel.appendChild(packEmpty);
 
   const renderPacks = (): void => {
@@ -384,36 +439,26 @@ export function buildSettingsPanel(
     packEmpty.style.display = packs.length ? "none" : "block";
     packEmpty.textContent = t("settings.packsEmpty");
     for (const p of packs) {
-      const row = document.createElement("div");
-      row.style.cssText =
+      const row = el(
+        "div",
         "display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.625rem;margin:0.25rem 0;" +
-        "background:#333;border-radius:0.375rem;font-size:0.875rem;";
-      const name = document.createElement("span");
-      name.textContent = p.name;
-      name.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-      const meta = document.createElement("span");
-      meta.style.cssText = "flex-shrink:0;margin-left:0.5rem;color:#aaa;font-size:0.75rem;";
-      meta.textContent = `${p.builtin ? t("settings.packsBuiltin") + " · " : ""}${p.fileCount}`;
+          "background:#333;border-radius:0.375rem;font-size:0.875rem;",
+      );
+      const name = el("span", "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", p.name);
+      const meta = el("span", "flex-shrink:0;margin-left:0.5rem;color:#aaa;font-size:0.75rem;", `${p.builtin ? t("settings.packsBuiltin") + " · " : ""}${p.fileCount}`);
       row.append(name, meta);
       packList.appendChild(row);
     }
   };
-
-  const packBackBtn = document.createElement("button");
-  packBackBtn.style.cssText = btnStyle;
-  packBackBtn.onmouseover = () => (packBackBtn.style.background = "#555");
-  packBackBtn.onmouseout = () => (packBackBtn.style.background = "#444");
+  const packBackBtn = button(BTN_CSS);
   packBackBtn.onclick = () => {
     packPanel.style.display = "none";
     settingsPanel.style.display = "block";
   };
   packPanel.appendChild(packBackBtn);
 
-  // 按键绑定: 按钮进入子面板 (各动作一行, 点击换绑, Esc 取消)
-  const keybindBtn = document.createElement("button");
-  keybindBtn.style.cssText = btnStyle;
-  keybindBtn.onmouseover = () => (keybindBtn.style.background = "#555");
-  keybindBtn.onmouseout = () => (keybindBtn.style.background = "#444");
+  // --- Key binds: entry button + sub-panel (action chips + visual keyboard) ---
+  const keybindBtn = button(BTN_CSS);
   keybindBtn.onclick = () => {
     settingsPanel.style.display = "none";
     keybindPanel.style.display = "block";
@@ -421,22 +466,15 @@ export function buildSettingsPanel(
   };
   settingsPanel.appendChild(keybindBtn);
 
-  // 按键绑定子面板: 动作芯片 + 可视化键盘 (完整 104 键 ANSI 布局, 固定 QWERTY 参照几何 = KeyboardEvent.code 物理位置)
-  // 交互: 点动作芯片选中 → 点键盘按键完成绑定; 冲突抢占由 setBind 处理
-  const keybindPanel = document.createElement("div");
-  keybindPanel.style.cssText =
-    "width:40rem;background:#222;border-radius:0.625rem;padding:1.25rem;text-align:center;color:#fff;" +
-    "font:1rem var(--font-ui);box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);display:none;";
-
-  const kbTitle = document.createElement("div");
-  kbTitle.style.cssText = "font-size:1.375rem;margin-bottom:0.375rem;";
+  // Key bind sub-panel: action chips + visual keyboard (full 104-key ANSI layout, fixed QWERTY
+  // reference geometry = KeyboardEvent.code physical positions). Interaction: click an action
+  // chip to select -> click a keyboard key to bind; conflict preemption handled by setBind.
+  const keybindPanel = el("div", panelCss("40rem"));
+  const kbTitle = el("div", "font-size:1.375rem;margin-bottom:0.375rem;");
   keybindPanel.appendChild(kbTitle);
-
-  const kbHint = document.createElement("div");
-  kbHint.style.cssText = "font-size:0.75rem;color:#999;margin-bottom:0.625rem;";
+  const kbHint = el("div", "font-size:0.75rem;color:#999;margin-bottom:0.625rem;");
   keybindPanel.appendChild(kbHint);
 
-  // 动作芯片行: 显示动作名+当前键, 点击选中/取消
   const KB_ACTIONS: { action: BindAction; labelKey: string }[] = [
     { action: "forward", labelKey: "bind.forward" },
     { action: "back", labelKey: "bind.back" },
@@ -449,62 +487,50 @@ export function buildSettingsPanel(
     { action: "place", labelKey: "bind.place" },
   ];
 
-  // 左右两栏: 左=键盘板 (主区+导航区+下方小键盘横排), 右=互动按钮竖排栏 (固定上限高度, 内部滚动)
-  const kbFlex = document.createElement("div");
-  kbFlex.style.cssText = "display:flex;gap:0.75rem;align-items:flex-start;margin-bottom:0.625rem;";
+  // Two columns: left = keyboard board (main rows + bottom clusters), right = action chip column
+  const kbFlex = el("div", "display:flex;gap:0.75rem;align-items:flex-start;margin-bottom:0.625rem;");
   keybindPanel.appendChild(kbFlex);
-
-  const kbBoard = document.createElement("div");
-  kbBoard.style.cssText = "flex:1 1 auto;min-width:0;user-select:none;";
+  const kbBoard = el("div", "flex:1 1 auto;min-width:0;user-select:none;");
   kbFlex.appendChild(kbBoard);
-
-  const kbSide = document.createElement("div");
-  kbSide.style.cssText =
+  const kbSide = el(
+    "div",
     "width:11rem;flex-shrink:0;max-height:20rem;display:flex;flex-direction:column;gap:0.375rem;" +
-    "background:#1a1a1a;border-radius:0.5rem;padding:0.625rem;overflow:hidden;";
+      "background:#1a1a1a;border-radius:0.5rem;padding:0.625rem;overflow:hidden;",
+  );
   kbFlex.appendChild(kbSide);
-
-  // 标题 + 滚动芯片列表 (高度跟随左板, 动作增多时内部滚动不撑破面板)
-  const kbSideTitle = document.createElement("div");
-  kbSideTitle.style.cssText = "font-size:0.9375rem;color:#bbb;text-align:center;";
+  const kbSideTitle = el("div", "font-size:0.9375rem;color:#bbb;text-align:center;");
   kbSide.appendChild(kbSideTitle);
-
-  const chipList = document.createElement("div");
+  const chipList = el("div", "flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:0.375rem;padding-right:0.5rem;");
   chipList.id = "kb-chip-list";
-  chipList.style.cssText =
-    "flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:0.375rem;padding-right:0.5rem;";
   kbSide.appendChild(chipList);
 
-  // 细滚动条样式 (全局只注入一次)
+  // Thin scrollbar style (injected globally only once)
   if (!document.getElementById("kb-chip-scrollbar")) {
-    const st = document.createElement("style");
-    st.id = "kb-chip-scrollbar";
-    st.textContent =
-      "#kb-chip-list::-webkit-scrollbar{width:6px}" +
+    const st = el("style", "", "#kb-chip-list::-webkit-scrollbar{width:6px}" +
       "#kb-chip-list::-webkit-scrollbar-thumb{background:#444;border-radius:3px}" +
-      "#kb-chip-list::-webkit-scrollbar-track{background:transparent}";
+      "#kb-chip-list::-webkit-scrollbar-track{background:transparent}");
+    st.id = "kb-chip-scrollbar";
     document.head.appendChild(st);
   }
 
-  const chipStyle =
+  const chipCss =
     "width:100%;padding:0.4375rem 0.625rem;font:0.8125rem var(--font-ui);color:#fff;border:none;" +
     "border-radius:0.3125rem;cursor:pointer;background:#444;text-align:center;";
   const kbChips = new Map<BindAction, HTMLButtonElement>();
   for (const { action } of KB_ACTIONS) {
-    const chip = document.createElement("button");
-    chip.style.cssText = chipStyle;
-    chip.dataset.action = action; // 免捕获拖拽的落点识别标记
-    // 拖拽起点: 按住互动按钮移动超过阈值即进入免捕获拖拽绑定
+    const chip = el("button", chipCss);
+    chip.dataset.action = action; // Drop-target marker for capture-free drags
+    // Drag start: holding a chip and moving past the threshold enters capture-free drag binding.
+    // Capture state: let the mousedown bubble to the document handler (both buttons bind);
+    // drag in progress: ignore other buttons starting a drag (anti-hijack) — events are not cut.
     chip.addEventListener("mousedown", (ev) => {
-      // 捕获态: 放行冒泡到 document 的即时绑定处理器 (左/右键都能绑);
-      // 拖拽进行中: 忽略其他按键起手 (防劫持覆盖) —— 不掐断事件, 不影响任何下游
       if (getCapturing() || chipDrag) return;
-      if (ev.button !== 0) return; // 仅左键可发起拖拽 (右键拖拽已移除)
-      ev.preventDefault(); // 防止拖动时选中文字
+      if (ev.button !== 0) return; // Only the left button starts a drag (right-button drag removed)
+      ev.preventDefault(); // Prevent text selection while dragging
       chipDrag = { action, button: ev.button, anchorX: ev.clientX, anchorY: ev.clientY, moved: false };
     });
     chip.onclick = () => {
-      sendLog(`KBCAP 点击互动按钮 action=${action} capturing=${getCapturing() ?? "null"}`);
+      sendLog(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
       if (getCapturing() === action) endCapture();
       else beginCapture(action);
       renderBinds();
@@ -513,42 +539,68 @@ export function buildSettingsPanel(
     kbChips.set(action, chip);
   }
 
-  // 可视键盘主区: [code, 宽度单位u], code="" 为空占位。
-  // 每行合计 18.5u (主区15 + 间隔0.5 + 导航区3), flex-grow 按比例分宽
+  // Visual keyboard main area: [code, width unit u]; code="" is an empty spacer. Each row sums
+  // to 18.5u (main 15 + gap 0.5 + nav 3); flex-grow splits widths proportionally.
   const KB_ROWS: [string, number][][] = [
-    // 功能键行 (PrtSc 组已移到底部右侧塔)
-    [["Escape",1],["",1],["F1",1],["F2",1],["F3",1],["F4",1],["",0.5],["F5",1],["F6",1],["F7",1],["F8",1],["",0.5],["F9",1],["F10",1],["F11",1],["F12",1]],
-    // 主区数字行 (导航区已移到底部右侧塔)
-    [["Backquote",1],["Digit1",1],["Digit2",1],["Digit3",1],["Digit4",1],["Digit5",1],["Digit6",1],["Digit7",1],["Digit8",1],["Digit9",1],["Digit0",1],["Minus",1],["Equal",1],["Backspace",2]],
-    // Tab 行
-    [["Tab",1.5],["KeyQ",1],["KeyW",1],["KeyE",1],["KeyR",1],["KeyT",1],["KeyY",1],["KeyU",1],["KeyI",1],["KeyO",1],["KeyP",1],["BracketLeft",1],["BracketRight",1],["Backslash",1.5]],
-    // Caps 行
-    [["CapsLock",1.75],["KeyA",1],["KeyS",1],["KeyD",1],["KeyF",1],["KeyG",1],["KeyH",1],["KeyJ",1],["KeyK",1],["KeyL",1],["Semicolon",1],["Quote",1],["Enter",2.25]],
-    // Shift 行 (方向键已移到底部区)
-    [["ShiftLeft",2.25],["KeyZ",1],["KeyX",1],["KeyC",1],["KeyV",1],["KeyB",1],["KeyN",1],["KeyM",1],["Comma",1],["Period",1],["Slash",1],["ShiftRight",2.75]],
-    // 底行 (方向键已移到底部区)
-    [["ControlLeft",1.25],["MetaLeft",1.25],["AltLeft",1.25],["Space",6.25],["AltRight",1.25],["MetaRight",1.25],["ContextMenu",1.25],["ControlRight",1.25]],
+    // Function key row (PrtSc group moved to the bottom right tower)
+    [["Escape", 1], ["", 1], ["F1", 1], ["F2", 1], ["F3", 1], ["F4", 1], ["", 0.5], ["F5", 1], ["F6", 1], ["F7", 1], ["F8", 1], ["", 0.5], ["F9", 1], ["F10", 1], ["F11", 1], ["F12", 1]],
+    // Main number row (nav area moved to the bottom right tower)
+    [["Backquote", 1], ["Digit1", 1], ["Digit2", 1], ["Digit3", 1], ["Digit4", 1], ["Digit5", 1], ["Digit6", 1], ["Digit7", 1], ["Digit8", 1], ["Digit9", 1], ["Digit0", 1], ["Minus", 1], ["Equal", 1], ["Backspace", 2]],
+    // Tab row
+    [["Tab", 1.5], ["KeyQ", 1], ["KeyW", 1], ["KeyE", 1], ["KeyR", 1], ["KeyT", 1], ["KeyY", 1], ["KeyU", 1], ["KeyI", 1], ["KeyO", 1], ["KeyP", 1], ["BracketLeft", 1], ["BracketRight", 1], ["Backslash", 1.5]],
+    // Caps row
+    [["CapsLock", 1.75], ["KeyA", 1], ["KeyS", 1], ["KeyD", 1], ["KeyF", 1], ["KeyG", 1], ["KeyH", 1], ["KeyJ", 1], ["KeyK", 1], ["KeyL", 1], ["Semicolon", 1], ["Quote", 1], ["Enter", 2.25]],
+    // Shift row (arrow keys moved to the bottom area)
+    [["ShiftLeft", 2.25], ["KeyZ", 1], ["KeyX", 1], ["KeyC", 1], ["KeyV", 1], ["KeyB", 1], ["KeyN", 1], ["KeyM", 1], ["Comma", 1], ["Period", 1], ["Slash", 1], ["ShiftRight", 2.75]],
+    // Bottom row (arrow keys moved to the bottom area)
+    [["ControlLeft", 1.25], ["MetaLeft", 1.25], ["AltLeft", 1.25], ["Space", 6.25], ["AltRight", 1.25], ["MetaRight", 1.25], ["ContextMenu", 1.25], ["ControlRight", 1.25]],
   ];
 
-  const capMainStyle =
-    "font-family:var(--font-ui);font-size:0.6875rem;line-height:1.15;white-space:nowrap;overflow:hidden;max-width:100%;";
+  const capMains = new Map<string, HTMLElement>(); // code -> legend span (highlight/legends)
+  const capKeys = new Map<string, HTMLButtonElement>(); // code -> keycap button
 
-  // code -> 键帽主元素 (渲染高亮/印字用); "" 为空占位不进表
-  const capMains = new Map<string, HTMLElement>();
-  const capKeys = new Map<string, HTMLButtonElement>();
+  const capKeyCss = (extra: string): string =>
+    `${extra}padding:0.0625rem;color:#fff;border:none;border-radius:0.25rem;cursor:pointer;` +
+    "background:#3a3a3a;display:flex;align-items:center;justify-content:center;overflow:hidden;";
 
-  // 网格键帽助手 (底部区 Grid 用): 创建按键并注册高亮表, 追加到容器。
-  // 不写死高度: 单行键由 grid-auto-rows 撑高, 跨行键 (+/⏎) 自动拉伸占满区域
-  const mkCapKey = (
-    parent: HTMLElement,
-    code: string,
-    area: string,
-  ): void => {
-    const key = document.createElement("button");
-    key.style.cssText =
-      `grid-area:${area};padding:0.0625rem;color:#fff;border:none;` +
-      "border-radius:0.25rem;cursor:pointer;background:#3a3a3a;display:flex;" +
-      "align-items:center;justify-content:center;overflow:hidden;";
+  /** Register a keycap button (flex row variant) */
+  const addRowKey = (rowEl: HTMLElement, code: string, unit: number): void => {
+    const key = el("button", capKeyCss(`flex:${unit} ${unit} 0%;min-width:0;height:1.8rem;`));
+    key.onclick = () => {
+      const sel = getCapturing();
+      if (!sel) return; // Clicking the keyboard with no action selected is a no-op
+      setBind(sel, code);
+      endCapture();
+      renderBinds();
+    };
+    const main = el("span", CAP_MAIN_CSS);
+    key.append(main);
+    rowEl.appendChild(key);
+    capMains.set(code, main);
+    capKeys.set(code, key);
+    capRegistry.push({ code, el: key }); // Cross-instance hit testing
+  };
+
+  for (const row of KB_ROWS) {
+    const rowEl = el("div", "display:flex;gap:0.125rem;margin-bottom:0.125rem;");
+    for (const [code, unit] of row) {
+      if (code === "") {
+        rowEl.appendChild(el("div", `flex:${unit} ${unit} 0%;min-width:0;`));
+        continue;
+      }
+      addRowKey(rowEl, code, unit);
+    }
+    kbBoard.appendChild(rowEl);
+  }
+
+  // Bottom area: right tower (left) + standard numpad (middle) + mouse buttons (right)
+  const kbBottom = el("div", "display:flex;gap:1.25rem;justify-content:flex-start;align-items:flex-end;margin-top:0.25rem;");
+  kbBoard.appendChild(kbBottom);
+
+  /** Grid keycap helper (bottom clusters): grid-area placement, registered like row keys.
+   *  No hardcoded height: grid-auto-rows sizes single-row keys; spanning keys stretch. */
+  const mkCapKey = (parent: HTMLElement, code: string, area: string): void => {
+    const key = el("button", capKeyCss(`grid-area:${area};`));
     key.onclick = () => {
       const sel = getCapturing();
       if (!sel) return;
@@ -556,59 +608,16 @@ export function buildSettingsPanel(
       endCapture();
       renderBinds();
     };
-    const main = document.createElement("span");
-    main.style.cssText = capMainStyle;
-    main.textContent = codeDisplayName(code);
+    const main = el("span", CAP_MAIN_CSS, codeDisplayName(code));
     key.append(main);
     parent.appendChild(key);
     capMains.set(code, main);
     capKeys.set(code, key);
-    capRegistry.push({ code, el: key }); // 跨实例落点探测用
+    capRegistry.push({ code, el: key });
   };
 
-  for (const row of KB_ROWS) {
-    const rowEl = document.createElement("div");
-    rowEl.style.cssText = "display:flex;gap:0.125rem;margin-bottom:0.125rem;";
-    for (const [code, unit] of row) {
-      if (code === "") {
-        const spacer = document.createElement("div");
-        spacer.style.cssText = `flex:${unit} ${unit} 0%;min-width:0;`;
-        rowEl.appendChild(spacer);
-        continue;
-      }
-      const key = document.createElement("button");
-      key.style.cssText =
-        `flex:${unit} ${unit} 0%;min-width:0;height:1.8rem;padding:0.0625rem;color:#fff;border:none;` +
-        "border-radius:0.25rem;cursor:pointer;background:#3a3a3a;display:flex;align-items:center;" +
-        "justify-content:center;overflow:hidden;";
-      key.onclick = () => {
-        const sel = getCapturing();
-        if (!sel) return; // 未选动作时点键盘无操作
-        setBind(sel, code);
-        endCapture();
-        renderBinds();
-      };
-      const main = document.createElement("span");
-      main.style.cssText = capMainStyle;
-      key.append(main);
-      rowEl.appendChild(key);
-      capMains.set(code, main);
-      capKeys.set(code, key);
-      capRegistry.push({ code, el: key });
-    }
-    kbBoard.appendChild(rowEl);
-  }
-
-  // 底部区: 右侧塔 (左) + 标准小键盘 (中) + 鼠标键 (右), 靠左对齐, 底边对齐
-  const kbBottom = document.createElement("div");
-  kbBottom.style.cssText =
-    "display:flex;gap:1.25rem;justify-content:flex-start;align-items:flex-end;margin-top:0.25rem;";
-  kbBoard.appendChild(kbBottom);
-
-  // 方向键簇: ↑ 居中在上, ← ↓ → 在下 (轨道宽度与主区格子对齐)
-  const towerGrid = document.createElement("div");
-  towerGrid.style.cssText =
-    "display:grid;grid-template-columns:repeat(3,2.2rem);grid-auto-rows:1.8rem;gap:0.125rem;";
+  // Arrow cluster: Up centered on top, Left/Down/Right below (track width aligned with the main grid)
+  const towerGrid = el("div", "display:grid;grid-template-columns:repeat(3,2.2rem);grid-auto-rows:1.8rem;gap:0.125rem;");
   mkCapKey(towerGrid, "PrintScreen", "1 / 1 / 2 / 2");
   mkCapKey(towerGrid, "ScrollLock", "1 / 2 / 2 / 3");
   mkCapKey(towerGrid, "Pause", "1 / 3 / 2 / 4");
@@ -624,10 +633,8 @@ export function buildSettingsPanel(
   mkCapKey(towerGrid, "ArrowRight", "5 / 3 / 6 / 4");
   kbBottom.appendChild(towerGrid);
 
-  // 小键盘: 标准 4 列网格, + 与 ⏎ 跨两行还原真实形状, 0 占两列 (轨道宽度与主区格子对齐)
-  const numGrid = document.createElement("div");
-  numGrid.style.cssText =
-    "display:grid;grid-template-columns:repeat(4,2.2rem);grid-auto-rows:1.8rem;gap:0.125rem;";
+  // Numpad: standard 4-column grid; + and Enter span two rows restoring the real shape, 0 spans two columns
+  const numGrid = el("div", "display:grid;grid-template-columns:repeat(4,2.2rem);grid-auto-rows:1.8rem;gap:0.125rem;");
   const NUM_GRID: { code: string; area: string }[] = [
     { code: "NumLock", area: "1 / 1 / 2 / 2" },
     { code: "NumpadDivide", area: "1 / 2 / 2 / 3" },
@@ -647,15 +654,12 @@ export function buildSettingsPanel(
     { code: "Numpad0", area: "5 / 1 / 6 / 3" },
     { code: "NumpadDecimal", area: "5 / 3 / 6 / 4" },
   ];
-  for (const n of NUM_GRID) {
-    mkCapKey(numGrid, n.code, n.area);
-  }
+  for (const n of NUM_GRID) mkCapKey(numGrid, n.code, n.area);
   kbBottom.appendChild(numGrid);
 
-  // 鼠标键: 五键完整布局。6 半列轨道: 上排主键各跨 2 轨, 下排侧键各跨 3 轨铺满整行无空位
-  const mouseGrid = document.createElement("div");
-  mouseGrid.style.cssText =
-    "display:grid;grid-template-columns:repeat(6,1.1rem);grid-auto-rows:1.8rem;gap:0.125rem;";
+  // Mouse buttons: full five-button layout. 6 half-column tracks: top-row main keys span 2
+  // tracks each, bottom-row side keys span 3 tracks filling the row without gaps
+  const mouseGrid = el("div", "display:grid;grid-template-columns:repeat(6,1.1rem);grid-auto-rows:1.8rem;gap:0.125rem;");
   mkCapKey(mouseGrid, "MouseLeft", "1 / 1 / 2 / 3");
   mkCapKey(mouseGrid, "MouseMiddle", "1 / 3 / 2 / 5");
   mkCapKey(mouseGrid, "MouseRight", "1 / 5 / 2 / 7");
@@ -663,10 +667,9 @@ export function buildSettingsPanel(
   mkCapKey(mouseGrid, "MouseX2", "2 / 4 / 3 / 7");
   kbBottom.appendChild(mouseGrid);
 
-  // 键帽印字: 优先 OS 实际布局 (Keyboard Map API), 失败回退 QWERTY 参照字母。
-  // 位置永远正确 (code 即物理位置), 印字只是尽量贴近用户键帽
+  // Keycap legends: prefer the OS's actual layout (Keyboard Map API), fall back to QWERTY
+  // reference letters on failure. Positions are always correct (code IS the physical position).
   let layoutLegends: Map<string, string> | null = null;
-
   const legendFor = (code: string): string => {
     const real = layoutLegends?.get(code);
     if (real) return real.length === 1 ? real.toUpperCase() : real;
@@ -674,7 +677,7 @@ export function buildSettingsPanel(
   };
 
   const renderBinds = (): void => {
-    // 动作芯片: 名称 + 当前键 (位置名), 选中态蓝色
+    // Action chips: name + current key (position name), blue when selected
     for (const { action, labelKey } of KB_ACTIONS) {
       const chip = kbChips.get(action)!;
       const code = getBind(action);
@@ -684,8 +687,8 @@ export function buildSettingsPanel(
         : `${t(labelKey)} · ${code ? codeDisplayName(code) : t("bind.unbound")}`;
       chip.style.background = sel ? "#4a9eff" : "#444";
     }
-    // 键盘键帽: 主字=布局印字, 蓝底=被绑定 (绑定详情看上方动作芯片)
-    // 印字超宽时启动来回滚动动画 (marquee), 看全内容后滑回
+    // Keyboard keycaps: legend = layout print, blue background = bound (details in the chips).
+    // Legend wider than the keycap -> marquee back-and-forth animation.
     const byCode = new Map<string, BindAction>();
     for (const { action } of KB_ACTIONS) {
       const code = getBind(action);
@@ -693,11 +696,8 @@ export function buildSettingsPanel(
     }
     for (const [code, main] of capMains) {
       const key = capKeys.get(code)!;
-      const boundAction = byCode.get(code);
       main.textContent = legendFor(code);
-      key.style.background = boundAction ? (getCapturing() ? "#2f6cb3" : "#4a9eff") : "#3a3a3a";
-
-      // 溢出检测: 文本宽 > 键帽宽 → 来回滚动
+      key.style.background = byCode.has(code) ? (getCapturing() ? "#2f6cb3" : "#4a9eff") : "#3a3a3a";
       const over = main.scrollWidth - key.clientWidth;
       if (over > 1) {
         main.style.justifyContent = "flex-start";
@@ -712,16 +712,14 @@ export function buildSettingsPanel(
   };
   keybindRenderers.add(renderBinds);
 
-  // 键帽滚动动画定义 (全局只注入一次); 滑动距离由各键的 --cap-shift 变量承载
+  // Keycap scroll animation (injected globally only once); slide distance per key's --cap-shift
   if (!document.getElementById("cap-scroll-kf")) {
-    const st = document.createElement("style");
+    const st = el("style", "", "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}");
     st.id = "cap-scroll-kf";
-    st.textContent =
-      "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}";
     document.head.appendChild(st);
   }
 
-  // 异步获取 OS 键盘布局印字, 到货后重绘键帽 (失败静默回退参照字母)
+  // Async fetch of the OS keyboard layout for legends; redraw on arrival (silent fallback)
   void (async () => {
     try {
       const kbApi = (navigator as unknown as { keyboard?: { getLayoutMap?: () => Promise<Map<string, string>> } }).keyboard;
@@ -730,166 +728,67 @@ export function buildSettingsPanel(
         keybindRenderers.forEach((r) => r());
       }
     } catch {
-      /* 回退参照字母 */
+      /* Fall back to reference letters */
     }
   })();
 
-  // 物理按键捕获: 选中互动按钮期间拦截所有按键, 按下即绑定。
-  // preventDefault 阻止聚焦按钮被 Space/Enter 激活 (否则会误触发"再点芯片=取消");
-  // stopImmediatePropagation 挡住后注册的 main.ts ESC 处理器与 F3/F4
-  // (更早注册的背包 E 键靠 isCapturing() 让路)。
-  // Esc = 解绑该动作 (鼠标码/键盘码统一清空; 本来就未绑定时等于普通取消), 且不关菜单。
-  const onCaptureKey = (ev: KeyboardEvent): void => {
-    const action = getCapturing();
-    // 拖拽中按 Esc: 取消本次拖拽 (藏线+清状态), 停留在当前面板不触发返回
-    if (!action && chipDrag && ev.code === "Escape") {
-      ev.preventDefault();
-      ev.stopImmediatePropagation();
-      endCapture();
-      chipDrag = null;
-      hideCapLine();
-      sendLog("KBCAP Esc 取消拖拽");
-      return;
-    }
-    sendLog(`KBCAP keydown code=${ev.code} capturing=${action ?? "null"}`);
-    if (!action) return;
-    ev.preventDefault();
-    ev.stopImmediatePropagation();
-    endCapture();
-    if (ev.code === "Escape") {
-      setBind(action, "");
-    } else {
-      setBind(action, ev.code);
-    }
-    try {
-      // 所有两栏面板实例一起重绘 (可见的那个必然包含在内)
-      let panels = 0;
-      keybindRenderers.forEach((r) => {
-        r();
-        panels++;
-      });
-      sendLog(`KBCAP renderBinds 完成 (code=${ev.code}, panels=${panels})`);
-    } catch (e) {
-      sendLog(`KBCAP renderBinds 异常!! ${e instanceof Error ? e.stack : String(e)}`);
-    }
-  };
-  document.addEventListener("keydown", onCaptureKey);
-
-  // ===== 捕获态物理输入: 键盘任意键 + 全部鼠标键 (含左键) 按下即绑定对应码 =====
-  // preventDefault 阻止聚焦按钮被 Space/Enter 激活与中键自动滚动;
-  // stopImmediatePropagation 挡住后注册的 main.ts ESC 处理器与 F3/F4
-  // (更早注册的背包 E 键靠 isCapturing() 让路)。Esc = 解绑该动作, 且不关菜单。
-  const onCaptureMouseDown = (ev: MouseEvent): void => {
-    const action = getCapturing();
-    sendLog(`KBCAP mousedown button=${ev.button} capturing=${action ?? "null"}`);
-    if (!action) return;
-    ev.preventDefault();
-    ev.stopImmediatePropagation();
-    endCapture();
-    // 一次性抑制标志: 合成 click 到达时捕获态已空, 由 click 屏蔽层按此标志拦截。
-    // 仅左键会合成 click (右/中/侧键只产生 contextmenu/auxclick); mousedown 置位,
-    // 清零走全局 mouseup 兜底 (当场排会被按住时长抢先清掉)
-    if (ev.button === 0) armSuppressNextClick(false);
-    const code = buttonToCode(ev.button); // 左/中/右/X1/X2 统一立即绑定
-    if (!code) return;
-    setBind(action, code);
-    let panels = 0;
-    keybindRenderers.forEach((r) => {
-      r();
-      panels++;
-    });
-    sendLog(`KBCAP mousedown 绑定完成 (${code}, panels=${panels})`);
-  };
-  document.addEventListener("mousedown", onCaptureMouseDown);
-  onBindsChange(renderBinds);
+  // (The physical key/mouse capture listeners are module-level — see the top of this file.)
   onBindsChange(renderBinds);
 
-  const kbBackBtn = document.createElement("button");
-  kbBackBtn.style.cssText = btnStyle;
-  kbBackBtn.onmouseover = () => (kbBackBtn.style.background = "#555");
-  kbBackBtn.onmouseout = () => (kbBackBtn.style.background = "#444");
+  const kbBackBtn = button(BTN_CSS);
   kbBackBtn.onclick = () => {
-    endCapture(); // 离开面板时取消未完成的选中
+    endCapture(); // Leaving the panel cancels an unfinished selection
     keybindPanel.style.display = "none";
     settingsPanel.style.display = "block";
   };
   keybindPanel.appendChild(kbBackBtn);
 
-  // 界面缩放: 小/普通/大/自动 (MC 式 GUI Scale)
-  const scaleLabel = document.createElement("div");
-  scaleLabel.style.cssText = "text-align:left;font-size:0.9375rem;margin:0.5rem 0 0.25rem;";
+  // --- UI scale: small/normal/large/auto (MC-style GUI Scale) ---
+  const scaleLabel = el("div", LABEL_CSS);
   settingsPanel.appendChild(scaleLabel);
-
-  const scaleRow = document.createElement("div");
-  scaleRow.style.cssText = "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
-  const scaleBtnStyle =
-    "flex:1;padding:0.5rem;font:0.875rem var(--font-ui);color:#fff;border:none;border-radius:0.375rem;cursor:pointer;";
-  const mkScaleBtn = (mode: "small" | "normal" | "large" | "auto"): HTMLButtonElement => {
-    const b = document.createElement("button");
-    b.style.cssText = scaleBtnStyle;
-    b.onmouseover = () => (b.style.background = getUIScaleMode() === mode ? "#3b83d6" : "#555");
-    b.onmouseout = () => (b.style.background = getUIScaleMode() === mode ? "#4a9eff" : "#444");
-    b.onclick = () => setUIScaleMode(mode);
-    return b;
-  };
-  const scaleBtns: Record<"small" | "normal" | "large" | "auto", HTMLButtonElement> = {
-    small: mkScaleBtn("small"),
-    normal: mkScaleBtn("normal"),
-    large: mkScaleBtn("large"),
-    auto: mkScaleBtn("auto"),
-  };
+  const scaleRow = el("div", "display:flex;gap:0.375rem;margin:0 0 0.375rem;");
+  const scaleBtnCss = "flex:1;padding:0.5rem;font:0.875rem var(--font-ui);color:#fff;border:none;border-radius:0.375rem;cursor:pointer;";
+  const scaleBtns = (["small", "normal", "large", "auto"] as const).map((k) => ({
+    k,
+    b: choiceButton(scaleBtnCss, () => getUIScaleMode() === k, () => setUIScaleMode(k)),
+  }));
   const renderScale = (): void => {
-    (Object.keys(scaleBtns) as (keyof typeof scaleBtns)[]).forEach((k) => {
-      scaleBtns[k].textContent = t(`uiScale.${k}`);
-      scaleBtns[k].style.background = getUIScaleMode() === k ? "#4a9eff" : "#444";
-    });
+    for (const { k, b } of scaleBtns) {
+      b.textContent = t(`uiScale.${k}`);
+      b.style.background = getUIScaleMode() === k ? "#4a9eff" : "#444";
+    }
   };
-  // 缩放标签实时显示当前生效倍率 (auto 随窗口变化)
+  // The scale label shows the live effective multiplier (auto follows the window)
   const renderScaleLabel = (): void => {
     scaleLabel.textContent = `${t("settings.uiScale")}: ${t(`uiScale.${getUIScaleMode()}`)} (${getCurrentScale().toFixed(2)}x)`;
   };
   onResizeMerged(renderScaleLabel);
-  scaleRow.append(scaleBtns.small, scaleBtns.normal, scaleBtns.large, scaleBtns.auto);
+  for (const { b } of scaleBtns) scaleRow.appendChild(b);
   settingsPanel.appendChild(scaleRow);
 
-  // 窗口模式: 窗口化 / 全屏 (NW.js 运行时切换, 免重启)
-  const wmLabel = document.createElement("div");
-  wmLabel.style.cssText = "text-align:left;font-size:0.9375rem;margin:0.5rem 0 0.25rem;";
+  // --- Window mode: windowed / fullscreen (NW.js runtime switch, no restart) ---
+  const wmLabel = el("div", LABEL_CSS);
   settingsPanel.appendChild(wmLabel);
-
-  const wmRow = document.createElement("div");
-  wmRow.style.cssText = "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
-  const wmBtnStyle =
-    "flex:1;padding:0.5rem;font:0.875rem var(--font-ui);color:#fff;border:none;border-radius:0.375rem;cursor:pointer;";
-  const mkWmBtn = (mode: WindowMode): HTMLButtonElement => {
-    const b = document.createElement("button");
-    b.style.cssText = wmBtnStyle;
-    b.onmouseover = () => (b.style.background = opts.getWindowMode() === mode ? "#3b83d6" : "#555");
-    b.onmouseout = () => (b.style.background = opts.getWindowMode() === mode ? "#4a9eff" : "#444");
-    b.onclick = () => opts.onSetWindowMode(mode);
-    return b;
-  };
-  const wmBtns: Record<WindowMode, HTMLButtonElement> = {
-    windowed: mkWmBtn("windowed"),
-    fullscreen: mkWmBtn("fullscreen"),
-  };
+  const wmRow = el("div", "display:flex;gap:0.375rem;margin:0 0 0.375rem;");
+  const wmBtnCss = "flex:1;padding:0.5rem;font:0.875rem var(--font-ui);color:#fff;border:none;border-radius:0.375rem;cursor:pointer;";
+  const wmBtns = (["windowed", "fullscreen"] as const).map((k) => ({
+    k,
+    b: choiceButton(wmBtnCss, () => opts.getWindowMode() === k, () => opts.onSetWindowMode(k)),
+  }));
   const renderWm = (): void => {
-    (Object.keys(wmBtns) as WindowMode[]).forEach((k) => {
-      wmBtns[k].textContent = t(`windowMode.${k}`);
-      wmBtns[k].style.background = opts.getWindowMode() === k ? "#4a9eff" : "#444";
-    });
+    for (const { k, b } of wmBtns) {
+      b.textContent = t(`windowMode.${k}`);
+      b.style.background = opts.getWindowMode() === k ? "#4a9eff" : "#444";
+    }
   };
-  wmRow.append(wmBtns.windowed, wmBtns.fullscreen);
+  for (const { b } of wmBtns) wmRow.appendChild(b);
   settingsPanel.appendChild(wmRow);
 
   onUIScaleModeChange(renderScale);
   onWindowModeChange(renderWm);
   onFontChange(renderFont);
 
-  const backBtn = document.createElement("button");
-  backBtn.style.cssText = btnStyle;
-  backBtn.onmouseover = () => (backBtn.style.background = "#555");
-  backBtn.onmouseout = () => (backBtn.style.background = "#444");
+  const backBtn = button(BTN_CSS);
   backBtn.onclick = () => {
     settingsPanel.style.display = "none";
     opts.onBack();
@@ -903,13 +802,10 @@ export function buildSettingsPanel(
     renderGpuBtn();
     langBtn.textContent = t("settings.languageFont");
     langTitle.textContent = t("settings.languageFont");
-    langColLabel.textContent = t("settings.language");
-    fontColLabel.textContent = t("settings.font");
-    zhBtn.textContent = t("lang.zh");
-    enBtn.textContent = t("lang.en");
-    jaBtn.textContent = t("lang.ja");
-    pixelBtn.textContent = t("fonts.pixel");
-    systemBtn.textContent = t("fonts.system");
+    langCol.querySelector("div")!.textContent = t("settings.language");
+    fontCol.querySelector("div")!.textContent = t("settings.font");
+    for (const [lang, b] of langBtns) b.textContent = t(`lang.${lang}`);
+    for (const [id, b] of fontBtns) b.textContent = t(`fonts.${id}`);
     renderLang();
     renderFont();
     packBtn.textContent = t("settings.resourcepacks");
@@ -935,6 +831,8 @@ export function buildSettingsPanel(
   return { settingsPanel, langPanel, packPanel, keybindPanel };
 }
 
+// ===== 5. Pause menu =====
+
 export class Menu {
   visible = false;
 
@@ -947,81 +845,45 @@ export class Menu {
   private readonly onResume: () => void;
   private readonly onToMainMenu: () => void;
   private readonly title: HTMLDivElement;
-  private readonly resumeBtn: HTMLButtonElement;
-  private readonly settingsBtn: HTMLButtonElement;
-  private readonly toMainMenuBtn: HTMLButtonElement;
 
   constructor(cb: MenuCallbacks) {
-    const {
-      onResume,
-      onFpsCap,
-      onToggleGpuVsync,
-      getGpuVsyncState,
-      getFpsCap,
-      getWindowMode,
-      onSetWindowMode,
-      onToMainMenu,
-    } = cb;
-    this.onResume = onResume;
-    this.onToMainMenu = onToMainMenu;
+    this.onResume = cb.onResume;
+    this.onToMainMenu = cb.onToMainMenu;
 
-    const btnStyle =
-      "display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:0.9375rem var(--font-ui);color:#fff;" +
-      "background:#444;border:none;border-radius:0.375rem;cursor:pointer;";
-
-    this.root = document.createElement("div");
-    this.root.style.cssText =
-      "position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;" +
-      "background:rgba(0,0,0,.55);";
+    this.root = el("div", "position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);");
     uiStage.appendChild(this.root);
 
-    this.panel = document.createElement("div");
-    this.panel.style.cssText =
-      "width:17.5rem;background:#222;border-radius:0.625rem;padding:1.25rem;text-align:center;color:#fff;" +
-      "font:1rem var(--font-ui);box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);";
+    this.panel = el("div", panelCss("17.5rem").replace("display:none;", ""));
     this.root.appendChild(this.panel);
-
-    this.title = document.createElement("div");
-    this.title.style.cssText = "font-size:1.375rem;margin-bottom:0.875rem;";
+    this.title = el("div", TITLE_CSS);
     this.panel.appendChild(this.title);
 
-    this.resumeBtn = document.createElement("button");
-    this.resumeBtn.style.cssText = btnStyle;
-    this.resumeBtn.onmouseover = () => (this.resumeBtn.style.background = "#555");
-    this.resumeBtn.onmouseout = () => (this.resumeBtn.style.background = "#444");
-    this.resumeBtn.onclick = () => {
+    const resumeBtn = button(BTN_CSS);
+    resumeBtn.onclick = () => {
       this.hide();
       this.onResume();
     };
-    this.panel.appendChild(this.resumeBtn);
-
-    this.settingsBtn = document.createElement("button");
-    this.settingsBtn.style.cssText = btnStyle;
-    this.settingsBtn.onmouseover = () => (this.settingsBtn.style.background = "#555");
-    this.settingsBtn.onmouseout = () => (this.settingsBtn.style.background = "#444");
-    this.settingsBtn.onclick = () => {
+    this.panel.appendChild(resumeBtn);
+    const settingsBtn = button(BTN_CSS);
+    settingsBtn.onclick = () => {
       this.panel.style.display = "none";
       this.settingsPanel.style.display = "block";
     };
-    this.panel.appendChild(this.settingsBtn);
-
-    this.toMainMenuBtn = document.createElement("button");
-    this.toMainMenuBtn.style.cssText = btnStyle;
-    this.toMainMenuBtn.onmouseover = () => (this.toMainMenuBtn.style.background = "#555");
-    this.toMainMenuBtn.onmouseout = () => (this.toMainMenuBtn.style.background = "#444");
-    this.toMainMenuBtn.onclick = () => {
+    this.panel.appendChild(settingsBtn);
+    const toMainMenuBtn = button(BTN_CSS);
+    toMainMenuBtn.onclick = () => {
       this.hide();
       this.onToMainMenu();
     };
-    this.panel.appendChild(this.toMainMenuBtn);
+    this.panel.appendChild(toMainMenuBtn);
 
     const panels = buildSettingsPanel({
-      getFpsCap,
-      onFpsCap,
-      getGpuVsyncState,
-      onToggleGpuVsync,
-      getWindowMode,
-      onSetWindowMode,
+      getFpsCap: cb.getFpsCap,
+      onFpsCap: cb.onFpsCap,
+      getGpuVsyncState: cb.getGpuVsyncState,
+      onToggleGpuVsync: cb.onToggleGpuVsync,
+      getWindowMode: cb.getWindowMode,
+      onSetWindowMode: cb.onSetWindowMode,
       onBack: () => {
         this.panel.style.display = "block";
       },
@@ -1030,16 +892,13 @@ export class Menu {
     this.langPanel = panels.langPanel;
     this.packPanel = panels.packPanel;
     this.keybindPanel = panels.keybindPanel;
-    this.root.appendChild(this.settingsPanel);
-    this.root.appendChild(this.langPanel);
-    this.root.appendChild(this.packPanel);
-    this.root.appendChild(this.keybindPanel);
+    this.root.append(this.settingsPanel, this.langPanel, this.packPanel, this.keybindPanel);
 
     const refresh = (): void => {
       this.title.textContent = t("menu.paused");
-      this.resumeBtn.textContent = t("menu.resume");
-      this.settingsBtn.textContent = t("menu.settings");
-      this.toMainMenuBtn.textContent = t("menu.toMainMenu");
+      resumeBtn.textContent = t("menu.resume");
+      settingsBtn.textContent = t("menu.settings");
+      toMainMenuBtn.textContent = t("menu.toMainMenu");
     };
     onLangChange(refresh);
     refresh();

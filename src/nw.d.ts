@@ -1,4 +1,4 @@
-// NW.js 渲染层全局 (DOM 上下文直接可用, 无需 import)
+// NW.js renderer-side globals (available directly in the DOM context, no import needed)
 interface NWWindow {
   id: string;
   x: number;
@@ -14,7 +14,7 @@ declare const nw: {
   Window: { get(): NWWindow };
 };
 
-// Node 全局 (NW.js 渲染层默认开启)
+// Node globals (enabled by default in the NW.js renderer)
 declare const process: {
   versions: Record<string, string>;
   execPath: string;

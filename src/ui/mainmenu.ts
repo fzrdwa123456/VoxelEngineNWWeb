@@ -1,16 +1,19 @@
-// ===== 主界面 (标题 voxelcraft + 单人/多人/设置/退出) =====
-// 背景: 资源包 backgrounds/background.json 选模式 (见 ui/background.ts 判定链):
-//   panorama = 球体全景 (root 透明让出画布, main.ts 的菜单渲染循环画)
-//   static   = backgrounds/mainmenu.png 铺满 (缺图退黑)
-//   checker  = 无配置/非法配置, 直接程序化紫黑格子 (不可覆盖)
+// ===== Main menu (title voxelcraft + singleplayer/multiplayer/settings/exit) =====
+// Background: the pack's backgrounds/background.json picks the mode (see ui/background.ts decision chain):
+//   panorama = sphere panorama (root transparent so the canvas shows, drawn by main.ts's menu render loop)
+//   static   = backgrounds/mainmenu.png covers (missing image falls to black)
+//   checker  = no config/invalid config, straight to the procedural magenta/black checkerboard (not overridable)
 import { buildSettingsPanel, type SettingsCallbacks } from "./menu";
 import { t, onLangChange } from "./i18n";
 import { uiStage } from "./uiscale";
-import { resolveTexture, CHECKER_TEXTURE_URL } from "../textures";
+import { resolveTexture, CHECKER_TEXTURE_URL } from "../rendering/textures";
 import { menuBgKind } from "./background";
 
+/** World type (main-menu singleplayer choice; world generation removed, only the selection semantics remain) */
+type WorldGenMode = "superflat" | "noise";
+
 export interface MainMenuCallbacks extends SettingsCallbacks {
-  onStartSingle: () => void;
+  onStartSingle: (mode: WorldGenMode) => void;
   onMultiplayer: () => void;
   onExit: () => void;
 }
@@ -25,6 +28,7 @@ export class MainMenu {
   private readonly langPanel: HTMLDivElement;
   private readonly packPanel: HTMLDivElement;
   private readonly keybindPanel: HTMLDivElement;
+  private readonly genPanel: HTMLDivElement;
   private readonly singleBtn: HTMLButtonElement;
   private readonly multiBtn: HTMLButtonElement;
   private readonly settingsBtn: HTMLButtonElement;
@@ -41,7 +45,7 @@ export class MainMenu {
     const mkBtn = (onClick: () => void): HTMLButtonElement => {
       const b = document.createElement("button");
       b.style.cssText = btnBase;
-      // hover/按下用单独属性, 不重写 cssText (避免冲掉布局系统的 translate 偏移)
+            // hover/pressed use separate properties, not rewriting cssText (avoids wiping the layout system's translate offset)
       b.onmouseover = () => (b.style.filter = "brightness(1.25)");
       b.onmouseout = () => {
         b.style.filter = "";
@@ -57,16 +61,16 @@ export class MainMenu {
     this.root.style.cssText =
       "position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;" +
       "image-rendering:pixelated;";
-    // 背景形态判定 (与 main.ts 渲染循环共用): panorama 让画布透出 + 半透明压暗;
-    // static/checker 设 DOM 背景图。checker 直接用程序化棋盘格 (无配置 = 紫黑格子, 不可覆盖)
+        // Background form decision (shared with main.ts's render loop): panorama lets the canvas show + semi-transparent dimmer;
+        // static/checker set a DOM background image. checker uses the procedural checkerboard directly (no config = magenta/black, not overridable)
     const kind = menuBgKind();
     if (kind === "panorama") {
-      this.root.style.background = "rgba(0,0,0,.35)"; // 仅压暗层, 全景由画布渲染
+      this.root.style.background = "rgba(0,0,0,.35)";  // Dimmer only; the panorama is rendered by the canvas
     } else if (kind === "checker") {
       this.root.style.background = "#000 center/cover no-repeat";
       this.root.style.backgroundImage = `linear-gradient(rgba(0,0,0,.5),rgba(0,0,0,.5)), url(${CHECKER_TEXTURE_URL})`;
     } else {
-      // static: background.ts 判定为 static 时图必然存在 (缺图会直接判成 checker), 无需再兜底
+            // static: when background.ts decides static the image must exist (a missing image would decide checker), no further fallback needed
       this.root.style.background = "#000 center/cover no-repeat";
       const bgUrl = resolveTexture("backgrounds/mainmenu.png");
       this.root.style.backgroundImage = `linear-gradient(rgba(0,0,0,.5),rgba(0,0,0,.5)), url(${bgUrl})`;
@@ -85,7 +89,11 @@ export class MainMenu {
       "text-shadow:0 0.25rem 0 #2a2a2a,0 0.375rem 0.75rem rgba(0,0,0,.6);";
     this.panel.appendChild(this.title);
 
-    this.singleBtn = mkBtn(cb.onStartSingle);
+    this.singleBtn = mkBtn(() => {
+            // Singleplayer -> pick a world type first (superflat/noise), then enter the world
+      this.panel.style.display = "none";
+      this.genPanel.style.display = "block";
+    });
     this.panel.appendChild(this.singleBtn);
     this.multiBtn = mkBtn(cb.onMultiplayer);
     this.panel.appendChild(this.multiBtn);
@@ -96,6 +104,26 @@ export class MainMenu {
     this.panel.appendChild(this.settingsBtn);
     this.quitBtn = mkBtn(cb.onExit);
     this.panel.appendChild(this.quitBtn);
+
+        // World type selection page (singleplayer sub-page): superflat / noise world
+    this.genPanel = document.createElement("div");
+    this.genPanel.style.cssText =
+      "display:none;width:18.75rem;text-align:center;font-family:var(--font-ui);";
+    const genTitle = document.createElement("div");
+    genTitle.style.cssText =
+      "font-size:1.4rem;font-weight:700;color:#fff;margin-bottom:1rem;" +
+      "text-shadow:0 0.125rem 0 rgba(0,0,0,.5);";
+    this.genPanel.appendChild(genTitle);
+    const genSuperflatBtn = mkBtn(() => cb.onStartSingle("superflat"));
+    this.genPanel.appendChild(genSuperflatBtn);
+    const genNoiseBtn = mkBtn(() => cb.onStartSingle("noise"));
+    this.genPanel.appendChild(genNoiseBtn);
+    const genBackBtn = mkBtn(() => {
+      this.genPanel.style.display = "none";
+      this.panel.style.display = "block";
+    });
+    this.genPanel.appendChild(genBackBtn);
+    this.root.appendChild(this.genPanel);
 
     const panels = buildSettingsPanel({
       getFpsCap: cb.getFpsCap,
@@ -123,6 +151,10 @@ export class MainMenu {
       this.multiBtn.textContent = t("main.multi");
       this.settingsBtn.textContent = t("menu.settings");
       this.quitBtn.textContent = t("main.quit");
+      genTitle.textContent = t("main.genTitle");
+      genSuperflatBtn.textContent = t("main.genSuperflat");
+      genNoiseBtn.textContent = t("main.genNoise");
+      genBackBtn.textContent = t("menu.back");
     };
     onLangChange(refresh);
     refresh();
@@ -144,8 +176,15 @@ export class MainMenu {
     return this.keybindPanel.style.display === "block";
   }
 
+  get genVisible(): boolean {
+    return this.genPanel.style.display === "block";
+  }
+
   goBack(): void {
-    if (this.packVisible) {
+    if (this.genVisible) {
+      this.genPanel.style.display = "none";
+      this.panel.style.display = "block";
+    } else if (this.packVisible) {
       this.packPanel.style.display = "none";
       this.settingsPanel.style.display = "block";
     } else if (this.langVisible) {

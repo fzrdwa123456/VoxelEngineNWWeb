@@ -1,4 +1,4 @@
-﻿// ===== HUD: 十字准星 + F3 调试面板 + 底部 toast (纯 DOM, 无外部依赖) =====
+﻿// ===== HUD: crosshair + F3 debug panel + bottom toast (pure DOM, no external dependencies) =====
 import { t } from "./i18n";
 import { uiStage } from "./uiscale";
 
@@ -14,13 +14,13 @@ export interface DebugInfo {
   y: number;
   z: number;
   blocks: number;
-  /** 设备不支持 timestamp-query 时为 null */
+    /** null when the device does not support timestamp-query */
   gpuMs: number | null;
   mode: string;
   onGround: boolean;
   vy: number;
   feet: number;
-  /** 脚下最近方块顶面, 无方块时为 null */
+    /** Nearest block top below; null when none */
   top: number | null;
   logs: DebugLog[];
 }
@@ -32,7 +32,7 @@ export class Hud {
   private readonly toast: HTMLDivElement;
 
   constructor() {
-    // 十字准星 (DOM HUD)
+        // Crosshair (DOM HUD)
     const hud = document.createElement("div");
     hud.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:10;";
     const hLine = document.createElement("div");
@@ -44,13 +44,13 @@ export class Hud {
     hud.append(hLine, vLine);
     uiStage.appendChild(hud);
 
-    // F3 调试面板 (默认隐藏)
+        // F3 debug panel (hidden by default)
     this.debug = document.createElement("div");
     this.debug.style.cssText =
       "position:fixed;top:0.5rem;left:0.5rem;z-index:20;color:#fff;font:0.75rem/1.7 var(--font-mono);background:rgba(0,0,0,.55);padding:0.375rem 0.625rem;border-radius:0.25rem;display:none;white-space:pre;";
     uiStage.appendChild(this.debug);
 
-    // 底部居中提示条 (toast): 设置类操作结果反馈, 约 2.5s 自动消失
+        // Bottom centered toast: feedback for settings actions, auto-dismisses after ~2.5s
     this.toast = document.createElement("div");
     this.toast.style.cssText =
       "position:fixed;left:50%;bottom:3.75rem;transform:translateX(-50%);z-index:60;color:#fff;" +

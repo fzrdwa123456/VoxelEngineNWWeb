@@ -1,10 +1,10 @@
-// ===== 性能采样 =====
-// FPS 统计 (固定窗口) + GPU 渲染耗时 EMA 平滑, 从 main.ts 渲染循环抽出。
+// ===== Performance sampling =====
+// FPS stats (fixed window) + GPU render-time EMA smoothing, extracted from the main.ts render loop.
 
 export interface PerfWindow {
-  /** 窗口内平均 FPS */
+    /** Average FPS within the window */
   fps: number;
-  /** 最近 GPU 渲染耗时 ms (EMA; 无 timestamp-query 支持时为 null) */
+    /** Latest GPU render time ms (EMA; null when timestamp-query is unsupported) */
   gpuMs: number | null;
 }
 
@@ -14,7 +14,7 @@ export class PerfSampler {
   private gpuRenderMs = 0;
   private gpuSamples = 0;
 
-  /** 每帧调用 (delta 秒)。攒满窗口期返回一次统计并重置, 未满返回 null */
+    /** Per-frame call (delta seconds). Returns stats once the window fills and resets; null otherwise */
   sample(delta: number, windowSec = 0.5): PerfWindow | null {
     this.fpsTimer += delta;
     this.fpsFrames++;
@@ -25,7 +25,7 @@ export class PerfSampler {
     return { fps, gpuMs: this.gpuSamples > 0 ? this.gpuRenderMs : null };
   }
 
-  /** 异步收取 GPU 渲染耗时 (renderer.resolveTimestampsAsync 的回调), EMA 平滑 */
+    /** Async GPU render-time collection (renderer.resolveTimestampsAsync callback), EMA-smoothed */
   noteGpu(ms: number): void {
     this.gpuSamples++;
     this.gpuRenderMs = this.gpuSamples === 1 ? ms : this.gpuRenderMs * 0.7 + ms * 0.3;

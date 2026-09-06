@@ -1,10 +1,12 @@
-// ===== MC 式 3D 物品图标: WebGPU 渲染方块模型进渲染目标, 读回像素编码 PNG 缓存 =====
-// 烘培尺寸 = 显示尺寸 × 界面缩放 × devicePixelRatio (1:1 显示, 零重采样, MC 同款)
-// 光照模拟 MC ITEMS_3D (环境光 + 前上方向光)
+// ===== MC-style 3D item icons: render the block model into a render target via WebGPU, read back pixels, encode a PNG cache =====
+// Bake size = display size x UI scale x devicePixelRatio (1:1 display, zero resampling, same as MC)
+// Lighting mimics MC ITEMS_3D (ambient + front/top directional)
 import * as THREE from "three/webgpu";
 import { resolveTexture } from "./textures";
-import type { BlockType } from "./blocks";
-import { getBlockDef } from "./blockregistry";
+import { getBlockDef } from "../blockregistry";
+
+/** Block type id (alias from the old blocks.ts; block world removed, registry ids remain strings) */
+type BlockType = string;
 
 const HALF_VIEW = 0.85;
 const MIN_SIZE = 32;
@@ -48,7 +50,7 @@ async function buildScene(type: BlockType): Promise<THREE.Scene> {
     scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0x4caf50 })));
     return scene;
   }
-  // BoxGeometry 6 组 = +X -X +Y -Y +Z -Z -> [side, side, top, bottom, side, side]
+    // BoxGeometry's 6 material groups = +X -X +Y -Y +Z -Z -> [side, side, top, bottom, side, side]
   const mk = async (tex?: string): Promise<THREE.MeshLambertMaterial> =>
     tex
       ? new THREE.MeshLambertMaterial({ map: await loadTex(resolveTexture(tex)), color: 0xffffff, alphaTest: 0.5 })
@@ -60,7 +62,7 @@ async function buildScene(type: BlockType): Promise<THREE.Scene> {
   return scene;
 }
 
-/** 取方块 3D 图标 (dataURL), 首次调用异步渲染后缓存; 失败返回 null (调用方保持纯色兜底) */
+/** Get a block's 3D icon (dataURL); the first call renders async then caches; null on failure (caller keeps the solid-color fallback) */
 export function getBlockIcon(type: BlockType, sizePx: number): Promise<string | null> {
   const size = Math.max(MIN_SIZE, Math.min(MAX_SIZE, Math.round(sizePx)));
   const key = `${type}@${size}`;
@@ -87,7 +89,7 @@ export function getBlockIcon(type: BlockType, sizePx: number): Promise<string | 
       canvas.height = size;
       const ctx = canvas.getContext("2d");
       if (!ctx) return null;
-      // WebGPU 读回 bytesPerRow 按 256 对齐, 非对齐尺寸有行填充, 需逐行去填充
+            // WebGPU readback aligns bytesPerRow to 256; non-aligned sizes have row padding — strip it row by row
       const rowBytes = size * 4;
       const paddedRowBytes = Math.ceil(rowBytes / 256) * 256;
       const clamped = new Uint8ClampedArray(rowBytes * size);

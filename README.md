@@ -1,10 +1,15 @@
-# 📦 VoxelEngineNWWeb — MC 风格体素沙盒游戏
+# 📦 VoxelEngineNWWeb — MC 风格第一人称沙盒（纯 ECS 架构）
 
-基于 **NW.js + three.js (WebGPU)** 的 Minecraft 风格体素沙盒。浏览器技术栈做桌面游戏：WebGPU 渲染、像素风 UI、完整的键鼠绑定系统与 mod/资源包生态，打包为免安装绿色目录。
+基于 **NW.js + three.js (WebGPU)** 的 Minecraft 风格第一人称沙盒。浏览器技术栈做桌面游戏：WebGPU 渲染、像素风 UI、完整的键鼠绑定系统与 mod/资源包生态，打包为免安装绿色目录。
+
+> **当前状态**：星球/体素世界系统已拆除重建中——进入世界是空天空（行走会持续下坠，创造模式双击空格飞行可用，Shift ×25 测试疾跑）。方块目前只存在于物品栏 UI；mod/资源包生态完好。
+>
+> **给 AI / 协作者**：工程地图、目录职责与铁律见 **[AGENTS.md](AGENTS.md)**（英文：两条时钟、稳定组件引用、注册顺序承重、竞态代码勿简化）。
 
 ## ✨ 特性
 
-- 🧱 **体素世界**：准星射线破坏/放置方块，固定步长物理 + 渲染插值（当前为演示规模：固定出生平台，无区块/地形生成/存档）
+- 🧩 **纯 ECS 架构**：自研轻量调度器（World，120Hz 固定步长 + 每帧渲染双通道）+ 实体存储（spawn/despawn/类型安全组件/Query 查询）+ 查询驱动的系统（新实体挂组件即被自动处理）
+- 🚶 **三模式移动**：行走（重力）/ 创造飞行（双击空格切飞行，俯仰可翻越天顶 360°）/ 观察者，固定步长物理 + 渲染插值
 - 🧩 **内容 mod 系统**：方块注册表数据驱动（`blocks.json`），`game\mods\` 放文件夹/zip 即可**新增方块**或**改造已有方块**，免构建自带贴图
 - 🎨 **资源包系统**：MC 式三层命名空间（`assets/<ns>/...`），资源包可覆盖 mod 与本体的贴图/背景/语言（资源包 > mods 的优先级语义，与 MC 一致）
 - 🌐 **中/英/日三语**：词典文件化（`lang/*.json` 多层合并），mod/资源包可增量补词条；Fusion Pixel 像素字体 / 系统字体切换
@@ -25,7 +30,7 @@
 | 层 | 技术 |
 |---|---|
 | 渲染 | three.js 0.185 (WebGPURenderer) |
-| 运行时 | NW.js 0.115 SDK（Chromium + Node.js 同进程） |
+| 运行时 | NW.js 0.115 普通版（无 DevTools/SDK 工具；Chromium + Node.js 同进程） |
 | 语言 | TypeScript + Vite 8 构建 |
 | 原生插件 | Rust（napi-rs v3）→ `rawinput.node`，Win32 Raw Input |
 | 桌面工具 | C（MinGW gcc）：`launcher.exe` 启动器（多实例槽位分配 + `--user-data-dir` 隔离，保证绿色目录可整体移动） |
@@ -34,11 +39,17 @@
 ## 📁 目录结构
 
 ```
-├─ src/            # TypeScript 源码（渲染/UI/输入/设置/方块注册表）
+├─ src/            # TypeScript 源码（全英文注释）
+│  ├─ ecs/         # 父调度器 World + 实体存储 store + 组件(components/) + 系统(systems/)
+│  ├─ rendering/   # 相机视角系统、纹理/资源包链解析、3D 图标烘培
+│  ├─ platform/    # NW.js 宿主、键位绑定、原始输入、指针锁定、日志、性能采样
+│  └─ ui/          # 主菜单/暂停设置/可视化键盘换绑/HUD/背包/三语/缩放/字体
+├─ packs/          # 官方示例：方块 mod（blocks.json+贴图）+ 资源包（三语词典/主菜单背景）
 ├─ rawinput/       # Rust 原生鼠标输入插件
 ├─ launcher/       # C 启动器源码（多实例槽位分配）
 ├─ scripts/        # get-nw 下载器 / rearrange 绿色打包
-├─ app/            # NW.js manifest
+├─ app/            # NW.js manifest 源（rearrange 拷为 game/core/package.json）
+├─ AGENTS.md       # AI 协作指南：架构地图 / 数据流 / 铁律（英文）
 └─ release/VoxelEngineNWWeb/   # 构建产物（免安装目录）
    └─ game/
       ├─ core/           # NW.js 运行时 + 游戏 + rawinput.node
