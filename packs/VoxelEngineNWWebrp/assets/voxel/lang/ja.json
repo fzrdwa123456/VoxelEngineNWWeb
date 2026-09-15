@@ -60,7 +60,7 @@
   "toast.multiPlaceholder": "マルチプレイは未実装です(プレースホルダー)",
   "f3.cap": "上限",
   "f3.unlimited": "無制限",
-  "f3.blocks": "ブロック",
+  "f3.chunks": "チャンク",
   "f3.gpuNa": "N/A",
   "f3.maxFps": "最高",
   "f3.phys": "物理",

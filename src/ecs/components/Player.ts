@@ -10,6 +10,12 @@ import type { World } from "../World";
 /** Eye height above the feet (view/feet calculations) */
 export const EYE_HEIGHT = 1.6;
 
+/** Body box: 0.6 x 1.8 with the eyes EYE_HEIGHT above the feet. Lives here rather than inside a
+ *  system because more than one system needs identical dimensions: collision resolution and the
+ *  "don't seal yourself inside a block" check in block placement. */
+export const PLAYER_HALF_WIDTH = 0.3;
+export const PLAYER_HEIGHT = 1.8;
+
 export type MoveMode = "walk" | "fly" | "spectator";
 export const MODE_NAMES: Record<MoveMode, string> = {
   walk: "Survival Mode",

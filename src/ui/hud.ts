@@ -13,7 +13,7 @@ export interface DebugInfo {
   x: number;
   y: number;
   z: number;
-  blocks: number;
+  chunks: number;
     /** null when the device does not support timestamp-query */
   gpuMs: number | null;
   mode: string;
@@ -82,7 +82,7 @@ export class Hud {
     let text =
       `FPS: ${info.fps.toFixed(1)} (${t("f3.cap")} ${info.fpsCap === 0 ? t("f3.unlimited") : info.fpsCap})\n` +
       `XYZ: ${info.x.toFixed(2)} / ${info.y.toFixed(2)} / ${info.z.toFixed(2)}\n` +
-      `${t("f3.blocks")}: ${info.blocks}\n` +
+      `${t("f3.chunks")}: ${info.chunks}\n` +
       (info.gpuMs !== null
         ? `GPU: ${info.gpuMs.toFixed(2)} ms ≈ ${t("f3.maxFps")} ${Math.round(1000 / info.gpuMs)} FPS\n`
         : `GPU: ${t("f3.gpuNa")}\n`) +

@@ -2,10 +2,10 @@
 
 export interface PointerLockDeps {
   /** What the lock manager needs from the input system (structural, no concrete class) */
-  fps: { lock(): Promise<void> | undefined; clickLockAllowed: boolean };
+  input: { lock(): Promise<void> | undefined; clickLockAllowed: boolean };
   isMenuOpen: () => boolean;
   isInvOpen: () => boolean;
-  sendLog: (line: string) => void;
+  logDebug: (line: string) => void;
 }
 
 // All relock() calls come from direct user interaction (clicking singleplayer / E closing the inventory / ESC resuming), so no focus gating anymore:
@@ -15,13 +15,13 @@ export class PointerLock {
   constructor(private readonly deps: PointerLockDeps) {}
 
   relock(source: string): void {
-        this.deps.sendLog(`LOCK request [${source}]`);
+        this.deps.logDebug(`LOCK request [${source}]`);
     const tryLock = (): void => {
       if (this.deps.isMenuOpen() || this.deps.isInvOpen()) return;
-      const p = this.deps.fps.lock();
+      const p = this.deps.input.lock();
       if (p) {
         p.catch(() => {
-                    this.deps.sendLog(`LOCK rejected [${source}], retrying in 1300ms`);
+                    this.deps.logDebug(`LOCK rejected [${source}], retrying in 1300ms`);
           setTimeout(tryLock, 1300);
         });
       }
@@ -33,6 +33,6 @@ export class PointerLock {
   applyCursor(): void {
     const uiOpen = this.deps.isMenuOpen() || this.deps.isInvOpen();
     document.body.style.cursor = uiOpen ? "default" : "none";
-    this.deps.fps.clickLockAllowed = !uiOpen;
+    this.deps.input.clickLockAllowed = !uiOpen;
   }
 }

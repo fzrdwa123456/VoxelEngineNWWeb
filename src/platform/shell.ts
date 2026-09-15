@@ -27,10 +27,10 @@ export function initShell(): void {
   fs.writeFileSync(path.join(logsDir, "renderer.log"), "", "utf8");
 
   window.addEventListener("error", (e) => {
-    appendLog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}`);
+    appendDebugLog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}`);
   });
   window.addEventListener("unhandledrejection", (e) => {
-    appendLog(`REJECT ${String(e.reason)}`);
+    appendDebugLog(`REJECT ${String(e.reason)}`);
   });
 
     // console error/warning levels go to logs\renderer.log (replaces old main.cjs console-message)
@@ -46,8 +46,8 @@ export function initShell(): void {
   };
 }
 
-// Debug log -> game\logs\debug.log (truncated at startup), silent on failure (never breaks the game)
-export function appendLog(line: string): void {
+// logs\debug.log only: the exact line, no timestamp (the shell's own error handlers)
+export function appendDebugLog(line: string): void {
   try {
     fs.appendFileSync(path.join(logsDir, "debug.log"), `${line}\n`, "utf8");
   } catch {}
@@ -68,9 +68,9 @@ export function writeSettings(s: Record<string, unknown>): void {
   } catch {}
 }
 
-// Debug log with a relative-to-start timestamp (shared by all modules)
-export function sendLog(line: string): void {
-  appendLog(`[${performance.now().toFixed(0)}ms] ${line}`);
+// logs\debug.log with a [<ms>ms] prefix — the general-purpose logger every module uses
+export function logDebug(line: string): void {
+  appendDebugLog(`[${performance.now().toFixed(0)}ms] ${line}`);
 }
 
 function appendRender(line: string): void {
@@ -155,7 +155,7 @@ export function onWinBlur(cb: () => void): void {
 const manifestPath = path.join(coreDir, "package.json");
 
 // Whether vsync is currently disabled (manifest contains --disable-gpu-vsync)
-export function getGpuVsyncState(): boolean {
+export function isGpuVsyncDisabled(): boolean {
   try {
     const pkg = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     return String(pkg["chromium-args"] ?? "").includes("--disable-gpu-vsync");
@@ -237,14 +237,14 @@ export function setWindowMode(mode: WindowMode): void {
   } catch {}
 }
 
-// Write the switch state: on=true adds the flag (disable vsync), false removes it; returns success
-export function setGpuVsyncState(on: boolean): boolean {
+// Write the switch: disabled=true adds --disable-gpu-vsync, false removes it; returns success
+export function setGpuVsyncDisabled(disabled: boolean): boolean {
   try {
     const pkg = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     const args = String(pkg["chromium-args"] ?? "")
       .split(/\s+/)
       .filter((s) => s.length > 0 && s !== "--disable-gpu-vsync");
-    if (on) args.push("--disable-gpu-vsync");
+    if (disabled) args.push("--disable-gpu-vsync");
     pkg["chromium-args"] = args.join(" ");
     fs.writeFileSync(manifestPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
     return true;

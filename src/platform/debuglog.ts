@@ -1,7 +1,7 @@
 // ===== Debug log incremental forwarding =====
 // Forwards new entries of the input system's diagnostic queues (shaped "XXX#seq ...") to debug.log in order.
 // One cursor per queue, managed uniformly here, replacing the per-queue boilerplate loops in main.ts.
-import { sendLog } from "./shell";
+import { logDebug } from "./shell";
 
 /** The diagnostic queues this forwarder consumes (satisfied by the player input system) */
 export interface DiagnosticQueues {
@@ -19,7 +19,7 @@ export class DebugLogForwarder {
     for (const line of lines) {
       const m = new RegExp(`^${label}#(\\d+)`).exec(line);
       if (m && Number(m[1]) > last) {
-        sendLog(line);
+        logDebug(line);
         last = Number(m[1]);
       }
     }

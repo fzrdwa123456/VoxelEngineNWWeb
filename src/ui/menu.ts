@@ -29,7 +29,7 @@ import { t, getLang, setLang, onLangChange } from "./i18n";
 import { getUIScaleMode, setUIScaleMode, onUIScaleModeChange, onResizeMerged, getCurrentScale, uiStage } from "./uiscale";
 import { getFontId, setFontId, onFontChange, type FontId } from "./fonts";
 import { listPacks } from "../rendering/textures";
-import { onWindowModeChange, type WindowMode, sendLog } from "../platform/shell";
+import { onWindowModeChange, type WindowMode, logDebug } from "../platform/shell";
 import { getBind, setBind, beginCapture, endCapture, getCapturing, onBindsChange, codeDisplayName, codeToButton, buttonToCode, type BindAction } from "../platform/keybinds";
 
 // ===== 1. Shared cross-instance state =====
@@ -126,7 +126,7 @@ function renderAllPanels(reason: string): void {
     r();
     panels++;
   });
-  sendLog(`KBCAP ${reason} (panels=${panels})`);
+  logDebug(`KBCAP ${reason} (panels=${panels})`);
 }
 
 // Global click shield (capture phase: runs before all elements' own onclick). Swallows every
@@ -186,7 +186,7 @@ document.addEventListener("mouseup", (ev) => {
   armSuppressNextClick(true); // mouseup-armed: schedule the timeout fallback immediately (the synthetic click consumes it first)
   if (getCapturing()) return; // A capture started mid-drag (abnormal path): abort the bind
   const code = capHitAtPoint(ev.clientX, ev.clientY)?.code ?? null;
-  sendLog(`KBCAP drag release action=${action} code=${code ?? "no hit"}`);
+  logDebug(`KBCAP drag release action=${action} code=${code ?? "no hit"}`);
   if (!code) return; // Released on empty space: no-op
   setBind(action, code);
   renderAllPanels(`drag bind done (${code})`);
@@ -222,11 +222,11 @@ document.addEventListener("keydown", (ev) => {
       endCapture();
       chipDrag = null;
       hideCapLine();
-      sendLog("KBCAP Esc cancels drag");
+      logDebug("KBCAP Esc cancels drag");
     }
     return;
   }
-  sendLog(`KBCAP keydown code=${ev.code} capturing=${action ?? "null"}`);
+  logDebug(`KBCAP keydown code=${ev.code} capturing=${action ?? "null"}`);
   if (!action) return;
   ev.preventDefault();
   ev.stopImmediatePropagation();
@@ -235,7 +235,7 @@ document.addEventListener("keydown", (ev) => {
   try {
     renderAllPanels(`renderBinds done (code=${ev.code})`);
   } catch (e) {
-    sendLog(`KBCAP renderBinds error!! ${e instanceof Error ? e.stack : String(e)}`);
+    logDebug(`KBCAP renderBinds error!! ${e instanceof Error ? e.stack : String(e)}`);
   }
 });
 
@@ -245,7 +245,7 @@ document.addEventListener("keydown", (ev) => {
 // F3/F4 (the earlier-registered inventory E key yields via isCapturing()).
 document.addEventListener("mousedown", (ev) => {
   const action = getCapturing();
-  sendLog(`KBCAP mousedown button=${ev.button} capturing=${action ?? "null"}`);
+  logDebug(`KBCAP mousedown button=${ev.button} capturing=${action ?? "null"}`);
   if (!action) return;
   ev.preventDefault();
   ev.stopImmediatePropagation();
@@ -309,8 +309,8 @@ const CAP_MAIN_CSS =
 export interface SettingsCallbacks {
   getFpsCap: () => number;
   onFpsCap: (cap: number) => void;
-  getGpuVsyncState: () => boolean;
-  onToggleGpuVsync: (on: boolean) => boolean;
+  isGpuVsyncDisabled: () => boolean;
+  onToggleGpuVsync: (disabled: boolean) => boolean;
   getWindowMode: () => WindowMode;
   onSetWindowMode: (mode: WindowMode) => void;
 }
@@ -357,15 +357,15 @@ export function buildSettingsPanel(opts: SettingsCallbacks & { onBack: () => voi
   settingsPanel.appendChild(capSlider);
 
   // --- GPU vsync toggle ---
-  let gpuVsyncOn = opts.getGpuVsyncState();
+  let gpuVsyncDisabled = opts.isGpuVsyncDisabled();
   const gpuBtn = button(BTN_CSS);
   const renderGpuBtn = (): void => {
-    gpuBtn.textContent = gpuVsyncOn ? t("settings.vsyncOff") : t("settings.vsyncOn");
+    gpuBtn.textContent = gpuVsyncDisabled ? t("settings.vsyncOff") : t("settings.vsyncOn");
   };
   gpuBtn.onclick = () => {
-    const next = !gpuVsyncOn;
+    const next = !gpuVsyncDisabled;
     if (opts.onToggleGpuVsync(next)) {
-      gpuVsyncOn = next;
+      gpuVsyncDisabled = next;
       renderGpuBtn();
     }
   };
@@ -530,7 +530,7 @@ export function buildSettingsPanel(opts: SettingsCallbacks & { onBack: () => voi
       chipDrag = { action, button: ev.button, anchorX: ev.clientX, anchorY: ev.clientY, moved: false };
     });
     chip.onclick = () => {
-      sendLog(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
+      logDebug(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
       if (getCapturing() === action) endCapture();
       else beginCapture(action);
       renderBinds();
@@ -880,7 +880,7 @@ export class Menu {
     const panels = buildSettingsPanel({
       getFpsCap: cb.getFpsCap,
       onFpsCap: cb.onFpsCap,
-      getGpuVsyncState: cb.getGpuVsyncState,
+      isGpuVsyncDisabled: cb.isGpuVsyncDisabled,
       onToggleGpuVsync: cb.onToggleGpuVsync,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,

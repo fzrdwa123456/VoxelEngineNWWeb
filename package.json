@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build-all": "node scripts/build-all.mjs",
+    "check": "node scripts/build-all.mjs --check-only",
     "build": "tsc && vite build && node scripts/rearrange.mjs && gcc -O2 -municode -mwindows -o release/VoxelEngineNWWeb/launcher.exe launcher/launcher.c",
     "build:cursor": "gcc -O2 -mwindows -o release/VoxelEngineNWWeb/game/core/cursor.exe launcher/cursor.c",
     "build:winctl": "gcc -O2 -s -mwindows -o release/VoxelEngineNWWeb/game/core/winctl.exe launcher/winctl.c",

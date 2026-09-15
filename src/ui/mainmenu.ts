@@ -128,7 +128,7 @@ export class MainMenu {
     const panels = buildSettingsPanel({
       getFpsCap: cb.getFpsCap,
       onFpsCap: cb.onFpsCap,
-      getGpuVsyncState: cb.getGpuVsyncState,
+      isGpuVsyncDisabled: cb.isGpuVsyncDisabled,
       onToggleGpuVsync: cb.onToggleGpuVsync,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,

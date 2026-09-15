@@ -1,26 +1,22 @@
-// Download and extract NW.js v0.115.0 (normal flavor, no SDK/devtools) win-x64 into nwjs\ (idempotent: skipped when present; matches the directory name rearrange.mjs expects)
+// Download and extract the NW.js runtime into nwjs\ (idempotent: skipped when already present).
+// The version and the distribution directory name live in scripts/paths.mjs — the single source
+// of truth shared with rearrange.mjs and build-all.mjs. They used to be duplicated here, in
+// rearrange.mjs and in README.md, and had drifted apart (the README pointed at an "sdk" flavor
+// that this script never downloads).
 import { existsSync, mkdirSync, createWriteStream } from "node:fs";
 import { spawnSync } from "node:child_process";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { NW_DIST, NW_DIST_NAME, NW_DIR, NW_EXE, NW_VERSION, NW_ZIP } from "./paths.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const version = "0.115.0";
-const distName = `nwjs-v${version}-win-x64`;
-const nwDir = path.join(root, "nwjs");
-const outDir = path.join(nwDir, distName);
-
-if (existsSync(path.join(outDir, "nw.exe"))) {
-    console.log(`Already present: ${outDir}\\nw.exe, skipping`);
+if (existsSync(NW_EXE)) {
+    console.log(`Already present: ${NW_EXE}, skipping`);
   process.exit(0);
 }
 
-mkdirSync(nwDir, { recursive: true });
-const zipPath = path.join(nwDir, `${distName}.zip`);
+mkdirSync(NW_DIR, { recursive: true });
 
 const urls = [
-  `https://dl.nwjs.io/v${version}/${distName}.zip`,
-  `https://registry.npmmirror.com/-/binary/nwjs/v${version}/${distName}.zip`,
+  `https://dl.nwjs.io/v${NW_VERSION}/${NW_DIST_NAME}.zip`,
+  `https://registry.npmmirror.com/-/binary/nwjs/v${NW_VERSION}/${NW_DIST_NAME}.zip`,
 ];
 
 let got = false;
@@ -31,7 +27,7 @@ for (const url of urls) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const total = Number(res.headers.get("content-length") || 0);
     let done = 0;
-    const file = createWriteStream(zipPath);
+    const file = createWriteStream(NW_ZIP);
     const reader = res.body.getReader();
     for (;;) {
       const { done: d, value } = await reader.read();
@@ -55,13 +51,13 @@ if (!got) {
 }
 
 console.log("Extracting...");
-const tar = spawnSync("tar", ["-xf", zipPath, "-C", nwDir], { stdio: "inherit" });
+const tar = spawnSync("tar", ["-xf", NW_ZIP, "-C", NW_DIR], { stdio: "inherit" });
 if (tar.status !== 0) {
     console.error("tar extraction failed");
   process.exit(1);
 }
-if (!existsSync(path.join(outDir, "nw.exe"))) {
-    console.error(`${outDir}\\nw.exe not found after extraction`);
+if (!existsSync(NW_EXE)) {
+    console.error(`${NW_EXE} not found after extraction`);
   process.exit(1);
 }
-console.log(`Done -> ${outDir}`);
+console.log(`Done -> ${NW_DIST}`);

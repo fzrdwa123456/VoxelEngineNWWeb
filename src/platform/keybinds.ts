@@ -27,7 +27,8 @@ const DEFS: BindDef[] = [
   { action: "right", defaultCode: "KeyD" },
   { action: "jump", defaultCode: "Space" },
   { action: "sneak", defaultCode: "ControlLeft" },
-    // Sprint: shared speed-up for walk/fly/spectator (E:mc SPRINTM=1.65); Shift by default, no conflict with sneak (Ctrl)
+    // Sprint: shared speed-up for walk/fly/spectator; Shift by default, no conflict with sneak (Ctrl).
+    // The multiplier is defined once in ecs/systems/movement.ts (SPRINT_MULT) — do not restate its value here.
   { action: "sprint", defaultCode: "ShiftLeft" },
   { action: "inventory", defaultCode: "KeyE" },
     // Mouse-button binds: stored as pseudo codes (MouseLeft/MouseRight), managed in the same table as keyboard codes

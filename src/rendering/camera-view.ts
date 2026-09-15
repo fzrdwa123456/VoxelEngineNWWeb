@@ -14,10 +14,22 @@ const tmpView = new THREE.Vector3();
 const tmpUp = new THREE.Vector3();
 const tmpZ = new THREE.Vector3();
 const tmpMat = new THREE.Matrix4();
+/** Scratch for viewDirection() — kept separate from tmpRight so a caller can never clobber the
+ *  scratch vector render() is in the middle of using. */
+const tmpTiltRight = new THREE.Vector3();
+
+/** The view direction for an orientation: the horizontal heading tilted by `pitch` around
+ *  `right` (= fwd × up, i.e. the local horizon).
+ *  SINGLE SOURCE OF TRUTH — both the camera below and the block-interaction raycast use this, so
+ *  the crosshair and what you actually see can never disagree. */
+export function viewDirection(ori: OrientationC, out: THREE.Vector3): THREE.Vector3 {
+  tmpTiltRight.crossVectors(ori.fwd, ori.up).normalize();
+  return out.copy(ori.fwd).applyAxisAngle(tmpTiltRight, ori.pitch).normalize();
+}
 
 export class CameraViewSystem {
-  /** Pre-movement position snapshot (fixed-step start): the render lerp and the collision
-   *  system re-simulate the tick displacement from this — taken BEFORE movement touches pos. */
+  /** Pre-movement position snapshot, taken at the start of the fixed step BEFORE movement
+   *  touches pos, so the render lerp spans exactly one physics tick. */
   readonly snapshot = new THREE.Vector3();
   /** Player component records (resolved once in the constructor — stable store references) */
   private readonly pos: THREE.Vector3;
@@ -47,7 +59,7 @@ export class CameraViewSystem {
     tmpFwd.copy(this.ori.fwd);
     tmpRight.crossVectors(tmpFwd, up).normalize(); // right = fwd × up (handedness matches movement/camera)
     // Pitch tilts the view around right (relative to the local horizon)
-    tmpView.copy(tmpFwd).applyAxisAngle(tmpRight, this.ori.pitch).normalize();
+    viewDirection(this.ori, tmpView);
     tmpUp.crossVectors(tmpRight, tmpView).normalize();
     tmpZ.copy(tmpView).negate(); // three cameras look down -Z -> Z axis = -view
     tmpMat.makeBasis(tmpRight, tmpUp, tmpZ);

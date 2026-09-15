@@ -14,7 +14,7 @@ import { PointerLock } from "./platform/pointerlock";
 import { t, loadLang, getLang, onLangChange, type Lang } from "./ui/i18n";
 import { loadUIScaleMode, getUIScaleMode, onUIScaleModeChange, applyUIScale } from "./ui/uiscale";
 import { loadFont, getFontId, onFontChange } from "./ui/fonts";
-import { initShell, sendLog, showWindow, getGpuVsyncState, setGpuVsyncState, winFocused, quitApp, onWinFocus, onWinBlur, readSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "./platform/shell";
+import { initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, winFocused, quitApp, onWinFocus, onWinBlur, readSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "./platform/shell";
 import { startRawInput, centerCursor } from "./platform/rawinput";
 import { DebugLogForwarder } from "./platform/debuglog";
 import { PerfSampler } from "./platform/perf";
@@ -22,6 +22,10 @@ import { loadBinds, getBind, getBindsAll, onBindsChange, isCapturing, buttonToAc
 import { menuBgKind } from "./ui/background";
 import { resolveTexture } from "./rendering/textures";
 import { loadBlockRegistry } from "./blockregistry";
+import { VoxelWorld, WORLD_SURFACE_Y } from "./voxel/world";
+import { ChunkStreamSystem } from "./ecs/systems/chunkstream";
+import { CollisionSystem } from "./ecs/systems/collision";
+import { BlockInteractionSystem } from "./ecs/systems/interaction";
 
 // Pixel font (Fusion Pixel, OFL open source): proportional font for general UI, monospace for F3/count panels
 import "@fontsource/fusion-pixel-12px-proportional-sc";
@@ -49,15 +53,19 @@ onUIScaleModeChange(saveSettings);
 onWindowModeChange(saveSettings);
 onBindsChange(saveSettings);
 
-// Block registry: merge every resource pack's blocks.json (built-in = default.zip entries, user packs can add/change blocks); must run before BlockWorld/inventory
+// Block registry: merge every resource pack's blocks.json across the pack chain. Must run
+// before the inventory is constructed (its slots are filled from the registry). The voxel
+// mesher deliberately does not consult it yet — it draws the built-in checker block.
 loadBlockRegistry();
 
 const app = document.getElementById("app")!;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
-// Fog (MC-style distance fade): fog color = sky color, everything blends into the sky past 950 units -> the far=1000 frustum circle edge is invisible; the main-menu panorama is a separate scene, unaffected
-scene.fog = new THREE.Fog(0x87ceeb, 500, 950);
+// No fog: the scene is deliberately unfogged so the whole streamed world stays visible. The
+// trade-off is that the rim of the chunk window (~(RENDER_RADIUS_CHUNKS+1)*32 = 288 blocks, see
+// ecs/systems/chunkstream.ts) is visible as the edge of the world — raise that radius to push it
+// further out. The main-menu panorama is a separate scene and is unaffected either way.
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
 camera.position.set(1, 2.6, 1);
@@ -78,16 +86,37 @@ applyWindowModeAtStart();
 
 // ===== ECS composition: entities + systems registered into the World scheduler =====
 const world = new World();
-const player = spawnPlayer(world, new THREE.Vector3(0.5, 5.6, 0.5));
-const input = new PlayerInputSystem(world, player, renderer.domElement, sendLog);
+// Spawn resting on the generated world: WORLD_SURFACE_Y is the first air layer above the fill,
+// so feet start exactly on the surface. One constant shared with the "enter world" reset below,
+// so the initial spawn and the re-entry position can never drift apart.
+const SPAWN = new THREE.Vector3(0.5, WORLD_SURFACE_Y + EYE_HEIGHT, 0.5);
+const player = spawnPlayer(world, SPAWN.clone());
+const input = new PlayerInputSystem(world, player, renderer.domElement, logDebug);
 const controller = new PlayerControllerSystem(world, player, input);
 const movement = new PlayerMovementSystem(world, input);
 const cameraView = new CameraViewSystem(world, player, camera);
 
+// Voxel world: one mesh per visible chunk lives in this group. prime() generates the spawn
+// window up front so collision has real blocks on the very first physics tick.
+const voxel = new VoxelWorld();
+const chunkGroup = new THREE.Group();
+scene.add(chunkGroup);
+const chunkStream = new ChunkStreamSystem(world, player, voxel, chunkGroup);
+const collision = new CollisionSystem(world, voxel);
+// The inventory is constructed further down, so this is a DEFERRED closure rather than an eager
+// read (steps do not run until startLoop, long after module evaluation). It also keeps the UI
+// layer out of the system: the only thing it is asked is "is a block selected at all?".
+const interaction = new BlockInteractionSystem(world, player, voxel, input, () => inv.selectedType() !== null);
+scene.add(interaction.outline);
+chunkStream.prime(SPAWN.x, SPAWN.z);
+
 world.addFixed((dt) => cameraView.beginStep()); // freeze the render-interpolation source first...
 world.addFixed((dt) => controller.step(dt));     // ...then consume input deltas and apply the view...
 world.addFixed((dt) => movement.step(dt));       // ...move the entities...
+world.addFixed((dt) => collision.step(dt));      // ...then resolve them against the blocks
+world.addFixed((dt) => interaction.step(dt));    // ...then break/place against the voxel world
 world.addRender((alpha) => cameraView.render(alpha));
+world.addRender(() => chunkStream.step());       // stream chunk meshes around the player
 world.addRender((alpha, delta) => diagnostics(alpha, delta));
 world.addRender(() => renderer.render(scene, camera));
 
@@ -116,7 +145,7 @@ let pointerLock: PointerLock;
 const inv = new Inventory((open) => {
   if (open) {
     input.prepareUnlock();
-        sendLog("UNLOCK request (inventory)");
+        logDebug("UNLOCK request (inventory)");
     document.exitPointerLock();
     centerCursor();
     stopLoop();
@@ -133,39 +162,39 @@ document.addEventListener("keydown", (ev) => {
 });
 
 pointerLock = new PointerLock({
-  fps: input,
+  input,
   isMenuOpen: () => menu.visible || menu.settingsVisible || mainMenu.visible,
   isInvOpen: () => inv.open,
-  sendLog,
+  logDebug,
 });
 
 // Diagnostics: record pointer lock state changes (locked/unlocked done) to verify cursor-centering races
 document.addEventListener("pointerlockchange", () => {
-    sendLog(`LOCKCHANGE ${document.pointerLockElement ? "locked" : "unlocked"}`);
+    logDebug(`LOCKCHANGE ${document.pointerLockElement ? "locked" : "unlocked"}`);
 });
 
 // Settings callbacks (shared by the pause menu and main menu)
 const onFpsCap = (cap: number): void => {
   fpsCap = cap;
-    sendLog(`FPS cap set to ${cap === 0 ? "unlimited" : cap}`);
+    logDebug(`FPS cap set to ${cap === 0 ? "unlimited" : cap}`);
 };
-const onToggleGpuVsync = (on: boolean): boolean => {
-  const ok = setGpuVsyncState(on);
+const onToggleGpuVsync = (disabled: boolean): boolean => {
+  const ok = setGpuVsyncDisabled(disabled);
   hud.showToast(
     ok
-      ? on
+      ? disabled
         ? t("toast.vsyncOff")
         : t("toast.vsyncOn")
       : t("toast.vsyncFail"),
   );
-    sendLog(`GPU vsync ${on ? "disabled" : "enabled"} ${ok ? "written to manifest, restart to apply" : "write failed"}`);
+    logDebug(`GPU vsync ${disabled ? "disabled" : "enabled"} ${ok ? "written to manifest, restart to apply" : "write failed"}`);
   return ok;
 };
 
 // Window mode: runtime enter/leaveFullscreen switch (no restart); exiting fullscreen goes through the settings panel "windowed"
 const onSetWindowMode = (mode: WindowMode): void => {
   setWindowMode(mode);
-    sendLog(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
+    logDebug(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
 };
 
 const menu = new Menu({
@@ -173,11 +202,11 @@ const menu = new Menu({
         // Back to game: relock the mouse (cooldown after ESC, auto-retry on failure)
         pointerLock.relock("menu resume");
     pointerLock.applyCursor();
-        sendLog("RESUME back to game -> relock");
+        logDebug("RESUME back to game -> relock");
   },
   onFpsCap,
   onToggleGpuVsync,
-  getGpuVsyncState: () => getGpuVsyncState(),
+  isGpuVsyncDisabled: () => isGpuVsyncDisabled(),
   getFpsCap: () => fpsCap,
   getWindowMode: () => getWindowMode(),
   onSetWindowMode,
@@ -190,7 +219,7 @@ const menu = new Menu({
     mainMenu.show();
     startMenuBgLoop();  // panorama mode: restart the panorama loop
     pointerLock.applyCursor();
-        sendLog("MENU back to main menu");
+        logDebug("MENU back to main menu");
   },
 });
 
@@ -219,28 +248,29 @@ function enterWithLoading(): void {
   pointerLock.applyCursor();
     pointerLock.relock("world entered after load");
   startLoop();
-    sendLog("MAINMENU entering singleplayer");
+    logDebug("MAINMENU entering singleplayer");
 }
 
 // Main menu: singleplayer picks a world type then enters; multiplayer placeholder; settings/exit
 const mainMenu = new MainMenu({
   onStartSingle: (mode) => {
-    playerPos.set(0.5, 5.6, 0.5);
+    playerPos.copy(SPAWN);
     playerMotion.vy = 0;
-    sendLog(`MAINMENU entering singleplayer (world type: ${mode === "noise" ? "noise" : "superflat"})`);
+    playerMotion.onGround = false;
+    logDebug(`MAINMENU entering singleplayer (world type: ${mode === "noise" ? "noise" : "superflat"})`);
     enterWithLoading();
   },
   onMultiplayer: () => {
     hud.showToast(t("toast.multiPlaceholder"));
-        sendLog("MAINMENU multiplayer (placeholder)");
+        logDebug("MAINMENU multiplayer (placeholder)");
   },
   onExit: () => {
-        sendLog("MAINMENU quit");
+        logDebug("MAINMENU quit");
     quitApp();
   },
   getFpsCap: () => fpsCap,
   onFpsCap,
-  getGpuVsyncState,
+  isGpuVsyncDisabled,
   onToggleGpuVsync,
   getWindowMode,
   onSetWindowMode,
@@ -254,13 +284,13 @@ onWinBlur(() => {
   if (started && !mainMenu.visible && !menu.visible && !menu.settingsVisible && !inv.open) {
     menu.show();
     pointerLock.applyCursor();
-        sendLog("BLUR lost focus -> pause menu");
+        logDebug("BLUR lost focus -> pause menu");
   }
 });
 onWinFocus(() => {
   if (started && !mainMenu.visible && !menu.visible && !menu.settingsVisible && !inv.open && !input.locked) {
         pointerLock.relock("window focus");
-        sendLog("FOCUS focused -> relock");
+        logDebug("FOCUS focused -> relock");
   }
 });
 
@@ -270,7 +300,7 @@ onWinFocus(() => {
 document.addEventListener("keydown", (ev) => {
   if (ev.code !== "Escape") return;
   ev.preventDefault();  // #7907: block the default unlock; we control menu open/close
-  sendLog(
+  logDebug(
     `ESC mainMenu=${mainMenu.visible} menu=${menu.visible} settings=${menu.settingsVisible} ` +
       `lang=${menu.langVisible} pack=${menu.packVisible} keybind=${menu.keybindVisible} gen=${mainMenu.genVisible} capturing=${isCapturing()}`,
   );
@@ -289,7 +319,7 @@ document.addEventListener("keydown", (ev) => {
   } else {
         // In game: show the menu + release the mouse directly (pauses even if the cursor was not captured)
     input.prepareUnlock();
-        sendLog("UNLOCK request (menu)");
+        logDebug("UNLOCK request (menu)");
     document.exitPointerLock();
     menu.show();
     centerCursor();
@@ -298,7 +328,7 @@ document.addEventListener("keydown", (ev) => {
 });
 
 // F3+F4 game mode switch + F3 debug panel (registers its own keyboard listeners in the constructor)
-new GamemodeController(hud, input, sendLog);
+new GamemodeController(hud, input, logDebug);
 
 // ===== Central mouse-button dispatch: bound actions get their triggers here =====
 document.addEventListener("mousedown", (ev) => {
@@ -316,9 +346,18 @@ document.addEventListener("mouseup", (ev) => {
   const code = buttonToCode(ev.button);
   if (!code) return;
   const action = buttonToAction(ev.button);
-  if (!action || action === "break" || action === "place" || action === "inventory") return;
+  // inventory is a toggle with no "held" state, but break/place MUST be released: otherwise the
+  // button stays in CONTROL.keys forever and block interaction would keep repeating after a
+  // single click.
+  if (!action || action === "inventory") return;
   input.bindRelease(code);
 });
+
+// Right-click is a game action (place), so the browser's default context menu must never appear:
+// in a pointer-locked window it interrupts the frame and pulls the cursor away for a moment.
+// This is the ONLY place contextmenu is handled anywhere in the codebase. It does not affect
+// rebinding — the bind-capture path in ui/menu.ts works off mousedown, not contextmenu.
+document.addEventListener("contextmenu", (ev) => ev.preventDefault());
 
 // Space shield: whenever any UI is open, Space's browser default (scroll the nearest
 // scrollable ancestor of the focused element — e.g. the keybind chip list after clicking
@@ -337,6 +376,11 @@ document.addEventListener(
 );
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+// Directional light: ambient alone lights every face of a block identically, which renders the
+// chunk geometry flat and unreadable. Same setup as rendering/blockicons.ts.
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(1, 1.5, 0.75);
+scene.add(sun);
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -396,12 +440,13 @@ function diagnostics(_alpha: number, delta: number): void {
   if (!s) return;
   const p = playerPos;
   const feet = p.y - EYE_HEIGHT;
-  const top = NaN;  // No world — no terrain height
-  sendLog(
+  // Surface height of the voxel column under the player, or null when the column is empty
+  const top = voxel.topSolidY(Math.floor(p.x), Math.floor(p.z), Math.floor(feet + 0.5));
+  logDebug(
     `PHYS mode=${playerControl.mode} ground=${playerMotion.onGround} vy=${playerMotion.vy.toFixed(2)} ` +
-      `feet=${feet.toFixed(4)} top=${Number.isFinite(top) ? top.toFixed(4) : "none"} ` +
-      `gap=${Number.isFinite(top) ? (feet - top).toFixed(4) : "-"} ` +
-      `gapE=${Number.isFinite(top) ? (feet - top).toExponential(2) : "-"} ` +
+      `feet=${feet.toFixed(4)} top=${top === null ? "none" : top.toFixed(4)} ` +
+      `gap=${top === null ? "-" : (feet - top).toFixed(4)} ` +
+      `gapE=${top === null ? "-" : (feet - top).toExponential(2)} ` +
       `xyz=${p.x.toFixed(2)}/${p.y.toFixed(2)}/${p.z.toFixed(2)}`,
   );
 
@@ -423,13 +468,13 @@ function diagnostics(_alpha: number, delta: number): void {
     x: p.x,
     y: p.y,
     z: p.z,
-    blocks: 0,
+    chunks: voxel.loadedChunkCount,
     gpuMs: s.gpuMs,
     mode: playerControl.mode,
     onGround: playerMotion.onGround,
     vy: playerMotion.vy,
     feet,
-    top: Number.isFinite(top) ? top : null,
+    top,
     logs: [
       { label: t("f3.logMouse"), lines: input.mouseLog },
       { label: t("f3.logSpace"), lines: input.spaceLog },
@@ -452,7 +497,7 @@ function startLoop(): void {
     try {
       renderFrame();
     } catch (err) {
-            sendLog(`render error: ${String((err as Error)?.message || err)}`);
+            logDebug(`render error: ${String((err as Error)?.message || err)}`);
     }
     rafId = requestAnimationFrame(tick);
   });
@@ -497,7 +542,7 @@ function stopMenuBgLoop(): void {
   menuBgRaf = 0;
 }
 
-sendLog(`BOOT render=rAF(60Hz) winFocused=${winFocused()}`);
+logDebug(`BOOT render=rAF(60Hz) winFocused=${winFocused()}`);
 
 // Main menu: black clear as fallback (DOM background/panorama handled by the main-menu background system). Entering the game, startLoop's first render restores the 3D world.
 applyUIScale();

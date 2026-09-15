@@ -4,11 +4,10 @@ import { existsSync, mkdirSync, copyFileSync, cpSync, readdirSync, renameSync, r
 import path from "node:path";
 import { zipSync } from "fflate";
 
-const root = path.resolve(".");
-const nwDist = path.join(root, "nwjs", "nwjs-v0.115.0-win-x64");
-const dist = path.join(root, "dist");
-const release = path.join(root, "release", "VoxelEngineNWWeb");
-const core = path.join(release, "game", "core");
+// Paths come from scripts/paths.mjs — the single source of truth (NW.js version included).
+// They resolve from that file's own URL rather than process.cwd(), so this packager now works
+// from any working directory instead of only from the repository root.
+import { CORE as core, DIST as dist, NW_DIST as nwDist, RELEASE as release, ROOT as root } from "./paths.mjs";
 
 if (!existsSync(path.join(nwDist, "nw.exe"))) {
     console.error("nwjs not downloaded, run first: npm run get-nw");

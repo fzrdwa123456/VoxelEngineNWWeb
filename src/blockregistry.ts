@@ -6,9 +6,9 @@
 // In-pack path (MC taxonomy): assets\<ns>\data\blocks.json (data goes in data\, sibling of textures\/lang\);
 // normalized to the global path data/blocks.json.
 // Entry fields: label (display name, defaults to id) / color (solid material, CSS color) / top/side/bottom (texture paths,
-// pack-root relative) / all (shorthand for all three faces); missing referenced texture -> transparent (neighbor faces not culled, alphaTest drops fragments so you can see through).
+// pack-root relative) / all (shorthand for all three faces); a referenced texture that no pack in the chain provides sets hasMissingTexture (neighbour faces are then not culled and alphaTest drops the fragments).
 import { resolveAllBytes, textureMissing } from "./rendering/textures";
-import { sendLog } from "./platform/shell";
+import { logDebug } from "./platform/shell";
 
 export interface BlockDef {
   id: string;
@@ -17,7 +17,10 @@ export interface BlockDef {
   top?: string;  // Texture path; top/bottom default to side
   side?: string;
   bottom?: string;
-  transparent: boolean;  // Any referenced texture missing -> neighbor faces not culled
+  /** Some referenced face texture is missing from the pack chain (the neighbour faces are then not
+   *  culled and alphaTest drops the fragments). Named for its CAUSE: it says nothing about whether
+   *  the block is see-through. */
+  hasMissingTexture: boolean;
 }
 
 type RawDef = { label?: unknown; color?: unknown; top?: unknown; side?: unknown; bottom?: unknown; all?: unknown };
@@ -44,9 +47,9 @@ function defFrom(id: string, raw: RawDef): BlockDef {
     side,
     top: asStr(raw.top) ?? asStr(raw.all) ?? side,
     bottom: asStr(raw.bottom) ?? asStr(raw.all) ?? side,
-    transparent: false,
+    hasMissingTexture: false,
   };
-  def.transparent = [def.top, def.side, def.bottom].some((p) => p !== undefined && textureMissing(p));
+  def.hasMissingTexture = [def.top, def.side, def.bottom].some((p) => p !== undefined && textureMissing(p));
   return def;
 }
 
@@ -69,7 +72,7 @@ export function loadBlockRegistry(): void {
     if (!raw || typeof raw !== "object") continue;
     registry.set(id, defFrom(id, raw as RawDef));
   }
-    sendLog(`BLOCKREG registry loaded: ${registry.size} blocks (${layers.length} layers of blocks.json) -> [${[...registry.keys()].join(", ")}]`);
+    logDebug(`BLOCKREG registry loaded: ${registry.size} blocks (${layers.length} layers of blocks.json) -> [${[...registry.keys()].join(", ")}]`);
 }
 
 export function getBlockDef(id: string): BlockDef | undefined {

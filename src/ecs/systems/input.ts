@@ -50,8 +50,13 @@ export class PlayerInputSystem {
   private skipFirstMove = false;
   /** Grace period armed before an intentional unlock: swallows synthetic deltas during the exitPointerLock + SetCursorPos race (while still locked) */
   private lockGraceUntil = 0;
-  /** When the window is partially offscreen and Chromium cancels pointer lock -> auto-switch to "free mouse" mode (MC-style windowed view) */
+  /** When the window is partially offscreen and Chromium cancels pointer lock BY ITSELF -> auto-switch
+   *  to "free mouse" mode (MC-style windowed view). A lock WE released never enables this; see
+   *  prepareUnlock(). */
   private freeMouseActive = false;
+  /** Set by prepareUnlock() when it is about to release a lock we hold, so the pointerlockchange that
+   *  follows knows the unlock was ours and must NOT engage the offscreen fallback. */
+  private unlockIsIntentional = false;
   /** Raw-input takeover state tracking (logs one line on switch for diagnosis) */
   private rawTakeoverActive = false;
   /** Offscreen check result cache (~120ms), so not every mouse event triggers layout/screen queries */
@@ -76,19 +81,36 @@ export class PlayerInputSystem {
     this.log = log;
 
     this.dom.addEventListener("click", () => {
-      if (this.clickLockAllowed) {
-        this.log("LOCK click grab");
-        this.lock();
-      }
+      // Grab the lock ONLY when we do not already hold it. This is deliberate and load-bearing:
+      // re-requesting pointer lock on the already-locked element is a known Chromium bug path
+      // (issue 40122995: "we have a bug" from requestPointerLock called in a click handler on the
+      // locked element) and in this NW.js build it is rejected as kAlreadyLocked. Worse, any
+      // pointerlockchange it produces re-arms the grace window below, and that DISCARDS every
+      // mousemove for LOCK_GRACE_MS — a visible freeze of mouse look right after each click.
+      if (!this.clickLockAllowed || document.pointerLockElement !== null) return;
+      this.log("LOCK click grab");
+      const pending = this.lock();
+      // Never leave this promise unhandled: a rejection used to surface as an unhandled rejection
+      // and get written to the log by the window-level handler.
+      if (pending) pending.catch((err) => this.log(`LOCK click grab rejected: ${String(err)}`));
     });
     document.addEventListener("pointerlockchange", () => {
       this.locked = document.pointerLockElement === this.dom;
       if (this.locked) {
         this.freeMouseActive = false;
+        this.unlockIsIntentional = false; // moot once we hold the lock again
         this.skipFirstMove = true;
         this.lockGraceUntil = performance.now() + LOCK_GRACE_MS;
+      } else if (this.unlockIsIntentional) {
+        // WE released the lock (pause menu / inventory / window blur). This must NOT enable the
+        // offscreen fallback: a window half offscreen that opens a menu is indistinguishable from
+        // "Chromium cancelled the lock" by position alone, and treating it as such leaves the game
+        // fully controllable behind the menu (movement, view, break/place all gate on canControl).
+        // prepareUnlock() has already cleared freeMouseActive for the case where no event follows.
+        this.unlockIsIntentional = false;
+        this.freeMouseActive = false;
       } else if (this.isWindowPartiallyOffScreen()) {
-        // Window partially offscreen and pointer lock cancelled by Chromium -> auto-switch to free-mouse mode
+        // Window partially offscreen and pointer lock cancelled by Chromium by itself
         this.freeMouseActive = true;
       } else {
         this.freeMouseActive = false;
@@ -152,9 +174,19 @@ export class PlayerInputSystem {
     return d;
   }
 
-  /** Enter the grace period before an intentional unlock: swallow synthetic deltas during the exitPointerLock + SetCursorPos race (while still locked) */
+  /** Called immediately BEFORE we release the pointer on purpose (open the pause menu, open the
+   *  inventory, lose window focus). Three things have to happen here:
+   *    1. arm the grace window that swallows the synthetic deltas of the exitPointerLock +
+   *       SetCursorPos race while still locked;
+   *    2. drop free-mouse mode AT ONCE — control has to stop the moment a UI opens, and this is also
+   *       what covers the case where the lock was ALREADY gone (Chromium had cancelled it earlier),
+   *       because then exitPointerLock() changes nothing and no pointerlockchange will follow;
+   *    3. record that this unlock is OURS, so the pointerlockchange that does follow cannot mistake
+   *       it for Chromium cancelling the lock and re-enable the offscreen fallback. */
   prepareUnlock(): void {
     this.lockGraceUntil = performance.now() + 100;
+    this.freeMouseActive = false;
+    this.unlockIsIntentional = this.locked;
   }
 
   /** Raw mouse deltas (WM_INPUT, fed by main.ts polling).

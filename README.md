@@ -2,14 +2,15 @@
 
 基于 **NW.js + three.js (WebGPU)** 的 Minecraft 风格第一人称沙盒。浏览器技术栈做桌面游戏：WebGPU 渲染、像素风 UI、完整的键鼠绑定系统与 mod/资源包生态，打包为免安装绿色目录。
 
-> **当前状态**：星球/体素世界系统已拆除重建中——进入世界是空天空（行走会持续下坠，创造模式双击空格飞行可用，Shift ×25 测试疾跑）。方块目前只存在于物品栏 UI；mod/资源包生态完好。
+> **当前状态**：体素区块系统已重建（32³ 区块；X/Z 环形循环；Y 分两段——下方 128 格地形 + 上方 128 格可建造空间，y<0 为基岩），出生即站在地面上，可走可跳，AABB 碰撞生效，**左键挖掘 / 右键放置**（目标方块带白色描边）。**地形内容尚未实现**——所有区块统一填充引擎内置的紫黑格子方块，且目前只有这一种方块。mod/资源包生态完好。
 >
-> **给 AI / 协作者**：工程地图、目录职责与铁律见 **[AGENTS.md](AGENTS.md)**（英文：两条时钟、稳定组件引用、注册顺序承重、竞态代码勿简化）。
+> **给 AI / 协作者**：工程地图、目录职责与铁律见 **[AGENTS.md](AGENTS.md)**（英文：两条时钟、稳定组件引用、注册顺序承重、竞态代码勿简化）；**还没做的、待办的、故意不做的**见 **[ROADMAP.md](ROADMAP.md)**（英文：星球/地形路线图、各系统的缺口、决策清单、给 LLM 的债务清单）。两份文件互不重叠——前者只写"现状"，后者只写"计划"。
 
 ## ✨ 特性
 
 - 🧩 **纯 ECS 架构**：自研轻量调度器（World，120Hz 固定步长 + 每帧渲染双通道）+ 实体存储（spawn/despawn/类型安全组件/Query 查询）+ 查询驱动的系统（新实体挂组件即被自动处理）
-- 🚶 **三模式移动**：行走（重力）/ 创造飞行（双击空格切飞行，俯仰可翻越天顶 360°）/ 观察者，固定步长物理 + 渲染插值
+- 🚶 **三模式移动**：行走（重力）/ 创造飞行（双击空格切飞行，俯仰钳制在 ±89.4°）/ 观察者（穿墙），固定步长物理 + 渲染插值
+- ⛏️ **挖掘 / 放置**：体素射线检测（6 格，按住连发 0.18s/次），目标方块白色描边；不会把自己封进方块，也挖不穿世界底部（下方是基岩）
 - 🧩 **内容 mod 系统**：方块注册表数据驱动（`blocks.json`），`game\mods\` 放文件夹/zip 即可**新增方块**或**改造已有方块**，免构建自带贴图
 - 🎨 **资源包系统**：MC 式三层命名空间（`assets/<ns>/...`），资源包可覆盖 mod 与本体的贴图/背景/语言（资源包 > mods 的优先级语义，与 MC 一致）
 - 🌐 **中/英/日三语**：词典文件化（`lang/*.json` 多层合并），mod/资源包可增量补词条；Fusion Pixel 像素字体 / 系统字体切换
@@ -40,7 +41,8 @@
 
 ```
 ├─ src/            # TypeScript 源码（全英文注释）
-│  ├─ ecs/         # 父调度器 World + 实体存储 store + 组件(components/) + 系统(systems/)
+│  ├─ voxel/       # 体素世界：区块存储 chunk + 区块世界 world（环形循环/有界 Y/生成器/编辑脏标记）+ 射线检测 raycast
+│  ├─ ecs/         # 父调度器 World + 实体存储 store + 组件(components/) + 系统(systems/：输入/控制器/移动/碰撞/挖掘放置/区块流式加载)
 │  ├─ rendering/   # 相机视角系统、纹理/资源包链解析、3D 图标烘培
 │  ├─ platform/    # NW.js 宿主、键位绑定、原始输入、指针锁定、日志、性能采样
 │  └─ ui/          # 主菜单/暂停设置/可视化键盘换绑/HUD/背包/三语/缩放/字体
@@ -49,7 +51,8 @@
 ├─ launcher/       # C 启动器源码（多实例槽位分配）
 ├─ scripts/        # get-nw 下载器 / rearrange 绿色打包
 ├─ app/            # NW.js manifest 源（rearrange 拷为 game/core/package.json）
-├─ AGENTS.md       # AI 协作指南：架构地图 / 数据流 / 铁律（英文）
+├─ AGENTS.md       # AI 协作指南：架构地图 / 数据流 / 铁律（英文，只描述"现状"）
+├─ ROADMAP.md      # AI 路线图：未完成的 / 待办的 / 故意不做的（英文，只描述"计划"）
 └─ release/VoxelEngineNWWeb/   # 构建产物（免安装目录）
    └─ game/
       ├─ core/           # NW.js 运行时 + 游戏 + rawinput.node
@@ -69,7 +72,7 @@
 
 ```bash
 npm install                # 安装依赖
-npm run get-nw             # 下载 NW.js SDK 到 nwjs/
+npm run get-nw             # 下载 NW.js 普通版（非 SDK）到 nwjs/
 npm run build              # tsc + vite + 打包 + 编译启动器
 ```
 
@@ -91,7 +94,7 @@ rawinput 插件提供窗口出屏后的原始鼠标输入，**缺失时游戏自
 
    ```bash
    mkdir -p rawinput/lib
-   cp nwjs/nwjs-sdk-v0.115.0-win-x64/node.dll rawinput/lib/libnode.dll
+   cp nwjs/nwjs-v0.115.0-win-x64/node.dll rawinput/lib/libnode.dll
    # 生成导入库 (MinGW binutils 的 dlltool; DEF 文件可用 pexports/gendef 生成)
    gendef rawinput/lib/libnode.dll
    dlltool -d rawinput/lib/libnode.def -D libnode.dll -l rawinput/lib/libnode.dll.a

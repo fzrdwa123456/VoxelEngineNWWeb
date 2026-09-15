@@ -17,8 +17,8 @@ export class GamemodeController {
 
   constructor(
     private readonly hud: Hud,
-    private readonly fps: { mode: MoveMode; setMode(mode: MoveMode): void },
-    private readonly sendLog: (line: string) => void,
+    private readonly input: { mode: MoveMode; setMode(mode: MoveMode): void },
+    private readonly logDebug: (line: string) => void,
   ) {
     this.menu = document.createElement("div");
     this.menu.style.cssText =
@@ -75,7 +75,7 @@ export class GamemodeController {
   }
 
   private open(): void {
-    this.sel = GM_MODES.indexOf(this.fps.mode);
+    this.sel = GM_MODES.indexOf(this.input.mode);
     this.menu.style.display = "block";
     this.menuOpen = true;
     this.render();
@@ -97,9 +97,9 @@ export class GamemodeController {
     this.menuOpen = false;
     this.menu.style.display = "none";
     const m = GM_MODES[this.sel];
-    if (m !== this.fps.mode) {
-      this.fps.setMode(m);
-            this.sendLog(`MODE switch -> ${m} (${MODE_NAMES[m]})`);
+    if (m !== this.input.mode) {
+      this.input.setMode(m);
+            this.logDebug(`MODE switch -> ${m} (${MODE_NAMES[m]})`);
     }
   }
 }

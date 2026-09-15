@@ -5,7 +5,7 @@
 // Gating for view rotation lives inside PlayerInputSystem.applyRawInput:
 // applied only when pointer lock was cancelled by Chromium and the window is partially offscreen (free-mouse mode),
 // discarded when locked/in menus, avoiding double counting with movementX or rotating the view behind menus.
-import { sendLog } from "./shell";
+import { logDebug } from "./shell";
 
 interface RawMouseNative {
   pollDelta(): { dx: number; dy: number };
@@ -34,13 +34,13 @@ export function startRawInput(): RawInputHandle {
     const mod = req(nodePath.join(coreDir, "rawinput.node"));
     nativeListener = new mod.RawMouseListener();
     nativeModule = mod;
-        sendLog("RAWINPUT plugin loaded, raw input listener started");
+        logDebug("RAWINPUT plugin loaded, raw input listener started");
     return {
       available: true,
       poll: () => nativeListener!.pollDelta(),
     };
   } catch (e) {
-        sendLog(`RAWINPUT load failed (no raw-input fallback, game unaffected): ${String(e)}`);
+        logDebug(`RAWINPUT load failed (no raw-input fallback, game unaffected): ${String(e)}`);
     return { available: false, poll: () => ({ dx: 0, dy: 0 }) };
   }
 }

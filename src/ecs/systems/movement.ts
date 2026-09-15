@@ -2,7 +2,10 @@
 // Query-driven: every live entity carrying CONTROL + POSITION + ORIENTATION + MOTION is moved
 // by its own control state. The player is one such entity; future AI-driven ones join free.
 // Walking uses horizontal movement + vertical gravity along up; flying/spectating use
-// MC-style controls (horizontal WASD + Space/Ctrl vertical). No terrain collision (world removed).
+// MC-style controls (horizontal WASD + Space/Ctrl vertical). This system only integrates the
+// tick provisionally: ecs/systems/collision.ts runs right after it, re-integrates the same
+// displacement in sub-steps and resolves it against the voxel world (it also owns
+// motion.onGround and zeroes motion.vy on contact).
 import * as THREE from "three/webgpu";
 import { getBind } from "../../platform/keybinds";
 import { CONTROL, MOTION, ORIENTATION, POSITION, type ControlC, type MotionC, type OrientationC } from "../components/Player";
@@ -13,8 +16,13 @@ import type { PlayerInputSystem } from "./input";
 export const GRAVITY = 24;
 export const WALK_SPEED = 4.2;
 export const FLY_SPEED = 4.2;
-/** Sprint multiplier (E:\mc SPRINTM) — test-only high speed: sprint fly ≈ 105 units/s;
- *  set back to 1.65 for normal feel */
+/** Sprint multiplier — TEST-ONLY high speed: sprint fly ≈ 105 units/s.
+ *  The intended gameplay value is 1.65 (MC-style sprint ratio); set SPRINT_MULT back to
+ *  1.65 to restore the normal feel. Both numbers are fixed inputs of THIS repo: they were
+ *  carried over from an external reference project that is NOT part of this tree, so they
+ *  cannot be re-derived from anything here — treat them as design decisions, not as values
+ *  to recompute. The number lives ONLY here; other modules point at this constant instead
+ *  of restating it. */
 const SPRINT_MULT = 25;
 
 // Scratch vectors (avoid per-step allocations)

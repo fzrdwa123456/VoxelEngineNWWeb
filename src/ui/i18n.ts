@@ -5,7 +5,7 @@
 // Missing words fall back to English (aligning with MC's en_us convention), then to the key itself. Only user-visible UI copy is covered;
 // debug.log diagnostic lines stay Chinese.
 import { resolveAllBytes } from "../rendering/textures";
-import { sendLog } from "../platform/shell";
+import { logDebug } from "../platform/shell";
 
 export type Lang = "zh" | "en" | "ja";
 
@@ -55,7 +55,7 @@ export function onLangChange(cb: () => void): void {
 /** Load the language from config at startup (invalid values fall back to Chinese); entry counts logged to debug.log to confirm the file chain works */
 export function loadLang(l: unknown): void {
   if (l === "zh" || l === "en" || l === "ja") current = l;
-  sendLog(
+  logDebug(
         `I18N dictionaries loaded (lang/*.json layered merge): zh=${Object.keys(STRINGS.zh).length} en=${Object.keys(STRINGS.en).length} ja=${Object.keys(STRINGS.ja).length} entries (${resolveAllBytes("lang/zh.json").length} layer(s) of zh.json)`,
   );
 }
