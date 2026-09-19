@@ -1,0 +1,2470 @@
+// ===== ECS invariant check: compile the ECS half and assert what it promises =====
+// `AGENTS.md` makes claims that a type-checker cannot verify and that no human can re-derive by
+// reading: entity handles detect stale ids, a query's cache is invalidated by structural changes,
+// one process supports one World, an undeclared data dependency throws, the schedule's batches are
+// what the docs say, and the members of a batch really do commute. Those claims are exactly the ones
+// that break silently during a refactor, so they get a command.
+//
+// Everything is compiled with the SAME `tsc` the build uses, into `node_modules/.cache/` —which is
+// git-ignored, so nothing in the tracked tree is written, AND Node can still resolve `three/webgpu`
+// from there (it looks up the directory chain and finds the real `node_modules`). Neither the ECS
+// nor the systems' fixed lane import three.js or touch the DOM, which is what makes the replay
+// possible; the VOXEL resource is only ever used through `isSolid()`, so a real `VoxelWorld` serves
+// as one.
+//
+// Usage:  node scripts/check-ecs.mjs        (or: npm run check:ecs)
+// Exit:   0 = every assertion passed, 1 = something failed (each failure names itself).
+import { execFileSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { ROOT, TSC_BIN } from "./paths.mjs";
+
+const NODE = process.execPath;
+const OUT = path.join(ROOT, "node_modules", ".cache", "voxelengine-ecs-check");
+
+/** Sources to compile. tsc follows their imports, so this list is "the ECS plus the fixed lane". */
+const SOURCES = [
+  "src/ecs/World.ts",
+  "src/ecs/components/Player.ts",
+  "src/ecs/commands.ts",
+  "src/ecs/resources.ts",
+  "src/ecs/systems/snapshot.ts",
+  "src/ecs/systems/controller.ts",
+  "src/ecs/systems/movement.ts",
+  "src/ecs/systems/collision.ts",
+  "src/ecs/systems/interaction.ts",
+  // The input system: import-safe in Node (its only host dependency, platform/keybinds.ts, has no
+  // imports at all, and the DOM is touched from the constructor's listeners, never at import time).
+  "src/ecs/systems/input.ts",
+  "src/ecs/systems/chunkstream.ts",
+  "src/ecs/systems/diagnostics.ts",
+  // The widget layer: pure data + one pure style function + the action table + the reconciler. None of
+  // them touches the DOM at import time, which is what lets this gate load them.
+  "src/ecs/ui/theme.ts",
+  "src/ecs/ui/widgets.ts",
+  "src/ecs/ui/actions.ts",
+  "src/ecs/ui/bindings.ts",
+  "src/ecs/ui/system.ts",
+  // The three UI systems that own state the views used to keep privately: the F3+F4 picker (key edges
+  // -> PICKER_STATE -> a SetMode command), the HUD toast (a wall-clock deadline in a resource), and the
+  // key bind panels + drag gesture (KEYBIND_GESTURE as data, the panels derived every frame).
+  "src/ecs/ui/picker.ts",
+  "src/ecs/ui/toast.ts",
+  "src/ecs/ui/loading.ts",
+  "src/ecs/ui/hud.ts",
+  "src/ecs/ui/keybind.ts",
+  "src/ecs/ui/navigation.ts",
+  "src/rendering/camera-view.ts",
+  // Import-safe in Node: the settings repair is a PURE comparison and lives in its own
+  // dependency-free module (the Tauri shell it belongs to imports @tauri-apps/api, which Node's
+  // CJS require cannot load) — which is exactly what the boot check asserts here.
+  "src/platform/settings-diff.ts",
+  // Import-safe in Node: no DOM at import time, and the WebGPU renderer is created lazily on the first
+  // bake —so the icon cache's synchronous reader can be asserted here.
+  "src/rendering/blockicons.ts",
+  "src/voxel/world.ts",
+];
+
+let passed = 0;
+let failed = false;
+const ok = (name) => {
+  console.log(`  [ok]    ${name}`);
+  passed++;
+};
+const fail = (name, err) => {
+  console.log(`  [FAIL]  ${name}: ${err instanceof Error ? err.message : String(err)}`);
+  failed = true;
+};
+function check(name, fn) {
+  try {
+    fn();
+    ok(name);
+  } catch (err) {
+    fail(name, err);
+  }
+}
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message ?? "assertion failed");
+};
+const equal = (actual, expected, message) => {
+  if (actual !== expected) throw new Error(`${message ?? "value"}: expected ${expected}, got ${actual}`);
+};
+/** SOA columns are Float32Array, so a float64 literal reads back quantized. The collision SKIN is
+ *  1e-3, four orders larger, so the quantization cannot change behaviour. */
+const close = (actual, expected, message) => {
+  if (!(Math.abs(actual - expected) < 1e-6)) {
+    throw new Error(`${message ?? "value"}: expected ~${expected}, got ${actual}`);
+  }
+};
+/** For quantities collision deliberately offsets (it leaves a body SKIN clear of the surface) */
+const near = (actual, expected, eps, message) => {
+  if (!(Math.abs(actual - expected) < eps)) {
+    throw new Error(`${message ?? "value"}: expected ~${expected} (+/-${eps}), got ${actual}`);
+  }
+};
+
+// ===== compile =====
+console.log("=== check-ecs: compile the ECS half -> " + OUT + " ===");
+rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+writeFileSync(path.join(OUT, "package.json"), '{ "type": "commonjs" }\n');
+try {
+  execFileSync(
+    NODE,
+    [
+      TSC_BIN,
+      ...SOURCES,
+      "--ignoreConfig",
+      "--outDir",
+      OUT,
+      "--rootDir",
+      "src",
+      "--module",
+      "commonjs",
+      "--target",
+      "es2022",
+      "--strict",
+      "--skipLibCheck",
+      "--types",
+      "node",
+      "--lib",
+      "es2022,dom,dom.iterable",
+    ],
+    { cwd: ROOT, stdio: "pipe" },
+  );
+  ok("tsc compiled the ECS half");
+} catch (err) {
+  const output = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim();
+  fail("tsc", new Error(output || "compilation failed"));
+  console.log("\nRESULT: FAILED");
+  process.exit(1);
+}
+
+const require = createRequire(import.meta.url);
+const load = (rel) => require(path.join(OUT, rel));
+const { World } = load("ecs/World.js");
+const { Schedule } = load("ecs/core/schedule.js");
+const { entityIndex } = load("ecs/core/entity.js");
+const C = load("ecs/components/Player.js");
+const { defineComponent, defineRecord } = load("ecs/core/component.js");
+const { defineResource } = load("ecs/core/resource.js");
+const { defineCommand } = load("ecs/core/commands.js");
+const {
+  canControl,
+  createLoadingState,
+  createInputState,
+  createKeyEventLog,
+  createPickerState,
+  createToastState,
+  createUiModalState,
+  LOADING_STATE,
+  INPUT_STATE,
+  isMenuUi,
+  isModalUi,
+  KEY_EVENTS,
+  LOCAL_PLAYER,
+  PICKER_STATE,
+  publishKeyEdge,
+  TOAST,
+  UI_MODAL,
+  VOXEL,
+} = load("ecs/resources.js");
+const { SelectSlot, SetLoadingStage, SetMode, ShowToast, SwapSlots, Teleport } = load("ecs/commands.js");
+const { TERRAIN_TOP_Y, VoxelWorld } = load("voxel/world.js");
+
+// ===== 1. core: handles, storage, queries =====
+console.log("\n--- entities, component storage and queries ---");
+
+check("a stale handle is detectable, and the slot is recycled with a new generation", () => {
+  const world = new World();
+  const A = defineComponent("check-a", { x: "f32" });
+  const a = world.spawn();
+  const b = world.spawn();
+  equal(world.store.entities.isAlive(a), true, "alive");
+  equal(world.despawn(a), true, "despawn");
+  equal(world.store.entities.isAlive(a), false, "stale handle must not report alive");
+  equal(world.despawn(a), false, "double despawn is a no-op");
+  const c = world.spawn();
+  equal(entityIndex(c), entityIndex(a), "the slot is reused");
+  equal(world.store.entities.isAlive(a), false, "the old handle stays dead after recycling");
+  equal(world.store.entities.isAlive(b), true, "the other entity is untouched");
+  void A;
+});
+
+check("SOA values survive column growth, and a recycled row starts zeroed", () => {
+  const world = new World();
+  const P = defineComponent("check-p", { x: "f32", y: "f32" });
+  const first = world.spawn();
+  world.insert(first, P, { x: 7, y: -2 });
+  equal(P.x[entityIndex(first)], 7, "written value");
+  world.despawn(first);
+  const again = world.spawn();
+  world.insert(again, P);
+  equal(P.x[entityIndex(again)], 0, "a recycled row must not inherit the previous occupant");
+  const ids = [again];
+  for (let i = 0; i < 3000; i++) {
+    const e = world.spawn();
+    world.insert(e, P, { x: i });
+    ids.push(e);
+  }
+  equal(P.x[entityIndex(ids[0])], 0, "the first row survived the reallocation");
+  equal(P.x[entityIndex(ids[3000])], 2999, "the last row is correct after doubling");
+  equal(world.query(P).length, 3001, "every carrier is found");
+});
+
+check("RECORD components keep their identity; a dead occupant's record does not resurface", () => {
+  const world = new World();
+  const R = defineRecord("check-r", () => ({ vy: 0 }));
+  const a = world.spawn();
+  world.insert(a, R);
+  const record = world.get(a, R);
+  record.vy = 5;
+  equal(world.get(a, R), record, "the record identity is stable");
+  world.despawn(a);
+  const b = world.spawn();
+  equal(entityIndex(b), entityIndex(a), "same slot");
+  equal(world.has(b, R), false, "the component is detached");
+  equal(world.get(b, R), undefined, "the old record must not resurface");
+  world.insert(b, R);
+  assert(world.get(b, R) !== record, "a fresh record is created");
+});
+
+check("a query caches its result and refreshes on structural change", () => {
+  const world = new World();
+  const A = defineComponent("check-qa", { v: "f32" });
+  const B = defineComponent("check-qb", { v: "f32" });
+  const e1 = world.spawn();
+  const e2 = world.spawn();
+  world.insert(e1, A);
+  world.insert(e1, B);
+  world.insert(e2, A);
+  const query = world.query(A, B);
+  equal(world.query(A, B), query, "the query is cached per component set");
+  equal(query.length, 1, "one match");
+  world.insert(e2, B);
+  equal(query.length, 2, "structural change invalidates the cache");
+  world.despawn(e2);
+  equal(query.length, 1, "despawn invalidates it again");
+  equal(world.query(A).length, 1, "removing B did not touch A");
+});
+
+check("one process supports one World (component storage is per definition)", () => {
+  // A probe component, not a real one: claiming a real component here would make it unusable for
+  // the Worlds below, which is exactly the constraint being tested.
+  const Probe = defineComponent("check-probe", { v: "f32" });
+  const first = new World();
+  first.insert(first.spawn(), Probe, { v: 1 });
+  const second = new World();
+  const entity = second.spawn();
+  let threw = false;
+  try {
+    second.insert(entity, Probe, { v: 2 });
+  } catch (err) {
+    threw = /already bound to another World/.test(String(err));
+  }
+  assert(threw, "a second World must be refused, not silently share rows");
+});
+
+check("commands are deferred to a barrier; resources are typed and guarded", () => {
+  const world = new World();
+  const log = [];
+  const Cmd = defineCommand("check-log", (_w, payload) => log.push(payload));
+  const TIME = defineResource("check-time");
+  world.insertResource(TIME, { dt: 1 });
+  equal(world.resource(TIME).dt, 1, "resource read");
+  let threw = false;
+  try {
+    world.insertResource(TIME, { dt: 2 });
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a duplicate resource insert throws");
+  world.addSystem({ name: "noop", stage: "fixed", run: () => {} });
+  world.start();
+  world.commands.send(Cmd, "a");
+  equal(log.length, 0, "nothing runs before a barrier");
+  world.stepFixed(1 / 120);
+  equal(log.join(""), "a", "the barrier applied it");
+});
+
+// ===== 2. the player entity: components and commands =====
+console.log("\n--- the player entity: components, spawn helpers, commands ---");
+
+// ONE World for everything below: component storage is owned per definition, so a second World that
+// touches the player's components would be refused —which is the constraint asserted a moment ago.
+const world = new World();
+const rawVoxel = new VoxelWorld();
+let solidCalls = 0;
+world.insertResource(VOXEL, {
+  isSolid: (x, y, z) => {
+    solidCalls++;
+    return rawVoxel.isSolid(x, y, z);
+  },
+});
+world.insertResource(INPUT_STATE, createInputState());
+world.insertResource(UI_MODAL, createUiModalState());
+// The three resources the UI systems own: key edges (published by the device layer), the F3+F4 picker's
+// state, and the toast with its wall-clock deadline.
+world.insertResource(KEY_EVENTS, createKeyEventLog());
+world.insertResource(PICKER_STATE, createPickerState());
+world.insertResource(TOAST, createToastState());
+const localPlayer = C.spawnPlayer(world, { x: 1, y: 2, z: 3 }, ["stone", "dirt"]);
+world.insertResource(LOCAL_PLAYER, localPlayer);
+
+// The fixed lane the physics checks replay: snapshot -> test gravity -> collision. Access is
+// declared on the TEST system too, because an undeclared system is invisible to the conflict rule.
+const { PositionSnapshotSystem, SNAPSHOT_ACCESS } = load("ecs/systems/snapshot.js");
+const { CollisionSystem, COLLISION_ACCESS } = load("ecs/systems/collision.js");
+const snapshot = new PositionSnapshotSystem(world);
+const collision = new CollisionSystem(world);
+const falling = [];
+world.addSystem({
+  name: "motion.snapshot",
+  stage: "fixed",
+  ...SNAPSHOT_ACCESS,
+  run: () => snapshot.step(),
+});
+world.addSystem({
+  name: "check.gravity",
+  stage: "fixed",
+  after: ["motion.snapshot"],
+  reads: [C.MOTION],
+  writes: [C.POSITION],
+  run: () => {
+    for (const entity of falling) {
+      const index = entityIndex(entity);
+      const motion = world.get(entity, C.MOTION);
+      motion.vy -= 24 / 120;
+      C.POSITION.y[index] += motion.vy / 120;
+    }
+  },
+});
+world.addSystem({
+  name: "player.collision",
+  stage: "fixed",
+  after: ["check.gravity"],
+  ...COLLISION_ACCESS,
+  run: () => collision.step(),
+});
+world.start();
+// Terrain must exist: reads do not generate, so a missing column is a fall-through.
+for (let cx = 0; cx <= 2; cx++) {
+  for (let cz = 0; cz <= 2; cz++) {
+    for (let cy = 0; cy < 8; cy++) rawVoxel.ensureChunk(cx, cy, cz);
+  }
+}
+
+let nextX = 100;
+const newPlayer = (items = []) => C.spawnPlayer(world, { x: nextX++, y: 2, z: 3 }, items);
+
+check("spawnPlayer attaches the full component set with the documented defaults", () => {
+  const player = newPlayer();
+  const index = entityIndex(player);
+  for (const component of [
+    C.POSITION,
+    C.PREV_POSITION,
+    C.ORIENTATION,
+    C.VIEW,
+    C.MOTION,
+    C.CONTROL,
+    C.BODY,
+    C.REACH,
+    C.INTERACTION,
+    C.INVENTORY,
+    C.PLAYER,
+  ]) {
+    equal(world.has(player, component), true, `has ${component.name}`);
+  }
+  equal(C.POSITION.y[index], 2, "position");
+  equal(C.PREV_POSITION.z[index], 3, "the sweep origin starts where the body is");
+  close(C.BODY.halfWidth[index], C.HUMANOID_BODY.halfWidth, "halfWidth");
+  close(C.BODY.eyeHeight[index], C.HUMANOID_BODY.eyeHeight, "eyeHeight");
+  equal(C.REACH.distance[index], C.DEFAULT_REACH, "reach");
+  equal(C.ORIENTATION.fwdZ[index], -1, "initial heading");
+  equal(C.PLAYER.fieldNames.length, 0, "the marker carries no data");
+});
+
+check("starting items fill the hotbar and nothing else", () => {
+  const player = newPlayer(["a", "b", "c"]);
+  const inventory = world.get(player, C.INVENTORY);
+  equal(inventory.slots.length, C.INVENTORY_SLOTS, "slot count");
+  equal(inventory.selected, 0, "selection");
+  equal(inventory.slots[0].type, "a", "first slot");
+  equal(inventory.slots[3], null, "past the items");
+  equal(inventory.slots[C.HOTBAR_SLOTS], null, "the backpack stays empty");
+});
+
+check("SelectSlot / SwapSlots are deferred to a barrier and clamped", () => {
+  const player = newPlayer(["a", "b"]);
+  const inventory = world.get(player, C.INVENTORY);
+  world.commands.send(SelectSlot, { entity: player, slot: 4 });
+  world.commands.send(SwapSlots, { entity: player, a: 0, b: 30 });
+  equal(inventory.selected, 0, "nothing before the barrier");
+  world.stepFixed(1 / 120);
+  equal(inventory.selected, 4, "selection applied");
+  equal(inventory.slots[30].type, "a", "swap applied");
+  for (const [name, payload] of [
+    ["over", { entity: player, slot: 999 }],
+    ["negative", { entity: player, slot: -1 }],
+    ["fractional", { entity: player, slot: 1.5 }],
+  ]) {
+    world.commands.send(SelectSlot, payload);
+    world.stepFixed(1 / 120);
+    equal(inventory.selected, 4, `a ${name} selection is ignored`);
+  }
+});
+
+check("Teleport moves POSITION and PREV_POSITION together and clears the view deltas", () => {
+  const player = newPlayer();
+  const index = entityIndex(player);
+  C.VIEW.yawDelta[index] = 5;
+  C.POSITION.x[index] = 99;
+  world.commands.send(Teleport, { entity: player, x: 7, y: 8, z: 9 });
+  world.stepFixed(1 / 120);
+  equal(C.POSITION.x[index], 7, "position");
+  equal(C.PREV_POSITION.x[index], 7, "sweep origin, or the next sweep starts elsewhere");
+  equal(C.VIEW.yawDelta[index], 0, "buffered view deltas");
+});
+
+check("SetMode resets flying and the vertical state", () => {
+  const player = newPlayer();
+  const control = world.get(player, C.CONTROL);
+  const motion = world.get(player, C.MOTION);
+  control.flying = true;
+  motion.vy = 7.5;
+  motion.onGround = true;
+  world.commands.send(SetMode, { entity: player, mode: "fly" });
+  world.stepFixed(1 / 120);
+  equal(control.mode, "fly", "mode");
+  equal(control.flying, false, "flying");
+  equal(motion.vy, 0, "vy");
+  equal(motion.onGround, false, "onGround");
+});
+
+check("a generic movable entity is not the player and cannot edit blocks", () => {
+  const npc = C.spawnMovable(world, { x: 300, y: 130, z: 300 });
+  equal(world.has(npc, C.PLAYER), false, "no PLAYER marker: the input freeze never applies");
+  equal(world.has(npc, C.VIEW), false, "no buffered mouse deltas");
+  equal(world.has(npc, C.REACH), false, "no reach");
+  equal(world.has(npc, C.INTERACTION), false, "no rate limits");
+  equal(world.has(npc, C.INVENTORY), false, "no items");
+  // movement's and collision's and the snapshot's queries must all accept it
+  assert(world.query(C.CONTROL, C.POSITION, C.ORIENTATION, C.MOTION).indices.includes(entityIndex(npc)), "movement's query");
+  assert(world.query(C.CONTROL, C.POSITION, C.MOTION, C.BODY, C.PREV_POSITION).indices.includes(entityIndex(npc)), "collision's query");
+  assert(world.query(C.POSITION, C.PREV_POSITION).indices.includes(entityIndex(npc)), "the snapshot's query");
+});
+
+// ===== 3. the fixed lane: physics =====
+console.log("\n--- the fixed lane: snapshot, gravity, collision ---");
+
+const physics = world;
+const drop = (x) => {
+  const entity = C.spawnMovable(world, { x, y: 200, z: 5.5 });
+  falling.push(entity);
+  return entity;
+};
+const ticks = (n) => {
+  for (let i = 0; i < n; i++) world.stepFixed(1 / 120);
+};
+
+check("a non-player entity lands, and PREV_POSITION tracks it", () => {
+  const npc = drop(5.5);
+  const index = entityIndex(npc);
+  ticks(400);
+  const motion = physics.get(npc, C.MOTION);
+  equal(motion.onGround, true, "gravity, collision and onGround all worked for an NPC");
+  near(C.POSITION.y[index], TERRAIN_TOP_Y + 1.6, 0.01, "landing height (collision leaves SKIN clearance)");
+  assert(
+    Math.abs(C.PREV_POSITION.y[index] - 200) > 50,
+    "PREV_POSITION must have left the spawn height —the bug was that only the local player's row was written",
+  );
+  assert(
+    Math.abs(C.POSITION.y[index] - C.PREV_POSITION.y[index]) < 0.25,
+    "PREV_POSITION trails POSITION by at most one tick",
+  );
+});
+
+check("the sweep stays cheap once resting (no replay of a stale origin)", () => {
+  const npc = drop(6.5);
+  ticks(400);
+  equal(physics.get(npc, C.MOTION).onGround, true, "settled");
+  solidCalls = 0;
+  ticks(20);
+  const perTick = solidCalls / 20;
+  assert(perTick < 40, `expected a few isSolid() calls per resting tick, got ${perTick}`);
+});
+
+check("an entity with no PREV_POSITION is skipped, not swept from a bogus origin", () => {
+  const orphan = physics.spawn();
+  physics.insert(orphan, C.POSITION, { x: 20.5, y: 200, z: 20.5 });
+  physics.insert(orphan, C.MOTION, { vy: 0, onGround: false });
+  physics.insert(orphan, C.CONTROL, { keys: new Set(), mode: "walk", flying: false });
+  physics.insert(orphan, C.BODY, { halfWidth: 0.3, height: 1.8, eyeHeight: 1.6 });
+  const index = entityIndex(orphan);
+  assert(
+    !physics.query(C.CONTROL, C.POSITION, C.MOTION, C.BODY, C.PREV_POSITION).indices.includes(index),
+    "collision must not resolve it",
+  );
+  C.POSITION.y[index] = 190;
+  ticks(5);
+  equal(C.POSITION.y[index], 190, "untouched: the loud failure is 'falls', not 'jitters'");
+});
+
+check("the chunk stream can say whether a window still needs warming", () => {
+  // The world-entry screen is only honest if it covers real work, and a RE-entry into a window that is
+  // still built has none: `needsWarmUp` is what keeps that from being a one-frame flash of the screen.
+  // Driven on a stub voxel whose chunks are all AIR (getChunk -> null), so no mesh is ever built and
+  // the mesher's material — which needs a DOM — is never touched.
+  const { ChunkStreamSystem } = load("ecs/systems/chunkstream.js");
+  const streamWorld = new World();
+  streamWorld.insertResource(VOXEL, {
+    ensureChunk() {},
+    getChunk: () => null,
+    isSolid: () => false,
+    takeDirty: () => [],
+  });
+  // The player HANDLE from the world above: resources are per World, and the POSITION column is shared
+  // per definition (a second World may not INSERT a component — the one-World rule — but the chunk
+  // stream only reads the row).
+  streamWorld.insertResource(LOCAL_PLAYER, localPlayer);
+  const stream = new ChunkStreamSystem(streamWorld, { add() {}, remove() {} });
+
+  assert(stream.needsWarmUp(1, 3), "a window that has never been built needs warming");
+  stream.prime(1, 3);
+  // What `warmUp` does, without the per-batch yields: a sync loop the gate can run.
+  for (let i = 0; i < 500 && stream.pendingCount() > 0; i++) stream.step();
+  equal(stream.pendingCount(), 0, "every chunk in the window is decided");
+  equal(stream.needsWarmUp(1, 3), false, "…so a re-entry into THIS window shows no screen");
+  assert(stream.needsWarmUp(900, 900), "a window somewhere else still needs one");
+  // (read directly: the section's `readSource`/`stripComments` helpers are defined further down)
+  const mainSrc = require("node:fs").readFileSync(path.join(ROOT, "src", "main.ts"), "utf8");
+  assert(
+    /needsWarmUp\(SPAWN\.x, SPAWN\.z\)/.test(mainSrc),
+    "…and the entry driver asks exactly that question, about the position it is entering",
+  );
+});
+
+// ===== 5. the UI widget layer =====
+console.log("\n--- the UI widget layer: theme, prefabs, migrated surfaces ---");
+
+const readSource = (rel) => require("node:fs").readFileSync(path.join(ROOT, rel), "utf8");
+const countOf = (s, re) => (s.match(re) || []).length;
+/** Comments document what was removed ("the reconciler replaced onLangChange"), so a source-text
+ *  assertion has to look at CODE —otherwise the note explaining the migration fails the migration. */
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+check("the theme is the ONLY place a colour literal lives", () => {
+  const theme = readSource("src/ecs/ui/theme.ts");
+  assert(countOf(theme, /#[0-9a-fA-F]{3,8}\b/g) > 0, "the theme defines the colours");
+  for (const rel of [
+    "src/ecs/ui/widgets.ts",
+    "src/ecs/ui/actions.ts",
+    "src/ecs/ui/system.ts",
+    // …and every MIGRATED surface, which is what makes the rule worth having: the menus used to carry
+    // 45 + 21 literals between them.
+    "src/ui/hud.ts",
+    "src/ui/menu.ts",
+    "src/ui/mainmenu.ts",
+    // …and the three UI systems the surfaces migrated INTO: a colour literal there would be just as
+    // wrong as one in a view (they write widget data; the theme owns every colour).
+    "src/ecs/ui/picker.ts",
+    "src/ecs/ui/toast.ts",
+    "src/ecs/ui/keybind.ts",
+  ]) {
+    equal(
+      countOf(stripComments(readSource(rel)), /#[0-9a-fA-F]{3,8}\b|rgba?\(/g),
+      0,
+      `${rel} must not carry a colour literal`,
+    );
+  }
+  // and the composition root must actually register it, or the reconciler throws at boot
+  assert(/insertResource\(UI_THEME/.test(readSource("src/main.ts")), "main.ts registers UI_THEME");
+});
+
+check("every recipe resolves to a style, and state changes it", () => {
+  const { recipeStyle, defaultUiTheme } = load("ecs/ui/theme.js");
+  const theme = defaultUiTheme();
+  const recipes = [
+    "text.label",
+    "loading.root",
+    "loading.title",
+    "loading.status",
+    "loading.track",
+    "loading.segment",
+    "loading.note",
+    "loading.noteText",
+    "hud.crosshair",
+    "hud.crosshairH",
+    "hud.crosshairV",
+    "hud.toast",
+    "debug.panel",
+    "debug.line",
+    "picker.panel",
+    "picker.row",
+    "picker.title",
+    "picker.item",
+    // The menu/settings/keyboard/inventory roles. `recipeStyle` has no default branch, so a role that
+    // is declared in the union but missing from the table would return undefined and land in cssText
+    // as the string "undefined" —this list is what makes that loud.
+    "menu.root",
+    "menu.backdrop",
+    "menu.backdropImage",
+    "menu.panel",
+    "menu.title",
+    "menu.subTitle",
+    "menu.btn",
+    "menu.stack",
+    "settings.panel",
+    "settings.panelWide",
+    "settings.panelXl",
+    "settings.title",
+    "settings.label",
+    "settings.value",
+    "settings.range",
+    "settings.columns",
+    "settings.column",
+    "settings.columnLabel",
+    "settings.btn",
+    "settings.btnRow",
+    "settings.choice",
+    "settings.scrollArea",
+    "settings.row",
+    "settings.rowName",
+    "settings.rowMeta",
+    "settings.empty",
+    "kb.board",
+    "kb.hint",
+    "kb.flex",
+    "kb.keys",
+    "kb.side",
+    "kb.sideTitle",
+    "kb.chips",
+    "kb.chip",
+    "kb.row",
+    "kb.key",
+    "kb.keycap",
+    "kb.keyLegend",
+    "kb.bottom",
+    "kb.title",
+    "kb.tower",
+    "kb.mouse",
+    "kb.numpad",
+    "inv.hotbar",
+    "inv.panel",
+    "inv.inner",
+    "inv.grid",
+    "inv.title",
+    "inv.cell",
+    "inv.slot",
+    "inv.icon",
+    "inv.count",
+  ];
+  for (const recipe of recipes) {
+    assert(recipeStyle(recipe, { selected: false }, theme).length > 8, `${recipe} produced no style`);
+  }
+  assert(
+    recipeStyle("picker.item", { selected: true }, theme) !==
+      recipeStyle("picker.item", { selected: false }, theme),
+    "selection must change the item's style",
+  );
+  // The loading bar is filled by DATA (`active` per segment), so its role has to answer to that
+  // state — otherwise the loading bar would draw the same face filled and empty.
+  assert(
+    recipeStyle("loading.segment", { active: true }, theme) !==
+      recipeStyle("loading.segment", { active: false }, theme),
+    "an engaged segment must look different from an empty one",
+  );
+});
+
+// ONE widget World for every check in this section: component storage lives on the definition, so a
+// second World claiming UI_TREE would throw (see the one-World rule above).
+const widgetWorld = new World();
+/** The widget layer, for every check in this section (the prefabs, the components, the setters) */
+const W = load("ecs/ui/widgets.js");
+
+check("widget prefabs build the tree the reconciler expects", () => {
+  const W = load("ecs/ui/widgets.js");
+  const uiWorld = widgetWorld;
+  const panel = W.spawnPanel(uiWorld, null, "picker.panel", { hidden: true });
+  const row = W.spawnPanel(uiWorld, panel, "picker.row");
+  const label = W.spawnLabel(uiWorld, row, "picker.item", "mode.walk");
+
+  equal(uiWorld.get(panel, W.UI_TREE).parent, 0, "a root's parent is NULL_ENTITY");
+  equal(uiWorld.get(label, W.UI_TREE).parent, row, "the label's parent is the row");
+  equal(uiWorld.get(label, W.UI_LOOK).recipe, "picker.item", "the recipe is carried through");
+  equal(uiWorld.get(label, W.UI_TEXT).key, "mode.walk", "the label text is the i18n KEY");
+  equal(uiWorld.get(label, W.UI_TEXT).raw, false, "…not a literal");
+  equal(uiWorld.get(panel, W.UI_STATE).hidden, true, "the panel starts hidden");
+  // creation order ascends, which is what lets the reconciler append parents before children
+  assert(uiWorld.get(panel, W.UI_TREE).order < uiWorld.get(row, W.UI_TREE).order, "parent before row");
+  assert(uiWorld.get(row, W.UI_TREE).order < uiWorld.get(label, W.UI_TREE).order, "row before label");
+  equal(uiWorld.query(W.UI_TREE).length, 3, "the query the reconciler iterates finds all three");
+
+  // the writers are plain field writes, so a system may call them (iron rule 1)
+  W.setUiSelected(uiWorld, label, true);
+  equal(uiWorld.get(label, W.UI_STATE).selected, true, "selection is data");
+  W.setUiVisible(uiWorld, row, false);
+  equal(uiWorld.get(row, W.UI_STATE).hidden, true, "visibility is data, not a marker");
+  W.setUiText(uiWorld, label, "42", true);
+  equal(uiWorld.get(label, W.UI_TEXT).raw, true, "a raw writer switches to a literal");
+  equal(uiWorld.get(label, W.UI_TEXT).key, "42", "…and stores it verbatim");
+});
+
+check("the reconciler writes the DOM from data: no wipe of a recipe, and a scroll list starts at the top", () => {
+  // The reconciler writes a few LONGHANDS (background-image, background-color, justify-content) after
+  // the recipe's cssText. A longhand write deletes the same property out of the shorthand the recipe
+  // used, and for a <button> that means falling back to the browser's own face —which is how every
+  // button and choice in the menus turned light grey (white) until the pointer touched it. This runs
+  // the real system against a minimal DOM stub and asserts the two halves of the rule.
+  const W = load("ecs/ui/widgets.js");
+  const { UiRenderSystem } = load("ecs/ui/system.js");
+  const { defaultUiTheme, UI_THEME } = load("ecs/ui/theme.js");
+  const { createUiActions, UI_ACTIONS } = load("ecs/ui/actions.js");
+
+  const made = [];
+  const mkEl = () => {
+    const el = {
+      children: [],
+      dataset: {},
+      style: {},
+      textContent: "",
+      title: "",
+      value: "",
+      scrollWidth: 0,
+      clientWidth: 0,
+      appendChild(child) {
+        this.children.push(child);
+        return child;
+      },
+      remove() {},
+      scrollTop: 0,
+      addEventListener() {},
+    };
+    el.style.cssText = "";
+    el.style.setProperty = (name, value) => {
+      el.style[name] = value;
+    };
+    made.push(el);
+    return el;
+  };
+
+  const previousDocument = globalThis.document;
+  const mount = mkEl();
+  globalThis.document = { createElement: () => mkEl(), elementFromPoint: () => null };
+  try {
+    // The SAME World the prefab check used (one World per component definition).
+    const world = widgetWorld;
+    world.insertResource(UI_THEME, defaultUiTheme());
+    world.insertResource(UI_ACTIONS, createUiActions());
+    const system = new UiRenderSystem(world, { mount, translate: (key) => key });
+
+    const plain = W.spawnButton(world, null, "settings.btn", "check.a", "", "label");
+    const icon = W.spawnPanel(world, null, "inv.icon", { image: { url: "", scrim: false } });
+    const choice = W.spawnButton(world, null, "settings.choice", "check.b", "v", "label", {
+      image: { url: "", scrim: false },
+    });
+    system.step();
+
+    const elOf = (recipe) => made.find((el) => el.dataset.uiRecipe === recipe);
+    const plainEl = elOf("settings.btn");
+    assert(!!plainEl, "the button was mounted");
+    assert(/background:#444444/.test(plainEl.style.cssText), "its recipe background is on the element");
+    // The write must not have happened at all for a widget with no image slot. `undefined` is the
+    // stub's way of saying "never assigned"; a real element would keep the shorthand's colour.
+    equal(plainEl.style.backgroundColor, undefined, "no backgroundColor was written over it");
+
+    const iconEl = elOf("inv.icon");
+    equal(iconEl.style.backgroundColor, "", "a widget WITH an image slot does get its tint written");
+
+    // Second half: a tint must survive the next cssText rewrite (a state change rewrites it).
+    W.setUiImage(world, choice, "", false, "#123456");
+    system.step();
+    const choiceEl = elOf("settings.choice");
+    equal(choiceEl.style.backgroundColor, "#123456", "the tint is written");
+    W.setUiSelected(world, choice, true); // changes the recipe's style -> cssText is rewritten
+    system.step();
+    assert(/background:#4a9eff/.test(choiceEl.style.cssText), "the selected style was rewritten");
+    equal(choiceEl.style.backgroundColor, "#123456", "…and the data tint was re-applied after it");
+
+    // …and the image URL itself, with the theme's scrim on top of it.
+    W.setUiImage(world, icon, "data:image/png;base64,AAAA", false);
+    system.step();
+    assert(/^url\("data:/.test(iconEl.style.backgroundImage), "the icon URL is written as a url()");
+    W.setUiImage(world, choice, "data:image/png;base64,AAAA", true);
+    system.step();
+    assert(
+      /^linear-gradient\(/.test(choiceEl.style.backgroundImage),
+      "scrim = the theme's gradient in front of the URL",
+    );
+
+    // A slider's RANGE has to reach the element, not just its value. The component carries min/max/step
+    // and the element used to keep the browser's defaults (0..100, step 1) —which is why a 30..240
+    // step-2 slider showed "100" at its far end, moved in ones, and could never reach the value its own
+    // label reads as "unlimited".
+    const slider = W.spawnSlider(world, null, "settings.range", "check.slider", "", {
+      min: 30,
+      max: 240,
+      step: 2,
+      initial: 60,
+    });
+    system.step();
+    const sliderEl = elOf("settings.range");
+    assert(!!sliderEl, "the slider was mounted");
+    equal(sliderEl.min, "30", "min reached the element");
+    equal(sliderEl.max, "240", "…and max");
+    equal(sliderEl.step, "2", "…and step");
+    equal(sliderEl.value, "60", "…and the value");
+    assert(slider, "the slider entity exists");
+
+    // ── a scrollable ROLE starts at the TOP on every visit, and its position is NOT recorded ───────
+    // What it must NOT do is what the previous attempt did: write a shared offset into a hidden subtree
+    // (a `display:none` box cannot hold one) while marking it "applied", so the list that came back was
+    // the one that had been at the top and the two settings panels disagreed. The rule is an EDGE — the
+    // frame a list (or the PANEL around it) becomes visible — and nothing else touches the position.
+    const capPanel = W.spawnPanel(world, null, "settings.panelXl", { hidden: true });
+    const capA = W.spawnPanel(world, capPanel, "kb.chips"); // inside a hidden PANEL, itself visible
+    const capB = W.spawnPanel(world, null, "kb.chips"); // an independent second instance
+    system.step();
+    const elA = made.filter((el) => el.dataset.uiRecipe === "kb.chips")[0];
+    const elB = made.filter((el) => el.dataset.uiRecipe === "kb.chips")[1];
+    assert(!!elA && !!elB, "two instances of the scrollable role are mounted");
+    equal(elA.scrollTop, 0, "a list behind a hidden panel starts at the top");
+
+    // Scrolling it — by any means — is NOT recorded and NOT undone while the panel stays up: the list
+    // the user scrolled stays where the user put it.
+    elA.scrollTop = 40;
+    elB.scrollTop = 12;
+    system.step();
+    equal(elA.scrollTop, 40, "a scroll while the panel is up is left alone");
+    equal(elB.scrollTop, 12, "…and the two instances do NOT follow each other");
+
+    // A whole PANEL disappears through its own flag, never through the list's: the edge has to see the
+    // ancestor, or the next visit keeps the old position.
+    W.setUiVisible(world, capPanel, false);
+    system.step();
+    elA.scrollTop = 40; // what a hidden box may keep, or may be reset to — either way it is stale
+    W.setUiVisible(world, capPanel, true);
+    system.step();
+    equal(elA.scrollTop, 0, "coming back from a hidden ANCESTOR panel returns the list to the top");
+    equal(elB.scrollTop, 12, "…and the other instance is not touched by it");
+
+    // …and it is an EDGE, not a per-frame write: the frame after the reset leaves it alone.
+    elA.scrollTop = 7;
+    system.step();
+    equal(elA.scrollTop, 7, "the reset does not repeat every frame");
+
+    // A recipe the theme does NOT list as scrollable is never touched.
+    equal(plainEl.scrollTop, 0, "a non-scrollable recipe keeps its own (untouched) position");
+    assert(capA && capB && capPanel, "the list entities exist");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+check("the icon cache has a synchronous reader, and both readers agree on the key", () => {
+  // The inventory draws the icon IMMEDIATELY when it is already baked; that is what keeps a stack move
+  // from painting one frame of the placeholder. It can only do that if the cache is readable without a
+  // promise —and only correctly if the peek builds the same key the bake wrote.
+  const icons = load("rendering/blockicons.js");
+  equal(icons.iconCacheKey("stone", 40), "stone@40", "the key is type@size");
+  equal(icons.iconCacheKey("stone", 40.4), "stone@40", "…with the size rounded");
+  equal(icons.iconCacheKey("stone", 20), "stone@32", "…and clamped up to MIN_SIZE");
+  equal(icons.iconCacheKey("stone", 1000), "stone@256", "…and down to MAX_SIZE");
+  equal(icons.clampIconSize(40.4), 40, "the bake size comes from the same function");
+  // Nothing is baked in this process, so this is a pure miss that never touches the GPU.
+  equal(icons.peekBlockIcon("stone", 40), null, "an unbaked icon peeks as null");
+  equal(icons.peekBlockIcon("stone", 1000), null, "…and a clamped request misses too");
+  // The two must not be able to drift apart.
+  const source = readSource("src/rendering/blockicons.ts");
+  assert(/iconCacheKey\(type, size\)/.test(source), "getBlockIcon keys through iconCacheKey");
+  assert(/cache\.get\(iconCacheKey\(type, sizePx\)\)/.test(source), "peekBlockIcon reads that same key");
+});
+
+check("a bound widget takes its value from its source, not from whoever built it", () => {
+  // The main menu and the pause menu each build a settings panel, so each used to hold its OWN copy of
+  // the frame cap; the two drifted apart and neither was guaranteed to match the value in force. A
+  // binding makes the shared state the only owner. This runs the real resolver, no DOM involved.
+  const W = load("ecs/ui/widgets.js");
+  const B = load("ecs/ui/bindings.js");
+  const world = widgetWorld;
+  const sources = B.createUiSources();
+  world.insertResource(B.UI_SOURCES, sources);
+  let cap = 0;
+  B.onUiSource(sources, "fpsCap", () => (cap === 0 ? 240 : cap));
+
+  const slider = W.spawnSlider(
+    world,
+    null,
+    "settings.range",
+    "check.cap",
+    "",
+    { min: 30, max: 240, step: 2, initial: 240 },
+    "fpsCap",
+  );
+  const value = () => world.get(slider, W.UI_INPUT).value;
+  const system = new B.UiBindingSystem(world, () => {});
+
+  system.step();
+  equal(value(), 240, "'unlimited' arrives as the top of the slider's own range");
+  cap = 61;
+  system.step();
+  // The exact tie-break is not the contract —"lands ON the slider's grid, inside its range" is, and
+  // that is what keeps the component and the element saying the same number.
+  const snapped = value();
+  assert(
+    (snapped - 30) % 2 === 0 && snapped >= 30 && snapped <= 240,
+    `a source value lands on the slider's grid and in its range (got ${snapped})`,
+  );
+  cap = 1000;
+  system.step();
+  equal(value(), 240, "…and is clamped to the range");
+  cap = -5;
+  system.step();
+  equal(value(), 30, "…from below too");
+  equal(system.boundCount, 1, "the resolver sees the bound widget");
+
+  // An unregistered source is a LOUD no-op: the widget keeps its value, the log says so —once.
+  const orphan = W.spawnSlider(
+    world,
+    null,
+    "settings.range",
+    "check.orphan",
+    "",
+    { min: 0, max: 10, step: 1, initial: 5 },
+    "nope",
+  );
+  const logs = [];
+  const reported = new B.UiBindingSystem(world, (line) => logs.push(line));
+  reported.step();
+  equal(world.get(orphan, W.UI_INPUT).value, 5, "an orphan binding leaves the value alone");
+  equal(logs.length, 1, "…and reports the missing source");
+  reported.step();
+  equal(logs.length, 1, "…once, not every frame");
+  equal(reported.boundCount, 2, "both bound widgets are seen");
+
+  // The range is the widget's own business (presentation), and the resolver respects it.
+  equal(W.snapToRange(63, { min: 30, max: 240, step: 2 }), 64, "snap: rounds onto the grid");
+  equal(W.snapToRange(29, { min: 30, max: 240, step: 2 }), 30, "snap: clamps up");
+  equal(W.snapToRange(999, { min: 30, max: 240, step: 2 }), 240, "snap: clamps down");
+  equal(W.snapToRange(Number.NaN, { min: 30, max: 240, step: 2 }), 30, "snap: a NaN is not propagated");
+});
+
+check("the migrated surfaces carry no styling and no DOM of their own", () => {
+  // The HUD surface, where even a language subscription is gone (its text is all keys).
+  for (const rel of ["src/ui/hud.ts"]) {
+    const code = stripComments(readSource(rel));
+    equal(countOf(code, /#[0-9a-fA-F]{3,8}\b/g), 0, `${rel} still has a colour literal`);
+    equal(countOf(code, /style\.cssText|document\.createElement/g), 0, `${rel} still builds DOM`);
+    equal(countOf(code, /onLangChange/g), 0, `${rel} still subscribes to language changes`);
+  }
+  // The UI SYSTEMS the views migrated into: no DOM, no styling, and —the point of the migration —no
+  // `document.addEventListener` (only the device layer listens) and no private timer for "how long".
+  for (const rel of ["src/ecs/ui/picker.ts", "src/ecs/ui/toast.ts", "src/ecs/ui/keybind.ts"]) {
+    const code = stripComments(readSource(rel));
+    equal(countOf(code, /#[0-9a-fA-F]{3,8}\b|rgba?\(/g), 0, `${rel} still has a colour literal`);
+    equal(countOf(code, /document\.|createElement|style\.cssText/g), 0, `${rel} still touches the DOM`);
+    equal(countOf(code, /setTimeout|setInterval/g), 0, `${rel} still owns a timer`);
+    equal(countOf(code, /onLangChange|onBindsChange/g), 0, `${rel} still subscribes to a change`);
+  }
+  // The menus and the settings panel. `onLangChange` is ALLOWED here: a label composed from a VALUE
+  // ("FPS 60", "1.25x") cannot be a key, so those few still have to be re-pushed on a language switch.
+  // Everything a key can express is re-derived by the reconciler instead.
+  for (const rel of ["src/ui/menu.ts", "src/ui/mainmenu.ts", "src/ui/inventory.ts"]) {
+    const code = stripComments(readSource(rel));
+    equal(countOf(code, /document\.createElement\(/g), 0, `${rel} still creates an element by hand`);
+    equal(countOf(code, /style\.cssText/g), 0, `${rel} still writes an inline style string`);
+    equal(countOf(code, /\.textContent\s*=/g), 0, `${rel} still writes text into an element`);
+    equal(countOf(code, /\.style\.background|\.style\.outline/g), 0, `${rel} still styles on hover`);
+    // `style.display` is allowed ONLY on the drag rubber band (a pointer overlay, not widget
+    // structure): anywhere else it would mean a surface is using CSS as its own state again.
+    const displayUsers = [...code.matchAll(/([A-Za-z_$][\w$]*)\.style\.display/g)].map((m) => m[1]);
+    assert(
+      displayUsers.every((name) => name === "svg"),
+      `${rel} uses display as state (${displayUsers.join(", ") || "none"})`,
+    );
+  }
+  // …and they compose the prefabs instead
+  assert(/spawnPanel\(/.test(readSource("src/ui/hud.ts")), "hud composes panels");
+  assert(/spawnLabel\(/.test(readSource("src/ecs/ui/picker.ts")), "the picker composes its own labels");
+  assert(/setUiVisible\(/.test(readSource("src/ecs/ui/picker.ts")), "…and shows/hides them as data");
+  assert(/spawnButton\(/.test(readSource("src/ui/menu.ts")), "the settings panel composes buttons");
+  assert(/spawnGridKey\(/.test(readSource("src/ui/menu.ts")), "the visual keyboard composes keycaps");
+  assert(/onUiAction\(/.test(readSource("src/ui/mainmenu.ts")), "the main menu dispatches actions");
+  assert(/spawnButton\(/.test(readSource("src/ui/inventory.ts")), "the inventory composes slot buttons");
+  assert(/setUiImage\(/.test(readSource("src/ui/inventory.ts")), "…and fills icon slots as data");
+});
+
+// ===== the three UI systems the views migrated into =====
+
+check("the F3+F4 picker is a system: key edges in, widget data and a mode change out", () => {
+  // It used to be a class in ui/gamemode.ts with its own document listeners and private fields.
+  const P = load("ecs/ui/picker.js");
+  const world = widgetWorld;
+  world.insertResource(PICKER_STATE, createPickerState());
+  world.insertResource(KEY_EVENTS, createKeyEventLog());
+  const panel = P.spawnPickerPanel(world);
+  const debug = W.spawnPanel(world, null, "debug.panel", { hidden: true });
+  let mode = "walk";
+  const applied = [];
+  /** Is a world running? false is the main menu / the loading screen, where this chord must do nothing. */
+  let inWorld = true;
+  const picker = new P.UiPickerSystem(world, {
+    panel: panel.panel,
+    items: panel.items,
+    debugPanel: debug,
+    readMode: () => mode,
+    applyMode: (m) => {
+      applied.push(m);
+      mode = m;
+    },
+    inWorld: () => inWorld,
+    log: () => {},
+  });
+  const edges = world.resource(KEY_EVENTS);
+  const visible = () => !world.get(panel.panel, W.UI_STATE).hidden;
+  const selected = () => panel.items.map((it) => world.get(it, W.UI_STATE).selected);
+  const edge = (code, down, repeat = false) => {
+    publishKeyEdge(edges, { code, down, repeat });
+    picker.step();
+  };
+
+  // 1. F3 alone is the DEBUG TOGGLE —not the picker. The debug panel's own widget state is the answer,
+  //    so there is no `debugVisible` boolean to drift out of sync with it.
+  edge("F3", true);
+  equal(visible(), false, "F3 alone does not open the picker");
+  equal(world.get(debug, W.UI_STATE).hidden, false, "…it shows the F3 panel");
+  edge("F3", false);
+  edge("F3", true);
+  equal(world.get(debug, W.UI_STATE).hidden, true, "…and F3 again hides it");
+
+  // 2. F3+F4 opens the picker on the mode in force (read through the injected reader, not a private copy).
+  edge("F4", true);
+  equal(visible(), true, "F3+F4 opens the picker");
+  equal(selected().indexOf(true), 0, "…with the mode in force selected (walk)");
+
+  // 3. F4 cycles while it is open; auto-repeat does not (a held F4 used to cycle at the OS repeat rate).
+  const before = world.get(debug, W.UI_STATE).hidden;
+  edge("F4", true, true);
+  equal(selected().indexOf(true), 0, "an auto-repeat F4 does not cycle");
+  edge("F4", true);
+  equal(selected().indexOf(true), 1, "a fresh F4 cycles the selection");
+
+  // 4. Releasing F3 applies the selection —through the injected mode setter, which main.ts wires to the
+  //    SetMode command (deferred to the next barrier like every other outside write).
+  edge("F3", false);
+  equal(applied.join(","), "fly", "F3 release applies the mode");
+  equal(visible(), false, "…and closes the picker");
+  // The edge log is read-once-PER-CONSUMER (a cursor each: ui.navigation reads the same edges), so what
+  // matters is that the consumer does not act twice on one edge.
+  const appliedAfter = applied.length;
+  picker.step();
+  equal(applied.length, appliedAfter, "a frame with no new edges does nothing (the cursor holds)");
+
+  // 5. …and a repeat edge never reaches the chord at all.
+  edge("F3", true, true);
+  equal(world.get(debug, W.UI_STATE).hidden, before, "auto-repeat does not re-toggle the F3 panel");
+
+  // 6. OUTSIDE A WORLD none of it fires. F3 and F3+F4 are GAMEPLAY chords: at the main menu (and on the
+  //    loading screen) they used to open the F3 panel — with stale text, because its numbers come from
+  //    the render lane, which does not run there — and to switch the movement mode through SetMode, i.e.
+  //    write a COMPONENT from a menu. The edges are still consumed, so nothing is replayed on entry.
+  inWorld = false;
+  const modeBefore = mode;
+  const appliedBefore = applied.length;
+  edge("F3", true);
+  equal(world.get(debug, W.UI_STATE).hidden, true, "F3 does not open the F3 panel outside a world");
+  edge("F4", true);
+  equal(visible(), false, "F3+F4 does not open the picker outside a world");
+  edge("F4", true);
+  edge("F3", false);
+  equal(applied.length, appliedBefore, "…and no mode change is sent");
+  equal(mode, modeBefore, "…so the player's mode is untouched");
+  // A panel left open by a game session is taken down when the session ends.
+  inWorld = true;
+  edge("F3", true); // the chord is F3+F4 in either order, and F3 alone only toggles the F3 panel
+  edge("F4", true);
+  equal(visible(), true, "the picker opens again in a world");
+  inWorld = false;
+  picker.step();
+  equal(visible(), false, "leaving the world closes the picker");
+  equal(world.resource(PICKER_STATE).open, false, "…and clears its state (nothing is left held)");
+  equal(world.resource(PICKER_STATE).f3, false, "…including the chord keys");
+  inWorld = true;
+  picker.step();
+  equal(visible(), false, "…so entering a world again does not resurrect the panel");
+});
+
+check("the GAMEPLAY widgets are visible only while a world runs (the crosshair and the hotbar)", () => {
+  // Both were spawned VISIBLE during wiring and nothing ever wrote their flag, so they were on screen in
+  // every mode: at the main menu (through its translucent backdrop), on the loading screen, and over the
+  // PAUSE menu — where the hotbar's z-index (31) is above that menu's whole root (30), so it drew on top
+  // of the panel — with its slots still clickable (a menu click could select a slot, a SetMode-free but
+  // still component-writing command). `ui.hud` owns that flag and derives it from `inWorld()`.
+  const H = load("ecs/ui/hud.js");
+  const world = widgetWorld;
+  const crosshair = W.spawnPanel(world, null, "hud.crosshair"); // spawned visible, like the real ones
+  const hotbar = W.spawnPanel(world, null, "inv.hotbar");
+  let inWorld = true;
+  const hud = new H.UiHudSystem(world, { crosshair, hotbar, inWorld: () => inWorld });
+  const shown = (e) => world.get(e, W.UI_STATE).hidden === false;
+
+  equal(shown(crosshair) && shown(hotbar), true, "the widgets start visible (that is the spawn default)");
+  hud.step();
+  equal(shown(crosshair) && shown(hotbar), true, "…and stay so while a world runs");
+
+  inWorld = false;
+  hud.step();
+  equal(shown(crosshair), false, "no world: the crosshair comes down");
+  equal(shown(hotbar), false, "…and so does the hotbar");
+  hud.step();
+  equal(shown(hotbar), false, "a frame with no change writes nothing (idempotent)");
+
+  inWorld = true;
+  hud.step();
+  equal(shown(crosshair) && shown(hotbar), true, "entering a world brings both back");
+
+  // The system is registered in the ui lane with a declared access set, ahead of every other writer —
+  // "what may the lane show at all" comes first — and the composition root hands it the two roots.
+  const main = stripComments(readSource("src/main.ts"));
+  assert(/name: "ui\.hud"/.test(main), "the composition root registers ui.hud");
+  assert(/crosshair: hud\.crosshairEntity/.test(main), "…with the crosshair root");
+  assert(/hotbar: inv\.hotbarEntity/.test(main), "…and the hotbar root");
+  assert(/inWorld,/.test(main), "…gated on the one definition of \"a world is running\"");
+  // The toast is deliberately NOT part of this: a main-menu message is a documented case.
+  assert(!/toast/.test(stripComments(readSource("src/ecs/ui/hud.ts"))), "ui.hud leaves the toast alone");
+});
+
+check("ESC walks the sub-page ladder one rung at a time, and its top rung is not a no-op", () => {
+  // The reported bug: on the settings LIST, ESC wrote "settings" over "settings" (a no-op), and from a
+  // sub-page it wrote null (skipping the list). The ladder is ONE function now (stepBackSettings), shared
+  // by ESC, both menus' goBack() and the settings Back buttons.
+  const N = load("ecs/ui/navigation.js");
+  const world = widgetWorld;
+  world.insertResource(UI_MODAL, createUiModalState());
+  const edges = world.resource(KEY_EVENTS); // inserted by the picker check above
+  const mkPanel = (recipe) => W.spawnPanel(world, null, recipe, { hidden: true });
+  const ids = ["settings", "lang", "pack", "keybind"];
+  const trees = {
+    pauseRoot: mkPanel("menu.root"),
+    pauseMain: mkPanel("settings.panel"),
+    pausePanels: Object.fromEntries(ids.map((id) => [id, mkPanel("settings.panel")])),
+    mainRoot: mkPanel("menu.backdrop"),
+    mainMain: mkPanel("menu.panel"),
+    genPanel: mkPanel("menu.panel"),
+    mainPanels: Object.fromEntries(ids.map((id) => [id, mkPanel("settings.panel")])),
+    inventoryPanel: mkPanel("inv.panel"),
+  };
+  const effects = [];
+  /** "Is a world running?" — the ESC/inventory gate. false is the LOADING-SCREEN state (the startup and
+   *  a world being built behind the screen), where neither the pause menu nor the backpack may open. */
+  let inWorld = false;
+  const nav = new N.UiNavigationSystem(world, {
+    trees,
+    inventoryCode: () => "KeyE",
+    capturing: () => false,
+    inWorld: () => inWorld,
+    prepareUnlock: () => effects.push("prepareUnlock"),
+    exitPointerLock: () => effects.push("exit"),
+    centerCursor: () => effects.push("center"),
+    relock: (r) => effects.push(`relock:${r}`),
+    relockSoon: (r) => effects.push(`relockSoon:${r}`),
+    applyCursor: () => {},
+    log: () => {},
+  });
+  const ui = world.resource(UI_MODAL);
+  const esc = () => {
+    publishKeyEdge(edges, { code: "Escape", down: true, repeat: false });
+    nav.step();
+  };
+  const shown = (e) => world.get(e, W.UI_STATE).hidden === false;
+
+  // ── main menu: sub-page -> settings LIST -> main panel -> stays ──
+  Object.assign(ui, { mainMenu: true, menu: false, inventory: false, settings: "lang", gen: false });
+  nav.step();
+  assert(shown(trees.mainPanels.lang), "the language sub-panel is up");
+  esc();
+  equal(ui.settings, "settings", "ESC from a sub-page lands on the settings LIST (not past it)");
+  assert(shown(trees.mainPanels.settings) && !shown(trees.mainPanels.lang), "…and that is what is painted");
+  esc();
+  equal(ui.settings, null, "…and ESC again leaves the settings");
+  assert(shown(trees.mainMain), "…back on the main menu's own panel");
+  esc();
+  equal(ui.mainMenu, true, "ESC at the root of the main menu does nothing (it never leaves)");
+
+  // ── pause menu: the same ladder, then it closes and relocks ──
+  Object.assign(ui, { mainMenu: false, menu: true, inventory: false, settings: "settings", gen: false });
+  nav.step();
+  effects.length = 0;
+  esc();
+  equal(ui.settings, null, "ESC on the settings LIST returns to the pause menu (this used to be a no-op)");
+  assert(shown(trees.pauseMain), "…and the pause menu's main panel is painted");
+  ui.settings = "pack";
+  nav.step();
+  esc();
+  equal(ui.settings, "settings", "ESC from the packs sub-page goes back to the settings LIST");
+  esc();
+  equal(ui.settings, null, "…then out of the settings");
+  effects.length = 0;
+  esc();
+  equal(ui.menu, false, "…then the pause menu itself closes");
+  assert(effects.includes("relock:ESC closes menu"), "…and the mouse is relocked");
+
+  // ── the backpack closes, and in game ESC opens the pause menu (releasing + centring) ──
+  Object.assign(ui, { mainMenu: false, menu: false, inventory: true, settings: null, gen: false });
+  nav.step();
+  effects.length = 0;
+  esc();
+  equal(ui.inventory, false, "ESC closes the backpack");
+  assert(effects.some((e) => e.startsWith("relockSoon")), "…and relocks on the next event-loop turn");
+  inWorld = true;
+  effects.length = 0;
+  esc();
+  equal(ui.menu, true, "ESC in game opens the pause menu");
+  equal(effects.join(","), "prepareUnlock,exit,center", "…releasing the mouse and centring the cursor");
+
+  // ── …but NOT while a loading screen is up: the startup and a world entry spend seconds in the
+  // `load` mode with no modal open and no world running, and both of these used to fire there (ESC
+  // opened the pause menu OVER the loading screen, E opened the backpack behind it). ──
+  inWorld = false;
+  Object.assign(ui, { mainMenu: false, menu: false, inventory: false, settings: null, gen: false });
+  nav.step();
+  effects.length = 0;
+  publishKeyEdge(edges, { code: "KeyE", down: true, repeat: false });
+  nav.step();
+  equal(ui.inventory, false, "E does not open the backpack while a loading screen is up");
+  esc();
+  equal(ui.menu, false, "…and ESC does not open the pause menu there");
+  equal(effects.join(","), "", "…with no pointer-lock effects at all (nothing to release yet)");
+  // The step-back ladder still works in every modal state: the gate is only on those two ACTIONS.
+  inWorld = false;
+  Object.assign(ui, { mainMenu: true, menu: false, inventory: false, settings: "lang", gen: false });
+  nav.step();
+  esc();
+  equal(ui.settings, "settings", "the main-menu ladder is unaffected by the gate");
+
+  // …and the composition root has to SUPPLY that answer (a dep that is never injected would read as
+  // undefined and refuse everything, which is the same class of miss as the screen that was never
+  // activated: the system is only as good as what the wiring hands it).
+  assert(
+    /inWorld,/.test(stripComments(readSource("src/main.ts"))),
+    "main.ts injects \"is a world running\" into ui.navigation",
+  );
+});
+
+check("the toast is a system: a command arms a wall-clock deadline, the ui lane applies it", () => {
+  // `showToast()` used to write two widgets and arm a setTimeout inside the view; the message now
+  // outlives its caller, which is what lets the MAIN MENU show one (nothing there reconciles a DOM write).
+  const T = load("ecs/ui/toast.js");
+  const world = widgetWorld;
+  world.insertResource(TOAST, createToastState());
+  const panel = W.spawnPanel(world, null, "hud.toast", { hidden: true });
+  const body = W.spawnLabel(world, panel, "text.label", "");
+  const toast = new T.UiToastSystem(world, panel, body);
+  const visible = () => !world.get(panel, W.UI_STATE).hidden;
+
+  equal(visible(), false, "nothing is up before a message is armed");
+  const before = performance.now();
+  world.commands.send(ShowToast, { key: "toast.multiPlaceholder" });
+  world.commands.flush(); // the barrier: what world.render()/renderUi() run at the top of every frame
+  const state = world.resource(TOAST);
+  assert(state.until > before, "the command arms a deadline in the future");
+  equal(state.key, "toast.multiPlaceholder", "…carrying the i18n KEY, not a finished sentence");
+
+  toast.step();
+  equal(visible(), true, "the ui lane puts it on screen");
+  equal(world.get(body, W.UI_TEXT).key, "toast.multiPlaceholder", "…and the text widget holds the key");
+  equal(world.get(body, W.UI_TEXT).raw, false, "…so the reconciler re-translates it on a language switch");
+
+  state.until = performance.now() - 1; // the deadline passed (2.5 s of WALL time: paused or not)
+  toast.step();
+  equal(visible(), false, "…and the same system takes it down again");
+
+  // A message that carries a VALUE ("cap set to 60") cannot be a key and goes out raw.
+  world.commands.send(ShowToast, { key: "FPS 60", raw: true });
+  world.commands.flush();
+  toast.step();
+  equal(visible(), true, "a second message shows again");
+  equal(world.get(body, W.UI_TEXT).raw, true, "…as raw text");
+  equal(world.get(body, W.UI_TEXT).key, "FPS 60", "…verbatim");
+});
+
+check("the key bind panels are derived data, and the drag gesture drives them", () => {
+  // The panels used to own copies of the bind table and an imperative renderAllPanels() fan-out —which
+  // is exactly how one instance ended up stuck while the other refreshed. Now the DATA is derived every
+  // frame from one source, and the drag only publishes what it is doing.
+  const K = load("ecs/ui/keybind.js");
+  const world = widgetWorld;
+  const gesture = K.createKeybindGesture();
+  world.insertResource(K.KEYBIND_GESTURE, gesture);
+
+  /** One panel INSTANCE, as the pause menu and the main menu each build one. */
+  const makePanel = () => {
+    const root = W.spawnPanel(world, null, "settings.panel", { hidden: true });
+    const chip = W.spawnButton(world, root, "kb.chip", "kb.chip", "forward", "");
+    const key = W.spawnGridKey(world, root, "kb.keycap", "", "kb.key", "KeyW");
+    const legend = W.spawnLabel(world, key, "kb.keyLegend", "", { raw: true });
+    return {
+      spec: {
+        chips: [{ action: "forward", entity: chip, labelKey: "bind.forward", format: (code) => `F·${code}` }],
+        keycaps: [{ code: "KeyW", key, legend, legendText: () => "W" }],
+      },
+      chip,
+      key,
+      legend,
+    };
+  };
+  const a = makePanel();
+  const b = makePanel();
+  K.clearKeybindPanels();
+  K.registerKeybindPanel(a.spec);
+  K.registerKeybindPanel(b.spec);
+
+  const bound = new Set(["KeyW"]);
+  let capturing = null;
+  const lines = [];
+  const system = new K.UiKeybindSystem(world, {
+    boundCodes: () => bound,
+    capturing: () => capturing,
+    bindOf: (action) => (action === "forward" ? "KeyW" : ""),
+    showLine: (x1, y1, x2, y2) => lines.push(`${x1},${y1},${x2},${y2}`),
+    hideLine: () => lines.push("hide"),
+  });
+
+  system.step();
+  equal(world.get(a.chip, W.UI_TEXT).raw, true, "an unselected chip shows a FORMATTED label");
+  equal(world.get(a.chip, W.UI_TEXT).key, "F·KeyW", "…built by the surface, not by the system");
+  equal(world.get(a.key, W.UI_STATE).active, true, "a bound keycap is marked active");
+  equal(world.get(a.legend, W.UI_TEXT).key, "W", "the legend is the layout print");
+
+  capturing = "forward";
+  system.step();
+  equal(world.get(a.chip, W.UI_TEXT).raw, false, "the selected chip shows its i18n KEY");
+  equal(world.get(a.chip, W.UI_TEXT).key, "bind.forward", "…so a language switch re-translates it");
+  equal(world.get(a.chip, W.UI_STATE).selected, true, "…and it is marked selected");
+  equal(world.get(b.chip, W.UI_STATE).selected, true, "the SECOND instance agrees (one source, no copies)");
+  equal(world.get(b.legend, W.UI_TEXT).key, "W", "…legends included");
+
+  // The drag: the gesture carries WHERE it is and WHAT it is over; the system decides what that means.
+  gesture.drag = { action: "forward", button: 0, anchorX: 10, anchorY: 20, moved: true };
+  gesture.hover = a.key;
+  gesture.pointerX = 100;
+  gesture.pointerY = 200;
+  system.step();
+  equal(lines[0], "10,20,100,200", "the rubber band follows the gesture data");
+  equal(world.get(a.key, W.UI_STATE).selected, true, "the hovered keycap is lit");
+
+  gesture.drag = null;
+  gesture.hover = null;
+  system.step();
+  equal(lines[lines.length - 1], "hide", "letting go hides the line");
+  equal(world.get(a.key, W.UI_STATE).selected, false, "…and clears the highlight");
+  K.clearKeybindPanels();
+});
+
+// ===== 6. the schedule: declared access, batches, commutativity =====
+console.log("\n--- the schedule: access declarations, batches, commutativity ---");
+
+/** Rebuild every registration exactly as main.ts declares it: names, stages, edges, access. */
+function registrations() {
+  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "main.ts"), "utf8");
+  const blocks = [...source.matchAll(/world\.addSystem\(\{([\s\S]*?)\n\}\);/g)].map((m) => m[1]);
+  if (blocks.length === 0) throw new Error("no addSystem blocks found in main.ts");
+  const list = (text, key) => {
+    const m = new RegExp(`${key}:\\s*\\[([^\\]]*)\\]`).exec(text);
+    if (!m) return undefined;
+    return m[1].split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+  };
+  const ACCESS = {
+    SNAPSHOT_ACCESS: load("ecs/systems/snapshot.js").SNAPSHOT_ACCESS,
+    CONTROLLER_ACCESS: load("ecs/systems/controller.js").CONTROLLER_ACCESS,
+    MOVEMENT_ACCESS: load("ecs/systems/movement.js").MOVEMENT_ACCESS,
+    COLLISION_ACCESS: load("ecs/systems/collision.js").COLLISION_ACCESS,
+    INTERACTION_ACCESS: load("ecs/systems/interaction.js").INTERACTION_ACCESS,
+    INPUT_ACCESS: load("ecs/systems/input.js").INPUT_ACCESS,
+    CHUNK_STREAM_ACCESS: load("ecs/systems/chunkstream.js").CHUNK_STREAM_ACCESS,
+    DIAGNOSTICS_ACCESS: load("ecs/systems/diagnostics.js").DIAGNOSTICS_ACCESS,
+    CAMERA_VIEW_ACCESS: load("rendering/camera-view.js").CAMERA_VIEW_ACCESS,
+    // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
+    // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
+    // what the file declares, and the source-text assertion below keeps the two honest.
+    INVENTORY_VIEW_ACCESS: (() => {
+      const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ui", "inventory.ts"), "utf8");
+      const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
+      const widgets = load("ecs/ui/widgets.js");
+      const names = [...new Set([...block.matchAll(/\b(UI_[A-Z]+)\b/g)].map((m) => m[1]))];
+      if (names.length === 0) throw new Error("INVENTORY_VIEW_ACCESS declares no widget component");
+      return { reads: [C.INVENTORY], writes: names.map((name) => widgets[name]) };
+    })(),
+    UI_RENDER_ACCESS: load("ecs/ui/system.js").UI_RENDER_ACCESS,
+    UI_BINDING_ACCESS: load("ecs/ui/bindings.js").UI_BINDING_ACCESS,
+    UI_LOADING_ACCESS: load("ecs/ui/loading.js").UI_LOADING_ACCESS,
+    UI_HUD_ACCESS: load("ecs/ui/hud.js").UI_HUD_ACCESS,
+    UI_PICKER_ACCESS: load("ecs/ui/picker.js").UI_PICKER_ACCESS,
+    UI_TOAST_ACCESS: load("ecs/ui/toast.js").UI_TOAST_ACCESS,
+    UI_KEYBIND_ACCESS: load("ecs/ui/keybind.js").UI_KEYBIND_ACCESS,
+    UI_NAVIGATION_ACCESS: load("ecs/ui/navigation.js").UI_NAVIGATION_ACCESS,
+  };
+  return blocks.map((block) => {
+    const accessName = /\.\.\.([A-Z_]+_ACCESS)/.exec(block)?.[1];
+    if (accessName && !ACCESS[accessName]) throw new Error(`unknown access constant ${accessName}`);
+    return {
+      name: /name:\s*"([^"]+)"/.exec(block)[1],
+      stage: /stage:\s*"([^"]+)"/.exec(block)[1],
+      after: list(block, "after"),
+      before: list(block, "before"),
+      ...(accessName
+        ? ACCESS[accessName]
+        : {
+            readsExternal: list(block, "readsExternal"),
+            writesExternal: list(block, "writesExternal"),
+          }),
+    };
+  });
+}
+
+function buildSchedule(defs, mutate) {
+  const schedule = new Schedule();
+  for (const def of defs) schedule.add({ ...def, run: () => {} });
+  if (mutate) mutate(defs);
+  schedule.resolve();
+  return schedule;
+}
+
+check("the real schedule resolves into the batches the docs claim", () => {
+  const schedule = buildSchedule(registrations());
+  for (const line of schedule.report()) console.log("          " + line);
+  const names = (stage) => schedule.batchesOf(stage).map((b) => b.map((d) => d.name));
+  const expectedFixed = [
+    // input drains the device events of the last frame ALONE in batch 0: it writes the VIEW the
+    // controller settles and reads the ORIENTATION/POSITION the later systems write, so the conflict
+    // rule orders it ahead of all of them (the edge to motion.snapshot is the declared pessimisation
+    // documented in input.ts / main.ts —they commute, and it keeps the pair below intact).
+    ["player.input"],
+    ["motion.snapshot", "player.controller"],
+    ["player.movement"],
+    ["player.collision"],
+    ["player.interaction"],
+  ];
+  const expectedRender = [["cameraView.render", "chunk.stream", "diagnostics"], ["renderer.draw"]];
+  // The ui lane: every widget-data WRITER, then the reconciler that reads all of it. The writers are a
+  // chain rather than a pair because the conflict model is per COMPONENT, not per entity —the
+  // inventory, the picker, the toast and the bind panels write UI_STATE/UI_TEXT on DIFFERENT entities,
+  // and the schedule cannot see that, so the order has to be declared.
+  const expectedUi = [
+    // The GAMEPLAY gate shares the first batch with the binding resolver: they touch DISJOINT components
+    // (UI_STATE vs UI_INPUT), so the schedule says they may run in either order — and it is right.
+    ["ui.hud", "ui.bindings"],
+    ["ui.loading"],
+    ["ui.inventory"],
+    ["ui.picker"],
+    ["ui.toast"],
+    ["ui.keybind"],
+    ["ui.navigation"],
+    ["ui.widgets"],
+  ];
+  equal(JSON.stringify(names("fixed")), JSON.stringify(expectedFixed), "fixed batches");
+  equal(JSON.stringify(names("render")), JSON.stringify(expectedRender), "render batches");
+  equal(JSON.stringify(names("ui")), JSON.stringify(expectedUi), "ui batches");
+});
+
+check("renderUi() pumps the barrier + the ui lane ONLY, and render() still ends with it", () => {
+  // The stopped-loop pump. Replayed on a real World: three lanes that record that they ran, so the
+  // assertion covers both halves —the ui lane DOES run with no loop, and the fixed/render lanes do
+  // NOT (running the render lane here would draw the world over the main-menu panorama).
+  const pumped = new World();
+  const ran = [];
+  const Cmd = defineCommand("check-pump", () => ran.push("command"));
+  pumped.addSystem({ name: "check.fixed", stage: "fixed", run: () => ran.push("fixed") });
+  pumped.addSystem({ name: "check.render", stage: "render", run: () => ran.push("render") });
+  pumped.addSystem({ name: "check.ui", stage: "ui", run: () => ran.push("ui") });
+  pumped.start();
+
+  pumped.commands.send(Cmd, 1);
+  pumped.renderUi();
+  equal(ran.join("+"), "command+ui", "the barrier ran first, then the ui lane, and nothing else");
+
+  ran.length = 0;
+  pumped.commands.send(Cmd, 1);
+  pumped.render(0.5, 0.016);
+  equal(ran.join("+"), "command+render+ui", "render() runs render then ui, after the same barrier");
+});
+
+check("every system that writes the DOM is in the ui lane", () => {
+  // The invariant behind the regression this lane was split for: a DOM writer left in the render
+  // lane stops reconciling the moment stopLoop() runs, which today is the main menu. A `dom.` target
+  // is the discriminator —"framebuffer" is a canvas, not DOM.
+  const dom = registrations().filter((def) =>
+    (def.writesExternal ?? []).some((target) => target.startsWith("dom.")),
+  );
+  equal(dom.map((def) => def.name).join(","), "ui.widgets", "the systems that write DOM");
+  for (const def of dom) {
+    equal(def.stage, "ui", `"${def.name}" reconciles the DOM from the ui lane`);
+  }
+});
+
+check("diagnostics declares every external target it actually touches", () => {
+  // A system's declaration IS the scheduler's model of it, so a missing target is the one mistake the
+  // conflict rule structurally cannot catch. This one used to claim only `perfSampler` while it also
+  // read the input queues, the block world and the GPU timestamp, and wrote the debug log.
+  const { DIAGNOSTICS_ACCESS } = load("ecs/systems/diagnostics.js");
+  for (const target of ["inputDiagnosticQueues", "voxelBlocks", "gpuTimestamps"]) {
+    assert(DIAGNOSTICS_ACCESS.readsExternal.includes(target), `readsExternal declares "${target}"`);
+  }
+  for (const target of ["perfSampler", "debugLog"]) {
+    assert(DIAGNOSTICS_ACCESS.writesExternal.includes(target), `writesExternal declares "${target}"`);
+  }
+  // …and the FPS cap is NOT an external read any more: it is a resource, so the schedule does not
+  // model it and listing it here would be a lie in the other direction.
+  assert(!DIAGNOSTICS_ACCESS.readsExternal.includes("fpsCap"), "the frame cap is a resource now");
+});
+
+check("the frame cap is world state AND a persisted setting", () => {
+  // It used to be a closure variable in main.ts: read by the frame gate every frame (so it is world
+  // state), and written by the settings panel —but never persisted, so it silently reset to
+  // "unlimited" on every launch while the slider still SHOWED "unlimited", as if it had never changed.
+  const R = load("ecs/resources.js");
+  equal(R.createFrameCap().cap, 0, "no value means unlimited");
+  equal(R.createFrameCap(60).cap, 60, "a real cap survives");
+  equal(R.createFrameCap(59.6).cap, 60, "…rounded");
+  equal(R.createFrameCap(-5).cap, 0, "a negative cap from a hand-edited settings.json is refused");
+  equal(R.createFrameCap(Number.NaN).cap, 0, "…and so is a non-number");
+  // The cap's DOMAIN is part of the value's contract. A stored cap the slider cannot express makes the
+  // label and the slider disagree — a hand-edited `fpsCap: 1` showed "1 FPS" above a slider parked at
+  // 30, and the first drag silently replaced it — so the sanitiser clamps and snaps into it.
+  equal(R.CAP_MIN, 30, "the domain's floor");
+  equal(R.CAP_MAX, 240, "…its top, which means unlimited");
+  equal(R.createFrameCap(1).cap, 30, "below the floor becomes the floor");
+  equal(R.createFrameCap(29).cap, 30, "…including one step under it");
+  equal(R.createFrameCap(30).cap, 30, "the floor itself survives");
+  equal(R.createFrameCap(240).cap, 0, "the top means unlimited");
+  equal(R.createFrameCap(241).cap, 0, "…and anything above it");
+  equal(R.createFrameCap(9999).cap, 0, "…no matter how far above");
+  equal(R.createFrameCap(59).cap, 60, "an off-grid value snaps to the nearest step");
+  equal(R.createFrameCap(239).cap, 0, "…and rounding UP onto the top is unlimited too");
+  equal(R.createFrameCap(Number.POSITIVE_INFINITY).cap, 0, "an infinite cap is refused like a NaN");
+  // THE INVARIANT the label and the slider rely on: whatever goes in, what comes out is exactly what
+  // the slider shows for it — `snapToRange` with the slider's own domain must be a NO-OP.
+  const range = { min: R.CAP_MIN, max: R.CAP_MAX, step: R.CAP_STEP };
+  const { snapToRange } = load("ecs/ui/widgets.js");
+  for (const input of [-10, 0, 0.4, 1, 29, 30, 31, 32, 58, 59, 60, 61, 119, 120, 238, 239, 240, 241, 300, 1e6,
+    Number.NaN, Number.POSITIVE_INFINITY, -Number.POSITIVE_INFINITY]) {
+    const cap = R.sanitizeFrameCap(input);
+    const shown = cap === 0 ? R.CAP_MAX : cap; // the binding maps 0 to the slider's top
+    assert(snapToRange(shown, range) === shown, `a stored cap is representable by the slider (${input} -> ${cap})`);
+    assert(cap === 0 || (cap >= R.CAP_MIN && cap < R.CAP_MAX), `a stored cap is in the domain or unlimited (${input} -> ${cap})`);
+  }
+  // …and the DOMAIN is declared ONCE: the settings panel IMPORTS it instead of restating the numbers.
+  const menuCapSrc = stripComments(readSource("src/ui/menu.ts"));
+  equal(countOf(menuCapSrc, /const CAP_MIN\s*=|const CAP_MAX\s*=/g), 0, "the panel does not restate the cap domain");
+  assert(/min:\s*CAP_MIN[\s\S]{0,120}max:\s*CAP_MAX[\s\S]{0,120}step:\s*CAP_STEP/.test(menuCapSrc),
+    "…it uses the resource's constants for the slider's whole domain");
+
+  // The RUNTIME write goes through a command (the frame gate reads the resource every frame, so it is
+  // world state and cannot be assigned by a UI callback), and it sanitises exactly like the loader.
+  const capWorld = new World();
+  capWorld.insertResource(R.FPS_CAP, R.createFrameCap(0));
+  const { SetFpsCap } = load("ecs/commands.js");
+  capWorld.commands.send(SetFpsCap, { cap: 90 });
+  equal(capWorld.resource(R.FPS_CAP).cap, 0, "the command is deferred: nothing changes before a barrier");
+  capWorld.commands.flush();
+  equal(capWorld.resource(R.FPS_CAP).cap, 90, "the barrier applies it");
+  capWorld.commands.send(SetFpsCap, { cap: -3 });
+  capWorld.commands.flush();
+  equal(capWorld.resource(R.FPS_CAP).cap, 0, "a nonsense cap is refused at runtime too");
+  capWorld.commands.send(SetFpsCap, { cap: Number.NaN });
+  capWorld.commands.flush();
+  equal(capWorld.resource(R.FPS_CAP).cap, 0, "…and a NaN from a slider cannot brick the frame gate");
+
+  const main = stripComments(readSource("src/main.ts"));
+  assert(/insertResource\(FPS_CAP/.test(main), "the composition root provides the resource");
+  assert(/createFrameCap\(Number\(readSettings\(\)\.fpsCap/.test(main), "…loading it at boot");
+  assert(/s\.fpsCap\s*=/.test(main), "…and writing it back");
+  assert(/commands\.send\(SetFpsCap/.test(main), "onFpsCap sends the command instead of assigning");
+  assert(
+    /saveSettings\(cap\)/.test(main),
+    "…and persists the value it was handed (the command is deferred, so saving the resource here would write the previous cap)",
+  );
+  // The cap LABEL is a push, and the number it shows arrives through that same command at the next
+  // barrier: the drag handler must hand it the value it just sent. Re-reading the resource printed the
+  // PREVIOUS drag step, and nothing else refreshes the label — the reported "the FPS number is not
+  // accurate while sliding" ("每次滑动 fps 数值不准确").
+  const menuSrc = stripComments(readSource("src/ui/menu.ts"));
+  assert(/renderCap\(cap\)/.test(menuSrc), "the cap label is handed the value the drag just sent");
+  assert(/const renderCap = \(justSet\?: number\)/.test(menuSrc), "…and reads the resource only when it has none");
+  equal(countOf(main, /\blet fpsCap\b|\bfpsCap = cap\b/g), 0, "no closure variable left behind");
+  // The gate reads the resource, and diagnostics reads it too —from the World, not from a callback.
+  assert(/frameCap\.cap > 0/.test(main), "the frame gate reads the resource");
+  assert(
+    /world\.resource\(FPS_CAP\)/.test(readSource("src/ecs/systems/diagnostics.ts")),
+    "diagnostics reads the resource",
+  );
+});
+
+check("the loop is ONE rAF chain whose body the MODE picks", () => {
+  // "Is the game loop running" used to be the implicit consequence of which of stopLoop()/startLoop()
+  // ran last —and stopLoop() started the UI pump as a side effect that startLoop() then undid. Then the
+  // ui pump and the panorama became exactly one caller each (setLoopMode). NOW there is nothing to start
+  // or stop at all: ONE chain runs for the process lifetime, `setLoopMode` only writes the mode, and the
+  // frame body dispatches on it — so a mode transition cannot half-stop a loop.
+  const main = stripComments(readSource("src/main.ts"));
+  equal(countOf(main, /function stopLoop|function startLoop/g), 0, "no stopLoop/startLoop pair");
+  equal(countOf(main, /\btimerId\b|\bstarted\b/g), 0, "no dead timer handle, no second running flag");
+  equal(countOf(main, /function startUiPump|function stopUiPump|function startMenuBgLoop|function stopMenuBgLoop/g), 0,
+    "the separate ui pump / panorama loops are gone");
+  assert(/function setLoopMode\(/.test(main), "one transition function");
+  assert(/function inWorld\(\)/.test(main), "the playing-or-not question is a function of the mode");
+  assert(countOf(main, /setLoopMode\("/g) >= 4, "the startup, the world entry, its hand-over and the menu all say it");
+  // ONE chain: a single requestAnimationFrame (re-arming itself) and no cancelAnimationFrame anywhere.
+  equal(countOf(main, /requestAnimationFrame\(/g), 1, "exactly one rAF chain");
+  equal(countOf(main, /cancelAnimationFrame\(/g), 0, "the chain is never cancelled or restarted");
+  // The body dispatches on the mode, and a menu frame is the ui lane (+ the background), nothing else.
+  assert(/if \(loopMode === "game"\) renderFrame\(\)/.test(main), "a game frame runs the fixed step + render");
+  assert(/else if \(loopMode === "menu"\) menuFrame\(\)/.test(main), "a menu frame runs the menu body");
+  assert(/function menuFrame\(\)[\s\S]{0,200}world\.renderUi\(\)/.test(main), "…which is the ui lane alone");
+  // …and a LOAD frame is the ui lane alone too, because the loading screen is widget data and the
+  // renderer does not exist yet. It used to have no body at all ("nothing yet"), which is why the
+  // loading screen could not have been painted by the loop before `renderer.init()`.
+  assert(/else if \(loopMode === "load"\) loadFrame\(\)/.test(main), "a load frame runs the loading screen");
+  assert(/function loadFrame\(\)[\s\S]{0,200}world\.renderUi\(\)/.test(main), "…which is the ui lane alone");
+  // …and BOTH flows have to be in that mode while their screen is up: the startup starts in it, and a
+  // world entry (driven from the MENU) has to switch into it, or every frame in between is a menu frame
+  // that draws the panorama behind an opaque screen for nothing.
+  const entryForMode = main.slice(main.indexOf("async function enterWorld("), main.indexOf("const mainMenu = new MainMenu("));
+  assert(/setLoopMode\("load"\)/.test(entryForMode), "the world entry puts the loop in load mode");
+  equal(countOf(main, /loopMode = mode;/g), 1, "the mode has exactly one writer");
+  // …and the chain is kicked off once, by calling frame() directly rather than scheduling it. The call
+  // lives inside the boot driver now (it is the first thing that happens after the loading screen's
+  // first stage), so the assertion has to allow its indentation while still demanding exactly one.
+  equal(countOf(main, /^\s*frame\(\);$/gm), 1, "the boot block starts the chain exactly once");
+});
+
+check("the startup screen is DATA: a command moves LOADING_STATE, `ui.loading` paints the widgets", () => {
+  // The window is now revealed while the GPU is still being initialised, so the process needs a
+  // loading screen — and a loading screen is UI, which in this repo means: a surface writes data and
+  // the reconciler paints it. main.ts therefore publishes the stage into a resource (through a
+  // command, like every other outside write) and `ui.loading` turns it into widget data, which is also
+  // what keeps the loading text translatable and the bar free of per-frame style strings.
+  const B = load("ecs/ui/loading.js");
+  const { LoadingScreen } = load("ui/loading.js");
+  const { LOADING_SEGMENTS } = load("ecs/resources.js");
+  const world = widgetWorld;
+  world.insertResource(LOADING_STATE, createLoadingState());
+  const screen = new LoadingScreen(world);
+  const loading = new B.UiLoadingSystem(world, screen);
+  const shown = () => !world.get(screen.rootEntity, W.UI_STATE).hidden;
+  const filled = () =>
+    screen.segmentEntities.filter((e) => world.get(e, W.UI_STATE).active).length;
+
+  equal(shown(), false, "the startup screen is spawned hidden");
+  equal(world.get(screen.rootEntity, W.UI_LOOK).recipe, "loading.root", "…as a widget tree, not a DOM overlay");
+
+  world.commands.send(SetLoadingStage, { active: true, key: "loading.settings", progress: 0 });
+  equal(world.resource(LOADING_STATE).active, false, "the command is deferred: no barrier, no change");
+  world.commands.flush();
+  loading.step();
+  equal(shown(), true, "the ui lane puts it on screen");
+  equal(world.get(screen.statusEntity, W.UI_TEXT).key, "loading.settings", "the stage line is an i18n KEY");
+  equal(world.get(screen.statusEntity, W.UI_TEXT).raw, false, "…so a language switch re-translates it live");
+  equal(world.get(screen.percentEntity, W.UI_TEXT).key, "0%", "the percentage is the progress");
+  equal(world.get(screen.percentEntity, W.UI_TEXT).raw, true, "…as raw data");
+  equal(screen.segmentEntities.length, LOADING_SEGMENTS, "the bar is a fixed row of segments");
+  equal(filled(), 0, "…with nothing engaged at 0%");
+
+  world.commands.send(SetLoadingStage, { key: "loading.gpu", progress: 0.5 });
+  world.commands.flush();
+  loading.step();
+  equal(world.get(screen.statusEntity, W.UI_TEXT).key, "loading.gpu", "the next stage renames the line");
+  equal(filled(), Math.round(LOADING_SEGMENTS / 2), "half the bar is engaged at 50%");
+  equal(world.get(screen.segmentEntities[0], W.UI_LOOK).recipe, "loading.segment", "the bar is widgets, not a width");
+
+  equal(world.get(screen.noteEntity, W.UI_STATE).hidden, true, "no note while nothing needed repairing");
+  world.commands.send(SetLoadingStage, { noteKey: "loading.fixed", noteValue: "fpsCap, language" });
+  world.commands.flush();
+  loading.step();
+  equal(world.get(screen.noteEntity, W.UI_STATE).hidden, false, "a repaired setting shows the note");
+  equal(world.get(screen.noteLabelEntity, W.UI_TEXT).key, "loading.fixed", "…under a translated label");
+  equal(world.get(screen.noteLabelEntity, W.UI_TEXT).raw, false, "…which the reconciler re-derives");
+  equal(world.get(screen.noteValueEntity, W.UI_TEXT).key, "fpsCap, language", "…listing the settings by name");
+  equal(world.get(screen.noteValueEntity, W.UI_TEXT).raw, true, "…as data no dictionary could hold");
+
+  world.commands.send(SetLoadingStage, { active: false, progress: 1 });
+  world.commands.flush();
+  loading.step();
+  equal(shown(), false, "the screen comes down when the startup is over");
+  loading.step();
+  equal(world.get(screen.statusEntity, W.UI_TEXT).key, "loading.gpu", "a hidden screen writes nothing (idempotent)");
+});
+
+check("the startup reveals the window behind the screen, and entering a world rebuilds it there", () => {
+  // The window used to be revealed AFTER `await renderer.init()`, so the GPU handshake, the spawn
+  // window's generation and the first ~100 frames of chunk meshing all happened behind a hidden
+  // window — the startup was a black rectangle for as long as it took. The order below is the feature.
+  const main = stripComments(readSource("src/main.ts"));
+  // The two drivers, extracted by name: EVERY assertion about "the screen is activated" / "the world is
+  // built here" has to be scoped to ONE of them, because an unscoped `indexOf` finds whichever comes
+  // first in the FILE, which is not the one being talked about.
+  const bootBody = main.slice(main.indexOf("async function boot("), main.indexOf("void boot()"));
+  // The end marker has to be CODE: comments are stripped above, so a `//` marker matches nothing and the
+  // slice would silently run to the end of the file (which is how the entry assertions passed while the
+  // entry was broken — the boot driver's own `active: true` was inside the slice).
+  const entryBody = main.slice(
+    main.indexOf("async function enterWorld("),
+    main.indexOf("const mainMenu = new MainMenu("),
+  );
+  assert(bootBody.length > 0, "the startup driver is in the source");
+  assert(entryBody.length > 0, "the world-entry driver is in the source");
+  assert(!entryBody.includes("renderer.init"), "…and the slice ends before the startup driver");
+  const firstStage = main.indexOf('loadingStage(0, "loading.settings")');
+  const started = main.indexOf("frame();");
+  const revealed = main.indexOf("showWindow()");
+  const gpu = main.indexOf("await renderer.init()");
+  assert(firstStage > 0, "the startup screen's first stage is announced");
+  assert(started > firstStage, "…before the ONE chain is kicked off");
+  assert(revealed > started, "…and before the window is revealed");
+  assert(gpu > revealed, "the GPU handshake happens AFTER the window is already showing the screen");
+  // …and the screen has to be ACTIVATED, or none of the above paints anything: `ui.loading` shows its root
+  // only while LOADING_STATE.active is true, and the root is spawned hidden. This shipped BROKEN TWICE —
+  // the startup without the line (a black window with the crosshair and the hotbar on it, the HUD being
+  // visible by default) and then the world entry without it, because `boot()`'s final stage sets
+  // `active: false` and the entry never set it back. Both drivers are asserted separately now; a
+  // source-text assertion is the only kind available, since a driver needs the DOM and a renderer.
+  assert(
+    /SetLoadingStage, \{ active: true \}/.test(bootBody),
+    "the startup ACTIVATES the loading screen",
+  );
+  assert(
+    bootBody.indexOf("active: true") < bootBody.indexOf("showWindow()"),
+    "…before the window is revealed, so the first visible frame is the screen",
+  );
+  assert(
+    // Not anchored at the closing brace: the entry clears the startup's settings NOTE in the same
+    // command, so its payload carries more than the flag.
+    /SetLoadingStage, \{ active: true/.test(entryBody),
+    "…and so does the WORLD-ENTRY driver (the startup left active = false)",
+  );
+  assert(
+    entryBody.indexOf("active: true") < entryBody.indexOf("chunkStream.warmUp"),
+    "…before the meshing its screen is supposed to cover",
+  );
+  assert(
+    entryBody.indexOf("commands.send(Teleport") < entryBody.indexOf("chunkStream.warmUp"),
+    "…and after the Teleport is queued, because the warm-up reads POSITION",
+  );
+  // Every stage is announced BEFORE its work runs, and each announcement names an i18n key.
+  for (const [key, work] of [
+    ["loading.gpu", "await renderer.init()"],
+    ["loading.ready", "mainMenu.show()"],
+    ["world.terrain", "chunkStream.prime("],
+    ["world.chunks", "chunkStream.warmUp("],
+  ]) {
+    const at = main.indexOf(`"${key}"`);
+    assert(at > 0, `the loading screen announces ${key}`);
+    assert(at < main.indexOf(work, at), `${key} is announced before its work runs`);
+  }
+  assert(/world\.renderUi\(\)/.test(main), "each stage is reconciled before its paint");
+  // The per-stage yield is a MACROTASK, not a second chain: there is still exactly ONE rAF chain, and
+  // the yield has to let the compositor present the screen before the blocking work starts.
+  assert(/setTimeout\(resolve, 0\)/.test(main), "the per-stage yield is a timer task");
+  equal(countOf(main, /requestAnimationFrame\(/g), 1, "…so the process still owns exactly one rAF chain");
+
+  // ===== the world is built at ENTRY, not at startup =====
+  // Building it at boot made the STARTUP pay for a world the user may never enter (the spawn window's
+  // generation plus ~100 frames of meshing, ~1.6 s in the measured log) and left "entering a world"
+  // with nothing to wait for — i.e. no honest place for a loading screen. Both halves are asserted:
+  // `boot()` must NOT build a world, and the entry driver MUST. (Both bodies were extracted above.)
+  equal(countOf(bootBody, /chunkStream\./g), 0, "the startup does not build or mesh the world any more");
+  assert(/chunkStream\.prime\(/.test(entryBody), "entering a world generates the spawn window");
+  assert(/chunkStream\.warmUp\(paint/.test(entryBody), "…and meshes it behind the screen");
+  // A re-entry into a window that is still built skips the screen instead of flashing it for one frame.
+  assert(
+    /if \(chunkStream\.needsWarmUp\(/.test(entryBody),
+    "the entry asks whether there is anything to build before it shows a screen",
+  );
+  assert(/setLoopMode\("game"\)/.test(entryBody), "the entry ends by handing the mode over to the game");
+  equal(countOf(main, /document\.createElement\(/g), 0, "the composition root builds no element any more");
+  equal(countOf(main, /style\.cssText/g), 0, "…and writes no style string");
+});
+
+check("the settings FILE is checked at boot, repaired and written back", () => {
+  // Each config module already ignores a value it cannot use and falls back — which silently left the
+  // FILE disagreeing with the value in force, unreported, forever. The boot check compares the two.
+  const { diffSettings } = load("platform/settings-diff.js");
+  const inForce = {
+    language: "en",
+    font: "pixel",
+    uiScale: "auto",
+    windowMode: "windowed",
+    fpsCap: 0,
+    keybinds: { forward: "KeyW", jump: "Space" },
+  };
+
+  const fine = diffSettings({ language: "en", fpsCap: 0 }, inForce);
+  equal(fine.fixed.length, 0, "a usable file reports no repair");
+  equal(fine.unknown.length, 0, "…and no unknown key");
+  equal(fine.merged.fpsCap, 0, "…and is left exactly as it was");
+
+  // A hand-edited cap: the file says 1, the value that took force is 30 (sanitizeFrameCap).
+  const cap = diffSettings({ fpsCap: 1 }, { ...inForce, fpsCap: 30 });
+  equal(cap.fixed.join(","), "fpsCap", "an unusable value is reported as repaired");
+  equal(cap.merged.fpsCap, 30, "…by writing the value that took force");
+  equal(diffSettings({ language: "de" }, inForce).merged.language, "en", "a value outside the domain goes to the one in force");
+  equal(diffSettings({ windowMode: 5 }, inForce).fixed.join(","), "windowMode", "a wrong TYPE is repaired too");
+
+  const binds = diffSettings({ keybinds: { forward: "KeyQ", jump: "Space" } }, inForce);
+  equal(binds.fixed.join(","), "keybinds.forward", "a bind the table refused is repaired per ACTION");
+  equal(binds.merged.keybinds.forward, "KeyW", "…to the binding in force");
+  equal(binds.merged.keybinds.jump, "Space", "…leaving the valid one alone");
+
+  const future = diffSettings({ fpsCap: 0, futureSetting: 7 }, inForce);
+  equal(future.unknown.join(","), "futureSetting", "a key the engine does not know is reported");
+  equal(future.merged.futureSetting, 7, "…and KEPT (an older build must not trim a newer file)");
+  equal(future.fixed.length, 0, "…and is not a repair");
+
+  const empty = diffSettings({}, inForce);
+  equal(empty.fixed.length + empty.unknown.length, 0, "an ABSENT key is not a fault (a first run)");
+
+  // …and the composition root actually runs it, before anything it could disagree with is used.
+  const main = stripComments(readSource("src/main.ts"));
+  assert(/readSettingsChecked\(\)/.test(main), "the boot check uses the read that can report a fault");
+  assert(/diffSettings\(checked\.settings, inForce\)/.test(main), "…compares the file with the values in force");
+  assert(/writeSettings\(report\.merged\)/.test(main), "…and writes the repaired file back");
+  assert(/backupSettingsFile\(\)/.test(main), "an UNREADABLE file is backed up before being rebuilt");
+  assert(/writeSettings\(\{ \.\.\.inForce \}\)/.test(main), "…and rebuilt from the values in force");
+  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds"]) {
+    assert(new RegExp(`\\n    ${key}:`).test(main), `the schema lists "${key}"`);
+  }
+});
+
+check("the startup screen's copy exists in the shipped dictionaries", () => {
+  // The loading screen is the FIRST thing a user sees, and its text is i18n keys like every other
+  // surface: a key with no entry would put "loading.gpu" on screen instead of a sentence.
+  const dicts = ["zh", "en", "ja"].map((lang) =>
+    JSON.parse(
+      require("node:fs").readFileSync(
+        path.join(ROOT, "packs", "VoxelEngineNWWebrp", "assets", "voxel", "lang", `${lang}.json`),
+        "utf8",
+      ),
+    ),
+  );
+  const keys = [
+    "loading.title",
+    "loading.settings",
+    "loading.gpu",
+    "loading.ready",
+    "loading.fixed",
+    "loading.unknown",
+    "loading.rebuilt",
+    // …and the world-entry stages, which the SAME screen shows while the spawn window is built.
+    "world.spawn",
+    "world.terrain",
+    "world.chunks",
+    "world.ready",
+  ];
+  for (const [index, dict] of dicts.entries()) {
+    for (const key of keys) {
+      assert(typeof dict[key] === "string" && dict[key].length > 0, `${key} is translated (${["zh", "en", "ja"][index]})`);
+    }
+  }
+});
+
+check("configuration is a RESOURCE, and the input state caches no copy of it", () => {
+  // Two leftovers of the same shape: state that lived as a module singleton or as a cached field.
+  //   * the mutable CONFIG (language, font, UI scale, key map) is world state — the bind table is asked
+  //     every tick and the language every frame — so it lives in resources with declared readers;
+  //   * INPUT_STATE carried a cached `clickLockAllowed`, i.e. a second copy of what UI_MODAL already
+  //     answers. A stale copy there let a click capture the mouse behind an open menu.
+  const R = load("ecs/resources.js");
+  const main = stripComments(readSource("src/main.ts"));
+  for (const [name, make] of [
+    ["LOCALE", R.createLocale],
+    ["FONT", R.createFont],
+    ["UI_SCALE", R.createScale],
+    ["KEYMAP", R.createKeyMap],
+  ]) {
+    assert(typeof make === "function", `${name} has a factory`);
+    assert(new RegExp(`insertResource\\(${name},`).test(main), `the composition root inserts ${name}`);
+  }
+  assert(/loadBinds\(keymap, readSettings\(\)\.keybinds\)/.test(main), "…seeded from settings.json");
+  assert(/loadLang\(locale, readSettings\(\)\.language\)/.test(main), "…and so is the language");
+
+  // The bind table IS the resource: the module seeds its DEFAULTS INTO that object (no private copy).
+  const keymap = R.createKeyMap();
+  const K = load("platform/keybinds.js");
+  K.adoptKeyMap(keymap);
+  equal(keymap.codes.get("jump"), "Space", "adopting seeds the defaults into the resource");
+  equal(K.getBind("jump"), "Space", "…and the module answers from it");
+  K.loadBinds(keymap, { jump: "KeyJ", forward: "not a code" });
+  equal(keymap.codes.get("jump"), "KeyJ", "a saved bind lands in the resource");
+  equal(keymap.codes.get("forward"), "KeyW", "…while an invalid saved value keeps the default");
+  K.setBind("sprint", "KeyJ");
+  equal(keymap.codes.get("jump"), "", "rebinding preempts the previous owner of the code");
+  equal(K.getBind("sprint"), "KeyJ", "…and the new owner has it");
+  // Leave a clean table behind: the module keeps a POINTER to whatever it adopted last.
+  K.adoptKeyMap(R.createKeyMap());
+  equal(K.getBind("jump"), "Space", "a fresh KEYMAP restores the defaults");
+
+  // No module keeps a private copy of the value any more (a pointer to the resource, not a mirror).
+  const keybindsSrc = stripComments(readSource("src/platform/keybinds.ts"));
+  assert(/let table: KeyMapState \| null/.test(keybindsSrc), "keybinds.ts holds the resource object");
+  equal(countOf(keybindsSrc, /const binds = new Map/g), 0, "…and its private Map is gone");
+  for (const [file, needle] of [
+    ["src/ui/i18n.ts", /let locale: LocaleState \| null/],
+    ["src/ui/fonts.ts", /let state: FontState \| null/],
+    ["src/ui/uiscale.ts", /let state: ScaleState \| null/],
+  ]) {
+    assert(needle.test(stripComments(readSource(file))), `${file} reads the config resource`);
+  }
+  // …and the readers DECLARE it, or the schedule's model of them is a lie.
+  assert(/readsExternal: \["keybinds"\]/.test(stripComments(readSource("src/ecs/systems/movement.ts"))),
+    "movement declares the bind-table read");
+  assert(/"locale"/.test(stripComments(readSource("src/ecs/ui/system.ts"))),
+    "the reconciler declares the language read");
+
+  // The cached click permission is gone from all three places that used to move it around.
+  equal(countOf(stripComments(readSource("src/ecs/resources.ts")), /clickLockAllowed/g), 0,
+    "INPUT_STATE has no click-permission field");
+  assert(/isModalUi\(this\.ui\)/.test(stripComments(readSource("src/ecs/systems/input.ts"))),
+    "the input system derives it from UI_MODAL at the moment of the question");
+  equal(countOf(stripComments(readSource("src/platform/pointerlock.ts")), /clickLockAllowed/g), 0,
+    "pointerlock.ts no longer publishes it");
+
+  // Assets stay assets: the dictionaries and the block registry are loaded once and never change.
+  assert(!/insertResource\((?:DICT|DICTS|BLOCKS|BLOCK_REGISTRY|CATALOG)/.test(main), "assets are not resources");
+});
+
+check("ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ui", "inventory.ts"), "utf8");
+  const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
+  assert(/reads:\s*\[INVENTORY\]/.test(block), "reads INVENTORY");
+  // It writes WIDGET DATA now, not DOM: that is what makes it conflict with the reconciler and what
+  // forces the declared order in the ui lane.
+  for (const component of ["UI_IMAGE", "UI_STATE", "UI_TEXT", "UI_TIP"]) {
+    assert(new RegExp(`writes:[\\s\\S]*\\b${component}\\b`).test(block), `writes ${component}`);
+  }
+  assert(!/dom\./.test(block), "writes no DOM target of its own any more");
+  // …and main.ts must declare the order the conflict demands, or the schedule throws at boot.
+  const main = require("node:fs").readFileSync(path.join(ROOT, "src", "main.ts"), "utf8");
+  assert(
+    /name:\s*"ui\.widgets"[\s\S]{0,300}after:\s*\["ui\.inventory"/.test(main),
+    "main.ts orders ui.widgets after ui.inventory",
+  );
+});
+
+check("an undeclared data dependency throws (checked on the real registrations)", () => {
+  const defs = registrations().map((def) =>
+    def.name === "player.movement" ? { ...def, after: ["player.controller"] } : def,
+  );
+  let message = "";
+  try {
+    buildSchedule(defs);
+  } catch (err) {
+    message = String(err.message);
+  }
+  assert(/both touch component "position"/.test(message), `expected the dependency error, got: ${message}`);
+});
+
+check("the batcher finds parallelism when it exists, and separates conflicts", () => {
+  const def = (name, extra) => ({ name, stage: "fixed", run: () => {}, ...extra });
+  const disjoint = new Schedule();
+  disjoint.add(def("w-a", { writes: [C.POSITION] }));
+  disjoint.add(def("w-b", { writes: [C.PREV_POSITION] }));
+  disjoint.add(def("w-c", { writes: [C.ORIENTATION] }));
+  disjoint.resolve();
+  equal(disjoint.batchesOf("fixed").length, 1, "three disjoint writers share one batch");
+
+  const sameTarget = new Schedule();
+  sameTarget.add(def("ui-1", { writesExternal: ["dom.f3"] }));
+  sameTarget.add(def("ui-2", { writesExternal: ["dom.f3"] }));
+  let message = "";
+  try {
+    sameTarget.resolve();
+  } catch (err) {
+    message = String(err.message);
+  }
+  assert(/target "dom\.f3"/.test(message), `expected the target conflict, got: ${message}`);
+
+  const ordered = new Schedule();
+  ordered.add(def("first", { writes: [C.POSITION] }));
+  ordered.add(def("second", { writes: [C.POSITION], after: ["first"] }));
+  ordered.resolve();
+  equal(ordered.batchesOf("fixed").length, 2, "a declared order puts them in different batches");
+});
+
+check("a declared order holds in EITHER registration order (the batcher's index space)", () => {
+  // ROADMAP §3.9 carried this as a GAP: a pure ORDERING edge — two systems that share no data at all —
+  // only worked when the declaration happened to be registered in topological order. `build()` built the
+  // adjacency in REGISTRATION order and the verification + the batcher indexed that same array by
+  // RESOLVED position, so as soon as Kahn's sort MOVED one of the two, the edge pointed at the wrong
+  // pair: it threw `Schedule.batch: "a" must run before "b" but was batched no earlier` (a message that
+  // also read backwards for an `after` declaration), and the workaround was "register a system before
+  // anything that points at it". The adjacency is remapped into the resolved space now, so the ONLY
+  // thing that decides the order is the declaration. Both orders are pinned here, for `after` and
+  // `before`, with and without a data conflict.
+  const sys = (name, extra) => ({ name, stage: "ui", run: () => {}, ...extra });
+  const build = (defs) => {
+    const schedule = new Schedule();
+    for (const def of defs) schedule.add({ ...def, run: () => {} });
+    schedule.resolve();
+    return schedule;
+  };
+  const order = (s) => s.orderOf("ui").map((d) => d.name).join(",");
+  const groups = (s) => JSON.stringify(s.batchesOf("ui").map((b) => b.map((d) => d.name)));
+
+  const afterLate = build([sys("a", { after: ["b"] }), sys("b")]);
+  const afterEarly = build([sys("b"), sys("a", { after: ["b"] })]);
+  equal(order(afterLate), "b,a", "a system that must follow another runs after it");
+  equal(order(afterEarly), "b,a", "…in either registration order");
+  equal(groups(afterLate), '[["b"],["a"]]', "…and the edge alone splits the batch (no shared data)");
+  equal(groups(afterEarly), groups(afterLate), "…identically");
+
+  const beforeLate = build([sys("a", { before: ["b"] }), sys("b")]);
+  const beforeEarly = build([sys("b"), sys("a", { before: ["b"] })]);
+  equal(order(beforeLate), "a,b", "a `before` declaration runs first");
+  equal(order(beforeEarly), "a,b", "…in either registration order");
+  equal(groups(beforeLate), groups(beforeEarly), "…and lands in the same batches");
+
+  // A neighbour in between keeps its registration order among the unconstrained systems.
+  const withNeighbour = build([sys("a", { after: ["b"] }), sys("b"), sys("c")]);
+  equal(order(withNeighbour), "b,a,c", "unconstrained systems keep their registration order");
+
+  // An edge that ALSO conflicts (the same component written by both) is honoured in either order too.
+  const conflicting = build([sys("a", { after: ["b"], writes: [C.POSITION] }), sys("b", { writes: [C.POSITION] })]);
+  equal(order(conflicting), "b,a", "an edge that also conflicts is honoured");
+  equal(conflicting.batchesOf("ui").length, 2, "…and they still cannot share a batch");
+
+  // A typo still fails with the message that names the problem (not with a batching complaint).
+  let message = "";
+  try {
+    build([sys("a", { after: ["nope"] }), sys("b")]);
+  } catch (err) {
+    message = String(err.message);
+  }
+  assert(/declares after "nope", which is not a "ui"-stage system/.test(message), `expected the name error, got: ${message}`);
+});
+
+check("the UI modality gate: one predicate, two reasons", () => {
+  const devices = world.resource(INPUT_STATE);
+  const ui = world.resource(UI_MODAL);
+  const cases = [
+    ["locked, no UI", { locked: true, freeMouseActive: false }, {}, true],
+    ["locked + main menu", { locked: true, freeMouseActive: false }, { mainMenu: true }, false],
+    ["locked + pause menu", { locked: true, freeMouseActive: false }, { menu: true }, false],
+    ["locked + inventory", { locked: true, freeMouseActive: false }, { inventory: true }, false],
+    ["free mouse, no UI", { locked: false, freeMouseActive: true }, {}, true],
+    ["free mouse + inventory", { locked: false, freeMouseActive: true }, { inventory: true }, false],
+    ["unlocked, no UI", { locked: false, freeMouseActive: false }, {}, false],
+  ];
+  for (const [label, d, u, expected] of cases) {
+    Object.assign(devices, { locked: false, freeMouseActive: false }, d);
+    Object.assign(ui, { mainMenu: false, menu: false, inventory: false }, u);
+    equal(canControl(devices, ui), expected, `canControl: ${label}`);
+  }
+  // The inventory is modal but NOT a menu: the E key / its mouse binding must still close it.
+  Object.assign(ui, { mainMenu: false, menu: false, inventory: true });
+  equal(isMenuUi(ui), false, "isMenuUi ignores the inventory");
+  equal(isModalUi(ui), true, "but the inventory is modal");
+  Object.assign(devices, { locked: false, freeMouseActive: false });
+  Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
+});
+
+check("a modal UI drops the PLAYER's input but keeps its physics (the gate is per entity)", () => {
+  const { PlayerMovementSystem, MOVEMENT_ACCESS } = load("ecs/systems/movement.js");
+  const mover = new PlayerMovementSystem(world);
+  const schedule = new Schedule();
+  schedule.add({ name: "check.movement", stage: "fixed", ...MOVEMENT_ACCESS, run: (ctx) => mover.step(ctx.dt) });
+  schedule.resolve();
+  const player = C.spawnPlayer(world, { x: 400, y: 200, z: 400 }, []);
+  const npc = C.spawnMovable(world, { x: 420, y: 200, z: 420 });
+  const playerIndex = entityIndex(player);
+  const npcIndex = entityIndex(npc);
+  const devices = world.resource(INPUT_STATE);
+  const ui = world.resource(UI_MODAL);
+  const control = world.get(player, C.CONTROL);
+  const forwardKey = load("platform/keybinds.js").getBind("forward");
+  const run = (ticks) => {
+    for (let i = 0; i < ticks; i++) schedule.run("fixed", { world, dt: 1 / 120, alpha: 0, tick: i + 1 });
+  };
+
+  Object.assign(devices, { locked: true, freeMouseActive: false });
+  Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
+  // Pin the basis so the two axes are separable: forward = +x, up = +y. Gravity then has NO horizontal
+  // component, which is what makes "x did not move" a real statement about the input rather than
+  // about the orientation the spawn happened to pick.
+  C.ORIENTATION.fwdX[playerIndex] = 1;
+  C.ORIENTATION.fwdY[playerIndex] = 0;
+  C.ORIENTATION.fwdZ[playerIndex] = 0;
+  C.ORIENTATION.upX[playerIndex] = 0;
+  C.ORIENTATION.upY[playerIndex] = 1;
+  C.ORIENTATION.upZ[playerIndex] = 0;
+
+  const playerBefore = C.POSITION.y[playerIndex];
+  run(1);
+  assert(C.POSITION.y[playerIndex] < playerBefore, "locked and UI-free: gravity must apply");
+
+  // A modal UI owns the input: the held key must do NOTHING...
+  Object.assign(ui, { menu: true });
+  control.keys.add(forwardKey);
+  const frozenX = C.POSITION.x[playerIndex];
+  const frozenY = C.POSITION.y[playerIndex];
+  run(10);
+  near(C.POSITION.x[playerIndex], frozenX, 1e-9, "the held forward key must be ignored while a UI is open");
+  assert(
+    C.POSITION.y[playerIndex] < frozenY,
+    "...but gravity keeps applying: an airborne player FALLS instead of hanging in mid-air",
+  );
+  assert(
+    C.POSITION.y[npcIndex] < 200,
+    "an NPC keeps falling too: the UI owns OUR pointer, not its physics (no PLAYER marker)",
+  );
+
+  // ...and the same key must move it once the UI is gone, or the assertion above proves nothing.
+  Object.assign(ui, { menu: false });
+  const freeX = C.POSITION.x[playerIndex];
+  run(10);
+  assert(C.POSITION.x[playerIndex] > freeX, "with the UI closed the same key DOES move it (positive control)");
+  control.keys.delete(forwardKey);
+});
+
+check("player.input is a scheduled system with a declared access set", () => {
+  // It used to be the one behaviour module outside the schedule: constructed in main.ts, never
+  // registered, with no *_ACCESS constant —so its writes to CONTROL/VIEW/MOTION happened inside DOM
+  // event handlers, outside every barrier the scheduler checks.
+  const def = registrations().find((d) => d.name === "player.input");
+  assert(!!def, "main.ts registers the input system");
+  equal(def.stage, "fixed", "it drains the device events in the fixed lane");
+  assert((def.before ?? []).includes("motion.snapshot"), "declared as the tick's first act");
+  assert((def.before ?? []).includes("player.controller"), "…before the controller that drains its VIEW");
+  for (const name of ["CONTROL", "VIEW", "MOTION"]) {
+    assert((def.writes ?? []).includes(C[name]), `writes ${name}`);
+  }
+  for (const name of ["CONTROL", "MOTION"]) {
+    assert((def.reads ?? []).includes(C[name]), `reads ${name} (the state a press decides against)`);
+  }
+  for (const name of ["ORIENTATION", "POSITION", "BODY"]) {
+    assert((def.reads ?? []).includes(C[name]), `reads ${name} (its logs print it)`);
+  }
+  // The host state it arbitrates with, and the two things it publishes that the ECS does not model:
+  // INPUT_STATE is a RESOURCE (the device layer owns it —pointerlock.ts writes it too), and the F3
+  // queues are forwarded by diagnostics, which declares the read.
+  for (const target of ["pointerLock", "windowGeometry"]) {
+    assert((def.readsExternal ?? []).includes(target), `readsExternal declares "${target}"`);
+  }
+  for (const target of ["inputState", "inputDiagnosticQueues"]) {
+    assert((def.writesExternal ?? []).includes(target), `writesExternal declares "${target}"`);
+  }
+  const diagnostics = registrations().find((d) => d.name === "diagnostics");
+  assert((diagnostics.readsExternal ?? []).includes("inputDiagnosticQueues"), "…and diagnostics reads it");
+});
+
+check("the device handlers only QUEUE; step() is what writes the components", () => {
+  // The hand-off is the whole point of the migration: the decisions (which key, which delta, which jump
+  // branch, every race guard) still happen at event time; the writes moved into the system run.
+  const { PlayerInputSystem } = load("ecs/systems/input.js");
+  const devices = world.resource(INPUT_STATE);
+  const ui = world.resource(UI_MODAL);
+  const index = entityIndex(localPlayer);
+  const control = world.get(localPlayer, C.CONTROL);
+  const motion = world.get(localPlayer, C.MOTION);
+  const handlers = {};
+  const domListeners = {};
+  const dom = {
+    addEventListener: (type, fn) => {
+      domListeners[type] = fn;
+    },
+    requestPointerLock: () => undefined,
+  };
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    addEventListener: (type, fn) => {
+      handlers[type] = fn;
+    },
+    pointerLockElement: null,
+  };
+  const saved = {
+    devices: { ...devices },
+    ui: { ...ui },
+    control: { mode: control.mode, flying: control.flying },
+    motion: { vy: motion.vy, onGround: motion.onGround },
+    yaw: C.VIEW.yawDelta[index],
+    pitch: C.VIEW.pitchDelta[index],
+  };
+  control.keys.clear();
+  try {
+    const input = new PlayerInputSystem(world, dom, () => {});
+    for (const type of ["click"]) {
+      assert(typeof domListeners[type] === "function", `the canvas listens for ${type} (lock grab)`);
+    }
+    for (const type of ["pointerlockchange", "mousemove", "keydown", "keyup"]) {
+      assert(typeof handlers[type] === "function", `document listens for ${type}`);
+    }
+    // The click guard is UI_MODAL-driven now (there is no cached "click may grab the lock" field on the
+    // input state any more), so this resets the resource that actually decides it.
+    Object.assign(devices, { locked: true, freeMouseActive: false });
+    Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
+
+    // 1. a held key: handler queues, tick applies.
+    handlers.keydown({ code: "KeyW", repeat: false });
+    equal(control.keys.has("KeyW"), false, "the keydown handler leaves CONTROL alone");
+    input.step();
+    equal(control.keys.has("KeyW"), true, "step() applies the held key");
+    handlers.keyup({ code: "KeyW" });
+    equal(control.keys.has("KeyW"), true, "the keyup handler leaves CONTROL alone too (order is kept)");
+    input.step();
+    equal(control.keys.has("KeyW"), false, "…and the tick releases it");
+
+    // 2. mouse look: scaled at event time, added by the tick.
+    const yaw = C.VIEW.yawDelta[index];
+    const pitch = C.VIEW.pitchDelta[index];
+    handlers.mousemove({ movementX: 10, movementY: -20 });
+    equal(C.VIEW.yawDelta[index], yaw, "the mousemove handler leaves VIEW alone");
+    input.step();
+    near(C.VIEW.yawDelta[index], yaw - 0.02, 1e-6, "step() adds the delta the handler scaled (10px x 0.002)");
+    near(C.VIEW.pitchDelta[index], pitch + 0.04, 1e-6, "…on both axes");
+
+    // 3. Space: the branch is DECIDED at press time, the impulse is WRITTEN by the tick.
+    control.mode = "walk";
+    motion.vy = 0;
+    motion.onGround = true;
+    const logged = Math.min(10, input.spaceLog.length + 1);
+    handlers.keydown({ code: "Space", repeat: false });
+    equal(motion.vy, 0, "the jump impulse waits for the tick");
+    equal(input.spaceLog.length, logged, "…but the press itself is logged at press time");
+    input.step();
+    equal(motion.vy, 7.5, "step() writes the impulse");
+    equal(control.keys.has("Space"), true, "…and the held key");
+    handlers.keyup({ code: "Space" });
+    input.step();
+
+    // 4. bindPress is de-duplicated against the QUEUE, not just the component: the same mouse bind
+    //    pressed twice inside one frame must not jump twice (the first press is not applied yet).
+    motion.vy = 0;
+    motion.onGround = true;
+    const bindLogged = Math.min(10, input.spaceLog.length + 1);
+    input.bindPress("Space");
+    input.bindPress("Space");
+    equal(input.spaceLog.length, bindLogged, "a second press of the same frame is ignored as held");
+    equal(motion.vy, 0, "…and neither press has written anything yet");
+    input.step();
+    equal(motion.vy, 7.5, "step() writes the bind's impulse exactly once");
+    equal(control.keys.has("Space"), true, "…and the bind's held key");
+    input.bindRelease("Space");
+    input.step();
+
+    // 5. the modal gate still runs at press time (that was the mid-air/launch bug).
+    Object.assign(ui, { inventory: true });
+    motion.vy = 0;
+    motion.onGround = true;
+    handlers.keydown({ code: "Space", repeat: false });
+    input.step();
+    equal(motion.vy, 0, "a press while a modal UI owns the input writes no impulse at all");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+    control.keys.clear();
+    Object.assign(control, saved.control);
+    Object.assign(motion, saved.motion);
+    Object.assign(devices, saved.devices);
+    Object.assign(ui, saved.ui);
+    C.VIEW.yawDelta[index] = saved.yaw;
+    C.VIEW.pitchDelta[index] = saved.pitch;
+  }
+});
+
+check("losing control DROPS the buffered view deltas instead of replaying them", () => {
+  // The reported bug this pins: move the mouse, press ESC (or E), stop moving, close the UI —the view
+  // slid by a few degrees. Cause: the deltas of the last fraction of a tick were left in VIEW while
+  // this system was frozen and were applied in one go when control came back.
+  const { PlayerControllerSystem } = load("ecs/systems/controller.js");
+  const controller = new PlayerControllerSystem(world);
+  const devices = world.resource(INPUT_STATE);
+  const ui = world.resource(UI_MODAL);
+  const index = entityIndex(localPlayer);
+  const saved = {
+    devices: { ...devices },
+    ui: { ...ui },
+    view: { yaw: C.VIEW.yawDelta[index], pitch: C.VIEW.pitchDelta[index] },
+    orientation: {
+      fwdX: C.ORIENTATION.fwdX[index],
+      fwdY: C.ORIENTATION.fwdY[index],
+      fwdZ: C.ORIENTATION.fwdZ[index],
+      upX: C.ORIENTATION.upX[index],
+      upY: C.ORIENTATION.upY[index],
+      upZ: C.ORIENTATION.upZ[index],
+      pitch: C.ORIENTATION.pitch[index],
+    },
+  };
+  /** The forward vector, so "the view moved" is one comparable string. */
+  const fwd = () =>
+    [C.ORIENTATION.fwdX[index], C.ORIENTATION.fwdY[index], C.ORIENTATION.fwdZ[index]]
+      .map((v) => v.toFixed(6))
+      .join(",");
+  try {
+    Object.assign(devices, { locked: true, freeMouseActive: false });
+    Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
+    // Pin the basis: a forward vector parallel to `up` is invariant under a yaw rotation, which would
+    // make "the view turned" unfalsifiable.
+    C.ORIENTATION.fwdX[index] = 1;
+    C.ORIENTATION.fwdY[index] = 0;
+    C.ORIENTATION.fwdZ[index] = 0;
+    C.ORIENTATION.upX[index] = 0;
+    C.ORIENTATION.upY[index] = 1;
+    C.ORIENTATION.upZ[index] = 0;
+    C.ORIENTATION.pitch[index] = 0;
+
+    // 1. WITH control the buffered delta turns the view and empties the buffer (positive control).
+    const straight = fwd();
+    C.VIEW.yawDelta[index] = 0.25;
+    C.VIEW.pitchDelta[index] = 0.5;
+    controller.step();
+    assert(fwd() !== straight, "with control the buffered delta turns the view");
+    near(C.ORIENTATION.pitch[index], 0.5, 1e-6, "…and pitches it");
+    equal(C.VIEW.yawDelta[index], 0, "…and the buffer is emptied");
+
+    // 2. The same delta while a modal UI owns the mouse: frozen, and DROPPED rather than held.
+    const turnedTo = fwd();
+    C.VIEW.yawDelta[index] = 0.25;
+    C.VIEW.pitchDelta[index] = 0.5;
+    Object.assign(ui, { inventory: true });
+    controller.step();
+    equal(fwd(), turnedTo, "with a UI open the view does not move");
+    near(C.ORIENTATION.pitch[index], 0.5, 1e-6, "…on either axis");
+    equal(C.VIEW.yawDelta[index], 0, "the buffered delta was dropped, not held for later");
+    equal(C.VIEW.pitchDelta[index], 0, "…on both axes");
+
+    // 3. …so closing the UI cannot replay it —the symptom the user sees.
+    Object.assign(ui, { inventory: false });
+    controller.step();
+    equal(fwd(), turnedTo, "closing the UI does not slide the view");
+    near(C.ORIENTATION.pitch[index], 0.5, 1e-6, "…and does not pitch it");
+
+    // 4. Not locked and not free-mouse: the same freeze applies (this is the window-blur path).
+    Object.assign(devices, { locked: false, freeMouseActive: false });
+    C.VIEW.yawDelta[index] = 0.25;
+    controller.step();
+    equal(fwd(), turnedTo, "an unlocked player does not turn either");
+    equal(C.VIEW.yawDelta[index], 0, "…and its buffer is dropped too");
+  } finally {
+    Object.assign(devices, saved.devices);
+    Object.assign(ui, saved.ui);
+    C.VIEW.yawDelta[index] = saved.view.yaw;
+    C.VIEW.pitchDelta[index] = saved.view.pitch;
+    C.ORIENTATION.fwdX[index] = saved.orientation.fwdX;
+    C.ORIENTATION.fwdY[index] = saved.orientation.fwdY;
+    C.ORIENTATION.fwdZ[index] = saved.orientation.fwdZ;
+    C.ORIENTATION.upX[index] = saved.orientation.upX;
+    C.ORIENTATION.upY[index] = saved.orientation.upY;
+    C.ORIENTATION.upZ[index] = saved.orientation.upZ;
+    C.ORIENTATION.pitch[index] = saved.orientation.pitch;
+  }
+});
+
+check("the snapshot/controller pair commutes (real systems, both registration orders)", () => {
+  // This pair is batch 1 of the fixed lane now that player.input drains alone in batch 0 (they commute
+  // with the snapshot too, but the drain is declared first —see input.ts). What is being checked is
+  // unchanged: the members of a batch the schedule CALLS parallel must produce the same trajectory in
+  // either registration order.
+  // The LOCAL player is what the controller and movement instances resolve, so it is also the entity
+  // whose trajectory this check compares.
+  const player = localPlayer;
+  const index = entityIndex(player);
+  const instances = {
+    snapshot,
+    collision,
+    controller: new (load("ecs/systems/controller.js").PlayerControllerSystem)(world),
+    movement: new (load("ecs/systems/movement.js").PlayerMovementSystem)(world),
+  };
+  const meta = {
+    snapshot: {
+      name: "motion.snapshot",
+      access: load("ecs/systems/snapshot.js").SNAPSHOT_ACCESS,
+      after: undefined,
+    },
+    controller: {
+      name: "player.controller",
+      access: load("ecs/systems/controller.js").CONTROLLER_ACCESS,
+      after: undefined,
+    },
+    movement: {
+      name: "player.movement",
+      access: load("ecs/systems/movement.js").MOVEMENT_ACCESS,
+      after: ["motion.snapshot", "player.controller"],
+    },
+    collision: {
+      name: "player.collision",
+      access: load("ecs/systems/collision.js").COLLISION_ACCESS,
+      after: ["player.movement"],
+    },
+  };
+  const laneSchedule = (order) => {
+    const schedule = new Schedule();
+    for (const kind of order) {
+      schedule.add({
+        name: meta[kind].name,
+        stage: "fixed",
+        after: meta[kind].after,
+        ...meta[kind].access,
+        run: (ctx) => instances[kind].step(ctx.dt),
+      });
+    }
+    schedule.resolve();
+    return schedule;
+  };
+  const reset = (yawDelta) => {
+    world.commands.send(Teleport, { entity: player, x: 5.5, y: 200, z: 5.5 });
+    world.commands.flush();
+    const motion = world.get(player, C.MOTION);
+    motion.vy = 0;
+    motion.onGround = false;
+    world.get(player, C.CONTROL).mode = "walk";
+    C.ORIENTATION.fwdX[index] = 1;
+    C.ORIENTATION.fwdZ[index] = 0;
+    C.VIEW.yawDelta[index] = yawDelta; // after the teleport: Teleport clears it
+    C.VIEW.pitchDelta[index] = 0;
+    world.resource(INPUT_STATE).locked = true;
+  };
+  const trace = (schedule, count, yawDelta) => {
+    reset(yawDelta);
+    const signature = [];
+    for (let i = 0; i < count; i++) {
+      schedule.run("fixed", { world, dt: 1 / 120, alpha: 0, tick: i + 1 });
+      signature.push(
+        [
+          C.POSITION.x[index],
+          C.POSITION.y[index],
+          C.POSITION.z[index],
+          C.PREV_POSITION.x[index],
+          C.PREV_POSITION.y[index],
+          C.ORIENTATION.fwdX[index],
+          C.ORIENTATION.fwdZ[index],
+        ]
+          .map((v) => v.toFixed(6))
+          .join(","),
+      );
+    }
+    return signature;
+  };
+
+  const TICKS = 400;
+  const YAW = 0.35;
+  const forward = laneSchedule(["snapshot", "controller", "movement", "collision"]);
+  const swapped = laneSchedule(["controller", "snapshot", "movement", "collision"]);
+  const a = trace(forward, TICKS, YAW);
+  const b = trace(swapped, TICKS, YAW);
+  equal(b.join("|"), a.join("|"), "the same tick-by-tick trajectory in either batch order");
+  near(C.POSITION.y[index], TERRAIN_TOP_Y + 1.6, 0.01, "the replayed run really landed");
+  assert(
+    trace(forward, TICKS, 0).join("|") !== a.join("|"),
+    "a yawed run must differ from a straight one, or the test proves nothing",
+  );
+});
+
+// ===== report =====
+console.log(`\n=== check-ecs report ===`);
+if (failed) {
+  console.log(`  [FAIL]  ${passed} passed, at least one failed`);
+  console.log("\nRESULT: FAILED");
+  process.exit(1);
+}
+console.log(`  [ok]    ${passed} assertion groups passed`);
+console.log("\nRESULT: OK");

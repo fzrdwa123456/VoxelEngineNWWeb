@@ -1,0 +1,22 @@
+# 前端
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# 开发期的游戏数据（运行时会写 settings/logs/saves；示例包是拷进来的产物，不是用户数据）
+game/
+
+# 杂项
+.tmp/
+*.log
+
+# 便携发布目录（构建产物：exe + WebView2Loader.dll + 拷进去的示例包）
+release/
+
+# 调试期我自己留下的截图，不进仓库
+shot-*.png
+lang-fixed.png
+release-standalone.png

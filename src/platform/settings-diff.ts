@@ -1,0 +1,79 @@
+// settings.json 的**纯**修复逻辑。
+//
+// 为什么单独一个文件：这段逻辑必须能在 Node 里被 `check:ecs` 直接 require 来跑。
+// 原 NW.js 版它住在 platform/shell.ts 里（那个文件只碰 nw/DOM，Node 里 import 得动）；
+// Tauri 版的 shell.ts 顶部就 import 了 @tauri-apps/api（ESM），Node 的 CJS require 会炸。
+// 所以把纯的那一半切出来放在这里 —— 一个 import 都没有，谁都能跑。
+//
+// shell.ts 仍然把它 re-export 出去，调用点的 import 路径一行没变。
+
+/** The outcome of comparing the file with the values that actually took force. */
+export interface SettingsDiff {
+  /** Settings whose file value was unusable; `merged` carries the value in force instead */
+  readonly fixed: readonly string[];
+  /** Settings the engine does not know. KEPT as they are (a newer version's key, or a mod's) — a
+   *  forward-compatible file must not be trimmed by an older build. */
+  readonly unknown: readonly string[];
+  /** The whole file with the repaired values written back, ready for writeSettings() */
+  readonly merged: Record<string, unknown>;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Repair a settings file AGAINST THE VALUES IN FORCE.
+ *
+ *  Every config module validates its own field when it loads it and silently falls back to a default
+ *  (`loadLang` ignores a language that is not zh/en/ja, `sanitizeFrameCap` sends a hand-edited
+ *  `fpsCap: 1` to 30, and so on). That is the right behaviour at load time, but it left the FILE
+ *  saying one thing while the game used another — so the bad value survived on disk, unreported, and
+ *  the next launch had to guess again. Comparing the two answers this: the values in force ARE the
+ *  sanitised ones, so any key whose file value differs from it was invalid, and the fix is simply to
+ *  write the value in force back.
+ *
+ *  `inForce` doubles as the schema — its keys are the settings the engine knows. One nesting level is
+ *  supported because `keybinds` is the only map-valued setting: an entry whose code the bind table
+ *  refused is reported and rewritten per ACTION, and an action the engine does not know is kept.
+ *
+ *  Pure: no file I/O, so the Node gate can drive it. */
+export function diffSettings(
+  raw: Record<string, unknown>,
+  inForce: Record<string, unknown>,
+): SettingsDiff {
+  const merged: Record<string, unknown> = { ...raw };
+  const fixed: string[] = [];
+  const unknown: string[] = [];
+
+  for (const [key, value] of Object.entries(raw)) {
+    const known = inForce[key];
+    if (known === undefined) {
+      unknown.push(key);
+      continue;
+    }
+    if (isPlainObject(value) && isPlainObject(known)) {
+      const out: Record<string, unknown> = { ...value };
+      let changed = false;
+      for (const [entry, entryValue] of Object.entries(value)) {
+        const knownEntry = known[entry];
+        if (knownEntry === undefined) {
+          unknown.push(`${key}.${entry}`);
+          continue;
+        }
+        if (entryValue !== knownEntry) {
+          out[entry] = knownEntry;
+          changed = true;
+          fixed.push(`${key}.${entry}`);
+        }
+      }
+      if (changed) merged[key] = out;
+      continue;
+    }
+    if (value !== known) {
+      merged[key] = known;
+      fixed.push(key);
+    }
+  }
+
+  return { fixed, unknown, merged };
+}

@@ -1,0 +1,37 @@
+{
+  "name": "voxelenginettauri",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "check": "node scripts/build-all.mjs --check-only",
+    "check:ecs": "node scripts/check-ecs.mjs",
+    "verify": "node scripts/build-all.mjs",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build",
+    "app:exe": "cargo build --release --manifest-path src-tauri/Cargo.toml --features custom-protocol",
+    "app:portable": "node scripts/package-portable.mjs",
+    "game:dirs": "node scripts/rearrange.mjs",
+    "packs:install": "node scripts/rearrange.mjs --with-packs"
+  },
+  "dependencies": {
+    "@fontsource/fusion-pixel-12px-monospaced-sc": "^5.3.0",
+    "@fontsource/fusion-pixel-12px-proportional-sc": "^5.3.0",
+    "@tauri-apps/api": "^2.9.0",
+    "fflate": "^0.8.3",
+    "onnxruntime-web": "^1.29.0",
+    "three": "^0.185.1",
+    "vgpu": "^0.4.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^22.0.0",
+    "@types/three": "^0.185.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}

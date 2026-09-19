@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VoxelEngineTauri",
+  "version": "1.0.0",
+  "identifier": "com.voxelengine.tauri",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "VoxelEngine",
+        "width": 1280,
+        "height": 720,
+        "minWidth": 320,
+        "minHeight": 240,
+        "resizable": true,
+        "center": true,
+        "visible": false,
+        "focus": true,
+        "dragDropEnabled": false,
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist --disable-gesture-requirement-for-presentation --disable-blink-features=RateLimitPointerLockRequests --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

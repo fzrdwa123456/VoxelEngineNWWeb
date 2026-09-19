@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VoxelEngine</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+    * { user-select: none; }
+    *:focus { outline: none; box-shadow: none; }
+    #app { width: 100vw; height: 100vh; }
+  </style>
+  <!--
+    最早的一道网。
+    ------------------------------------------------------------------
+    **必须是 classic script（不是 module），而且必须在 module 之前**：
+    module 脚本的加载/解析失败不会进任何 try/catch，而 Tauri 里前端挂掉是**静默**的
+    —— 没有窗口、debug.log 一行都没有，从外面看跟"卡在加载器"一模一样。
+    所以这里直接打 IPC 全局（不经过 @tauri-apps/api，那时它可能正是坏掉的那个），
+    把消息写进 logs\boot.log，同时挂到 document.title 上（进程列表里能看到）。
+  -->
+  <script>
+    (function () {
+      function report(msg) {
+        var text = String(msg);
+        try {
+          var internals = window.__TAURI_INTERNALS__;
+          if (internals && internals.invoke) internals.invoke("boot_report", { message: text });
+        } catch (e) { /* 连 IPC 都没有，就只剩标题了 */ }
+        try { document.title = "VoxelEngine [boot: " + text + "]"; } catch (e) {}
+      }
+      window.__bootReport = report;
+      window.addEventListener("error", function (e) {
+        report("error: " + (e.message || e.type) + " @ " + (e.filename || "?") + ":" + (e.lineno || 0));
+      }, true);
+      window.addEventListener("unhandledrejection", function (e) {
+        report("rejection: " + String(e.reason));
+      });
+      report("html loaded");
+    })();
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
