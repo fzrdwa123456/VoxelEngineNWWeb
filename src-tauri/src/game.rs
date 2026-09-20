@@ -1,9 +1,10 @@
-// 游戏数据根目录、settings.json、日志、vsync 开关 —— 对应原 NW.js 版 platform/shell.ts 里
-// 那一半"文件系统"的职责（nw.Window 那一半在 win.rs）。
+// Game data root, settings.json, logs, the vsync switch — the counterpart of the "filesystem" half
+// of the original NW.js build's platform/shell.ts (the nw.Window half lives in win.rs).
 //
-// 便携布局：release 下 exe 在 release\VoxelEngineTauri\，数据在旁边的 game\；
-// dev 下 exe 在 src-tauri\target\debug\，数据直接用仓库根目录（省得每次 dev 都往 target 里塞）。
-// VOXEL_GAME_ROOT 环境变量可以强制指定，排查问题时好用。
+// Portable layout: in release the exe sits in release\VoxelEngineTauri\ and the data in the sibling
+// game\; in dev the exe sits in src-tauri\target\debug\ and the data is taken straight from the repo
+// root (no need to stuff it into target on every dev run).
+// The VOXEL_GAME_ROOT environment variable can force it, which is handy when diagnosing.
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-/// 游戏数据根目录（原版是 `process.execPath` 的上一级 + ".."，这里是同样的意思）
+/// Game data root directory (the original took `process.execPath`'s parent + "..", which means the same here)
 pub fn game_root() -> PathBuf {
     if let Ok(v) = std::env::var("VOXEL_GAME_ROOT") {
         if !v.is_empty() {
@@ -23,14 +24,15 @@ pub fn game_root() -> PathBuf {
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
     if cfg!(debug_assertions) {
-        // dev: exe 在 src-tauri\target\debug\ -> 往上数三级是仓库根，数据统一放 <仓库根>\game\，
-        // **无论 game\ 在不在**（scripts/rearrange.mjs 也建在那里，两边必须一致）
+        // dev: the exe is in src-tauri\target\debug\ -> three levels up is the repo root, and the
+        // data always goes to <repo root>\game\, **whether or not game\ exists** (scripts/rearrange.mjs
+        // creates it there too, so the two must agree)
         if let Some(root) = exe_dir.ancestors().nth(3) {
             return root.join("game");
         }
         return exe_dir.join("game");
     }
-    // release: 便携布局 —— exe 旁边的 game\
+    // release: portable layout — game\ next to the exe
     let portable = exe_dir.join("game");
     if portable.is_dir() {
         portable
@@ -39,7 +41,7 @@ pub fn game_root() -> PathBuf {
     }
 }
 
-/// 原版 initShell() 的第一步：把这些目录都建出来（缺了也不报错）
+/// The original initShell()'s first step: create all these directories (a failure is not reported)
 pub fn ensure_dirs(root: &Path) {
     for d in ["logs", "saves", "config", "mods", "resourcepacks"] {
         let _ = fs::create_dir_all(root.join(d));
@@ -63,10 +65,12 @@ fn vsync_path(root: &Path) -> PathBuf {
 }
 
 // ===== settings.json =====
-// 原版 readSettingsChecked() 的语义原样搬过来：
-//   * 文件不存在 -> 一次全新的运行，不是故障（problem = None）
-//   * 文件存在但读不动 / 不是 JSON 对象 / JSON 语法错 -> problem 说明原因
-// 前端拿到的是**同一个判定**，`diffSettings()`（纯函数）留在 TS 里没动，check:ecs 还在测它。
+// The original readSettingsChecked()'s semantics carried over unchanged:
+//   * the file does not exist -> a brand-new run, not a fault (problem = None)
+//   * the file exists but cannot be read / is not a JSON object / has a JSON syntax error
+//     -> problem explains why
+// The frontend receives **the same verdict**, and `diffSettings()` (a pure function) stays in TS
+// untouched, still covered by check:ecs.
 #[derive(Serialize)]
 pub struct SettingsRead {
     pub settings: Value,
@@ -107,14 +111,16 @@ pub fn write_settings(root: &Path, value: &Value) -> bool {
     fs::write(settings_path(root), text).is_ok()
 }
 
-/// 把即将被覆盖的那份 settings.json 留一份 —— 手改坏的文件正是用户想看的东西
+/// Keeps a copy of the settings.json that is about to be overwritten — a hand-mangled file is
+/// exactly what the user wants to look at
 pub fn backup_settings(root: &Path) -> String {
     let _ = fs::copy(settings_path(root), settings_bad_path(root));
     "config/settings.bad.json".to_string()
 }
 
-// ===== 日志 =====
-/// channel: "debug" | "renderer"。前端攒够一批再发过来，这里只负责追加。
+// ===== Logs =====
+/// channel: "debug" | "renderer". The frontend accumulates a batch before sending it; this side
+/// only appends.
 pub fn append_log(root: &Path, channel: &str, lines: &[String]) {
     if lines.is_empty() {
         return;
@@ -130,16 +136,17 @@ pub fn append_log(root: &Path, channel: &str, lines: &[String]) {
     }
 }
 
-/// 启动时清空日志（原版 initShell 的行为：覆盖成空文件）。
-/// boot.log 是**最早期**那条诊断通道（见 lib.rs 的 boot_report）：前端在 initShell 之前
-/// 就挂掉时，只有它能留下痕迹 —— Tauri 里前端挂掉是"没窗口、没日志"的静默失败。
+/// Truncates the logs at startup (the original initShell's behaviour: overwrite with an empty file).
+/// boot.log is the **earliest** diagnostic channel (see boot_report in lib.rs): when the frontend
+/// dies before initShell, it is the only thing that leaves a trace — in Tauri a frontend crash is
+/// the silent failure of "no window, no log".
 pub fn truncate_logs(root: &Path) {
     for name in ["debug.log", "renderer.log", "boot.log"] {
         let _ = fs::write(logs_dir(root).join(name), b"");
     }
 }
 
-/// 最早期诊断：把前端报上来的东西追加进 logs\boot.log
+/// Earliest diagnostics: append whatever the frontend reports into logs\boot.log
 pub fn append_boot(root: &Path, message: &str) {
     let _ = fs::create_dir_all(logs_dir(root));
     if let Ok(mut f) = fs::OpenOptions::new()
@@ -152,11 +159,13 @@ pub fn append_boot(root: &Path, message: &str) {
     }
 }
 
-// ===== GPU vsync 开关 =====
-// NW.js 原版是把 --disable-gpu-vsync 写进自己的 package.json 的 chromium-args，重启生效。
-// Tauri 的 WebView2 参数只能在启动时给，所以这里落一个开关文件，run() 在创建窗口前读它，
-// 决定要不要把 --disable-gpu-vsync 塞进 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS。语义一样：重启生效。
-// 默认值与 NW.js 版一致：默认是"关掉 vsync"（原 app/package.json 的 chromium-args 里就有这个 flag）。
+// ===== GPU vsync switch =====
+// The original NW.js build wrote --disable-gpu-vsync into its own package.json's chromium-args, which
+// takes effect on restart. Tauri's WebView2 arguments can only be supplied at launch, so this leaves a
+// switch file that run() reads before creating the window to decide whether to stuff
+// --disable-gpu-vsync into WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS. Same semantics: effective on restart.
+// The default matches the NW.js build: vsync is off by default (the original app/package.json's
+// chromium-args already carried this flag).
 pub fn read_vsync_disabled(root: &Path) -> bool {
     match fs::read_to_string(vsync_path(root)) {
         Ok(t) => serde_json::from_str::<Value>(&t)
@@ -175,8 +184,8 @@ pub fn write_vsync_disabled(root: &Path, disabled: bool) -> bool {
     )
     .is_ok()
 }
-/// 必须在 tauri::Builder 之前调用。tauri.conf.json 里的 additionalBrowserArgs 是**基础**参数，
-/// 这里只负责在开关要求时补上 --disable-gpu-vsync。
+/// Must be called before tauri::Builder. additionalBrowserArgs in tauri.conf.json are the **base**
+/// arguments; this only appends --disable-gpu-vsync when the switch asks for it.
 pub fn apply_browser_args(root: &Path) {
     if !read_vsync_disabled(root) {
         return;

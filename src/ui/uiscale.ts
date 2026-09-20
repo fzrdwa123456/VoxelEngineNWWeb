@@ -6,13 +6,14 @@
 //
 // The mode IN FORCE is a RESOURCE (`UI_SCALE`, see ecs/resources.ts); the factors below are constants.
 //
-// ===== Tauri/ECS 化的一处改动：这个模块不再自己写 DOM =====
-// 以前这里有个 `applyUIScale()`：`setUIScaleMode()` / `loadUIScaleMode()` / 一个 resize 回调里
-// 直接 `documentElement.style.fontSize = ...`。同 fonts.ts：那是系统之外的副作用，而且是无条件写。
-// 现在只提供**值**（`currentRootFontPx()`），写 DOM 的活由协调器每帧比对后做 ——
-// 于是 resize 也不需要单独的回调来"重算并写入"，下一帧自然就是新值。
-// （这里原本还留着一个 resize 监听 + rAF 合并器，给设置面板那行缩放标签用；现在那唯一的窗口监听
-//  搬去了 `platform/viewport.ts`，这份重复的已经删掉。）
+// ===== One Tauri/ECS change: this module no longer writes the DOM itself =====
+// It used to own an `applyUIScale()` that assigned `documentElement.style.fontSize = ...` from
+// `setUIScaleMode()`, `loadUIScaleMode()` and a resize callback. As in fonts.ts that is a side effect
+// outside the system — unconditional, and unable to declare what it reads. It produces the VALUE only now
+// (`currentRootFontPx()`), and the reconciler compares that against the value it last applied once per
+// frame, so a resize needs no callback to "recompute and write" either: the next frame is the new value.
+// (A resize listener + rAF coalescer for the settings panel's scale label used to sit here; the ONE window
+//  listener lives in `platform/viewport.ts` now and this duplicate is deleted.)
 import type { ScaleState } from "../ecs/resources";
 
 export type UIScaleMode = "small" | "normal" | "large" | "auto";

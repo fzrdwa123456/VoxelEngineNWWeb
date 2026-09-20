@@ -115,9 +115,11 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
       ev.preventDefault();
       return;
     }
-    // 诊断探针（**暂时注释掉**，2026-09 用户实测用）：它原来是无条件打的，所以按住任意一个键就是
-    // ~30 行/秒写进 debug.log（Windows 自动重复），而且和是否在捕获键位无关。要恢复就取消注释。
-    // 它与下面 `KBCAP mousedown` 是同一类探针（那行还在，只有按下鼠标时触发）。
+    // Diagnostic probe (**commented out for now**, for the 2026-09 hands-on test): it used to fire
+    // unconditionally, so holding any key wrote ~30 lines/s into debug.log (Windows auto-repeat), and it
+    // was unrelated to whether a bind capture was running. Uncomment to restore.
+    // It is the same class of probe as `KBCAP mousedown` below (that line is still there, fired only on a
+    // mouse press).
     // deps.log(`KBCAP keydown code=${ev.code} capturing=${action ?? "null"}`);
     if (!action) return;
     ev.preventDefault();

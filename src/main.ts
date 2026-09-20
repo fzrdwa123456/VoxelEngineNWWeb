@@ -51,15 +51,16 @@ import { VoxelWorld, WORLD_SURFACE_Y } from "./voxel/world";
 import "@fontsource/fusion-pixel-12px-proportional-sc";
 import "@fontsource/fusion-pixel-12px-monospaced-sc";
 
-// ===== Tauri：同步前置（这个 port 唯一一处启动顺序上的改动）=====
-// 原 NW.js 版这里不用等任何东西：require("node:fs") 是同步的，nw.Window 也已经在了。
-// Tauri 的命令是**异步**的，而下面 loadLang/loadFont/loadBinds 以及整个 UI 都同步读设置与资源包，
-// 所以先把这两样一次性取进内存：
-//   preloadShell() -> settings / 窗口模式 / vsync 开关（之后 readSettings() 读内存，保持同步）
-//   preloadPacks() -> resourcepacks + mods 的全部字节（之后 resolveTexture() 保持同步）
-// 顶层 await 需要 ESM（index.html 本来就是 <script type="module">）。
-// **包一层 try/catch**：这里抛出去的话整个模块就死了，而那时 initShell() 还没跑，
-// 错误最后不会落到任何地方 —— 现象是"进程活着、没有窗口、日志 0 字节"的静默失败。
+// ===== Tauri: the synchronous preload (the ONE startup-order change in this port) =====
+// The NW.js build had nothing to wait for here: require("node:fs") is synchronous and nw.Window was
+// already there. A Tauri command is **asynchronous**, while loadLang/loadFont/loadBinds below and the
+// whole UI read settings and resource packs synchronously, so these two are fetched up front, once:
+//   preloadShell() -> settings / window mode / vsync switch (readSettings() stays synchronous, from memory)
+//   preloadPacks() -> every byte of resourcepacks + mods (resolveTexture() stays synchronous after it)
+// Top-level await needs ESM (index.html is a <script type="module"> already).
+// **Wrap it in try/catch**: a throw out of here kills the whole module while initShell() has not run
+// yet, and the error then lands nowhere — the symptom is the silent failure "process alive, no window,
+// 0-byte log".
 try {
   await preloadShell();
   await preloadPacks();
@@ -89,7 +90,7 @@ loadLang(locale, readSettings().language);
 loadFont(font, readSettings().font);
 loadUIScaleMode(uiScale, readSettings().uiScale);
 loadBinds(keymap, readSettings().keybinds);
-// The "日志检测" switch (settings panel): the periodic DIAGNOSTIC PROBES are on by default, and the
+// The "Diagnostic log" switch (settings panel): the periodic DIAGNOSTIC PROBES are on by default, and the
 // setting decides whether `logDebug` writes them. Set BEFORE anything logs a probe line, so a file with
 // the switch off never sees one.
 setDiagLogEnabled(readSettings().diagLog !== false);
@@ -189,7 +190,7 @@ const uiOpen = (): boolean => isModalUi(uiModal);
 /** A MENU is open (not counting the inventory, which the inventory key must still be able to toggle) */
 const menuOpen = (): boolean => isMenuUi(uiModal);
 world.insertResource(LOCAL_PLAYER, player);
-// 光标策略要读它（canControl），所以留一个引用
+// The cursor policy reads it (canControl), so keep a reference
 const inputState = createInputState();
 world.insertResource(INPUT_STATE, inputState);
 // The race guards' own state (ecs/resources.ts::InputTiming): which mousemove is the synthetic
@@ -558,7 +559,7 @@ const navigation = new UiNavigationSystem(world, {
   // instead of stepping back through the ladder.
   dragging: () => keybindGesture.drag !== null,
   cancelDrag: (reason) => cancelKeybindDrag(reason),
-  // 原生捕获：不走 document.exitPointerLock（见 platform/mousecapture.ts）
+  // Native capture: does NOT go through `document.exitPointerLock` (see platform/mousecapture.ts)
   exitPointerLock: () => input.releaseCapture(),
   centerCursor,
   relock: (reason) => pointerLock.relock(reason),
@@ -623,19 +624,22 @@ world.addSystem({
 // (world.start() moved below: ui.navigation needs the widget trees the surfaces build during wiring.)
 
 // Raw mouse input (Rust plugin): takes over view rotation when pointer lock is cancelled with the window partially offscreen.
-// **事件到达即判定、每帧只应用一次**：`rawDelta` 在每条事件里做接管/宽限/尖峰判定并把通过的部分累加，
-// `frame()` 每帧调一次 `input.frameLook()` 把它作为一个 look 意图排进队列 —— 视角不再经过任何定时器
-// （原来那个 8ms `setInterval` 会被按键事件挤成 9~12ms 一档，"按住键转视角不顺滑"就是它）。
+// **Decided on event arrival, applied ONCE per frame**: `rawDelta` runs the takeover/grace/spike
+// decision in every event and accumulates the part that passes; `frame()` calls `input.frameLook()`
+// once per frame to queue it as ONE look intent — the view no longer goes through any timer (the old
+// 8 ms `setInterval` was stretched to 9-12 ms steps by key events, which is exactly "holding a key
+// turns the view unsmoothly").
 const rawInput = startRawInput((dx, dy) => input.rawDelta(dx, dy));
-// **必须等 ready 落地再赋值。** 原版 startRawInput() 是同步 NAPI，available 当场为真，
-// 所以这里原来是 `input.rawInputActive = rawInput.available` 一行同步赋值；Tauri 版它是
-// `invoke("rawinput_start").then()` 才置真的，同步读会**永久**拿到 false ——
-// 后果是原生鼠标捕获永远不启用（退回浏览器的 requestPointerLock，又撞上 ESC 解锁 + 冷却），
-// 同时 raw-input 的视角接管也一起失效。这个坑真踩过。
+// **The assignment must wait for ready to settle.** In the original, startRawInput() was a synchronous
+// NAPI call, so `available` was true on the spot and this line used to be a synchronous assignment,
+// `input.rawInputActive = rawInput.available`; the Tauri port only sets it in
+// `invoke("rawinput_start").then()`, and a synchronous read gets **permanently** false. The consequence
+// is that native mouse capture never enables (falling back to the browser's requestPointerLock, which
+// runs into ESC unlock + the cooldown) and the raw-input view takeover dies with it. That trap was hit.
 void rawInput.ready.then((ok) => {
   input.rawInputActive = ok;
   logDebug(
-    `RAWINPUT active=${ok} -> 鼠标捕获走${ok ? "**原生 ClipCursor**（不碰浏览器指针锁定）" : "浏览器 requestPointerLock（原始输入不可用）"}`,
+    `RAWINPUT active=${ok} -> mouse capture uses ${ok ? "**native ClipCursor** (browser pointer lock untouched)" : "the browser requestPointerLock path (raw input unavailable)"}`,
   );
 });
 
@@ -645,13 +649,16 @@ let pointerLock: PointerLock;
 pointerLock = new PointerLock({
   input,
   isUiModal: uiOpen,
-  // 光标的判据：玩家**真的在控制鼠标**才隐藏。不能用 !isUiModal —— 加载界面不占模态面，
-  // 那样会让加载界面把光标藏起来（历史遗留 bug）。
+  // The cursor test: hide it only while the player **really is controlling the mouse**. `!isUiModal`
+  // will not do — the loading screen holds no modal surface, so that would make the loading screen
+  // hide the cursor (a legacy bug).
   canControl: () => canControl(inputState, uiModal),
-  // 捕获只允许在前台开着（原生 ClipCursor 不看前台；浏览器那条 requestPointerLock 本来就会拒）。
+  // Capture only opens while foregrounded (native ClipCursor does not look at focus; the browser's
+  // requestPointerLock refuses on its own anyway).
   focused: winFocused,
   logDebug,
-  // 这两个都是**延时意图**，不是本模块的定时器：到期时间进 DELAYED_INTENTS，由 ui.delays 应用。
+  // Both of these are **delayed intents**, not timers of this module: the deadline goes into
+  // DELAYED_INTENTS and is applied by `ui.delays`.
   scheduleRetry: (delayMs, source) => delayedIntents.schedule("lockRetry", delayMs, source),
   scheduleCursor: (delayMs) => delayedIntents.schedule("cursor", delayMs),
 });
@@ -690,13 +697,15 @@ const onToggleGpuVsync = (disabled: boolean): boolean => {
   return ok;
 };
 
-/** 设置面板里的"日志检测"开关：只控制**诊断探针行**写不写盘（见 platform/shell.ts::logDebug 的前缀
- *  过滤），不碰任何游戏状态，也不需要重启。默认开。 */
+/** The "Diagnostic log" switch in the settings panel: it only controls whether the **diagnostic probe
+ *  lines** reach the disk (see the prefix filter in platform/shell.ts::logDebug), touches no game state
+ *  and needs no restart. On by default. */
 const onToggleDiagLog = (on: boolean): boolean => {
   setDiagLogEnabled(on);
   saveSettings();
-  // 这行本身**不是**探针（前缀不在表里），所以关掉之后仍然会写下来 —— 正好留下"谁把它关了"的记录。
-  logDebug(`DIAGLOG probes ${on ? "enabled" : "disabled (探针行不再写盘)"}`);
+  // This line itself is **not** a probe (its prefix is not in the table), so it is still written after
+  // the switch is turned off — which leaves exactly the record of who turned it off.
+  logDebug(`DIAGLOG probes ${on ? "enabled" : "disabled (probe lines stop being written)"}`);
   return true;
 };
 
@@ -802,10 +811,13 @@ async function enterWorld(mode: string): Promise<void> {
   world.commands.send(SetLoadingStage, { active: false });
   setLoopMode("game");
   pointerLock.applyCursor();
-  // 进世界**必须在前台**才捕获。加载期间切到别的应用的话，这里 relock 会把原生捕获开在一个**后台**窗口上
-  // （光标被夹在那块屏幕区域里、而那块区域上是别的应用；原始输入后台也收所以视角照转；光标还被全局隐藏），
-  // 而且**不会**再有 blur 事件来救它（焦点早就丢了）。所以按"非前台 ⇒ 暂停"处理：直接进暂停菜单，
-  // 切回来时 onWinFocus 会看到 UI 开着而不自动捕获（菜单不自动关，手动恢复 —— 既有约定）。
+  // Entering a world **must be foregrounded** to capture. Switching to another app during the load
+  // would make this relock open native capture on a **background** window (the cursor clamped into that
+  // screen region while another app is over it; raw input is collected in the background too, so the
+  // view keeps turning; and the cursor is globally hidden) — and **no** blur event will come to rescue
+  // it, because focus was lost long ago. So the treatment is "not foreground ⇒ pause": into the pause
+  // menu at once, and on switching back onWinFocus sees a UI open and does not auto-capture (a menu
+  // does not auto-close, resume manually — the existing convention).
   if (winFocused()) {
     pointerLock.relock("world entered");
   } else {
@@ -872,7 +884,8 @@ for (const line of world.scheduleReport()) logDebug(line);
 const onWindowLost = (reason: string): void => {
   logDebug(`${reason} inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
   input.prepareUnlock();
-  // 交出鼠标：原生捕获要在这里放掉（Rust 侧失焦/非前台也会兜底释放）
+  // Hand the mouse back: native capture is released here (Rust also releases it as a fallback on
+  // blur / not foreground).
   input.releaseCapture();
   if (inWorld() && !uiOpen()) {
     menu.show();
@@ -883,9 +896,10 @@ const onWindowLost = (reason: string): void => {
 onWinBlur(() => onWindowLost("WINFOCUS blur"));
 onCaptureLost(() => onWindowLost("CAPTURELOST not foreground"));
 onWinFocus(() => {
-  // 诊断：**无条件**记录一次
+  // Diagnostics: record it once, **unconditionally**
   logDebug(`WINFOCUS focus inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
-  // 切回来先把光标补回来：Chromium 缓存的 cursor 可能还是失焦前那个 NULL（见 reapplyCursor 的说明）
+  // On switching back, restore the cursor first: Chromium's cached cursor may still be the NULL from
+  // before the blur (see the note on reapplyCursor).
   pointerLock.reapplyCursor();
   if (inWorld() && !uiOpen() && !input.locked) {
         pointerLock.relock("window focus");
@@ -1045,10 +1059,12 @@ function applyViewportSize(): void {
   renderer.setSize(vp.width, vp.height);
 }
 
-/** ===== FRAME 诊断（每秒一行 + 停顿告警）=====
- *  为什么需要：`PHYS`（diagnostics）只在 game 模式、粒度 500ms，光靠它分不清"主线程被占住一下"和
- *  "帧时间整体变长"。这里用 rAF 的**真实间隔**每秒报一次：n / avg / max（毫秒），以及停顿次数和最长停顿
- *  —— 超过 80ms 立刻单独打一行 `STALL`。三种模式都覆盖，所以"按住键转视角时是不是堵住了"这一行就能答。 */
+/** ===== FRAME diagnostics (one line per second + stall warnings) =====
+ *  Why it is needed: `PHYS` (diagnostics) only runs in game mode at a 500 ms granularity, and on its own
+ *  it cannot tell "the main thread was occupied for a moment" from "frame time grew overall". This uses
+ *  the rAF **real interval** to report once per second: n / avg / max (milliseconds), plus the stall
+ *  count and the longest stall — above 80 ms it immediately logs a separate `STALL` line. All three
+ *  modes are covered, so "does holding a key to turn the view block" is the one line that answers it. */
 const FRAME_STALL_MS = 80;
 let frameLast = 0;
 let frameN = 0;
@@ -1057,9 +1073,11 @@ let frameMax = 0;
 let frameStalls = 0;
 let frameStallMax = 0;
 let frameStatAt = 0;
-/** 每帧 look 采样份数的直方图（下标 = 份数，0..12 归到最后一格）+ 每帧鼠标像素当量的 min/avg/max。
- *  这两组数字回答的是 `LOOK`/`RAWLAG` 那两行**答不了**的问题：视角是"每帧均匀推进"还是"每帧份数不匀"
- *  （8ms 拉一次 ≈ 1.67 份/帧 → 2,2,1 的图案；快转时就是眼睛看到的"一格一格"）。 */
+/** Histogram of the per-frame look sample count (index = count, 0..12 folded into the last bucket) + the
+ *  min/avg/max of the per-frame mouse pixel equivalent. These two numbers answer what the `LOOK`/`RAWLAG`
+ *  lines **cannot**: whether the view advances evenly per frame or in an uneven number of samples per
+ *  frame (polling at 8 ms ≈ 1.67 samples/frame → a 2,2,1 pattern; when turning fast that is the
+ *  "one notch at a time" the eye sees). */
 const framePfBuckets = new Array<number>(13).fill(0);
 let framePxMin = Number.POSITIVE_INFINITY;
 let framePxMax = 0;
@@ -1079,7 +1097,7 @@ function frameProbe(): void {
     }
   }
   frameLast = now;
-  // 这一帧的鼠标：几份采样、多少像素当量（读即清零）
+  // This frame's mouse: how many samples, how many pixel equivalents (the read clears both)
   const meter = input.takeLookFrameMeter();
   framePfBuckets[Math.min(meter.samples, framePfBuckets.length - 1)]++;
   if (meter.samples > 0) {
@@ -1093,7 +1111,8 @@ function frameProbe(): void {
     return;
   }
   if (now - frameStatAt < 1000) return;
-  // RAWLAG 也跟着每秒一行（它原来挂在被删掉的 8ms poll 上，现在由帧探针驱动）
+  // RAWLAG follows the once-per-second line as well (it used to hang off the deleted 8 ms poll, and is
+  // driven by the frame probe now).
   const lag = rawLagLine();
   if (lag) logDebug(lag);
   const pf: string[] = [];
@@ -1133,7 +1152,8 @@ function frame(): void {
   } catch (err) {
     logDebug(`frame error: ${String((err as Error)?.message || err)}`);
   }
-  // 诊断放在最后：测到的是"这一帧到下一帧"的完整周期（帧体本身卡住也会算进去）
+  // Diagnostics go last: what it measures is the full "this frame to the next" period (a blocked frame
+  // body counts into it as well).
   frameProbe();
   requestAnimationFrame(frame);
 }

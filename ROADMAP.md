@@ -213,7 +213,7 @@ or building a sphere before there is any terrain to put on it.
   assigning a resource from a UI callback was the last world value changed outside a system run. That
   deferral has one trap, hit and fixed: the settings panel's cap LABEL is a push refreshed on the drag
   event, so re-reading the resource inside the handler printed the PREVIOUS drag step and stayed wrong
-  until the panel was reopened ("每次滑动 fps 数值不准确"). The handler now hands the value to
+  until the panel was reopened (the reported symptom: "the FPS number is not accurate while sliding"). The handler now hands the value to
   `renderCap(cap)`, and `check:ecs` asserts the hand-off. Two lessons: the F3 line and the loop gate
   disagreed with the *setting* the moment they read different sources, and "a setting that gates the
   loop" belongs with the world, not with the config singletons
@@ -653,7 +653,7 @@ Still outstanding:
   `emits`/`wmIn`/`cursorFix`/`hookSeen` plus the cursor and capture state, and `MouseDelta` carries its send
   time so the frontend can measure queue backlog). They are kept — they answer "is it the frame loop, the
   IPC transport, the cursor sentinel or the keyboard hook?" in one run — behind the settings panel's
-  "日志检测" toggle (`settings.json`'s `diagLog`, default ON, repaired by type like every other setting),
+  "Diagnostic log" toggle (`settings.json`'s `diagLog`, default ON, repaired by type like every other setting),
   which filters the probe prefixes in `logDebug`; `appendDebugLog` (errors/console) always writes.
   Two findings from that instrumentation are worth keeping in mind: the LL keyboard hook has NEVER fired
   (`HOOKPROBE seen=0`, so the device-layer listeners are the only protection against the menu-key gesture),

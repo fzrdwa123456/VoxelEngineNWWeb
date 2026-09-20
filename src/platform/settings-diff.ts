@@ -1,11 +1,11 @@
-// settings.json 的**纯**修复逻辑。
+// The **pure** repair logic for settings.json.
 //
-// 为什么单独一个文件：这段逻辑必须能在 Node 里被 `check:ecs` 直接 require 来跑。
-// 原 NW.js 版它住在 platform/shell.ts 里（那个文件只碰 nw/DOM，Node 里 import 得动）；
-// Tauri 版的 shell.ts 顶部就 import 了 @tauri-apps/api（ESM），Node 的 CJS require 会炸。
-// 所以把纯的那一半切出来放在这里 —— 一个 import 都没有，谁都能跑。
+// Why it is a separate file: this logic has to be requirable directly by `check:ecs` in Node. In the
+// NW.js version it lived in platform/shell.ts (that file only touched nw/DOM, so Node could import it);
+// the Tauri version's shell.ts imports @tauri-apps/api (ESM) at the top, which Node's CJS require blows
+// up on. So the pure half was cut out and put here — it has not one import, so anyone can run it.
 //
-// shell.ts 仍然把它 re-export 出去，调用点的 import 路径一行没变。
+// shell.ts still re-exports it, and not one call site's import path changed.
 
 /** The outcome of comparing the file with the values that actually took force. */
 export interface SettingsDiff {

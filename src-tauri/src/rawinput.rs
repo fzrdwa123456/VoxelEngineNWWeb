@@ -1,14 +1,20 @@
-// 原始鼠标输入 —— 原 rawinput/src/lib.rs 的 NAPI 版本换成 Tauri 版本。
+// Raw mouse input — the NAPI version in the original rawinput/src/lib.rs ported to Tauri.
 //
-// 原来的形状：JS 每帧调 pollDelta() 主动**拉**（NAPI 同步调用，读写进程内原子量）。
-// Tauri 里没有同步 IPC，所以方向反过来：Rust 侧**推** ——
-// 采集线程照旧往原子量里累加，另一个节流线程每 BATCH_MS 把累加值取走、清零，
-// 通过 Tauri 事件 "raw-input" 发给前端；前端在事件回调里累加，poll() 依然是同步取走。
+// The original shape: JS calls pollDelta() every frame to actively **pull** (a synchronous NAPI
+// call that reads and writes in-process atomics).
+// Tauri has no synchronous IPC, so the direction is inverted: the Rust side **pushes** —
+// the collector thread still accumulates into the atomics, and a separate throttling thread takes
+// the accumulated value and zeroes it every BATCH_MS, sending it to the frontend through the Tauri
+// event "raw-input"; the frontend accumulates in the event callback, and poll() still takes it
+// synchronously.
 //
-// 语义没变：都是"按帧批量消费相对增量"，只是搬运方式从拉变推。
-// 节流是必要的：WM_INPUT 一秒钟可能上百条，一条一个 IPC 事件会把 webview 淹掉。
+// The semantics are unchanged: both consume relative deltas in per-frame batches — only the
+// transport changed from pull to push.
+// Throttling is necessary: WM_INPUT can arrive hundreds of times a second, and one IPC event per
+// message would drown the webview.
 //
-// dwFlags 不加 RIDEV_NOLEGACY：不吞 legacy 消息，Chromium 的 pointer lock 不受影响，两条路并行。
+// dwFlags does not set RIDEV_NOLEGACY: legacy messages are not swallowed, so Chromium's pointer
+// lock is unaffected and the two paths run in parallel.
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -26,24 +32,29 @@ const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
 const RIDEV_INPUTSINK: u32 = 0x00000100;
 const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
 
-/// 推送节流：最多 4ms 一个事件（≈250/s），比一帧还密，够用且不淹 IPC
+/// Push throttle: at most one event per 4 ms (≈250/s) — denser than one frame, which is enough
+/// and does not flood IPC
 const BATCH_MS: u64 = 4;
 
-// ===== 方案 B：低级键盘钩子，只为了吞掉 ESC =====
-// 为什么需要它：ESC 是浏览器的"默认解锁手势"，由**浏览器进程在把按键交给页面之前**
-// 就处理掉了（content/browser/renderer_host/render_widget_host_impl.cc 的
-// ForwardKeyboardEvent -> PreHandleKeyboardEvent；Chrome 层见
-// chrome/browser/ui/exclusive_access/exclusive_access_manager.cc:196 HandleUserKeyEvent，
-// 它只看 keycode，从不查页面有没有 preventDefault）。所以页面里的 preventDefault()
-// （main.ts:725，注释还引着 #7907）在原生 Chromium/WebView2 上**拦不住**它：
-//   第 1 次 ESC -> 浏览器解指针锁定（光标出来，页面根本收不到这次 keydown）
-//   第 2 次 ESC -> 已经没有锁定可解，事件才落到页面 -> 暂停界面
-// 办法就是让浏览器**永远看不到 ESC**：钩子吞掉，再从这儿推给前端合成一个真的 KeyboardEvent。
+// ===== Option B: a low-level keyboard hook, solely to swallow ESC =====
+// Why it is needed: ESC is the browser's "default unlock gesture", handled by the **browser
+// process before the key is ever handed to the page** (ForwardKeyboardEvent ->
+// PreHandleKeyboardEvent in content/browser/renderer_host/render_widget_host_impl.cc; at the
+// Chrome layer see chrome/browser/ui/exclusive_access/exclusive_access_manager.cc:196
+// HandleUserKeyEvent, which looks only at the keycode and never asks the page whether it called
+// preventDefault). So the page's preventDefault() (main.ts:725, whose comment still cites #7907)
+// **cannot** stop it on native Chromium/WebView2:
+//   1st ESC -> the browser releases the pointer lock (the cursor comes out and the page never even
+//              sees this keydown)
+//   2nd ESC -> there is no lock left to release, so the event finally reaches the page -> pause menu
+// The fix is to make the browser **never see ESC**: the hook swallows it, and this side pushes it
+// to the frontend to synthesise a real KeyboardEvent.
 const WH_KEYBOARD_LL: i32 = 13;
 const VK_ESCAPE: u32 = 0x1B;
-/// 菜单键（Apps）：键盘上的"上下文菜单"手势之一
+/// The menu key (Apps): one of the keyboard's "context menu" gestures
 const VK_APPS: u32 = 0x5D;
-/// F10 与 Shift 组合 = 与菜单键等价的手势（单独 F10 不动它：那可能是玩家的绑定键）
+/// F10 combined with Shift = a gesture equivalent to the menu key (a bare F10 is left alone: it
+/// may be one of the player's bound keys)
 const VK_F10: u32 = 0x79;
 const VK_SHIFT: u32 = 0x10;
 const WM_KEYDOWN: u32 = 0x0100;
@@ -85,7 +96,7 @@ struct RawInputHeader {
 
 const RAWINPUT_HEADER_SIZE: usize = std::mem::size_of::<RawInputHeader>();
 
-// MSDN tagRAWMOUSE x64 布局: usFlags(2)+pad(2)+usButtonFlags(2)+usButtonData(2)
+// MSDN tagRAWMOUSE x64 layout: usFlags(2)+pad(2)+usButtonFlags(2)+usButtonData(2)
 //   + ulRawButtons(4) + lLastX(4) + lLastY(4) + ulExtraInformation(4) = 24
 const RAWMOUSE_SIZE: usize = 24;
 const OFF_L_LAST_X: usize = RAWINPUT_HEADER_SIZE + 12;
@@ -102,7 +113,8 @@ struct Msg {
     _l_private: u32,
 }
 
-/// WH_KEYBOARD_LL 回调收到的按键信息（只用 vkCode，其余按 ABI 排布）
+/// The key information a WH_KEYBOARD_LL callback receives (only vkCode is used; the rest is laid
+/// out per the ABI)
 #[repr(C)]
 struct KbDllHookStruct {
     vk_code: u32,
@@ -147,7 +159,7 @@ extern "system" {
     fn GetCurrentThread() -> isize;
     fn SetThreadPriority(thread: isize, priority: i32) -> i32;
     pub fn SetCursorPos(x: i32, y: i32) -> i32;
-    // ===== ESC 钩子用到的（方案 B）=====
+    // ===== Used by the ESC hook (option B) =====
     fn SetWindowsHookExW(
         id_hook: i32,
         lpfn: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>,
@@ -158,46 +170,55 @@ extern "system" {
     fn CallNextHookEx(hook: isize, code: i32, w_param: usize, l_param: isize) -> isize;
     fn GetForegroundWindow() -> isize;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
-    /// 走到顶层（GA_ROOT=2）/ 属主根（GA_ROOTOWNER=3）—— 用来判断"前台是不是我们这一族的窗口"
+    /// Walks up to the top level (GA_ROOT=2) / the owner root (GA_ROOTOWNER=3) — used to answer
+    /// "is the foreground window one of ours"
     fn GetAncestor(hwnd: isize, flags: u32) -> isize;
     fn GetCurrentProcessId() -> u32;
 }
 
-// ===== 全局累加器 (单实例使用; 多实例会合并计数, 游戏场景无影响) =====
+// ===== Global accumulators (single instance; multiple instances merge counts, harmless in a game) =====
 static ACC_DX: AtomicI32 = AtomicI32::new(0);
 static ACC_DY: AtomicI32 = AtomicI32::new(0);
 static ACC_ABS_DROPPED: AtomicI32 = AtomicI32::new(0);
-/// 诊断: 收到的 WM_INPUT 总数 (含被过滤的绝对坐标事件)
+/// Diagnostics: total WM_INPUT messages received (including the filtered absolute-coordinate events)
 static ACC_WM_INPUT_TOTAL: AtomicI32 = AtomicI32::new(0);
-/// 诊断: GetRawInputData 失败次数
+/// Diagnostics: number of GetRawInputData failures
 static ACC_RID_FAIL: AtomicI32 = AtomicI32::new(0);
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// ESC 钩子句柄（0 = 没装上 -> **失败即放行**：不吞 ESC，游戏退回"按两次"的旧行为）
+/// ESC hook handle (0 = not installed -> **fail open**: ESC is not swallowed and the game falls
+/// back to the old "press it twice" behaviour)
 static ESC_HOOK: AtomicIsize = AtomicIsize::new(0);
-/// 待推送的 ESC 边沿。钩子回调里**只**动这些原子量 ——
-/// 低级钩子有 `LowLevelHooksTimeout`（默认 1 秒），在回调里发 IPC 慢了会被 Windows 静默摘钩子。
+/// Pending ESC edges to push. The hook callback touches **only** these atomics —
+/// low-level hooks have `LowLevelHooksTimeout` (1 second by default), and a slow IPC send inside
+/// the callback makes Windows silently unhook the hook.
 static ESC_DOWNS: AtomicI32 = AtomicI32::new(0);
 static ESC_REPEATS: AtomicI32 = AtomicI32::new(0);
 static ESC_UPS: AtomicI32 = AtomicI32::new(0);
-/// 按下状态（用来区分"首次按下"和"长按重复"）
+/// Down state (used to tell "first press" from "auto-repeat")
 static ESC_IS_DOWN: AtomicBool = AtomicBool::new(false);
-/// 钩子**被调用过**多少次（一次按键 +1）。探针用：它一直是 0 就说明钩子压根没被调用
-/// （装上了但没生效 vs 根本没装上，是两种完全不同的病，这一条直接区分）。
+/// How many times the hook **has been called** (+1 per key event). Probe use: if it stays 0 the
+/// hook is not being called at all
+/// (installed but ineffective vs never installed are two entirely different faults, and this one
+/// number separates them).
 static HOOK_SEEN: AtomicI32 = AtomicI32::new(0);
-/// 探针只发一次（免得刷屏）
+/// The probe fires only once (to avoid spamming)
 static PROBE_SENT: AtomicBool = AtomicBool::new(false);
 
-/// 前台窗口属于本进程吗？不是就**不吞** —— 否则用户在别的程序里按 ESC 也会被我们吃掉。
+/// Does the foreground window belong to this process? If not, **nothing is swallowed** — otherwise
+/// the user pressing ESC in another program would be eaten by us too.
 ///
-/// **按 HWND / 祖先链判断，不按"前台那个窗口的进程号"。** 原来比的是
-/// `GetWindowThreadProcessId(GetForegroundWindow()) == 我们的 pid`，在 Tauri/WebView2 下前台 HWND 可能是
-/// **WebView2 自己的子窗口**（属于 `msedgewebview2.exe`），于是这个判断恒为 false —— 后果是钩子"装上了
-/// 但一个键都不吞"：菜单键 / Shift+F10 漏进页面（日志里 `code=ContextMenu` 就是证据），连 ESC 的那层防护
-/// 也一起失效（原生捕获下 ESC 照样能用，所以一直没暴露）。
-/// 现在接受三种情况：前台就是我们的窗口、前台的**根窗口**是我们的、或前台的**属主根窗口**是我们的。
+/// **The test walks the HWND / ancestor chain, not "the process id of the foreground window".**
+/// It used to compare `GetWindowThreadProcessId(GetForegroundWindow()) == our pid`, but under
+/// Tauri/WebView2 the foreground HWND can be **a child window of WebView2 itself** (owned by
+/// `msedgewebview2.exe`), so that test was always false — the consequence being a hook that was
+/// "installed but swallowed not a single key": the menu key / Shift+F10 leaked into the page (the
+/// `code=ContextMenu` line in the log is the evidence) and the ESC guard failed along with it
+/// (ESC still worked under native capture, which is why it never surfaced).
+/// Three cases are accepted now: the foreground window is ours, the foreground's **root window**
+/// is ours, or the foreground's **owner root window** is ours.
 unsafe fn foreground_is_ours() -> bool {
     let fg = GetForegroundWindow();
     if fg == 0 {
@@ -206,26 +227,28 @@ unsafe fn foreground_is_ours() -> bool {
     if window_is_ours(fg) {
         return true;
     }
-    // GA_ROOT = 2：把子窗口一路走到顶层（WebView2 的子窗口就落在这里）
+    // GA_ROOT = 2: walk a child window all the way up to the top level (WebView2's child window
+    // lands here)
     let root = GetAncestor(fg, 2);
     if root != 0 && root != fg && window_is_ours(root) {
         return true;
     }
-    // GA_ROOTOWNER = 3：再兜一层属主链（弹出窗口的宿主）
+    // GA_ROOTOWNER = 3: one more fallback up the owner chain (the host of a popup window)
     let owner = GetAncestor(fg, 3);
     owner != 0 && owner != fg && owner != root && window_is_ours(owner)
 }
 
-/// 这个窗口的线程/进程是我们吗
+/// Is this window's thread/process ours
 unsafe fn window_is_ours(hwnd: isize) -> bool {
     let mut pid: u32 = 0;
     GetWindowThreadProcessId(hwnd, &mut pid);
     pid != 0 && pid == GetCurrentProcessId()
 }
 
-/// 一行探针文本（由推送线程发一次事件，前端写进 debug.log）：
-/// `seen` = 钩子被调用过多少次（0 = 钩子没被调用）；后面是前台窗口、它的根窗口、属主根窗口的 HWND/PID
-/// 和我们的 PID —— "前台是不是我们的窗口"那个判断为什么是 false，这一行就能看出来。
+/// One probe line (the push thread emits it once as an event, the frontend writes it to debug.log):
+/// `seen` = how many times the hook was called (0 = the hook is not called); then the HWND/PID of
+/// the foreground window, its root window and its owner root window, plus our PID — this one line
+/// shows why the "is the foreground ours" test comes out false.
 fn hook_probe_line() -> String {
     unsafe {
         let pid_of = |h: isize| -> u32 {
@@ -253,16 +276,20 @@ fn hook_probe_line() -> String {
     }
 }
 
-/// WH_KEYBOARD_LL 回调。**必须极快**：几次比较 + 原子自增，然后 `return 1` 吞掉。
+/// The WH_KEYBOARD_LL callback. **Must be extremely fast**: a few comparisons + atomic increments,
+/// then `return 1` to swallow.
 unsafe extern "system" fn esc_hook(code: i32, w_param: usize, l_param: isize) -> isize {
     if code >= 0 && l_param != 0 {
         let kb = &*(l_param as *const KbDllHookStruct);
-        HOOK_SEEN.fetch_add(1, Ordering::Relaxed); // 探针：钩子确实被调用了（原子操作，安全）
-        // **菜单键 / Shift+F10 也要吞。** 它们是"上下文菜单"的键盘手势：Windows 收到之后会进入菜单
-        // 状态并把光标切成箭头（DOM 那层 `contextmenu` 的 preventDefault 挡不住这一步），我们的 8ms
-        // 光标哨兵随即又把它按回隐藏 —— 玩家看到的就是**鼠标闪一下**；它还可能弹出窗口菜单。和 ESC
-        // 同一招：在 Windows/Chromium 看到之前就吞掉，既没有闪烁也没有菜单。
-        // 只在"前台是本窗口"时吞（和 ESC 一样），并且只吞 Shift+F10（单独 F10 不吞，它可能是玩家的绑定键）。
+        HOOK_SEEN.fetch_add(1, Ordering::Relaxed); // probe: the hook really was called (atomic, safe)
+        // **The menu key / Shift+F10 must be swallowed too.** They are the "context menu" keyboard
+        // gestures: on receiving one, Windows enters menu state and switches the cursor to an arrow
+        // (the `contextmenu` preventDefault at the DOM layer cannot stop that step), and our 8 ms
+        // cursor sentinel immediately forces it back to hidden — what the player sees is **a cursor
+        // flash**; it may also pop up the window menu. Same trick as ESC: swallow it before
+        // Windows/Chromium ever sees it, and there is neither a flash nor a menu.
+        // It is swallowed only when "the foreground is this window" (same as ESC), and only
+        // Shift+F10 is swallowed (a bare F10 is not — it may be one of the player's bound keys).
         let shift_f10 = kb.vk_code == VK_F10 && (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
         if kb.vk_code == VK_APPS || shift_f10 {
             if foreground_is_ours() {
@@ -284,7 +311,7 @@ unsafe extern "system" fn esc_hook(code: i32, w_param: usize, l_param: isize) ->
                 }
                 _ => {}
             }
-            return 1; // 吞掉：浏览器永远看不到这次 ESC，也就不会解指针锁定
+            return 1; // swallow it: the browser never sees this ESC, so it never releases the pointer lock
         }
     }
     CallNextHookEx(0, code, w_param, l_param)
@@ -309,7 +336,7 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
     if msg == WM_INPUT && l_param != 0 {
         ACC_WM_INPUT_TOTAL.fetch_add(1, Ordering::Relaxed);
         let mut size: u32 = 0;
-        // 第一次调用拿需要的缓冲区大小
+        // the first call retrieves the required buffer size
         if GetRawInputData(
             l_param,
             RID_INPUT,
@@ -337,7 +364,7 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
         if dev_type == RIM_TYPEMOUSE {
             let us_flags = u16::from_ne_bytes([buf[RAWINPUT_HEADER_SIZE], buf[RAWINPUT_HEADER_SIZE + 1]]);
             if us_flags & MOUSE_MOVE_ABSOLUTE == 0 {
-                // 相对模式: lLastX/Y 就是增量 (标准鼠标/游戏鼠标都走这)
+                // relative mode: lLastX/Y are the deltas (standard and gaming mice both take this path)
                 let dx = i32::from_ne_bytes([
                     buf[OFF_L_LAST_X],
                     buf[OFF_L_LAST_X + 1],
@@ -355,7 +382,7 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
                     ACC_DY.fetch_add(dy, Ordering::Relaxed);
                 }
             } else {
-                // 绝对坐标 (平板/远程桌面): 丢弃
+                // absolute coordinates (tablet / remote desktop): dropped
                 ACC_ABS_DROPPED.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -372,28 +399,31 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
 pub struct MouseDelta {
     pub dx: i32,
     pub dy: i32,
-    /// 发出时刻（推送线程启动起的毫秒数）。前端拿它估"这条事件在队列里压了多久" —— 见 RAWLAG 行。
+    /// Emission time (milliseconds since the push thread started). The frontend uses it to estimate
+    /// "how long this event sat in the queue" — see the RAWLAG line.
     pub t: u64,
 }
 
-/// 被钩子吞掉的 ESC，推给前端去合成一个真的 KeyboardEvent（见 src/platform/rawinput.ts）
+/// An ESC swallowed by the hook, pushed to the frontend to synthesise a real KeyboardEvent (see
+/// src/platform/rawinput.ts)
 #[derive(Clone, Serialize)]
 pub struct EscEvent {
     pub down: bool,
     pub repeat: bool,
 }
 
-/// 每条推给前端的事件载荷
+/// The payload name of every event pushed to the frontend
 const EVENT: &str = "raw-input";
-/// ESC 边沿的载荷名（方案 B）
+/// The payload name for ESC edges (option B)
 const ESC_EVENT: &str = "esc";
 
-/// 启动监听：采集线程 + 推送线程。失败时返回原因，游戏照常跑（没有原始输入兜底而已）。
+/// Starts the listener: the collector thread + the push thread. On failure it returns the reason
+/// and the game runs as usual (merely without raw input as a fallback).
 pub fn start(app: AppHandle) -> Result<(), String> {
     {
         let guard = state().lock().unwrap();
         if guard.is_some() {
-            return Ok(()); // 已经起过了
+            return Ok(()); // already started
         }
     }
 
@@ -411,7 +441,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             return;
         }
 
-        // 类已存在时 RegisterClassW 失败是正常的 (重复 start), 忽略
+        // RegisterClassW failing when the class already exists is normal (a repeated start); ignore it
         let wc = WndClassW {
             style: 0,
             lpfn_wnd_proc: Some(wnd_proc),
@@ -426,7 +456,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         };
         let _atom = RegisterClassW(&wc);
 
-        // HWND_MESSAGE 父窗口 = message-only 窗口, 不可见不进任务栏
+        // HWND_MESSAGE as the parent = a message-only window: invisible and not in the taskbar
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
@@ -446,14 +476,18 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             return;
         }
 
-        // ===== 方案 B：先装 ESC 钩子（它**不依赖**原始输入注册成功）=====
-        // 低级钩子装在哪个线程，回调就在哪个线程被调用 —— 所以下面那个 GetMessageW 循环
-        // 同时也在给钩子泵消息，这是 WH_KEYBOARD_LL 的硬要求（不是可选的）。
+        // ===== Option B: install the ESC hook first (it does **not depend** on raw input
+        // registering successfully) =====
+        // A low-level hook is called back on whichever thread installed it — so the GetMessageW
+        // loop below also pumps messages for the hook, which is a hard requirement of
+        // WH_KEYBOARD_LL (not optional).
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(esc_hook), 0, 0);
         ESC_HOOK.store(hook, Ordering::SeqCst);
 
-        // 注册原始鼠标输入: INPUTSINK 让隐藏窗口在非前台也能收到全局输入。
-        // **失败不再中止线程** —— ESC 钩子要照样工作，两条路互相独立。
+        // Register raw mouse input: INPUTSINK lets the hidden window receive global input even
+        // while it is not in the foreground.
+        // **A failure no longer aborts the thread** — the ESC hook must keep working; the two paths
+        // are independent.
         let device = RawInputDevice {
             us_usage_page: 0x01, // Generic Desktop
             us_usage: 0x02,      // Mouse
@@ -465,7 +499,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         let _ = tx.send(Ok(hwnd));
 
-        // 消息循环: 阻塞等 WM_INPUT / WM_CLOSE, running=false 时由 stop 发 WM_CLOSE 唤醒退出
+        // Message loop: blocks waiting for WM_INPUT / WM_CLOSE; when running=false, stop() sends
+        // WM_CLOSE to wake it and exit
         let mut msg = Msg {
             hwnd: 0,
             message: 0,
@@ -480,7 +515,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        // 注: 故意不 UnregisterClassW, 进程级泄漏一个类名无害且避免多实例互踩
+        // Note: UnregisterClassW is deliberately not called — leaking one class name per process is
+        // harmless and avoids multiple instances treading on each other
     });
 
     let hwnd = rx
@@ -489,18 +525,23 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e)?;
 
     RUNNING.store(true, Ordering::SeqCst);
-    // 原始输入到底注册上没有，以线程报上来的为准（ESC 钩子即使它失败也照样工作）
+    // Whether raw input actually registered is taken from what the thread reported (the ESC hook
+    // works even when it fails)
     REGISTERED.store(registered.load(Ordering::SeqCst), Ordering::SeqCst);
 
-    // 推送线程：定速把累加值取走清零并发事件（前端同步 poll() 拿的是自己那份累加器）
+    // Push thread: at a fixed rate it takes and zeroes the accumulated values and emits events
+    // (the frontend's synchronous poll() reads its own accumulator)
     std::thread::spawn(move || {
         let mut tick: u32 = 0;
         let t0 = Instant::now();
-        // ===== RAWMON 诊断（每秒一行）=====
-        // 目的：把"按住键 + 转视角不顺滑"从猜测变成数字。这一行同时报告四条可能的路径上**这一秒各动了
-        // 多少次**：emits=我们推给前端的 IPC 事件数（上限 250/s）；wmIn=系统送来的原始鼠标包数；
-        // cursorFix=光标哨兵**真的纠正了**多少次（`CURSOR_ENFORCED` 的增量，一直涨 = 在跟系统拉锯）；
-        // hookSeen=低级键盘钩子被调用次数（一直是 0 = 钩子根本没进输入路径）。后面几个是当时的状态。
+        // ===== RAWMON diagnostics (one line per second) =====
+        // Purpose: turn "holding a key + turning the view is not smooth" from guesswork into
+        // numbers. This line reports **how many times each of four possible paths moved during this
+        // second**: emits=IPC events we pushed to the frontend (capped at 250/s); wmIn=raw mouse
+        // packets delivered by the system; cursorFix=how many times the cursor sentinel **actually
+        // corrected** the state (the `CURSOR_ENFORCED` delta — always climbing = a tug of war with
+        // the system); hookSeen=how many times the low-level keyboard hook was called (always 0 =
+        // the hook never reaches the input path). The rest are the state at that moment.
         let mut emits: u32 = 0;
         let mut last_wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
         let mut last_fix = crate::win::cursor_enforced_count() as i32;
@@ -509,20 +550,28 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         while RUNNING.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(BATCH_MS));
             tick = tick.wrapping_add(1);
-            // 光标哨兵：每两次 tick（≈8ms）校对一次可见性，把被 Windows 菜单模式 / Chromium
-            // 推送时机弄乱的状态按回期望值。稳态下 GetCursorInfo 一致，不做任何额外动作。
-            // 光标哨兵：**每 tick（≈4ms）**校对一次可见性（原来是每两次）——"菜单键闪一下"正是"系统把
-            // 光标亮起来 → 哨兵按回去"之间的那段时间，周期减半就把它压短一半（前端那边还会在按键瞬间
-            // 主动重写一次隐藏状态，两边一起抢这一帧）。
+            // Cursor sentinel: reconcile visibility every second tick (≈8 ms), forcing the expected
+            // value back onto a state that Windows menu mode / Chromium's push timing has scrambled.
+            // In steady state GetCursorInfo agrees and nothing extra happens.
+            // Cursor sentinel: reconcile visibility **every tick (≈4 ms)** (it used to be every
+            // second tick) — the "menu key flashes the cursor" is exactly the interval between "the
+            // system lights the cursor up -> the sentinel forces it back"; halving the period halves
+            // that interval (the frontend also rewrites the hidden state on the key edge itself, so
+            // both sides fight over that same frame).
             crate::win::cursor_sentinel(&app);
             if tick % 2 == 0 {
-                // 捕获必须只在前台开着：不是前台就拆掉，并告诉前端（前端做"放鼠标 + 该暂停就暂停"）。
-                // 只在 Rust 侧释放不够 —— 前端的 INPUT_STATE.locked 还是 true，视角照转、光标照隐藏。
+                // Capture must stay on only while in the foreground: when it is not, tear it down
+                // and tell the frontend (which "releases the mouse + pauses if it should").
+                // Releasing on the Rust side alone is not enough — the frontend's
+                // INPUT_STATE.locked is still true, so the view keeps turning and the cursor stays
+                // hidden.
                 if crate::win::capture_foreground_check(&app) {
                     let _ = app.emit("capture-lost", ());
                 }
-                // 探针：4s / 8s / 12s 各发一次（原来"开机 1.5 秒发一次"是在还没按键时发的，等于没答问题）。
-                // 按键过程中 seen 不涨，就说明钩子确实一次都没被调用；hook=0x0 说明装入就没成功。
+                // Probe: emitted once each at 4s / 8s / 12s (the old "once 1.5 seconds after
+                // startup" fired before any key was pressed, which answered nothing). If seen does
+                // not climb while keys are pressed, the hook truly is never called; hook=0x0 means
+                // the install never succeeded.
                 if tick == 1000 || tick == 2000 || tick == 3000 {
                     let _ = app.emit("hook-probe", hook_probe_line());
                 }
@@ -533,8 +582,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                 emits += 1;
                 let _ = app.emit(EVENT, MouseDelta { dx, dy, t: t0.elapsed().as_millis() as u64 });
             }
-            // 被钩子吞掉的 ESC 边沿：同样按批推，顺序 down -> repeat -> up
-            // （人不可能 4ms 内按两次，所以这个顺序实际上不会乱）
+            // ESC edges swallowed by the hook: also pushed in batches, in the order down -> repeat
+            // -> up (a human cannot press twice within 4 ms, so the order cannot really scramble)
             for _ in 0..ESC_DOWNS.swap(0, Ordering::Relaxed) {
                 let _ = app.emit(ESC_EVENT, EscEvent { down: true, repeat: false });
             }
@@ -545,7 +594,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                 let _ = app.emit(ESC_EVENT, EscEvent { down: false, repeat: false });
             }
 
-            // RAWMON：每秒一行（走事件由前端写进 debug.log，和 HOOKPROBE 同一条路）
+            // RAWMON: one line per second (emitted as an event, the frontend writes it to
+            // debug.log along the same route as HOOKPROBE)
             let now = Instant::now();
             if now.duration_since(last_mon).as_millis() >= 1000 {
                 let wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
@@ -582,7 +632,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 诊断数据。字段名故意用 camelCase —— serde 直接序列化成前端那个 RawStats 接口的形状。
+/// Diagnostics data. The field names are deliberately camelCase — serde then serialises straight
+/// into the shape of the frontend's RawStats interface.
 #[derive(Serialize)]
 #[allow(non_snake_case)]
 pub struct RawStats {
@@ -590,7 +641,8 @@ pub struct RawStats {
     pub wmInputTotal: i32,
     pub ridFail: i32,
     pub absoluteDropped: i32,
-    /// 方案 B 的 ESC 钩子装上没有（false = 失败即放行，游戏退回"按两次 ESC"）
+    /// Whether option B's ESC hook is installed (false = fail open, the game falls back to
+    /// "press ESC twice")
     pub escHook: bool,
 }
 
@@ -606,7 +658,7 @@ pub fn stats() -> RawStats {
 
 pub fn stop() {
     RUNNING.store(false, Ordering::SeqCst);
-    // 摘掉 ESC 钩子（低级钩子不摘的话，进程退出前它会一直被调用）
+    // Remove the ESC hook (an unremoved low-level hook keeps being called until the process exits)
     let hook = ESC_HOOK.swap(0, Ordering::SeqCst);
     if hook != 0 {
         unsafe { UnhookWindowsHookEx(hook) };

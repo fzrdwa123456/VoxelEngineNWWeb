@@ -16,29 +16,37 @@ export interface PointerLockDeps {
    *  captured, so the cursor stays visible through the startup, the settings check, the world entry
    *  and every menu — and is hidden only while a world is actually running under the player's hand. */
   canControl: () => boolean;
-  /** 窗口是不是**前台**（`platform/shell.ts` 的 winFocused）。
+  /** Whether the window is **foreground** (`platform/shell.ts`'s winFocused).
    *
-   *  **捕获必须只在前台开着。** 原生捕获走的是 `ClipCursor`，它**根本不看**窗口是不是前台；浏览器那条
-   *  `requestPointerLock` 会被 Chromium 拒（所以老版本可以省掉这个门禁，注释里也正是这么写的）—— 但
-   *  Tauri 版换成原生之后，省掉它就等于允许"后台开捕获"：光标被夹在一个后台窗口的矩形里（那块区域上是
-   *  别的应用）、视角还在转（原始输入是 RIDEV_INPUTSINK，后台也收）、光标还被全局隐藏。
-   *  最容易踩的一处是**进世界时的自动 relock**（加载期间切走，加载完照样捕获）—— 见
-   *  `win.rs::capture_foreground_check`，那是系统级兜底，这里是正常路径上的门禁。 */
+   *  **Capture must only be on while foreground.** Native capture goes through `ClipCursor`, and it
+   *  **does not look at all** at whether the window is foreground; the browser's `requestPointerLock` is
+   *  refused by Chromium (so the old version could drop this gate, and the old comment said exactly
+   *  that) — but once the Tauri version went native, dropping it means allowing "capture in the
+   *  background": the cursor is clamped inside a background window's rectangle (another application sits
+   *  over that area), the view keeps turning (raw input is RIDEV_INPUTSINK, received in the background
+   *  too), and the cursor is hidden globally as well. The easiest place to hit this is the **automatic
+   *  relock on world entry** (switching away during loading, then capturing anyway once it finishes) —
+   *  see `win.rs::capture_foreground_check`, which is the system-level backstop; this is the gate on the
+   *  normal path. */
   focused: () => boolean;
   logDebug: (line: string) => void;
-  /** 重试一个被拒绝的锁：**到期时间放进世界**（`DELAYED_INTENTS::schedule`，见 ecs/systems/delays.ts），
-   *  由 `ui.delays` 在下一帧应用。这里原来是 `setTimeout(tryLock, 1300)` —— 一个只属于本模块的定时器，
-   *  schedule 看不见、暂停时照样跑、也没法在日志里列出来。 */
+  /** Retry a rejected lock: **the deadline goes into the world** (`DELAYED_INTENTS::schedule`, see
+   *  ecs/systems/delays.ts), applied by `ui.delays` on the next frame. This used to be
+   *  `setTimeout(tryLock, 1300)` — a timer owned by this module alone, invisible to the schedule, still
+   *  running while paused, and impossible to list in the log. */
   scheduleRetry: (delayMs: number, source: string) => void;
-  /** 再写一次光标（`reapplyCursor` 的 0 / 120 ms 两次补写）：同样是延时意图，不是本模块的定时器。 */
+  /** Write the cursor once more (`reapplyCursor`'s two extra writes at 0 / 120 ms): likewise a delayed
+   *  intent, not a timer owned by this module. */
   scheduleCursor: (delayMs: number) => void;
 }
 
-// relock() 仍然**要求窗口在前台**（deps.focused）。老注释说"不需要焦点门禁"是因为浏览器那条
-// requestPointerLock 本来就会拒；Tauri 版走原生 ClipCursor，它不看前台 —— 那个假设不成立了。
+// relock() STILL **requires the window to be foreground** (deps.focused). The old comment said "no focus
+// gate is needed" because the browser's requestPointerLock refuses anyway; the Tauri version goes through
+// native ClipCursor, which does not look at the foreground — that assumption no longer holds.
 
 export class PointerLock {
-  /** 诊断：上一次写下去的 CSS 值，只在**变化**时打日志（免得每帧刷屏） */
+  /** Diagnostics: the last CSS value written, logged only when it **changes** (so it does not flood every
+   *  frame) */
   private lastCursor: "none" | "default" | null = null;
 
   constructor(private readonly deps: PointerLockDeps) {}
@@ -48,7 +56,8 @@ export class PointerLock {
     this.attempt(source);
   }
 
-  /** 到期重试（由 `ui.delays` 调用）：和 `relock` 同一条路径，只是多一行"这是重试"。 */
+  /** The expiry retry (called by `ui.delays`): the same path as `relock`, plus one line saying "this is
+   *  a retry". */
   retry(source: string): void {
     this.deps.logDebug(`LOCK retry [${source}]`);
     this.attempt(source);
@@ -72,28 +81,32 @@ export class PointerLock {
     // Cursor: hidden ONLY while the player actually controls the mouse (a world running, no modal UI
     // up). Visible on the loading screen, at the main menu, in the pause menu and in the backpack.
     // (It used to read `isUiModal` inverted, which made the loading screen hide the cursor.)
-  /** 窗口重新聚焦之后，逼 Chromium **重新算一次**光标并推下来。
+  /** After the window regains focus, force Chromium to **recompute** the cursor and push it down.
    *
-   *  为什么需要（探针证据）：失焦那一刻 CSS 从 `none` 变成 `default`，但那次推送被系统丢掉了
-   *  （窗口正在失活）；而 Chromium **缓存的"当前光标"仍然是 NULL** —— 所以事后问它
-   *  （Rust 侧发的 `WM_SETCURSOR`）它答的也是 NULL：
-   *      `[cursor] focus GAIN before=showing=false hCursor=0` → `after` 还是 0
-   *  只有让 CSS **真的变一次**，它才会重算。做法：先写一个和目标不同但等价的字符串
-   *  （`auto` 和 `default` 都是箭头，肉眼无差别），下一个宏任务再写回目标值。
-   *  `applyCursor()` 每帧都会写同一个值，Chromium 对"值没变"是不推送的 —— 所以必须先变一次。 */
+   *  Why it is needed (probe evidence): at the moment focus is lost the CSS goes from `none` to
+   *  `default`, but that push was dropped by the system (the window was deactivating); and Chromium's
+   *  **cached "current cursor" is still NULL** — so asking it afterwards (the `WM_SETCURSOR` the Rust
+   *  side sends) it answers NULL as well:
+   *      `[cursor] focus GAIN before=showing=false hCursor=0` → `after` is still 0
+   *  Only making the CSS **really change once** gets it to recompute. The trick: first write a string
+   *  that differs from the target but is equivalent (both `auto` and `default` are an arrow, no visible
+   *  difference), and in the next macrotask write the target value back.
+   *  `applyCursor()` writes the same value every frame, and Chromium does not push when "the value did
+   *  not change" — so it has to change once first. */
   reapplyCursor(): void {
     const target: "none" | "default" = this.deps.canControl() ? "none" : "default";
     if (target === "none") {
-      // 需要隐藏时不需要这套（失败模式是"该显示却一直隐藏"）
+      // When hiding, this dance is not needed (the failure mode is "should be visible but stays hidden")
       this.applyCursor();
       return;
     }
-    // 同样必须 important：主题那条 `*{cursor:inherit !important}` 会把普通内联压掉，
-    // 那样这次"强制变化"就变成空操作，Chromium 也就不会重新推光标了。
-    // （`auto` 和 `default` 都是箭头，肉眼无差别，但值确实变了。）
+    // Likewise it must be important: the theme's `*{cursor:inherit !important}` would beat a plain
+    // inline value, that "forced change" would become a no-op, and Chromium would not push the cursor
+    // again. (`auto` and `default` are both an arrow, no visible difference, but the value really did
+    // change.)
     document.body.style.setProperty("cursor", "auto", "important");
     this.deps.scheduleCursor(0);
-    // 渲染进程可能慢一拍，补一次
+    // The render process may lag by one beat; write it once more
     this.deps.scheduleCursor(120);
   }
 
@@ -102,16 +115,19 @@ export class PointerLock {
     const value: "none" | "default" = can ? "none" : "default";
     if (value !== this.lastCursor) {
       this.lastCursor = value;
-      // 诊断：CSS 侧的决定。和 boot.log 里 [cursor] 那些系统侧探针配合看，
-      // 就能判定"CSS 说可见、系统说隐藏"这种不一致发生在哪一刻。
+      // Diagnostics: the decision on the CSS side. Read together with the system-side [cursor] probes in
+      // boot.log, it pinpoints the moment an inconsistency like "CSS says visible, the system says
+      // hidden" happens.
       this.deps.logDebug(`CURSOR css=${value} canControl=${can}`);
-      // 把**期望**交给 Rust：之后由它的哨兵（每 8ms）负责真正显示/隐藏光标，
-      // 不再依赖 Chromium 的推送时机，也不怕 Windows 被 Alt 弄进菜单模式。
+      // Hand the **intent** to Rust: its sentinel (every 8ms) is then responsible for actually
+      // showing/hiding the cursor, no longer depending on Chromium's push timing and no longer
+      // vulnerable to Windows being dragged into menu mode by Alt.
       void invoke("cursor_intent", { visible: value !== "none" }).catch(() => {});
     }
-    // **重要：必须写成 important 内联。** 主题的全局样式表里有一条 `*{cursor:inherit !important}`
-    // （用来消掉控件的手型），body 自己也命中 `*` —— 只有"内联 important"才能压过"样式表 important"，
-    // 让 body 保住游戏的策略值，其余元素再从 body 继承。
+    // **Important: it must be written as an important inline value.** The theme's global stylesheet has
+    // a `*{cursor:inherit !important}` (to wipe out the controls' hand cursor), and body matches `*`
+    // itself — only "inline important" beats "stylesheet important", letting body keep the game's policy
+    // value while every other element inherits from body.
     document.body.style.setProperty("cursor", value, "important");
   }
 }

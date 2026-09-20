@@ -9,15 +9,16 @@
 // widget's text from it every frame, so it is read on the tick and every reader declares it. The
 // DICTIONARIES are assets — loaded once from the pack chain, never changed — and stay module-private.
 //
-// ===== Tauri 版的一处改动：词典改成**惰性**构建 =====
-// 原版这里是在模块作用域直接建词典：
+// ===== One Tauri-side change: the dictionaries are built **lazily** =====
+// The original built them at module scope:
 //     const STRINGS = { zh: loadPackDict("zh"), en: ..., ja: ... };
-// 那时没问题，因为 `fs.readFileSync` 是**同步**的，模块求值时包已经在磁盘上。
-// Tauri 的包要 `await preloadPacks()` 才到（main.ts 顶部），而 **ESM 的 import 在模块体之前求值**
-// —— 照搬原版就等于在空包链上建词典，而且这个空结果会被永久缓存住：
+// That worked because `fs.readFileSync` is **synchronous**: the pack chain is on disk when the module is
+// evaluated. A Tauri pack only arrives through `await preloadPacks()` (top of main.ts), and **an ESM
+// import is evaluated before the module body** — copying the original builds the dictionaries on an empty
+// chain, and that empty result is cached forever:
 //     I18N dictionaries loaded: zh=0 en=0 ja=0 entries (1 layer(s) of zh.json)
-// 界面于是把 `main.single` 这种原始 key 直接显示出来。
-// 现在改成惰性 + "包没装好就不建也不缓存"（见 textures.ts 的 packsInstalled()）。
+// The UI then showed raw keys such as `main.single`. It is lazy now, plus "do not build and do not cache
+// before the packs are installed" (see `packsInstalled()` in textures.ts).
 import { packsInstalled, resolveAllBytes } from "../rendering/textures";
 import { logDebug } from "../platform/shell";
 import type { LocaleState } from "../ecs/resources";
@@ -42,10 +43,10 @@ function loadPackDict(lang: Lang): Dict {
 }
 
 const EMPTY: Dict = {};
-/** 包还没装好时用的替身：不分配、也不缓存 */
+/** Stand-in used while the packs are not installed: it allocates nothing and caches nothing */
 const NOTHING: Record<Lang, Dict> = { zh: EMPTY, en: EMPTY, ja: EMPTY };
 
-/** 建好的三本词典；**只在包装好之后才建、才缓存**（见文件头的说明） */
+/** The three built dictionaries; **built and cached only once the packs are installed** (see the header) */
 let STRINGS: Record<Lang, Dict> | null = null;
 
 function dicts(): Record<Lang, Dict> {
@@ -102,8 +103,9 @@ export function onLangChange(cb: () => void): void {
 export function loadLang(state: LocaleState, l: unknown): void {
   adoptLocale(state);
   if (l === "zh" || l === "en" || l === "ja") state.lang = l;
-  // 这里读一次词典：此时包已经装好，构建会真的发生。日志里那三个数字就是"包链通不通"的证据，
-  // 全 0 时显式喊出来 —— 这个 bug 第一版就是这样从日志里溜过去的。
+  // Read the dictionaries once here: the packs are installed by now, so the build really happens. The
+  // three numbers in the log are the evidence that the pack chain works, and an all-zero line is shouted
+  // out explicitly — that is how this bug slipped through the log in the first release.
   const s = dicts();
   const zh = Object.keys(s.zh).length;
   const en = Object.keys(s.en).length;
@@ -111,6 +113,6 @@ export function loadLang(state: LocaleState, l: unknown): void {
   logDebug(
     `I18N dictionaries loaded (lang/*.json layered merge): zh=${zh} en=${en} ja=${ja} entries ` +
       `(${resolveAllBytes("lang/zh.json").length} layer(s) of zh.json)` +
-      (zh + en + ja === 0 ? "  <- 0 词条！界面会把原始 key 显示出来" : ""),
+      (zh + en + ja === 0 ? "  <- 0 entries! the UI will show raw keys" : ""),
   );
 }

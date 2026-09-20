@@ -35,8 +35,8 @@ let cached: MenuBgKind | null = null;
 
 export function menuBgKind(): MenuBgKind {
   if (cached) return cached;
-  // 包还没装好时**不缓存**结论 —— 否则这个 memo 会把 "checker" 永久记下来。
-  // （正常路径上菜单帧在 boot 之后才跑，这里只是不让它有机会记错。）
+  // Do NOT cache the answer until the packs are installed — the memo would otherwise record "checker"
+  // forever. (On the normal path the menu frame runs only after boot; this just denies it the chance.)
   if (!packsInstalled()) return "checker";
   const mode = readMode();
   if (mode === "panorama") {

@@ -56,8 +56,9 @@ function defFrom(id: string, raw: RawDef): BlockDef {
 /** Loaded once at startup: merge every pack's blocks.json (low->high priority, later merges win on same id) */
 export function loadBlockRegistry(): void {
   if (loaded) return;
-  // 包还没装好之前**不建、也不置 loaded** —— 否则会把"只剩 FALLBACK_DEFS"的结果永久缓存住。
-  // 原版不需要这个判断（fs 同步，模块求值时包就在）；Tauri 的包是 await preloadPacks() 才到的。
+  // Do NOT build and do NOT set `loaded` before the packs are installed — that would cache a registry
+  // holding nothing but FALLBACK_DEFS forever. The original needed no such test (fs is synchronous, the
+  // packs are there when the module is evaluated); a Tauri pack arrives only through `await preloadPacks()`.
   if (!packsInstalled()) return;
   loaded = true;
   const layers = resolveAllBytes("data/blocks.json");

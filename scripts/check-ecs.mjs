@@ -1889,7 +1889,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // The cap LABEL is a push, and the number it shows arrives through that same command at the next
   // barrier: the drag handler must hand it the value it just sent. Re-reading the resource printed the
   // PREVIOUS drag step, and nothing else refreshes the label — the reported "the FPS number is not
-  // accurate while sliding" ("每次滑动 fps 数值不准确").
+  // accurate while sliding".
   const menuSrc = stripComments(readSource("src/ui/menu.ts"));
   assert(/renderCap\(cap\)/.test(menuSrc), "the cap label is handed the value the drag just sent");
   assert(/const renderCap = \(justSet\?: number\)/.test(menuSrc), "…and reads the resource only when it has none");
@@ -2135,10 +2135,10 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds", "diagLog"]) {
     assert(new RegExp(`\\n    ${key}:`).test(main), `the schema lists "${key}"`);
   }
-  // The "日志检测" switch is a plain boolean in the same file, so a hand-edited `"diagLog": "yes"` is
-  // repaired by TYPE like every other unusable value.
+  // The "Diagnostic log" switch (the settings panel's `diagLog` toggle) is a plain boolean in the same
+  // file, so a hand-edited `"diagLog": "yes"` is repaired by TYPE like every other unusable value.
   const diag = diffSettings({ diagLog: "yes" }, { ...inForce, diagLog: true });
-  equal(diag.fixed.join(","), "diagLog", "the diagnostic-log switch is repaired like any other setting");
+  equal(diag.fixed.join(","), "diagLog", "the Diagnostic-log switch is repaired like any other setting");
   equal(diag.merged.diagLog, true, "…by writing the value in force");
 });
 

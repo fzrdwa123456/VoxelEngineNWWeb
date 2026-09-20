@@ -165,15 +165,17 @@ export function defaultUiTheme(): UiTheme {
         )
         .join("") +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
-      // **光标形状只有一个来源。** recipeStyle() 里有 7 处 `cursor:pointer`（按钮、滑块、格子键、
-      // 列表行、chip、hotbar 槽位），于是鼠标一碰到控件就变手型。这条把**所有**元素的形状强制成
-      // "继承"，一路继承到 body —— 而 body 的唯一值就是游戏的策略（游戏中 none / 界面 default），
-      // 由 platform/pointerlock.ts 的 applyCursor() 写入。
+      // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
+      // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
+      // a control. This rule forces **every** element's shape to `inherit`, all the way to `body` — whose
+      // only value is the game's policy (`none` in game / `default` in a UI), written by `applyCursor()` in
+      // platform/pointerlock.ts.
       //
-      // 为什么必须是 `inherit` 而不是 `default`：用 `default` 会把游戏中那个 `none` 也一起废掉
-      // （important 样式表压过 body 的普通内联），而且子元素会各自变 default、不再继承 body 的 none。
-      // 为什么 body 自己不受影响：它虽然也命中 `*`，但 applyCursor() 是用 **important 内联**写的，
-      // 内联 important 赢过样式表 important。
+      // Why it must be `inherit` and not `default`: `default` would cancel the in-game `none` as well (an
+      // important stylesheet beats `body`'s ordinary inline style), and the children would each become
+      // `default` instead of inheriting `body`'s `none`.
+      // Why `body` itself is unaffected: it matches `*` too, but `applyCursor()` writes an **important
+      // inline** style, and inline important beats stylesheet important.
       "*{cursor:inherit !important}",
     marquee: ["kb.keyLegend"],
     scroll: scrollRoles,

@@ -30,12 +30,14 @@
 // is the INPUT_TIMING resource now (a change of where the fields live, not of when they are read or
 // written); the logic itself is untouched.
 //
-// ===== Tauri 版的一处改动：鼠标捕获由 Win32 做，不走 Pointer Lock API =====
-// `state.locked` 的含义从"浏览器给了指针锁定"变成"**我们自己捕获了鼠标**"（Rust 侧
-// ClipCursor + SetCursorPos，见 platform/mousecapture.ts 的说明）。浏览器那套是安全策略：
-// ESC 强制解锁 + 解锁后一段时间拒绝重新锁定，页面和宿主都无权关闭。
-// 于是 lock() 不再 requestPointerLock，而是打开原生捕获，并自己同步记账
-// （原生捕获没有 pointerlockchange 可等）。**原始输入不可用时才回退**到浏览器那套。
+// ===== One Tauri-specific change: mouse capture is done by Win32, not the Pointer Lock API =====
+// `state.locked` no longer means "the browser granted pointer lock" but "**we captured the mouse**
+// ourselves" (Rust side: ClipCursor + SetCursorPos, see the note in platform/mousecapture.ts). The
+// browser's own path is a security policy: ESC force-unlocks it, and relocking is refused for a while
+// afterwards — neither the page nor the host may turn that off.
+// So lock() no longer calls requestPointerLock: it engages the native capture and keeps its own
+// bookkeeping in step (a native capture has no pointerlockchange to wait for). **It falls back** to
+// the browser path only when raw input is unavailable.
 import { captureMouse, releaseMouse } from "../../platform/mousecapture";
 import { buttonToAction, buttonToCode, getBind, isCapturing } from "../../platform/keybinds";
 import {
@@ -146,10 +148,12 @@ export class PlayerInputSystem {
    *  below keeps every use site reading like a local field. */
   private readonly intents: InputIntentLog;
 
-  // ===== LOOK 诊断计数器（每秒一行 `LOOK`，只为把"转视角不顺滑"变成数字）=====
-  // 它们全是**读数**，不参与任何判定、不影响任何逻辑：这一秒收了多少原始增量、成功排进队列多少、
-  // 分别在哪个 guard 上被丢掉、键盘边沿各来了多少、以及采样瞬间还没被固定步消费的队列长度。
-  // 判定到底丢在哪一环，比"看感觉"可靠。
+  // ===== LOOK diagnostic counters (one `LOOK` line per second, purely to turn "turning is not
+  // smooth" into numbers) =====
+  // They are all **readings**: they take part in no decision and change no logic — how many raw
+  // deltas arrived this second, how many made it into the queue, which guard dropped each of the
+  // rest, how many key edges of each kind arrived, and the queue length at the sampling instant that
+  // the fixed step had not consumed yet. Knowing which link dropped something beats "it feels off".
   private lookRaw = 0;
   private lookApplied = 0;
   private dropTakeover = 0;
@@ -162,13 +166,15 @@ export class PlayerInputSystem {
   private keyRepeats = 0;
   private keyUps = 0;
   private lookLogAt = 0;
-  /** 每帧计量器（`LOOK` 行看不出"每帧分到几份"，这一对就是为它准备的）：这一帧（= 上一帧之后到现在）
-   *  从鼠标采样到多少份 `look`、合计多少**像素当量**（`Math.hypot(yaw,pitch)/sensitivity`，这样主循环
-   *  不用知道灵敏度）。`takeLookFrameMeter()` 读即清零，由 FRAME 行每帧取一次。 */
+  /** Per-frame meter (a `LOOK` line cannot show "how many samples land in each frame", which is what
+   *  this pair exists for): how many `look` samples were taken from the mouse this frame (= since the
+   *  previous frame) and how many **pixel equivalents** they total (`Math.hypot(yaw,pitch)/sensitivity`,
+   *  so the main loop needs no knowledge of the sensitivity). `takeLookFrameMeter()` reads and clears,
+   *  and the FRAME line takes it once per frame. */
   private frameLookSamples = 0;
   private frameLookPx = 0;
-  /** 通过全部判定、等着本帧 `frameLook()` 一次性应用的原始位移（像素）。判定在 `rawDelta()` 里做完，
-   *  这里只累积"已经通过的部分"。 */
+  /** Raw displacement (pixels) that passed every guard and waits for this frame's single `frameLook()`
+   *  application. The decisions are made in `rawDelta()`; this only accumulates what got through. */
   private rawFrameDx = 0;
   private rawFrameDy = 0;
 
@@ -208,9 +214,10 @@ export class PlayerInputSystem {
       // locked element) and in this NW.js build it is rejected as kAlreadyLocked. Worse, any
       // pointerlockchange it produces re-arms the grace window below, and that DISCARDS every
       // mousemove for LOCK_GRACE_MS — a visible freeze of mouse look right after each click.
-      // 已经捕获就别再抓一次。**必须带上 state.locked**：原生捕获下
-      // document.pointerLockElement 永远是 null，少了这一项，每次点击都会重新 arm 一次
-      // grace 窗口 —— 那就是"每次点击后视角卡一下"（原来那段注释警告的正是这个）。
+      // Never grab again once captured. **`state.locked` MUST be part of this test**: under the native
+      // capture document.pointerLockElement is always null, so without that term every click re-arms
+      // the grace window — which is exactly "the view hitches after each click" (the comment above
+      // warns about precisely this).
       if (isModalUi(this.ui) || this.state.locked || document.pointerLockElement !== null) return;
       // …and nothing may capture the mouse before a WORLD exists. The loading screen is not a modal
       // surface, so this guard let a click there engage the native capture; the world entry then re-locked
@@ -352,11 +359,14 @@ export class PlayerInputSystem {
     queue.length = 0;
   }
 
-  /** 每帧计量器（FRAME 行每帧读一次，读即清零）：`samples` = 这一帧从鼠标采样到几份 `look`，
-   *  `px` = 这些采样合计多少像素当量的鼠标移动。
+  /** The per-frame meter (the FRAME line reads it once per frame, and reading clears it): `samples` =
+   *  how many `look` samples were taken from the mouse this frame, `px` = how much mouse movement in
+   *  pixel equivalents those samples total.
    *
-   *  存在的原因：`LOOK` 行按秒聚合，"每帧分到的份数不匀"（8ms 拉一次 ≈ 每帧 1.67 份 → 2,2,1 的图案）
-   *  在秒级数字上完全看不出来，而它正是"快转时一格一格"的嫌疑来源。这一对把它变成直方图。 */
+   *  Why it exists: a `LOOK` line aggregates per second, and "the samples per frame are uneven" (an
+   *  8 ms pull ≈ 1.67 per frame → a 2,2,1 pattern) is invisible in a per-second number — yet it is the
+   *  prime suspect behind "turning comes in steps when you spin fast". This pair turns it into a
+   *  histogram. */
   takeLookFrameMeter(): { samples: number; px: number } {
     const out = { samples: this.frameLookSamples, px: this.frameLookPx };
     this.frameLookSamples = 0;
@@ -369,12 +379,14 @@ export class PlayerInputSystem {
     this.pending.push({ kind: "key", code, down });
   }
 
-  /** 每秒一行 `LOOK`：把"这一秒的鼠标输入发生了什么"写成数字（见上面的计数器）。
-   *  `raw` = 从原始输入通道到达几块增量（Rust 每 4ms 推一块）；`app` = 推入意图队列几次
-   *  （改成每帧一次之后，它 ≈"有位移的帧数/秒"）；`dTO`（接管未开启）/`dG`（锁后宽限窗口）/
-   *  `dS`（尖峰保护）= 三条丢在哪的计数；`mmSkip`/`mmG`/`mmS` = 浏览器 mousemove 那条路的对应丢弃；
-   *  `key` = 这一秒的 keydown/keydown-repeat/keyup 次数（按住一个键应该 ≈1/30/1）；
-   *  `pend`/`yaw`/`pitch` = 采样瞬间还没被固定步消费的队列长度和待应用视角量。 */
+  /** One `LOOK` line per second: "what happened to the mouse input this second" as numbers (see the
+   *  counters above). `raw` = how many deltas arrived from the raw-input channel (Rust pushes one
+   *  every 4 ms); `app` = how many times one was pushed into the intent queue (after the move to once
+   *  per frame this ≈ "frames with displacement per second"); `dTO` (takeover off) / `dG` (post-lock
+   *  grace window) / `dS` (spike guard) = the three drop counters; `mmSkip`/`mmG`/`mmS` = the matching
+   *  drops on the browser mousemove path; `key` = this second's keydown/keydown-repeat/keyup counts
+   *  (holding a key should be ≈1/30/1); `pend`/`yaw`/`pitch` = at the sampling instant, the queue
+   *  length the fixed step has not consumed yet and the view delta still waiting to be applied. */
   private logLook(): void {
     const now = performance.now();
     if (this.lookLogAt === 0) {
@@ -500,23 +512,28 @@ export class PlayerInputSystem {
     this.rawFrameDy += dy;
   }
 
-  /** 每帧一次，帧的开头（固定步之前）由 `main.ts` 的 frame() 调用：把这一帧收到的位移作为**一个**
-   *  `look` 意图排队。
+  /** Once per frame, at the head of the frame (before the fixed steps), called by `main.ts`'s frame():
+   *  queue this frame's displacement as **one** `look` intent.
    *
-   *  **为什么不再是 8ms 定时器。** 视角增量原来是 `setInterval(…, 8)` 每 8ms 取走一次累加器，于是
-   *  "每帧分到几份"取决于那个定时器和帧率（16.67ms）的相位：名义上 1.67 份/帧，实际是 2/2/1 的图案。
-   *  更要命的是 **Chromium 把 keydown/keyup 这类输入任务排在定时器任务前面**，所以一按住键（自动重复
-   *  ~30 次/秒），那个定时器就被挤成 9~12ms 一档：探针实测**不按键时 122~127 份/秒、90% 的帧恰好 2 份；
-   *  按住键时掉到 84~110 份/秒、每帧份数在 0/1/2/3 之间乱跳（只有 ~40% 的帧是 2 份）** —— 每帧转角度
-   *  因此最多相差 3 倍，眼睛看到的就是"按住键转视角不顺滑"。
+   *  **Why this is no longer an 8 ms timer.** The view delta used to be taken out of the accumulator
+   *  every 8 ms by `setInterval(…, 8)`, so "how many samples land in each frame" depended on the phase
+   *  between that timer and the frame rate (16.67 ms): nominally 1.67 per frame, in practice a 2/2/1
+   *  pattern. Worse, **Chromium schedules input tasks such as keydown/keyup ahead of timer tasks**, so
+   *  the moment a key is held (auto-repeat ~30/s) that timer is squeezed into a 9~12 ms band: probe
+   *  measurements gave **122~127 per second with no key held, and exactly 2 samples in 90% of frames;
+   *  with a key held it drops to 84~110 per second and the per-frame count jumps around between
+   *  0/1/2/3 (only ~40% of frames have 2)** — the turn per frame therefore varies by up to 3x, which
+   *  the eye reads as "turning while holding a key is not smooth".
    *
-   *  改成每帧取一次之后：**每帧的转角度 = 该帧鼠标的真实位移**，与主线程上还在发生什么（按键、输入法、
-   *  日志、GC）完全无关，也不会再有 0/1/2/3 的跳变。判定仍全部在 `rawDelta()`（事件期）完成，所以
-   *  rule 3 那套接管/宽限/尖峰时序一个都没动。 */
+   *  Taking it once per frame changes that: **a frame's turn = the mouse displacement really received
+   *  in that frame**, entirely independent of whatever else is happening on the main thread (keys, the
+   *  IME, logging, GC), and the 0/1/2/3 jumps are gone. Every decision is still made in `rawDelta()`
+   *  (event time), so none of rule 3's takeover/grace/spike timing moved. */
   frameLook(): void {
     if (!this.inWorld()) {
-      // 没有世界就没有视角：绝不让一个缓冲区跨过"进世界"那一刻（进场时捕获可能已经开着，而 load
-      // 模式不跑固定步，攒下来的位移会在第一帧一次性甩出去 —— 那就是一次视角突跳）。
+      // No world, no view: a buffer must never cross the "entering the world" instant (the capture may
+      // already be engaged at entry, and load mode runs no fixed steps, so the accumulated
+      // displacement would be flung out in one go on the first frame — a single view jump).
       this.rawFrameDx = 0;
       this.rawFrameDy = 0;
       return;
@@ -532,23 +549,27 @@ export class PlayerInputSystem {
 
   /** Grab the mouse.
    *
-   *  **有原始输入时走原生捕获**（Win32 ClipCursor）：完全不碰 Pointer Lock API，于是没有
-   *  ESC 解锁手势、没有解锁后的冷却期、没有浏览器把锁拿走 —— 这几条都是页面管不了的策略。
-   *  原始输入不可用时才回退到 requestPointerLock（那时只能靠 movementX）。
+   *  **With raw input available it uses the native capture** (Win32 ClipCursor): the Pointer Lock API
+   *  is never touched, so there is no ESC unlock gesture, no cooldown after an unlock and no browser
+   *  taking the lock away — all of those are policies a page cannot override. It falls back to
+   *  requestPointerLock only when raw input is unavailable (that path has nothing but movementX).
    *
-   *  原生捕获**没有 pointerlockchange 可等**，所以"刚锁上"的那套记账（skipFirstMove + grace）
-   *  在 promise 成功之后自己做掉，语义与 pointerlockchange 里 locked 那一支完全一致。 */
+   *  A native capture **has no pointerlockchange to wait for**, so the "just locked" bookkeeping
+   *  (skipFirstMove + grace) is done here after the promise resolves, with exactly the semantics of
+   *  the locked branch of pointerlockchange. */
   lock(): Promise<void> | undefined {
     if (!this.state.rawInputActive) {
       return this.dom.requestPointerLock() as Promise<void> | undefined;
     }
     const pending = captureMouse(this.dom);
-    // 成功了才记账：失败时前端会回退到 requestPointerLock，那由 pointerlockchange 负责。
+    // Record only on success: on failure the front end falls back to requestPointerLock, and
+    // pointerlockchange is what covers that path.
     pending.then(() => this.onCaptured()).catch(() => {});
     return pending;
   }
 
-  /** 记"现在已经捕获"——对应 pointerlockchange 里 locked 那一支的四件事，逐条照抄 */
+  /** Record "the mouse is captured now" — the four things the locked branch of pointerlockchange
+   *  does, copied one by one */
   private onCaptured(): void {
     this.state.locked = true;
     this.state.freeMouseActive = false;
@@ -558,9 +579,9 @@ export class PlayerInputSystem {
     this.log("MOUSE CAPTURE on (native ClipCursor; browser pointer lock not used)");
   }
 
-  /** 放开鼠标（开菜单 / 失焦 / 退出世界）：紧跟在 prepareUnlock() 之后调用。
-   *  原生捕获没有 pointerlockchange 可等，所以状态必须在这里自己落下去；
-   *  回退路径下 releaseMouse() 还会顺带 document.exitPointerLock()。 */
+  /** Release the mouse (opening a menu / losing focus / leaving the world): called right after
+   *  prepareUnlock(). A native capture has no pointerlockchange to wait for, so the state has to be
+   *  settled here itself; on the fallback path releaseMouse() also calls document.exitPointerLock(). */
   releaseCapture(): void {
     if (this.state.locked) this.log("MOUSE CAPTURE off (native ClipCursor released)");
     this.state.locked = false;
@@ -604,9 +625,10 @@ export class PlayerInputSystem {
   }
 
   /** Whether raw input should take over the view.
-   *  原生捕获（ClipCursor）期间**必须**接管：光标被夹在窗口里，贴到边就不动了，movementX
-   *  随之归零 —— 这和原来"窗口一半在屏幕外"是同一个原因。
-   *  其余情况：插件可用 + 无菜单 + 窗口一半在屏幕外。 */
+   *  During the native capture (ClipCursor) it **must** take over: the cursor is clamped inside the
+   *  window, stops moving once it reaches the edge, and movementX goes to zero with it — the same
+   *  cause as the original "window half offscreen". Every other case: plugin available + no menu +
+   *  window half offscreen. */
   private rawInputShouldTakeOver(): boolean {
     if (!this.state.rawInputActive || !this.clickLockAllowed) return false;
     if (this.state.locked) return true;

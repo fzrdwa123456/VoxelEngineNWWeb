@@ -11,13 +11,15 @@
     #app { width: 100vw; height: 100vh; }
   </style>
   <!--
-    最早的一道网。
+    The earliest safety net.
     ------------------------------------------------------------------
-    **必须是 classic script（不是 module），而且必须在 module 之前**：
-    module 脚本的加载/解析失败不会进任何 try/catch，而 Tauri 里前端挂掉是**静默**的
-    —— 没有窗口、debug.log 一行都没有，从外面看跟"卡在加载器"一模一样。
-    所以这里直接打 IPC 全局（不经过 @tauri-apps/api，那时它可能正是坏掉的那个），
-    把消息写进 logs\boot.log，同时挂到 document.title 上（进程列表里能看到）。
+    **It MUST be a classic script (not a module), and it MUST come before the module**:
+    a module script that fails to load or parse never reaches any try/catch, and in Tauri a
+    dead frontend is **silent** — no window, not one line in debug.log, indistinguishable from
+    "stuck in the loader" from the outside.
+    So this talks to the IPC global directly (not through @tauri-apps/api, which may be exactly
+    the broken part at that moment), writing the message to logs\boot.log and also onto
+    document.title (visible in the process list).
   -->
   <script>
     (function () {
@@ -26,7 +28,7 @@
         try {
           var internals = window.__TAURI_INTERNALS__;
           if (internals && internals.invoke) internals.invoke("boot_report", { message: text });
-        } catch (e) { /* 连 IPC 都没有，就只剩标题了 */ }
+        } catch (e) { /* not even the IPC is there: the title is all that is left */ }
         try { document.title = "VoxelEngine [boot: " + text + "]"; } catch (e) {}
       }
       window.__bootReport = report;

@@ -1,12 +1,13 @@
-// 开发期的"建目录 + 装示例包"。
+// Development-time "create the directories + install the sample packs".
 //
-// 原版 rearrange.mjs 是 NW.js 的**打包器**（搬 nwjs 运行时 + dist + manifest，再用 rcedit 改名）。
-// Tauri 版这些活全部由 `tauri build` 自己干了（前端产物、图标、版本信息、NSIS 安装包），
-// 所以这里只剩下"开发时数据目录"这一件事，反而变简单了。
+// The original rearrange.mjs was NW.js's **packager** (copy the nwjs runtime + dist + manifest, then
+// rename it with rcedit). The Tauri port hands all of that to `tauri build` (frontend output, icons,
+// version info, the NSIS installer), so the only job left here is the "development data directory" —
+// which made this script simpler rather than harder.
 //
-// 用法：
-//   node scripts/rearrange.mjs               只建目录（对应原版的 plan A：引擎不内置任何资源包）
-//   node scripts/rearrange.mjs --with-packs  再把 packs\ 里那两个示例包按 MC 布局装进去
+// Usage:
+//   node scripts/rearrange.mjs               create directories only (original's plan A: nothing bundled)
+//   node scripts/rearrange.mjs --with-packs  also install the two sample packs under packs\ (MC layout)
 import { existsSync, mkdirSync, cpSync, rmSync, readdirSync } from "node:fs";
 import path from "node:path";
 
@@ -14,21 +15,22 @@ import { GAME, GAME_DIRS, PACKS, SAMPLE_MOD, SAMPLE_RP } from "./paths.mjs";
 
 const withPacks = process.argv.includes("--with-packs");
 
-// 数据根目录 + 那几个固定子目录（Rust 侧 game.rs 的 ensure_dirs 也会建，这里提前建好方便看）
+// The data root plus the fixed subdirectories — the Rust side's game.rs `ensure_dirs` creates them too,
+// so this only builds them early, where they are easy to see.
 mkdirSync(GAME, { recursive: true });
 for (const d of GAME_DIRS) mkdirSync(path.join(GAME, d), { recursive: true });
 console.log(`game\\ ready -> ${GAME}`);
 
 if (!withPacks) {
-  console.log("plan A: 不内置任何资源包（要装示例包就加 --with-packs）");
+  console.log("plan A: nothing bundled (add --with-packs to install the sample packs)");
   process.exit(0);
 }
 
-/** 把一个示例包拷进目标目录（先删再拷，保证可重复执行） */
+/** Copy one sample pack into its target directory (delete first, so re-running is safe) */
 function installPack(sampleName, targetDir) {
   const src = path.join(PACKS, sampleName);
   if (!existsSync(src)) {
-    console.warn(`warning: ${path.relative(process.cwd(), src)} 不存在，跳过`);
+    console.warn(`warning: ${path.relative(process.cwd(), src)} does not exist, skipping`);
     return;
   }
   const dst = path.join(GAME, targetDir, sampleName);
@@ -51,4 +53,4 @@ console.log("installing sample packs:");
 installPack(SAMPLE_MOD, "mods");
 installPack(SAMPLE_RP, "resourcepacks");
 
-console.log("\n示例内容已就位。启动：npm run app:dev");
+console.log("\nSample content is in place. Start with: npm run app:dev");

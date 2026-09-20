@@ -1,14 +1,18 @@
-// 资源包 / mod 扫描 —— 对应原 NW.js 版 rendering/textures.ts 里那一半"读目录"的职责。
+// Resource pack / mod scan — the counterpart of the "read the directory" half of the original
+// NW.js build's rendering/textures.ts.
 //
-// 分工是刻意的：
-//   * Rust 只做"列目录 + 读文件字节"（Node 的 fs 干的那点事），不做任何 MC 命名空间归一化；
-//   * 归一化（assets/<ns>/textures/... -> block/dirt.png）、优先级、layering 全部留在 TS 里，
-//     因为它已经是纯逻辑、已经被 check:ecs 覆盖，搬过来只会引入风险。
+// The split is deliberate:
+//   * Rust only does "list the directory + read file bytes" (the little Node's fs did); it does no
+//     MC namespace normalisation at all;
+//   * normalisation (assets/<ns>/textures/... -> block/dirt.png), priority and layering all stay in
+//     TS, because that is already pure logic already covered by check:ecs, and moving it here would
+//     only add risk.
 //
-// zip 包**不解**，Rust 直接把 zip 的原始字节丢给前端 —— 前端本来就有 fflate（unzipSync），
-// 这样 Rust 侧一个额外依赖都不用加。
+// zip packs are **not** unpacked: Rust hands the raw zip bytes straight to the frontend — the
+// frontend already has fflate (unzipSync), so the Rust side needs no extra dependency.
 //
-// 顺序也照抄 TS：每个目录里的条目按**名字升序**返回，TS 侧从后往前遍历（后加载的优先级高）。
+// The ordering is copied from TS too: entries in each directory are returned in **ascending name
+// order**, and the TS side walks them back to front (later loads win).
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -16,14 +20,15 @@ use std::path::Path;
 use base64::Engine;
 use serde::Serialize;
 
-/// 一个包：要么是文件夹包（files 里有内容），要么是 zip 包（zipB64 有内容）
+/// A pack: either a folder pack (files has content) or a zip pack (zipB64 has content)
 #[derive(Serialize, Default)]
 pub struct PackEntry {
     pub name: String,
     pub builtin: bool,
-    /// 文件夹包：相对路径（原样，带正/反斜杠都行，前端会归一化）-> base64 字节
+    /// Folder pack: relative path (as-is, with either forward or back slashes — the frontend
+    /// normalises it) -> base64 bytes
     pub files: BTreeMap<String, String>,
-    /// zip 包：整个 zip 的 base64（前端 fflate 解压）
+    /// Zip pack: base64 of the whole zip (the frontend unpacks it with fflate)
     #[serde(rename = "zipB64", skip_serializing_if = "Option::is_none")]
     pub zip_b64: Option<String>,
 }
@@ -31,9 +36,9 @@ pub struct PackEntry {
 #[derive(Serialize)]
 pub struct PackSnapshot {
     pub builtin: Option<PackEntry>,
-    /// mods 目录（中等优先级）
+    /// mods directory (medium priority)
     pub mods: Vec<PackEntry>,
-    /// resourcepacks 目录（最高优先级）
+    /// resourcepacks directory (highest priority)
     pub resourcepacks: Vec<PackEntry>,
 }
 
@@ -43,7 +48,8 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// 递归收集一个文件夹包里的所有文件（key 用 `/` 连接，前端按同样的规则归一化）
+/// Recursively collects every file in a folder pack (keys are joined with `/`, and the frontend
+/// normalises by the same rule)
 fn walk(dir: &Path, base: &str, out: &mut BTreeMap<String, String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -85,7 +91,8 @@ fn read_entry(full: &Path, name: &str, builtin: bool) -> PackEntry {
     entry
 }
 
-/// 扫一个目录：跳过内置包名，按名字升序返回（文件夹包和 .zip 都算）
+/// Scans one directory: skips the builtin pack name and returns ascending name order (both folder
+/// packs and .zip files count)
 fn scan_dir(dir: &Path, skip_builtin: bool) -> Vec<PackEntry> {
     let mut out = Vec::new();
     let entries = match fs::read_dir(dir) {
@@ -108,7 +115,7 @@ fn scan_dir(dir: &Path, skip_builtin: bool) -> Vec<PackEntry> {
     out
 }
 
-/// 完整的资源包快照（原版 scanPacks() 的那三个来源，同一个顺序）
+/// The complete resource pack snapshot (the original scanPacks()'s three sources, in the same order)
 pub fn snapshot(game_root: &Path) -> PackSnapshot {
     let packs_dir = game_root.join("resourcepacks");
     let mods_dir = game_root.join("mods");

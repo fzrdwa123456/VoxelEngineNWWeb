@@ -1,18 +1,21 @@
-// ===== Tauri 壳：settings / 日志 / 窗口 / vsync（原 NW.js 版的 platform/shell.ts）=====
+// ===== The Tauri shell: settings / logs / window / vsync (the NW.js version's platform/shell.ts) =====
 //
-// 原版直接 `eval("require")("node:fs")` 同步读写文件、`nw.Window.get()` 操作窗口。
-// Tauri 没有同步 IPC，所以这里的策略是：
+// The original read and wrote files synchronously through `eval("require")("node:fs")` and drove the
+// window through `nw.Window.get()`. Tauri has no synchronous IPC, so the strategy here is:
 //
-//   * **读**：启动时 `preloadShell()` 一次 invoke 把 settings / 窗口模式 / vsync 开关
-//     全部拿进内存，之后 `readSettings()` 读内存 —— 保持**同步**，调用点一个都不用改。
-//   * **写**：`writeSettings()` 先更新内存、再 fire-and-forget 丢给 Rust。
-//   * **日志**：攒批（64 行或 200ms）再发一次 `append_log`。原版是每行一次同步 appendFile，
-//     照搬到 Tauri 会变成每帧一个 IPC —— 这是必需的一处行为改动，已在 README 里写明。
-//   * **窗口**：全部走自定义命令（src-tauri/src/win.rs），所以不需要 window 插件的权限。
+//   * **Read**: at startup `preloadShell()` pulls settings / window mode / the vsync switch into memory
+//     in ONE invoke, and `readSettings()` reads memory afterwards — it stays **synchronous**, so not one
+//     call site changes.
+//   * **Write**: `writeSettings()` updates memory first, then fire-and-forgets to Rust.
+//   * **Logs**: batch (64 lines or 200ms) and send one `append_log`. The original did one synchronous
+//     appendFile per line; carried over to Tauri that becomes one IPC per frame — a necessary behaviour
+//     change, written down in the README.
+//   * **Window**: everything goes through custom commands (src-tauri/src/win.rs), so the window plugin's
+//     permissions are not needed.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-/** Rust `preload_shell` 返回的东西（字段名与 serde 的 camelCase 一一对应） */
+/** What Rust's `preload_shell` returns (the field names match serde's camelCase one for one) */
 export interface ShellSnapshot {
   gameRoot: string;
   dev: boolean;
@@ -26,7 +29,7 @@ export interface ShellSnapshot {
 }
 
 let snapshot: ShellSnapshot = {
-  gameRoot: "(未初始化)",
+  gameRoot: "(not initialized)",
   dev: false,
   settings: {},
   settingsProblem: null,
@@ -37,8 +40,9 @@ let snapshot: ShellSnapshot = {
   platform: "tauri",
 };
 
-/** 启动预载。**必须在 initShell() 之前 await 一次**，否则 readSettings() 读到的全是空。
- *  这就是原来的 `initShell()` 里"建目录 + 清日志"那段在 Tauri 里的位置：Rust 侧已经做完了。 */
+/** The startup preload. **It must be awaited ONCE before initShell()**, or readSettings() reads nothing
+ *  but empties. This is where the original `initShell()`'s "make the directories + clear the log" now
+ *  belongs in Tauri: the Rust side has already done it. */
 export async function preloadShell(): Promise<ShellSnapshot> {
   const snap = await invoke<ShellSnapshot>("preload_shell");
   snapshot = snap;
@@ -54,7 +58,8 @@ export async function preloadShell(): Promise<ShellSnapshot> {
   void listen("win-geometry", () => {
     geometryListeners.forEach((cb) => cb());
   });
-  // Rust 侧的兜底：捕获开着但窗口不是前台（ClipCursor 不看前台），约 32ms 内就会被拆掉并通知这里。
+  // The Rust-side backstop: capture is on but the window is not foreground (`ClipCursor` does not look
+  // at the foreground), so within ~32ms it is torn down and this side is notified.
   void listen("capture-lost", () => {
     captureLostListeners.forEach((cb) => cb());
   });
@@ -66,12 +71,14 @@ export function shellInfo(): ShellSnapshot {
   return snapshot;
 }
 
-/** 最早期诊断通道：**直接打 IPC 全局，不经过 @tauri-apps/api**。
+/** The earliest diagnostic channel: **it hits the IPC global directly, bypassing @tauri-apps/api**.
  *
- *  用途是"前端还没起来就挂了"的那一瞬间 —— 那时 `invoke` 的封装、下面的日志攒批
- *  都还不可用，而 Tauri 里前端挂掉是**静默**的：没有窗口、debug.log 一行都没有，
- *  从外面看跟"卡在加载器"一模一样（这个坑真踩过两次）。
- *  它把消息写进 logs\boot.log；调用点见 main.ts 的 preload try/catch 和 index.html 的 inline 脚本。 */
+ *  It exists for the moment "the front end died before it was up" — the `invoke` wrapper and the log
+ *  batching below are both still unavailable then, and in Tauri a dead front end is **silent**: no
+ *  window, not one line in debug.log, indistinguishable from outside from "stuck in the loader" (this
+ *  trap was really hit twice).
+ *  It writes the message to logs\boot.log; call sites are main.ts's preload try/catch and index.html's
+ *  inline script. */
 export function bootReport(message: string): void {
   try {
     const internals = (
@@ -81,11 +88,11 @@ export function bootReport(message: string): void {
     ).__TAURI_INTERNALS__;
     void internals?.invoke?.("boot_report", { message });
   } catch {
-    /* 连 IPC 都拿不到：那就只剩 index.html 里那个把消息写进标题的兜底了 */
+    /* Not even the IPC is reachable: index.html's title-writing fallback is all that is left */
   }
 }
 
-// ===== 日志攒批 =====
+// ===== Log batching =====
 const pending: Record<string, string[]> = { debug: [], renderer: [] };
 const FLUSH_LINES = 64;
 const FLUSH_MS = 200;
@@ -112,7 +119,8 @@ function queue(channel: "debug" | "renderer", line: string): void {
   else flushSoon();
 }
 
-// 关窗前把剩下的日志吐出去（原版是同步写，不会有这个问题）
+// Flush the remaining log lines before the window closes (the original wrote synchronously, so it never
+// had this problem)
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
     flush("debug");
@@ -120,7 +128,8 @@ if (typeof window !== "undefined") {
   });
 }
 
-// ===== 启动初始化：错误与 console 落 renderer.log / debug.log（原版 initShell 的后半段）=====
+// ===== Startup init: errors and console go to renderer.log / debug.log (the second half of the original
+// initShell) =====
 export function initShell(): void {
   window.addEventListener("error", (e) => {
     appendDebugLog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}`);
@@ -141,16 +150,19 @@ export function initShell(): void {
   };
 }
 
-// ===== 诊断探针的开关（设置面板里的"日志检测"）=====
-// 原因：为了查"按住键转视角不顺滑"，输入/帧/光标这几条路都挂上了周期性的探针行（`FRAME`/`LOOK`/
-// `RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/`HOOKPROBE`）。它们很有用（以后再查这类问题
-// 直接看日志），但一秒好几行、会一直写盘。所以给一个开关，**默认开**，关掉后 debug.log 只留真正的
-// 事件记录（BOOT / SETTINGS / LOCK / CURSOR / GEOMETRY / ERROR / REJECT / KBCAP…）。
+// ===== The "Diagnostic log" switch (the settings panel toggle) =====
+// Why: to chase "the view is not smooth while a key is held", periodic probe lines were hung off the
+// input / frame / cursor paths (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/
+// `HOOKPROBE`). They are useful (next time this class of problem comes up, read the log), but they are
+// several lines a second and write to disk forever. So there is a switch, **on by default**; with it off
+// debug.log keeps only the real event records (BOOT / SETTINGS / LOCK / CURSOR / GEOMETRY / ERROR /
+// REJECT / KBCAP…).
 //
-// 开关的**唯一过滤点在 logDebug 里**（所有探针行都从那里过），所以加探针只需要把前缀加进这张表。
-// `loadDebugLog` 之外的东西不受影响：`appendDebugLog` 是错误/console 的通道，永远写。
+// The switch's **one filter point is inside logDebug** (every probe line passes through there), so adding
+// a probe only means adding its prefix to this table. Everything outside `logDebug` is unaffected:
+// `appendDebugLog` is the error/console channel and always writes.
 let diagLogEnabled = true;
-/** 探针行的前缀（`SPACE#`/`MOUSE#`/`LOOK#` 带序号，所以按前缀判）。 */
+/** The probe lines' prefixes (`SPACE#`/`MOUSE#`/`LOOK#` carry a sequence number, so match by prefix). */
 const PROBE_PREFIXES = [
   "PHYS ",
   "FRAME ",
@@ -180,11 +192,11 @@ export function appendDebugLog(line: string): void {
 
 // logs\debug.log with a [<ms>ms] prefix — the general-purpose logger every module uses
 export function logDebug(line: string): void {
-  if (!diagLogEnabled && isProbeLine(line)) return; // 探针关掉：不写盘（事件记录照写）
+  if (!diagLogEnabled && isProbeLine(line)) return; // probes off: stay off disk (event records still write)
   appendDebugLog(`[${performance.now().toFixed(0)}ms] ${line}`);
 }
 
-// ===== settings.json（值在内存里，文件由 Rust 写）=====
+// ===== settings.json (the values live in memory, the file is written by Rust) =====
 export function readSettings(): Record<string, unknown> {
   return { ...snapshot.settings };
 }
@@ -194,7 +206,7 @@ export function writeSettings(s: Record<string, unknown>): void {
   void invoke("write_settings", { value: s }).catch(() => {});
 }
 
-// ===== The settings FILE's own health（判定由 Rust 做，形状与原版一致）=====
+// ===== The settings FILE's own health (the judgement is made by Rust, the shape matches the original) =====
 export interface SettingsRead {
   readonly settings: Record<string, unknown>;
   /** Why the file cannot be used, or null when it is usable (or simply absent). */
@@ -219,27 +231,31 @@ export function backupSettingsFile(): string {
 export { diffSettings } from "./settings-diff";
 export type { SettingsDiff } from "./settings-diff";
 
-// ===== 光标 / 窗口 =====
-// 菜单和背包打开时把光标放回准星位置（原版走 cursor.exe 子进程，这里 Rust 一步算完）
+// ===== Cursor / window =====
+// Put the cursor back on the crosshair position when a menu or the backpack opens (the original spawned
+// a cursor.exe child process; here Rust computes it in one step)
 export function centerCursor(): void {
   void invoke("center_cursor").catch(() => {});
 }
 
-// Show window: 配置里 "visible": false -> 第一帧渲染完之后才显示（避免启动白屏）
+// Show window: "visible": false in the config -> only show it after the first frame is rendered (avoids a
+// white startup screen)
 export function showWindow(): void {
   void invoke("show_window").catch(() => {});
 }
 
-// ===== 原生窗口焦点 =====
-// 焦点事件由 Rust 的 WindowEvent::Focused 转发成 win-focus / win-blur
+// ===== Native window focus =====
+// Focus events are forwarded by Rust's WindowEvent::Focused as win-focus / win-blur
 let windowFocused = false;
 const focusListeners = new Set<() => void>();
 const blurListeners = new Set<() => void>();
-/** 窗口几何变化（缩放 / 移动 / DPI）。注意它**不是**"鼠标离开应用"：拖边框时窗口仍然有焦点、
- *  光标也还在窗口矩形内（只是在非客户区），所以 blur/mouseleave 都不会来 —— 见 main.ts 的
- *  onWinGeometry 和 win.rs::reclip_mouse_capture 里那段说明。 */
+/** The window's geometry changed (resize / move / DPI). Note that it is **not** "the mouse left the
+ *  application": while a border is dragged the window still has focus and the cursor is still inside the
+ *  window rectangle (merely in the non-client area), so neither blur nor mouseleave arrives — see
+ *  main.ts's onWinGeometry and the note in win.rs::reclip_mouse_capture. */
 const geometryListeners = new Set<() => void>();
-/** 捕获被 Rust 侧拆掉了（"捕获开着但窗口不是前台"的系统级兜底）：前端据此放鼠标、必要时暂停。 */
+/** Capture was torn down by the Rust side (the system-level backstop for "capture is on but the window is
+ *  not foreground"): on this signal the front end releases the mouse and pauses when needed. */
 const captureLostListeners = new Set<() => void>();
 
 export function trackWindowFocus(): void {
@@ -254,7 +270,7 @@ export function focusWindow(): void {
   void invoke("focus_window").catch(() => {});
 }
 
-/** Quit the game: 关掉进程（Rust 侧会先停掉原始输入线程） */
+/** Quit the game: kill the process (the Rust side stops the raw-input thread first) */
 export function quitApp(): void {
   void invoke("quit_app").catch(() => {});
 }
@@ -267,23 +283,27 @@ export function onWinBlur(cb: () => void): void {
   blurListeners.add(cb);
 }
 
-/** 窗口几何变了（缩放 / 移动 / DPI）。它**不是**"鼠标离开应用"：拖边框/标题栏时窗口仍然是焦点窗口，
- *  光标也还在窗口矩形里（只是落在非客户区），所以既没有 blur 也不会 mouseleave —— 想抓"用户在弄窗口"
- *  只能靠这个信号（见 main.ts 的 onWinGeometry）。 */
+/** The window's geometry changed (resize / move / DPI). It is **not** "the mouse left the application":
+ *  while a border or the title bar is dragged the window is still the focused window and the cursor is
+ *  still inside the window rectangle (it merely sits in the non-client area), so there is neither blur
+ *  nor mouseleave — "the user is fiddling with the window" can only be caught from this signal (see
+ *  main.ts's onWinGeometry). */
 export function onWinGeometry(cb: () => void): void {
   geometryListeners.add(cb);
 }
 
-/** 捕获被 Rust 侧拆掉了：`capture-foreground-check` 发现"捕获开着但窗口不是前台"就会释放并发这个事件。
- *  前端要把它当"丢了窗口"处理（放鼠标 + 世界里且无 UI 时暂停）—— 只在 Rust 侧释放不够，前端的
- *  `INPUT_STATE.locked` 还是 true。 */
+/** Capture was torn down by the Rust side: `capture-foreground-check` finds "capture is on but the window
+ *  is not foreground", releases, and emits this event. The front end must treat it as "the window was
+ *  lost" (release the mouse + pause when in a world with no UI) — releasing on the Rust side alone is not
+ *  enough, the front end's `INPUT_STATE.locked` would still be true. */
 export function onCaptureLost(cb: () => void): void {
   captureLostListeners.add(cb);
 }
 
-// ===== GPU vsync 开关 =====
-// 原版改写自己的 package.json 的 chromium-args；这里落一个 config\vsync.json，
-// run() 在创建窗口之前读它决定要不要加 --disable-gpu-vsync。同样是**重启生效**。
+// ===== The GPU vsync switch =====
+// The original rewrote its own package.json's chromium-args; here it lands in config\vsync.json, which
+// run() reads before creating the window to decide whether to add --disable-gpu-vsync. Likewise it
+// **takes effect on restart**.
 export function isGpuVsyncDisabled(): boolean {
   return snapshot.vsyncDisabled;
 }
@@ -311,9 +331,10 @@ function notifyWindowMode(): void {
   modeListeners.forEach((cb) => cb());
 }
 
-/** 启动时按设置进全屏（原版在 showWindow 之后调）。
- *  原版用的是 NW.js 的 kiosk 全屏（进出都不掉最大化状态），Tauri 走自己的 set_fullscreen，
- *  没有 kiosk 那套 HWND_TOPMOST 副作用，所以原版那个 unTopmost() 补丁在这里不需要。 */
+/** Enter fullscreen per the setting at startup (the original called this after showWindow).
+ *  The original used NW.js's kiosk fullscreen (entering and leaving it both keep the maximised state);
+ *  Tauri goes through its own set_fullscreen, which has none of kiosk's HWND_TOPMOST side effects, so the
+ *  original's unTopmost() patch is not needed here. */
 export function applyWindowModeAtStart(): void {
   if (getWindowMode() === "fullscreen") {
     void invoke("set_window_mode", { fullscreen: true }).catch(() => {});

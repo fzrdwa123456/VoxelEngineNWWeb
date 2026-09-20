@@ -1,10 +1,12 @@
 import { defineConfig } from "vite";
 
-// Tauri 约定：
-//   * dev server 固定 1420 + strictPort —— tauri.conf.json 的 devUrl 写死了这个端口，端口漂了就白屏
-//   * clearScreen: false —— 别把 cargo 的编译输出擦掉，不然看不到 Rust 侧的错误
-//   * watch 忽略 game\ 和 src-tauri\ —— game\ 是运行时数据目录（会被进程独占锁，
-//     原版就被这个坑过：watching it crashes with EBUSY），src-tauri\ 归 cargo 管
+// Tauri conventions:
+//   * the dev server is pinned to 1420 + strictPort — tauri.conf.json's devUrl hardcodes that port,
+//     and a port that drifts means a blank window
+//   * clearScreen: false — do not wipe cargo's compiler output, or the Rust-side errors are invisible
+//   * watch ignores game\ and src-tauri\ — game\ is the runtime data directory (the process holds an
+//     exclusive lock on it; the NW.js original was bitten by this: watching it crashes with EBUSY),
+//     and src-tauri\ belongs to cargo
 export default defineConfig({
   base: "./",
   clearScreen: false,
@@ -16,7 +18,7 @@ export default defineConfig({
     },
   },
   build: {
-    // WebView2 就是 Chromium，target 直接按它来
+    // WebView2 IS Chromium, so target it directly
     target: "chrome110",
     sourcemap: false,
     chunkSizeWarningLimit: 4096,

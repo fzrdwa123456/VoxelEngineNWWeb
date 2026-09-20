@@ -216,11 +216,12 @@ the main menu is the mode where the ui lane is the only lane running, which is e
 system relies on;
 (5) `debug.log` must contain no new timer noise: the only new line is `DELAY lockRetry […]`.
 
-AFTER the diagnostic-log switch (the settings panel's "日志检测", default ON — `settings.json`'s `diagLog`):
+AFTER the diagnostic-log switch (the settings panel's "Diagnostic log", default ON — `settings.json`'s `diagLog`):
 the periodic probe lines (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/`HOOKPROBE`) are
 what made the "held key" investigation possible, and they are also the only thing that writes several lines
 per second forever. (1) open the settings panel (pause menu or main menu) — the toggle must read
-"日志检测: 已开启(含诊断探针)"; (2) click it → the label switches to "已关闭(只记事件)" and `debug.log` must
+"Diagnostic log: ON (probes included)"; (2) click it → the label switches to
+"Diagnostic log: OFF (events only)" and `debug.log` must
 write a `DIAGLOG probes disabled` line and then STOP getting `FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`PHYS` lines
 while everything else (BOOT/SETTINGS/LOCK/CURSOR/GEOMETRY/ERROR) keeps being written; (3) walk around and look
 around for a few seconds — no probe lines may appear (a line still arriving means its prefix is missing from

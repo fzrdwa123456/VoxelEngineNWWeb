@@ -328,7 +328,8 @@ export interface SettingsCallbacks {
   onFpsCap: (cap: number) => void;
   isGpuVsyncDisabled: () => boolean;
   onToggleGpuVsync: (disabled: boolean) => boolean;
-  /** 诊断探针（"日志检测"）开关：只影响探针行写不写 debug.log，默认开 */
+  /** The "Diagnostic log" switch: it only gates whether probe lines reach `debug.log`,
+   *  and is on by default. */
   isDiagLogEnabled: () => boolean;
   onToggleDiagLog: (on: boolean) => boolean;
   getWindowMode: () => WindowMode;
@@ -447,8 +448,8 @@ export function buildSettingsPanel(
     }
   });
 
-  // --- 诊断探针（"日志检测"）开关：FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE# 这些探针行
-  //     写不写 debug.log。默认开；关掉之后 debug.log 只留真正的事件记录。不需要重启。 ---
+  // --- "Diagnostic log": whether the FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE# lines
+  //     reach debug.log. On by default; off keeps only the real event records — no restart needed. ---
   let diagLog = opts.isDiagLogEnabled();
   const diagBtn = spawnButton(
     world,

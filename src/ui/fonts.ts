@@ -4,12 +4,14 @@
 // The font IN FORCE is a RESOURCE (`FONT`, see ecs/resources.ts); the FONTS table below is an asset (the
 // two font pair definitions) and stays here.
 //
-// ===== Tauri/ECS 化的一处改动：这个模块不再自己写 DOM =====
-// 以前这里有个 `applyFont()`：`setFontId()` / `loadFont()` 里直接 `documentElement.style.setProperty(...)`。
-// 那是一次发生在**系统之外**的副作用 —— 不过 barrier、无法声明它读哪些状态，而且每次调用都无条件写 DOM。
-// 现在值仍然住在 FONT 资源里，**DOM 写入搬到唯一的 DOM 写入者（协调器 `ecs/ui/system.ts`）**：
-// 它每帧把"已经应用的值"和资源里的当前值比对，只在变了的时候写。
-// 这个模块只负责两件事：拥有值（资源）+ 提供这张 asset 表（`currentFontCss()`）。
+// ===== One Tauri/ECS change: this module no longer writes the DOM itself =====
+// It used to own an `applyFont()` that called `documentElement.style.setProperty(...)` from `setFontId()`
+// and `loadFont()`. That was a side effect **outside the system** — no barrier, no way to declare what it
+// reads, and an unconditional DOM write on every call. The value still lives in the FONT resource, and the
+// **DOM write moved to the one DOM writer, the reconciler (`ecs/ui/system.ts`)**, which compares the
+// applied value against the resource's current one every frame and writes only when it changed.
+// This module does two things only: it owns the value (the resource) and supplies this asset table
+// (`currentFontCss()`).
 import type { FontState } from "../ecs/resources";
 
 export type FontId = "pixel" | "system";

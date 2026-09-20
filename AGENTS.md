@@ -331,7 +331,7 @@ src/
 ├── platform/               host/browser services, produce data only: shell.ts (NW.js:
 │                           settings/logs/window — it owns settings.json, whose VALUES live in the
 │                           config resources, and it owns the DIAGNOSTIC-PROBE SWITCH: the settings
-│                           panel's "日志检测" toggle, default ON, filters the probe lines
+│                           panel's "Diagnostic log" toggle, default ON, filters the probe lines
 │                           (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/
 │                           `HOOKPROBE`) inside `logDebug`, while `appendDebugLog` — the error/console
 │                           channel — always writes; the probe PREFIX TABLE there is the one place a

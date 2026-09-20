@@ -1,16 +1,17 @@
-// 便携发布目录：一个能直接双击跑的文件夹。
+// The portable release directory: a folder that runs by double-clicking it.
 //
-// ⚠️ **WebView2Loader.dll 必须跟 exe 放在一起。**
-// 少了它，Windows 不会给你任何窗口，只会弹一个
-//   "voxelengine-tauri.exe - 系统错误：由于找不到 WebView2Loader.dll，无法继续执行代码"
-// 的系统错误框；而且那个框是 **csrss.exe** 画的 —— 杀掉应用进程它也不会消失，
-// 于是现象看起来像"进程活着、0 CPU、2 个线程、没有窗口、一行日志都不写"的假死。
-// （这个坑真踩过：tauri build 会把 WebView2Loader.dll 放在 target\release\ 里，
-//   手动只拷 exe 就会漏。）
+// ⚠️ **WebView2Loader.dll MUST sit next to the exe.**
+// Without it Windows gives you no window at all, only a
+//   "voxelengine-tauri.exe - System Error: cannot run because WebView2Loader.dll was not found"
+// system error box — and **csrss.exe** draws that box, so killing the app process does not dismiss it
+// either; the symptom then reads as a hang: "process alive, 0 CPU, 2 threads, no window, not one log
+// line".
+// (This one was actually hit: `tauri build` leaves WebView2Loader.dll in target\release\, so copying
+//   only the exe by hand misses it.)
 //
-// 用法：
-//   node scripts/package-portable.mjs              装仓库里的示例包（默认）
-//   node scripts/package-portable.mjs --no-packs   不装示例包（对应原版 plan A：引擎不内置资源）
+// Usage:
+//   node scripts/package-portable.mjs              install the sample packs in the repo (the default)
+//   node scripts/package-portable.mjs --no-packs   install no sample packs (the original's plan A: no bundles)
 import {
   copyFileSync,
   cpSync,
@@ -34,24 +35,25 @@ const DIST = path.join(ROOT, "dist");
 const OUT = path.join(ROOT, "release", "VoxelEngineTauri");
 
 if (!existsSync(EXE_SRC)) {
-  console.error(`release exe 不存在：${EXE_SRC}`);
-  console.error("先跑一次：npm run app:build   （或 npm run app:exe）");
+  console.error(`release exe not found: ${EXE_SRC}`);
+  console.error("Build it first: npm run app:build   (or npm run app:exe)");
   process.exit(1);
 }
 if (!existsSync(LOADER_SRC)) {
-  console.error(`!! 找不到 WebView2Loader.dll（${LOADER_SRC}）`);
-  console.error("   没有它发布目录里的 exe 起不来（缺 DLL 的系统错误框）。");
-  console.error("   它由 tauri build / cargo build --release 生成在 target\\release\\ 里。");
+  console.error(`!! WebView2Loader.dll not found (${LOADER_SRC})`);
+  console.error("   Without it the exe in the release directory will not start (a missing-DLL system error box).");
+  console.error("   tauri build / cargo build --release produce it under target\\release\\.");
   process.exit(1);
 }
 
-/** 校验 exe 里**真的嵌了前端产物**。
+/** Verify that the exe **really has the frontend output embedded**.
  *
- *  Tauri 只在开了 `tauri/custom-protocol` feature 时才把 dist 嵌进二进制：
- *  `tauri build` 自己会开，但裸 `cargo build --release` **不会** —— 后者出来的 exe
- *  会去找 tauri.conf.json 的 devUrl，结果是**空白窗口**（进程活着、WebView2 各组件都起、
- *  但页面根本没加载，logs 一行都没有）。从外面看跟"卡在加载器"几乎一样，极难定位，
- *  所以这里直接检查资产表的 key（tauri-codegen 会把每个产物的路径作为明文存进二进制）。 */
+ *  Tauri only embeds dist into the binary when the `tauri/custom-protocol` feature is on:
+ *  `tauri build` enables it, but a bare `cargo build --release` **does not** — that exe looks for
+ *  tauri.conf.json's devUrl and gives a **blank window** (process alive, every WebView2 component
+ *  up, but the page never loads and logs have not one line). From outside it looks nearly like
+ *  "stuck in the loader", and it is very hard to pin down, so this checks the asset table's keys
+ *  directly (tauri-codegen stores each output's path as plain text in the binary). */
 function checkEmbeddedFrontend(exePath, distDir) {
   const haystack = readFileSync(exePath).toString("latin1");
   const assetsDir = path.join(distDir, "assets");
@@ -64,16 +66,16 @@ function checkEmbeddedFrontend(exePath, distDir) {
 
 const embed = checkEmbeddedFrontend(EXE_SRC, DIST);
 if (embed.total === 0 || embed.missing.length === embed.total) {
-  console.error("!! exe 里**没有前端产物** —— 它是个会开空白窗口的空壳。");
-  console.error("   原因：构建时没启用 tauri/custom-protocol feature。");
-  console.error("   正确做法：");
-  console.error("     npm run app:build    (= tauri build，自己会开这个 feature)");
+  console.error("!! the exe has **NO frontend output** — it is an empty shell that opens a blank window.");
+  console.error("   Cause: the build did not enable the tauri/custom-protocol feature.");
+  console.error("   Correct ways to build it:");
+  console.error("     npm run app:build    (= tauri build, enables the feature itself)");
   console.error("     npm run app:exe      (= cargo build --release --features custom-protocol)");
-  console.error("   ✗ 不要用裸 `cargo build --release`。");
+  console.error("   ✗ Do NOT use a bare `cargo build --release`.");
   process.exit(1);
 }
 if (embed.missing.length > 0) {
-  console.warn(`   warning: exe 里缺少 ${embed.missing.length}/${embed.total} 个前端产物，可能嵌的是旧的 dist`);
+  console.warn(`   warning: the exe is missing ${embed.missing.length}/${embed.total} frontend assets; it may embed a stale dist`);
 }
 
 rmSync(OUT, { recursive: true, force: true });
@@ -82,7 +84,7 @@ mkdirSync(OUT, { recursive: true });
 copyFileSync(EXE_SRC, path.join(OUT, "voxelengine-tauri.exe"));
 copyFileSync(LOADER_SRC, path.join(OUT, "WebView2Loader.dll"));
 
-// 便携数据目录：Rust 侧 game_root() 在 release 下就是找 exe 旁边的 game\
+// The portable data directory: in a release build the Rust side's game_root() looks for game\ beside the exe
 for (const d of GAME_DIRS) mkdirSync(path.join(OUT, "game", d), { recursive: true });
 
 function installPack(sampleName, targetDir) {
@@ -105,28 +107,29 @@ if (withPacks) {
 
 const readme = `VoxelEngine (Tauri v2 / WebView2)
 
-启动：双击 voxelengine-tauri.exe
-退出：游戏里 ESC -> main.quit，或直接关窗口
-全屏：设置面板里的窗口模式
+Start:  double-click voxelengine-tauri.exe
+Quit:   in game ESC -> main.quit, or just close the window
+Fullscreen: the window mode entry in the settings panel
 
-这个目录是自包含的：前端产物已经编进 exe，不需要 Node，也不需要 dev server。
-**WebView2Loader.dll 必须留在这个目录里** —— 删了会弹
-"找不到 WebView2Loader.dll" 的系统错误框，程序起不来。
+This directory is self-contained: the frontend output is compiled into the exe, so it needs
+neither Node nor a dev server.
+**WebView2Loader.dll must stay in this directory** — delete it and the program refuses to start
+with a "WebView2Loader.dll was not found" system error box.
 
-数据都在旁边的 game\\ 里：
-  game\\config\\settings.json      设置（语言/字体/UI 缩放/按键/窗口模式/FPS 上限）
-  game\\config\\vsync.json         GPU vsync 开关（改完重启生效）
-  game\\config\\settings.bad.json  读不动的设置文件的备份
-  game\\logs\\debug.log            引擎日志（启动有问题先看这个）
+The data lives in the game\\ directory next to it:
+  game\\config\\settings.json      settings (language/font/UI scale/keybinds/window mode/FPS cap)
+  game\\config\\vsync.json         GPU vsync switch (restart to apply)
+  game\\config\\settings.bad.json  backup of an unreadable settings file
+  game\\logs\\debug.log            engine log (look here first when the startup misbehaves)
   game\\logs\\renderer.log         console.error / warn
-  game\\resourcepacks\\            资源包（文件夹或 .zip，放进去重启即生效）
-  game\\mods\\                     方块 mod（assets/<ns>/data/blocks.json + 贴图）
+  game\\resourcepacks\\            resource packs (folder or .zip; restart to apply)
+  game\\mods\\                     block mods (assets/<ns>/data/blocks.json + textures)
   game\\saves\\
 
-环境变量：VOXEL_GAME_ROOT 可以强制指定数据根目录（排查问题用）。
+Environment variable: VOXEL_GAME_ROOT forces the data root (handy when diagnosing).
 `;
 
-writeFileSync(path.join(OUT, "启动说明.txt"), readme, "utf8");
+writeFileSync(path.join(OUT, "README.txt"), readme, "utf8");
 
 function walk(dir, base = "") {
   const out = [];
@@ -143,7 +146,7 @@ const files = walk(OUT);
 const total = files.reduce((a, f) => a + f.size, 0);
 console.log(`portable -> ${OUT}`);
 console.log(`  voxelengine-tauri.exe  ${Math.round(statSync(EXE_SRC).size / 1024)} KB`);
-console.log(`  WebView2Loader.dll     ${Math.round(statSync(LOADER_SRC).size / 1024)} KB  (必须有)`);
-if (installed.length) console.log(`  game\\ 里装了示例包: ${installed.join(", ")}`);
-else console.log("  game\\ 里没有资源包（plan A：资源完全外置）");
-console.log(`  ${files.length} 个文件，共 ${(total / 1024 / 1024).toFixed(1)} MB`);
+console.log(`  WebView2Loader.dll     ${Math.round(statSync(LOADER_SRC).size / 1024)} KB  (required)`);
+if (installed.length) console.log(`  sample packs installed under game\\: ${installed.join(", ")}`);
+else console.log("  no resource packs under game\\ (plan A: assets are fully external)");
+console.log(`  ${files.length} files, ${(total / 1024 / 1024).toFixed(1)} MB`);

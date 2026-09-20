@@ -1,18 +1,22 @@
-// VoxelEngine / Tauri 壳
+// VoxelEngine / Tauri shell
 //
-// 这个文件是**命令总线**：前端 src/platform/*.ts 通过 invoke() 调这里，
-// 这里再分发给 game.rs（文件/设置/日志）、packs.rs（资源包）、win.rs（窗口）、rawinput.rs（原始输入）。
+// This file is the **command bus**: the frontend's src/platform/*.ts calls in through invoke(),
+// and this side dispatches to game.rs (files/settings/logs), packs.rs (resource packs), win.rs
+// (window) and rawinput.rs (raw input).
 //
-// 关键设计（为什么前端改动这么小）：
-//   原 NW.js 版里 src/platform/shell.ts 的 readSettings()/logDebug() 是**同步**的，
-//   而 Tauri 的命令是异步的。所以这里不试图把同步 IO 变异步，而是：
-//   启动时用一次 invoke("preload_shell") 把 settings / 窗口模式 / vsync 开关一次性取到前端内存里，
-//   之后 readSettings() 读内存（同步，语义不变），写操作 fire-and-forget 回来。
-//   同一招用在资源包上：invoke("preload_packs") 一次拿走所有包字节，
-//   rendering/textures.ts 里那套归一化/优先级逻辑一行都不用改。
+// Key design (why the frontend needed so few changes):
+//   In the original NW.js build, readSettings()/logDebug() in src/platform/shell.ts were
+//   **synchronous**, while Tauri's commands are asynchronous. So instead of trying to turn
+//   synchronous IO asynchronous, this does the following:
+//   at startup a single invoke("preload_shell") pulls settings / window mode / the vsync switch
+//   into frontend memory once, after which readSettings() reads memory (synchronous, semantics
+//   unchanged) and writes are fire-and-forget back this way.
+//   The same trick is used for resource packs: invoke("preload_packs") takes all the pack bytes in
+//   one go, so not a line of the normalisation/priority logic in rendering/textures.ts changes.
 //
-// 于是 src/ 里除了 platform/shell.ts、platform/rawinput.ts、rendering/textures.ts 三个文件，
-// 其余 100+ 处调用点（main.ts、ui/*、ecs/*、blockregistry.ts ...）全都没动。
+// As a result, apart from three files in src/ — platform/shell.ts, platform/rawinput.ts and
+// rendering/textures.ts — the other 100+ call sites (main.ts, ui/*, ecs/*, blockregistry.ts ...)
+// are untouched.
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -27,16 +31,16 @@ mod win;
 
 struct AppState {
     root: PathBuf,
-    /// settings.json 的内存副本（前端 readSettings() 的同步来源）
+    /// In-memory copy of settings.json (the synchronous source for the frontend's readSettings())
     settings: Mutex<Value>,
-    /// 启动时检查出来的问题（坏 JSON / 不是对象），交给前端做启动修复
+    /// Problem detected at startup (bad JSON / not an object), handed to the frontend for startup repair
     problem: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShellSnapshot {
-    /// 游戏数据根目录（日志里会显示，排查问题时一眼看到）
+    /// Game data root directory (shown in the log so it is visible at a glance when diagnosing)
     game_root: String,
     dev: bool,
     settings: Value,
@@ -48,7 +52,7 @@ struct ShellSnapshot {
     platform: String,
 }
 
-/// 启动预载：设置 + 窗口状态。前端在 main.ts 顶部 await 一次。
+/// Startup preload: settings + window state. The frontend awaits it once at the top of main.ts.
 #[tauri::command]
 fn preload_shell(state: State<'_, AppState>, window: tauri::WebviewWindow) -> ShellSnapshot {
     let root = state.root.clone();
@@ -89,10 +93,10 @@ fn append_log(state: State<'_, AppState>, channel: String, lines: Vec<String>) {
     game::append_log(&state.root, &channel, &lines);
 }
 
-/// 最早期诊断通道：前端（包括 index.html 里那个 inline 脚本）在**任何东西就绪之前**
-/// 就能调它，把"我起来了 / 我挂了，原因是 X"写进 logs\boot.log。
-/// 存在的理由：Tauri 里前端挂掉是静默的 —— 没有窗口、debug.log 一行都没有，
-/// 从外面看跟"卡在加载器"一模一样（这个坑真踩过两次）。
+/// The earliest diagnostic channel: the frontend (including the inline script in index.html) can
+/// call it **before anything is ready** to write "I am up / I died because of X" into logs\boot.log.
+/// Why it exists: in Tauri a frontend crash is silent — no window, not a single line in debug.log,
+/// and from the outside it looks exactly like "stuck in the loader" (this trap was hit twice).
 #[tauri::command]
 fn boot_report(state: State<'_, AppState>, message: String) {
     game::append_boot(&state.root, &message);
@@ -131,11 +135,14 @@ fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
     win::set_fullscreen(&window, fullscreen)
 }
 
-/// 原生鼠标捕获开关（**不走 Pointer Lock API**）。见 win.rs 的说明：
-/// ClipCursor + SetCursorPos 把系统光标夹在窗口里，于是没有 ESC 解锁手势、没有解锁后的冷却期、
-/// 没有"锁被浏览器拿走"这一整类问题。返回 false 时前端会退回 requestPointerLock。
-/// 前端告诉我们**期望**光标可见还是隐藏（`pointerlock.applyCursor()` 的值变化时调一次）。
-/// 之后由 `win::cursor_sentinel()` 每 8ms 校对并纠正 —— 见 win.rs 里那段说明。
+/// Native mouse capture switch (**does not go through the Pointer Lock API**). See the notes in
+/// win.rs: ClipCursor + SetCursorPos pin the system cursor inside the window, so there is no ESC
+/// unlock gesture, no cooldown after an unlock, and none of the "the browser took the lock away"
+/// class of problems. When it returns false the frontend falls back to requestPointerLock.
+/// The frontend tells us the **desired** cursor visibility (called once whenever
+/// `pointerlock.applyCursor()`'s value changes).
+/// After that `win::cursor_sentinel()` reconciles and corrects it every 8 ms — see that note in
+/// win.rs.
 #[tauri::command]
 fn cursor_intent(app: AppHandle, window: tauri::WebviewWindow, visible: bool) {
     let hwnd = match window.hwnd() {
@@ -151,7 +158,8 @@ fn mouse_capture(state: State<'_, AppState>, window: tauri::WebviewWindow, on: b
         Ok(h) => h.0 as isize,
         Err(_) => 0,
     };
-    // 诊断：捕获前后各量一次原生光标状态（形状是否真的跟着变了）
+    // Diagnostics: measure the native cursor state before and after capture (whether the shape
+    // really follows)
     let before = win::cursor_probe();
     let ok = win::set_mouse_capture(hwnd, on);
     game::append_boot(
@@ -193,9 +201,9 @@ fn game_root_of(state: State<'_, AppState>) -> String {
 pub fn run() {
     let root = game::game_root();
     game::ensure_dirs(&root);
-    // 原版 initShell()：启动即把两个日志清空
+    // The original initShell(): truncate both logs at startup
     game::truncate_logs(&root);
-    // 必须在 Builder 之前：WebView2 的参数只能在创建 webview 之前给
+    // Must run before the Builder: WebView2 arguments can only be supplied before the webview is created
     game::apply_browser_args(&root);
 
     let read = game::read_settings_checked(&root);
@@ -227,13 +235,16 @@ pub fn run() {
             game_root_of,
         ])
         .setup(|app| {
-            // 原生焦点事件转发给前端（对应原版 win.on("focus"/"blur")）
+            // Forward native focus events to the frontend (the counterpart of the original
+            // win.on("focus"/"blur"))
             if let Some(w) = app.get_webview_window("main") {
-                // 方案 A：关掉 WebView2 的浏览器加速键（F3 不再弹"查找"）
+                // Option A: turn off WebView2's browser accelerator keys (F3 no longer opens "Find")
                 win::disable_browser_accelerator_keys(&w, app.state::<AppState>().root.clone());
 
-                // 禁掉"单按 Alt 打开系统菜单"：否则菜单模式会让窗口去激活（游戏自动暂停）
-                // 并跑一个嵌套模态循环卡住主线程（Tauri 事件全积压：视角不动、光标不刷新）。
+                // Disable "a bare Alt opens the system menu": otherwise menu mode deactivates the
+                // window (the game auto-pauses) and runs a nested modal loop that blocks the main
+                // thread (every Tauri event piles up: the view stops turning, the cursor stops
+                // refreshing).
                 let diag_root0 = app.state::<AppState>().root.clone();
                 match w.hwnd() {
                     Ok(h) => {
@@ -241,19 +252,20 @@ pub fn run() {
                         game::append_boot(
                             &diag_root0,
                             &format!(
-                                "win32: Alt 系统菜单抑制 {}",
-                                if ok { "已安装" } else { "安装失败" }
+                                "win32: Alt system-menu suppression {}",
+                                if ok { "installed" } else { "FAILED to install" }
                             ),
                         );
                     }
                     Err(e) => game::append_boot(
                         &diag_root0,
-                        &format!("win32: 拿不到 HWND，Alt 菜单抑制未安装: {e}"),
+                        &format!("win32: no HWND, Alt menu suppression NOT installed: {e}"),
                     ),
                 }
 
                 let handle = app.handle().clone();
-                // 诊断：光标形状问题的取证用（见 win.rs::cursor_probe 的说明）
+                // Diagnostics: evidence gathering for the cursor-shape problem (see the note on
+                // win.rs::cursor_probe)
                 let diag_root = app.state::<AppState>().root.clone();
                 w.on_window_event(move |event| match event {
                     WindowEvent::Focused(focused) => {
@@ -262,9 +274,10 @@ pub fn run() {
                                 &diag_root,
                                 &format!("[cursor] focus LOST  before={}", win::cursor_probe()),
                             );
-                            // **失焦必须释放原生鼠标捕获**，否则 Alt-Tab 之后用户的光标
-                            // 被 ClipCursor 关在窗口里出不来。这是安全网：
-                            // 前端 onWinBlur 也会主动释放，两边都做且都幂等。
+                            // **Losing focus must release the native mouse capture**, otherwise after
+                            // an Alt-Tab the user's cursor is shut inside the window by ClipCursor and
+                            // cannot get out. This is a safety net: the frontend's onWinBlur releases
+                            // it too, so both sides do it, idempotently.
                             win::release_mouse_capture();
                             game::append_boot(
                                 &diag_root,
@@ -275,10 +288,13 @@ pub fn run() {
                                 &diag_root,
                                 &format!("[cursor] focus GAIN  before={}", win::cursor_probe()),
                             );
-                            // 切回来**之后**才让 webview 重新决定光标形状（发 WM_SETCURSOR）——
-                            // 必须在聚焦之后，否则和失焦时那次一样会被系统丢掉。
+                            // Only **after** focus returns does the webview get to decide the cursor
+                            // shape again (by sending WM_SETCURSOR) — it must come after the focus,
+                            // otherwise the system discards it just like the one at focus loss.
                             win::refresh_cursor();
-                            // 再踢一下，逼系统把光标**重画到屏幕上**（系统状态对但画面没重绘那种）
+                            // One more kick to force the system to **repaint the cursor on screen**
+                            // (the case where the system state is right but the picture was not
+                            // redrawn)
                             win::kick_cursor_repaint();
                             game::append_boot(
                                 &diag_root,
@@ -292,18 +308,26 @@ pub fn run() {
                         win::release_mouse_capture();
                         rawinput::stop();
                     }
-                    // 窗口几何变了（缩放 / 移动 / DPI）。**这是"用户在弄窗口"唯一可靠的信号。**
+                    // Window geometry changed (resize / move / DPI). **This is the only reliable
+                    // signal that "the user is fiddling with the window".**
                     //
-                    // 为什么不是"鼠标离开应用"：拖窗口的**边框/标题栏**时窗口**仍然是焦点窗口**，光标也
-                    // 还在窗口矩形内（只是落在**非客户区**）—— 既没有 blur，也不会 mouseleave。而
-                    // `ClipCursor` 的矩形是「开始捕获那一刻」算的，拖拽中途变了就过时：光标能跑到边框上
-                    // （非客户区管不到 `cursor:none`），于是玩家**一边拖窗口一边转视角**，松手后光标还在
-                    // 窗口里到处滑（加载/进场期间拖窗口、进世界那一刻捕获打开，就是这么踩到的）。
+                    // Why not "the mouse left the application": while dragging the window's
+                    // **border/title bar** the window **is still the focused window**, and the cursor
+                    // is still inside the window rectangle (it merely lands in the **non-client
+                    // area**) — so there is no blur and no mouseleave. And `ClipCursor`'s rectangle
+                    // is computed at the moment capture starts, so it goes stale if the drag changes
+                    // it midway: the cursor can reach the border (the non-client area is beyond
+                    // `cursor:none`'s reach), so the player turns the view **while dragging the
+                    // window**, and after letting go the cursor still slides all over inside the
+                    // window (this is exactly how it was hit: dragging the window during
+                    // loading/entry, with capture switching on at the moment of world entry).
                     //
-                    // 两条动作：
-                    //   1. Rust 侧重算裁剪矩形 —— 前端会**抑制**程序自己改窗口模式（全屏/窗口化）时的那次
-                    //      暂停，那时捕获还开着，矩形必须跟上；
-                    //   2. 通知前端：放捕获，世界里且无 UI 时弹暂停菜单（就是 ESC/blur 那条路）。
+                    // Two actions:
+                    //   1. Rust recomputes the clip rectangle — the frontend **suppresses** the pause
+                    //      for its own window-mode change (fullscreen/windowed); capture is still on
+                    //      there, so the rectangle must keep up;
+                    //   2. Notify the frontend: drop capture and, in a world with no UI up, raise the
+                    //      pause menu (the same path as ESC/blur).
                     WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
                         let h = handle.clone();
                         let _ = h.run_on_main_thread(|| {

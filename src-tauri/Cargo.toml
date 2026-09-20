@@ -1,18 +1,20 @@
 [package]
 name = "voxelengine-tauri"
 version = "1.0.0"
-description = "VoxelEngine on Tauri — 前端还是那套 TypeScript + three.js + ECS，壳换成 WebView2"
+description = "VoxelEngine on Tauri — the same TypeScript + three.js + ECS frontend, with WebView2 as the shell"
 authors = ["VoxelEngine"]
 edition = "2021"
 rust-version = "1.77.2"
 
 [lib]
-# Tauri v2 的模板约定：逻辑放 lib（便于测试/多平台入口），main.rs 只调用 run()
+# The Tauri v2 template convention: the logic lives in the lib (testable, multi-platform entry),
+# main.rs only calls run()
 name = "voxelengine_tauri_lib"
-# **只做 rlib**。模板默认写的是 ["staticlib", "cdylib", "rlib"]（那是给 iOS/Android 用的），
-# 但在 Windows + GNU 工具链下 cdylib 会让链接器导出全部符号，
-# mingw 的 ld 直接炸：`error: export ordinal too large: 90414`。
-# 桌面版不需要 cdylib/staticlib，去掉即可（用 MSVC 工具链时留着也没事，但没有理由留）。
+# **rlib only.** The template writes ["staticlib", "cdylib", "rlib"] (that is for iOS/Android),
+# but on Windows + the GNU toolchain cdylib makes the linker export every symbol and mingw's ld
+# blows up: `error: export ordinal too large: 90414`.
+# A desktop build needs neither cdylib nor staticlib, so drop them (with the MSVC toolchain they
+# would be harmless, but there is no reason to keep them).
 crate-type = ["rlib"]
 
 [build-dependencies]
@@ -23,24 +25,27 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-# WebView2 的原生设置（方案 A：关掉浏览器加速键，F3 就不会弹"查找"了）。
-# 版本与 Cargo.lock 里已有的保持一致（windows 0.61.3 / webview2-com 0.38.2），
-# 这里只是把名字引进来，不新增任何实际依赖。
+# The native WebView2 settings (plan A: disable the browser accelerator keys, so F3 no longer opens
+# "Find"). Versions kept in step with what Cargo.lock already has (windows 0.61.3 /
+# webview2-com 0.38.2): this only pulls the names in, it adds no real dependency.
 webview2-com = "0.38"
 windows = "0.61"
 
-# 原始鼠标输入、SetCursorPos 这些直接声明 extern "system"（照抄原 rawinput/src/lib.rs 的做法），
-# 故意**不**引入 windows crate：少一层依赖，也少一处跟工具链较劲的地方。
+# Raw mouse input and SetCursorPos declare `extern "system"` directly (copied from the original
+# rawinput/src/lib.rs), and deliberately do **not** pull in the windows crate: one less dependency
+# and one less place to fight the toolchain.
 [features]
-# ===== 生产构建：把前端产物**嵌进二进制** =====
-# ⚠️ 这个 feature 是自包含 exe 的开关。`tauri build` 会自己开它，
-#    但直接 `cargo build --release` **不会** —— 那样出来的 exe 会去找 tauri.conf.json 的
-#    devUrl（http://localhost:1420），结果是**空白窗口**：
-#      进程活着、10 个线程、msedgewebview2 各组件都起了，但页面根本没加载，
-#      logs\debug.log 一行没有，连 index.html 里 inline 脚本的 "html loaded" 都不会出现。
-#    从外面看跟"卡在加载器"几乎一样，极难定位 —— 所以 scripts/package-portable.mjs
-#    现在会检查 exe 里有没有前端产物，没有就直接报错。
-#    要裸用 cargo 构建自包含 exe：
+# ===== Production build: EMBED the frontend output in the binary =====
+# ⚠️ This feature is the self-contained-exe switch. `tauri build` enables it by itself, but a bare
+#    `cargo build --release` **does not** — the resulting exe looks for tauri.conf.json's devUrl
+#    (http://localhost:1420) and shows a **blank window** instead:
+#      the process is alive, 10 threads, every msedgewebview2 component is up, but the page never
+#      loads, logs\debug.log has not one line, and not even the inline script's "html loaded" in
+#      index.html appears.
+#    From the outside it looks almost exactly like "stuck in the loader" and is very hard to
+#    localise — so scripts/package-portable.mjs now checks the exe for the frontend payload and
+#    fails loudly when it is missing.
+#    To build a self-contained exe with bare cargo:
 #      cargo build --release --features custom-protocol
 custom-protocol = ["tauri/custom-protocol"]
 

@@ -1,21 +1,23 @@
-// ===== Raw mouse input（原 NW.js 版是 rawinput.node 这个 NAPI 插件）=====
+// ===== Raw mouse input (the NW.js version used the rawinput.node NAPI plugin) =====
 //
-// 现在采集在 Rust 里（src-tauri/src/rawinput.rs，就是原 rawinput/src/lib.rs 那套
-// HWND_MESSAGE 隐藏窗口 + RegisterRawInputDevices 的直译），搬运方向从"JS 每帧拉"变成
-// "Rust 每 4ms 推一条 raw-input 事件"：
+// Collection now happens in Rust (src-tauri/src/rawinput.rs, a direct translation of the original
+// rawinput/src/lib.rs — that HWND_MESSAGE hidden window + RegisterRawInputDevices), and the direction of
+// travel changed from "JS pulls every frame" to "Rust pushes one raw-input event every 4ms":
 //
-//   Rust 采集线程 -> AtomicI32 累加 -> 节流线程每 4ms swap+emit
-//                                            ↓  Tauri 事件
-//   这里的监听器：记诊断 + 把增量交给 `onDelta`  <- 前端
+//   Rust collector thread -> AtomicI32 accumulate -> throttle thread swap+emits every 4ms
+//                                            ↓  Tauri event
+//   the listener here: record diagnostics + hand the delta to `onDelta`  <- front end
 //                                            ↓
-//   PlayerInputSystem.rawDelta()：接管/宽限/尖峰判定（事件期，rule 3），通过的部分累加
+//   PlayerInputSystem.rawDelta(): takeover/grace/spike decision (event time, rule 3); the rest accumulates
 //                                            ↓
-//   frame() 每帧一次 input.frameLook()：整帧位移变成**一个** look 意图
+//   frame() calls input.frameLook() once per frame: the frame's displacement becomes **one** look intent
 //
-// **注意最后两步**：判定在事件期、应用在帧边界。中间**没有定时器**了 —— 原来那个 8ms
-// `setInterval(…, 8)` 会被 Chromium 的输入任务优先级挤成 9~12ms 一档（按住键时尤其明显），
-// 于是"每帧分到几份视角增量"在 0/1/2/3 之间乱跳，就是"按住键转视角不顺滑"的来源。
-// 节流（4ms 合批）还是要的：WM_INPUT 一秒几百条，一条一个 IPC 事件会把 webview 淹掉。
+// **Note the last two steps**: the decision happens at event time, the application at a frame boundary.
+// There is **no timer** in between any more — the old 8ms `setInterval(…, 8)` was squeezed by Chromium's
+// input-task priority into 9~12ms buckets (most obvious while a key is held), so "how many view deltas
+// this frame gets" jumped between 0/1/2/3, which is exactly where "the view is not smooth while a key is
+// held" came from. Throttling (4ms batching) is still needed: WM_INPUT is several hundred a second and
+// one IPC event each would drown the webview.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -24,38 +26,44 @@ import { logDebug } from "./shell";
 export interface RawInputHandle {
   /** Whether the plugin loaded (false = game runs normally, no raw-input fallback) */
   readonly available: boolean;
-  /** 原始输入**到底**可用没有。
+  /** Whether raw input is **actually** available.
    *
-   *  **必须 await 它再决定要不要走依赖原始输入的那条路**：`available` 要等
-   *  `invoke("rawinput_start")` 落地才会变真，在那之前一直是 false。
-   *  原版这里是同步 NAPI（`require("rawinput.node")`），`available` 当场就是真值，
-   *  所以调用点可以直接读 —— Tauri 版有这个时间差，同步读会**永久**拿到 false。
-   *  踩过的后果：`input.rawInputActive` 一直是 false，于是原生鼠标捕获永远不启用
-   *  （退回 `requestPointerLock()`，又撞上 ESC 解锁 + 冷却），raw-input 视角接管也一起失效。
-   *  resolve 的值就是可用性。 */
+   *  **You MUST await it before deciding whether to take the path that depends on raw input**:
+   *  `available` only turns true once `invoke("rawinput_start")` has landed, and is false until then.
+   *  The original was synchronous NAPI here (`require("rawinput.node")`), so `available` was the real
+   *  value on the spot and a call site could read it directly — the Tauri version has that time gap, and
+   *  reading it synchronously gets false **permanently**. The consequence that was hit:
+   *  `input.rawInputActive` stayed false, so native mouse capture was never enabled (falling back to
+   *  `requestPointerLock()`, which runs into the ESC unlock + cooldown again), and the raw-input view
+   *  takeover failed along with it. The resolved value IS the availability. */
   readonly ready: Promise<boolean>;
 }
 
-/** Rust `rawinput_stats` 的形状 */
+/** The shape of Rust's `rawinput_stats` */
 interface RawStats {
   available: boolean;
   wmInputTotal: number;
   ridFail: number;
   absoluteDropped: number;
-  /** 方案 B 的 ESC 钩子装上没有 */
+  /** Whether plan B's ESC hook is installed */
   escHook: boolean;
 }
 
 let available = false;
 
-/** ===== 诊断（RAWLAG 行，每秒一行）：原始增量事件的**到达节奏**与**队列积压** =====
+/** ===== Diagnostics (the RAWLAG line, one per second): the raw delta events' **arrival rhythm** and
+ *  their **queue backlog** =====
  *
- *  「按住键转视角不顺滑」要么是事件被丢/被量化，要么是事件在队列里压住了。这一行把两件事都量出来：
- *   * `gapMax`  —— 相邻两条事件的最大到达间隔。稳态应该是 ~4ms（Rust 每 4ms 推一次）；
- *                  如果按键期间它跳到几十毫秒、然后又连着来一串，那就是"堵塞 + 一次性冲出"。
- *   * `backlog` —— 事件在队列里压了多久。Rust 和 JS 的时钟原点不同，所以用**最小偏移做基线**：
- *                  offset = performance.now() - payload.t，全程最小值≈纯传输延迟；当前 offset 减掉它
- *                  就是"比最顺的时候多压了多久"。这就是积压毫秒数的直接测量。 */
+ *  "the view is not smooth while a key is held" is either events being dropped/quantised, or events
+ *  being stuck in a queue. This line measures both:
+ *   * `gapMax`  — the largest arrival gap between two adjacent events. At steady state it should be
+ *                 ~4ms (Rust pushes once every 4ms); if it jumps to tens of milliseconds while a key is
+ *                 held and is then followed by a burst of events, that is "a jam + one big flush".
+ *   * `backlog` — how long an event sat in the queue. Rust and JS have different clock origins, so the
+ *                 **minimum offset is the baseline**: offset = performance.now() - payload.t, whose
+ *                 running minimum ≈ the pure transport delay; the current offset minus that is "how much
+ *                 longer it was held than in the smoothest case". That is a direct measurement of the
+ *                 backlog in milliseconds. */
 let evCount = 0;
 let gapMax = 0;
 let lastArrive = 0;
@@ -64,17 +72,18 @@ let backlogSum = 0;
 let backlogMax = 0;
 let lagAt = 0;
 
-/** ===== 方案 B：被 Rust 钩子吞掉的 ESC =====
+/** ===== Plan B: the ESC that Rust's hook swallows =====
  *
- *  为什么 ESC 要从这里来而不是 DOM：ESC 是浏览器的"默认解锁手势"，由浏览器进程在把按键
- *  交给页面**之前**就处理掉了（`preventDefault()` 拦不住 —— 见 main.ts:725 那条注释引的 #7907，
- *  那个模型只在 NW.js 里成立）。所以 Rust 侧装了个 WH_KEYBOARD_LL 钩子把它**吞掉**，
- *  再从这儿推过来，我们**合成一个真的 KeyboardEvent** 派发到 document。
+ *  Why ESC has to come from here rather than the DOM: ESC is the browser's "default unlock gesture",
+ *  handled by the browser process **before** the key is handed to the page (`preventDefault()` cannot
+ *  stop it — see #7907, cited by the comment at main.ts:725; that model only holds in NW.js). So the
+ *  Rust side installs a WH_KEYBOARD_LL hook that **swallows** it and pushes it over from here, and we
+ *  **synthesise a real KeyboardEvent** and dispatch it on document.
  *
- *  这样 input.ts 里发布 key edge 的监听器、main.ts 里 preventDefault 的监听器全都不用改，
- *  走的还是原来那条 KEY_EVENTS -> ui.navigation 的路。
- *  （游戏里所有 keydown/keyup 监听器都挂在 document 上，而且没有一处检查 isTrusted，
- *    所以合成事件能被正常接收。） */
+ *  That way neither the listener in input.ts that publishes the key edge nor the preventDefault listener
+ *  in main.ts changes, and the route is still the original one: KEY_EVENTS -> ui.navigation.
+ *  (Every keydown/keyup listener in the game hangs off document and not one of them checks isTrusted, so
+ *    a synthetic event is accepted normally.) */
 function installEscBridge(): void {
   void listen<{ down: boolean; repeat: boolean }>("esc", (event) => {
     const { down, repeat } = event.payload;
@@ -89,15 +98,18 @@ function installEscBridge(): void {
   });
 }
 
-/** 启动原始输入监听。`onDelta` 在**每一条**事件到达时被调用（Rust 每 4ms 推一块），
- *  由调用方（`PlayerInputSystem.rawDelta`）逐个做接管/宽限/尖峰判定并累加到本帧 ——
- *  视角的**应用**因此每帧恰好一次（见 `input.ts::frameLook`）。
+/** Start the raw-input listener. `onDelta` is called on **every** event that arrives (Rust pushes one
+ *  block every 4ms), and the caller (`PlayerInputSystem.rawDelta`) does the takeover/grace/spike decision
+ *  on each one and accumulates into this frame — so the view is **applied** exactly once per frame (see
+ *  `input.ts::frameLook`).
  *
- *  **这里不再是"累积到自己人手里、等 8ms 定时器来 poll"**：那个定时器是"按住键转视角不顺滑"的
- *  元凶 —— Chromium 把按键这种输入任务排在定时器任务之前，按住键（自动重复 ~30 次/秒）会把
- *  8ms 的采样挤成 9~12ms 一档，每帧分到的份数在 0/1/2/3 之间乱跳（探针 `pf` 实测）。 */
+ *  **This is no longer "accumulate into our own hands and wait for an 8ms timer to poll"**: that timer
+ *  was the culprit behind "the view is not smooth while a key is held" — Chromium schedules key input
+ *  tasks ahead of timer tasks, so holding a key (auto-repeat ~30/s) squeezed the 8ms sampling into
+ *  9~12ms buckets and the share per frame jumped between 0/1/2/3 (measured with the `pf` probe). */
 export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInputHandle {
-  // 先挂监听器再启动采集：反过来的话最前面几毫秒的增量会丢
+  // Install the listener before starting collection: the other order loses the first few milliseconds of
+  // deltas
   void listen<{ dx: number; dy: number; t?: number }>("raw-input", (event) => {
     const now = performance.now();
     const { dx, dy } = event.payload;
@@ -118,10 +130,12 @@ export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInp
     onDelta(dx, dy);
   });
   installEscBridge();
-  // 一次性探针（Rust 推送线程发的）：钩子到底有没有被调用（seen=0 就是没有），以及前台窗口是谁 ——
-  // Rust 侧拿不到日志根目录（AppState.root 是私有的），所以走事件由这里写进 debug.log。
+  // A one-off probe (sent by Rust's push thread): whether the hook is ever called at all (seen=0 means
+  // no), and who the foreground window is — the Rust side cannot reach the log root (AppState.root is
+  // private), so it comes as an event and is written into debug.log here.
   void listen<string>("hook-probe", (event) => logDebug(String(event.payload)));
-  // RAWMON：Rust 每秒报一次"这一秒谁在动"（emits / wmIn / cursorFix / hookSeen / 光标与捕获状态）
+  // RAWMON: Rust reports once a second "who moved during this second" (emits / wmIn / cursorFix /
+  // hookSeen / cursor and capture state)
   void listen<string>("raw-mon", (event) => logDebug(String(event.payload)));
 
   const ready = invoke<RawStats>("rawinput_start")
@@ -134,13 +148,13 @@ export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInp
       }
       logDebug(
         stats.escHook
-          ? "ESC HOOK installed (原生吞掉 ESC -> 合成键盘事件；浏览器不会再解指针锁定)"
-          : "ESC HOOK NOT installed (失败即放行：ESC 退回浏览器行为——第一次解锁，第二次才到页面)",
+          ? "ESC HOOK installed (ESC is swallowed natively -> a synthetic key event; the browser can no longer release pointer lock)"
+          : "ESC HOOK NOT installed (fail open: ESC falls back to the browser behaviour - the first press unlocks, only the second reaches the page)",
       );
       return stats.available;
     })
     .catch((e) => {
-      // 加载失败不影响游戏：鼠标走普通的 mousemove 那条路
+      // A load failure does not affect the game: the mouse takes the ordinary mousemove path
       logDebug(`RAWINPUT start failed (no raw-input fallback, game unaffected): ${String(e)}`);
       return false;
     });
@@ -153,8 +167,9 @@ export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInp
   };
 }
 
-/** 每秒一行 RAWLAG 的诊断文本（调用方 = 帧探针，负责写进 debug.log）；不足一秒返回 null。
- *  原来这一行是在 8ms 的 poll() 里打的，而那个定时器已经删掉了（见 startRawInput 的说明）。 */
+/** The diagnostic text of the one RAWLAG line per second (the caller = the frame probe, which writes it
+ *  into debug.log); returns null before a full second has passed. This line used to be printed from the
+ *  8ms poll(), and that timer has been deleted (see the note at startRawInput). */
 export function rawLagLine(): string | null {
   const now = performance.now();
   if (lagAt === 0) {
@@ -173,13 +188,15 @@ export function rawLagLine(): string | null {
   return line;
 }
 
-/** 诊断：WM_INPUT 收到了多少条、丢了多少绝对坐标事件（F3 面板上能看出原始输入到底有没有在跑） */
+/** Diagnostics: how many WM_INPUT events arrived and how many absolute-coordinate events were dropped
+ *  (the F3 panel shows whether raw input is really running) */
 export function rawInputStats(): Promise<RawStats> {
   return invoke<RawStats>("rawinput_stats");
 }
 
-/** Center the cursor on the window center（原版走插件的 in-process SetCursorPos）。
- *  这里 Rust 直接从 Tauri 拿窗口几何再 SetCursorPos，坐标根本不用绕到 JS 来。 */
+/** Center the cursor on the window center (the original went through the plugin's in-process
+ *  SetCursorPos). Here Rust takes the window geometry straight from Tauri and then calls SetCursorPos,
+ *  so the coordinates never have to make a detour into JS. */
 export function centerCursor(): void {
   void invoke("center_cursor").catch(() => {});
 }

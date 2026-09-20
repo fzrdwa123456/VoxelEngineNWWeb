@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "默认能力：核心事件（listen/emit 给原始输入与焦点事件用）。自定义命令不需要在这里声明权限。",
+  "description": "Default capability: core events (listen/emit, used by raw input and the focus events). Custom commands do not need a permission declared here.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }
