@@ -292,6 +292,25 @@ pub fn run() {
                         win::release_mouse_capture();
                         rawinput::stop();
                     }
+                    // 窗口几何变了（缩放 / 移动 / DPI）。**这是"用户在弄窗口"唯一可靠的信号。**
+                    //
+                    // 为什么不是"鼠标离开应用"：拖窗口的**边框/标题栏**时窗口**仍然是焦点窗口**，光标也
+                    // 还在窗口矩形内（只是落在**非客户区**）—— 既没有 blur，也不会 mouseleave。而
+                    // `ClipCursor` 的矩形是「开始捕获那一刻」算的，拖拽中途变了就过时：光标能跑到边框上
+                    // （非客户区管不到 `cursor:none`），于是玩家**一边拖窗口一边转视角**，松手后光标还在
+                    // 窗口里到处滑（加载/进场期间拖窗口、进世界那一刻捕获打开，就是这么踩到的）。
+                    //
+                    // 两条动作：
+                    //   1. Rust 侧重算裁剪矩形 —— 前端会**抑制**程序自己改窗口模式（全屏/窗口化）时的那次
+                    //      暂停，那时捕获还开着，矩形必须跟上；
+                    //   2. 通知前端：放捕获，世界里且无 UI 时弹暂停菜单（就是 ESC/blur 那条路）。
+                    WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                        let h = handle.clone();
+                        let _ = h.run_on_main_thread(|| {
+                            win::reclip_mouse_capture();
+                        });
+                        let _ = handle.emit("win-geometry", ());
+                    }
                     _ => {}
                 });
             }

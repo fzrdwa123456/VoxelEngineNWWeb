@@ -230,6 +230,16 @@ export function spawnLayoutBox(
   return entity;
 }
 
+/** Update a widget's raw layout CSS (the reconciler appends it AFTER the recipe's style, so it wins).
+ *  For a widget whose geometry is derived per frame — the key bind drag's rubber band is the only one
+ *  today. A widget spawned WITHOUT UI_LAYOUT cannot gain one here: attaching a component is a structural
+ *  change, which a system may not make (iron rule 1). */
+export function setUiLayout(world: World, entity: Entity, css: string): void {
+  const layout = world.get(entity, UI_LAYOUT);
+  if (!layout || layout.css === css) return;
+  layout.css = css;
+}
+
 /** A native range slider (the FPS cap). Wired like a button: the dispatch reports the new value.
  *
  *  `source` makes the slider BOUND: its value then comes from that source every frame (see UI_BIND),

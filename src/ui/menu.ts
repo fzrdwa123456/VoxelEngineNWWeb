@@ -36,12 +36,17 @@
 //   - Only the left button synthesizes clicks (right/middle/side produce contextmenu/auxclick),
 //     which is why only mousedown-with-button-0 arms the shield in capture mode.
 //
-// THE ONE PIECE OF DOM THIS FILE STILL OWNS: the drag rubber band (an SVG line). It is a POINTER
-// OVERLAY, not widget structure — it exists only while a gesture is live, and making it a widget would
-// mean a widget whose geometry is rewritten on every mousemove. The SYSTEM decides when a line is due
-// (`showKeybindLine`/`hideKeybindLine` below are its deps); this file still draws it.
+// THIS FILE OWNS NO DOM ANY MORE. The drag rubber band was the last element it created: an SVG line whose
+// geometry was rewritten on every mousemove. It is a WIDGET now (`spawnKeybindLine` below) whose UI_LAYOUT
+// string `ui.keybind` writes once per frame from the GESTURE + the POINTER resource — so the pointer
+// position travels as data (published by the device layer, which already listens for mousemove) instead of
+// through a second listener here. What is left of the gesture in this file is the EVENT-TIME half only:
+// the click shield, the drag's mousedown/mouseup, the wheel block and the key-capture handler, all of them
+// decisions that can only be taken inside the event that must be cancelled (see the contract above).
 import { t, getLang, setLang, onLangChange } from "./i18n";
-import { getUIScaleMode, setUIScaleMode, onUIScaleModeChange, onResizeMerged, getCurrentScale } from "./uiscale";
+import { getUIScaleMode, setUIScaleMode, onUIScaleModeChange, getCurrentScale } from "./uiscale";
+import { onViewportChange } from "../platform/viewport";
+import { installBindGestureHandlers } from "../platform/bind-gesture";
 import { getFontId, setFontId, onFontChange } from "./fonts";
 import { listPacks } from "../rendering/textures";
 import { onWindowModeChange, type WindowMode, logDebug } from "../platform/shell";
@@ -92,6 +97,22 @@ export interface KeybindDragDeps {
 let dragDeps: KeybindDragDeps | null = null;
 export function bindKeybindDrag(deps: KeybindDragDeps): void {
   dragDeps = deps;
+  // Install the gesture's DEVICE listeners (platform/bind-gesture.ts) — the click shield, the drag's
+  // start/end, the wheel block and the key capture. They live in the device layer because every one of them
+  // decides something inside the event itself; what is injected here is the state they read and the two
+  // facts only this file knows: which action ids a chip/keycap carries, and the hit test that finds one.
+  installBindGestureHandlers({
+    gesture: gestureState,
+    capturing: getCapturing,
+    endCapture,
+    setBind: (action, code) => setBind(action, code),
+    chipAction: ACTION_CHIP,
+    keycapCodeAt: (x, y) => keycapAt(x, y)?.code ?? null,
+    hitTest: (x, y) => deps.hitTest(x, y),
+    armShield: armSuppressNextClick,
+    buttonToCode: (button) => buttonToCode(button),
+    log: logDebug,
+  });
 }
 
 /** The gesture, for the event-time readers below. They MUST see the live state synchronously (the click
@@ -127,38 +148,36 @@ function armSuppressNextClick(schedSelf: boolean): void {
   }
 }
 
-/** Drag rubber band (single reusable SVG overlay — the one element this file owns, see the header).
- *  Its colour comes from the THEME, so the "no colour literal outside theme.ts" rule keeps holding
- *  here; the SVG is created lazily and only during a gesture.
- *
- *  WHO CALLS THIS: `ui.keybind`, once per frame, while a drag is past its threshold. The listeners below
- *  used to draw it on every mousemove; the element is the same, but "where the line goes" is now read
- *  from the gesture data instead of being pushed by the event that moved the pointer. */
-export function showKeybindLine(x1: number, y1: number, x2: number, y2: number): void {
-  if (!dragDeps) return;
-  let svg = document.getElementById("cap-line-svg") as SVGSVGElement | null;
-  if (!svg) {
-    svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.id = "cap-line-svg";
-    svg.setAttribute("style", "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:9999;display:none;");
-    const lineEl = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    lineEl.setAttribute("stroke", dragDeps.world.resource(UI_THEME).color.accentBg);
-    lineEl.setAttribute("stroke-width", "2");
-    lineEl.setAttribute("stroke-linecap", "round");
-    svg.appendChild(lineEl);
-    document.body.appendChild(svg);
-  }
-  svg.style.display = "block";
-  const line = svg.querySelector("line") as SVGLineElement;
-  line.setAttribute("x1", String(x1));
-  line.setAttribute("y1", String(y1));
-  line.setAttribute("x2", String(x2));
-  line.setAttribute("y2", String(y2));
+/** The drag RUBBER BAND, as a widget prefab. One layout-only box: its UI_LAYOUT string carries
+ *  left/top/width/rotate and is rewritten by `ui.keybind` once per frame while a drag is past its
+ *  threshold, so the geometry is DATA (derived from the gesture + the POINTER resource) and the
+ *  reconciler paints it. Spawned by the composition root during wiring — spawning is a structural change,
+ *  which a system may not make (iron rule 1). */
+export function spawnKeybindLine(world: World): Entity {
+  const line = spawnLayoutBox(world, null, "kb.line", "left:0;top:0;width:0;");
+  // HIDDEN through the widget's own UI_STATE, like every other widget — the layout string carries the
+  // geometry only, so `ui.keybind` rewriting it cannot accidentally reveal the line.
+  setUiVisible(world, line, false);
+  return line;
 }
 
-export function hideKeybindLine(): void {
-  const svg = document.getElementById("cap-line-svg");
-  if (svg) svg.style.display = "none";
+/** The drag's hover target for `ui.keybind`: the keycap under a point. Only a widget whose action IS a
+ *  keycap counts — a drag released over an action chip must not bind the chip's own value as a key. */
+export function keycapAtPoint(x: number, y: number): Entity | null {
+  return keycapAt(x, y)?.entity ?? null;
+}
+
+/** Cancel the drag in progress: clear the gesture and end a rebind capture. `ui.navigation` calls this for
+ *  ESC — the ONE decision-maker for that key (see its Escape branch). The device listener in
+ *  platform/bind-gesture.ts only neutralizes keyboard defaults while a drag is live; deciding there too is
+ *  what made ESC both cancel the drag AND walk up a menu level once the registration order changed. */
+export function cancelKeybindDrag(reason: string): void {
+  const g = gestureState();
+  if (!g?.drag) return;
+  g.drag = null;
+  g.hover = null;
+  endCapture();
+  logDebug(`KBCAP drag cancelled (${reason})`);
 }
 
 /** The KEYCAP under a point, if any. Only a widget whose action IS a keycap counts: a drag released
@@ -212,149 +231,13 @@ function registerKeybindActions(actions: Map<string, UiActionHandler>): void {
 // binding, so the browser-generated click must not re-trigger chip reselect/keycap pick/back button.
 // Consuming the shield clears it (except during drags, where a drag may outlive one click —
 // preserving the original semantics).
-document.addEventListener(
-  "click",
-  (ev) => {
-    const g = gestureState();
-    if (getCapturing() || g?.drag || g?.shield) {
-      ev.preventDefault();
-      ev.stopImmediatePropagation();
-      if (g && !g.drag) g.shield = false;
-    }
-  },
-  true,
-);
-
-// Capture-mode mouseup fallback: if the shield armed at mousedown is still alive after release
-// (no synthetic click to consume — e.g. the drag pressed a second mouse button, breaking
-// Chromium's click synthesis), a 0ms timer clears it so the next real click is not swallowed.
-document.addEventListener("mouseup", () => {
-  const g = gestureState();
-  if (!g?.shield) return;
-  setTimeout(() => {
-    g.shield = false;
-  }, 0);
-});
-
-// Capture-free drag move: past the 6px threshold the gesture becomes a drag — the pointer position is
-// recorded either way (the system needs it to draw the line once the threshold is crossed), and the
-// keycap under the cursor becomes the drag's hover target.
-document.addEventListener("mousemove", (ev) => {
-  const g = gestureState();
-  if (!g?.drag) return;
-  g.pointerX = ev.clientX;
-  g.pointerY = ev.clientY;
-  if (!g.drag.moved && Math.hypot(ev.clientX - g.drag.anchorX, ev.clientY - g.drag.anchorY) < 6) {
-    return; // Within the threshold, treated as a plain click
-  }
-  g.drag.moved = true;
-  g.hover = keycapAt(ev.clientX, ev.clientY)?.entity ?? null;
-});
-
-// Capture-free drag end: releasing the initiating button beyond the threshold binds the
-// keycap under the cursor; a plain release falls back to the native click (select toggle).
-document.addEventListener("mouseup", (ev) => {
-  const g = gestureState();
-  if (!g?.drag) return;
-  if (ev.button !== g.drag.button) return; // Release of the non-initiating button: ignore, do not interrupt the drag
-  const { action, anchorX, anchorY } = g.drag;
-  g.drag = null;
-  g.hover = null; // ui.keybind clears the highlight and hides the line on the next frame
-  const dragged = Math.hypot(ev.clientX - anchorX, ev.clientY - anchorY) >= 6;
-  if (!dragged) return; // Plain click: hand over to the native click for the select toggle
-  armSuppressNextClick(true); // mouseup-armed: schedule the timeout fallback immediately (the synthetic click consumes it first)
-  if (getCapturing()) return; // A capture started mid-drag (abnormal path): abort the bind
-  const code = keycapAt(ev.clientX, ev.clientY)?.code ?? null;
-  logDebug(`KBCAP drag release action=${action} code=${code ?? "no hit"}`);
-  if (!code) return; // Released on empty space: no-op
-  setBind(action, code);
-});
-
-// Capture state / capture-free drag in progress: forbid all wheel scrolling (prevents the bind
-// options list drifting under the operation). passive:false must be explicit — Chrome makes
-// document-level wheel listeners passive by default, otherwise preventDefault is ineffective.
-document.addEventListener(
-  "wheel",
-  (ev) => {
-    if (getCapturing() || gestureState()?.drag) {
-      ev.preventDefault();
-      ev.stopImmediatePropagation();
-    }
-  },
-  { passive: false },
-);
-
-// Physical key capture (module-level: behavior is instance-independent, and per-instance
-// registration used to double every diagnostic log). Esc during a drag cancels the drag;
-// with an action selected every key binds (Esc = unbind) without closing the menu.
-document.addEventListener("keydown", (ev) => {
-  const g = gestureState();
-  const action = getCapturing();
-  if (!action && g?.drag) {
-    // Drag in progress: keys have no default role here — Space/Enter/Tab would otherwise
-    // scroll the panel or jump focus (browser defaults; the wheel is already blocked above).
-    // Esc cancels the drag; every other key is swallowed (default prevented, other
-    // listeners unaffected — matching the old non-intervention except for the default).
-    ev.preventDefault();
-    if (ev.code === "Escape") {
-      ev.stopImmediatePropagation();
-      endCapture();
-      g.drag = null;
-      g.hover = null;
-      logDebug("KBCAP Esc cancels drag");
-    }
-    return;
-  }
-  logDebug(`KBCAP keydown code=${ev.code} capturing=${action ?? "null"}`);
-  if (!action) return;
-  ev.preventDefault();
-  ev.stopImmediatePropagation();
-  endCapture();
-  setBind(action, ev.code === "Escape" ? "" : ev.code); // Esc = unbind the action
-  logDebug(`KBCAP bind done (code=${ev.code})`);
-});
-
-// Capture-state mouse capture: any mouse button (incl. left) binds its code on press.
-// preventDefault stops the focused button being activated by Space/Enter and middle-click
-// autoscroll; stopImmediatePropagation blocks the later-registered main.ts ESC handler and
-// F3/F4 (the earlier-registered inventory E key yields via isCapturing()).
-//
-// The SAME listener starts a capture-free drag when the press lands on an action chip: the chip is a
-// widget now, so this cannot be a per-chip listener any more — and it does not need to be, because the
-// hit test can already say "this point is the chip whose value is `forward`".
-document.addEventListener("mousedown", (ev) => {
-  const g = gestureState();
-  const action = getCapturing();
-  logDebug(`KBCAP mousedown button=${ev.button} capturing=${action ?? "null"}`);
-  if (!action) {
-    // Capture-free drag start: hold a chip and move past the threshold to bind by dropping.
-    if (ev.button !== 0 || !g || g.drag) return; // Only the left button starts a drag (right-button drag removed), one at a time
-    const hit = dragDeps?.hitTest(ev.clientX, ev.clientY) ?? null;
-    if (!hit || hit.action !== ACTION_CHIP) return;
-    ev.preventDefault(); // Prevent text selection while dragging
-    g.drag = {
-      action: hit.value as BindAction,
-      button: ev.button,
-      anchorX: ev.clientX,
-      anchorY: ev.clientY,
-      moved: false,
-    };
-    g.pointerX = ev.clientX;
-    g.pointerY = ev.clientY;
-    return;
-  }
-  ev.preventDefault();
-  ev.stopImmediatePropagation();
-  endCapture();
-  // One-shot shield for the upcoming synthetic click: only button 0 synthesizes one
-  // (right/middle/side produce contextmenu/auxclick). Armed without a self-timeout —
-  // cleared by the click shield on consumption or by the mouseup fallback above.
-  if (ev.button === 0) armSuppressNextClick(false);
-  const code = buttonToCode(ev.button); // Left/middle/right/X1/X2 all bind immediately
-  if (!code) return;
-  setBind(action, code);
-  logDebug(`KBCAP mousedown bind done (${code})`);
-});
+// ===== 2b. The gesture's DEVICE listeners =====
+// The five `document` listeners that used to sit here (click shield, mouseup = fallback + drag end, wheel
+// block, key capture, drag start) are in `platform/bind-gesture.ts` now: they decide things that can only
+// be decided INSIDE the event, which makes them device-layer code rather than a view's — this file was the
+// last place in the project where a view owned `document` listeners. They are relocated, not refactored
+// (not one condition or order changed), and they are installed by `bindKeybindDrag` below with the two
+// things only this file can answer: which action ids a chip/keycap carries, and the hit test that finds one.
 
 // ===== 3. The keyboard layout table =====
 // Visual keyboard main area: [code, width unit u]; code="" is an empty spacer. Each row sums
@@ -445,6 +328,9 @@ export interface SettingsCallbacks {
   onFpsCap: (cap: number) => void;
   isGpuVsyncDisabled: () => boolean;
   onToggleGpuVsync: (disabled: boolean) => boolean;
+  /** 诊断探针（"日志检测"）开关：只影响探针行写不写 debug.log，默认开 */
+  isDiagLogEnabled: () => boolean;
+  onToggleDiagLog: (on: boolean) => boolean;
   getWindowMode: () => WindowMode;
   onSetWindowMode: (mode: WindowMode) => void;
 }
@@ -558,6 +444,25 @@ export function buildSettingsPanel(
     if (opts.onToggleGpuVsync(next)) {
       gpuVsyncDisabled = next;
       renderGpu();
+    }
+  });
+
+  // --- 诊断探针（"日志检测"）开关：FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE# 这些探针行
+  //     写不写 debug.log。默认开；关掉之后 debug.log 只留真正的事件记录。不需要重启。 ---
+  let diagLog = opts.isDiagLogEnabled();
+  const diagBtn = spawnButton(
+    world,
+    panels.settings,
+    "settings.btn",
+    `${id}.diagLog`,
+    "",
+    diagLog ? "settings.diagLogOn" : "settings.diagLogOff",
+  );
+  onUiAction(actions, `${id}.diagLog`, () => {
+    const next = !diagLog;
+    if (opts.onToggleDiagLog(next)) {
+      diagLog = next;
+      setUiText(world, diagBtn, diagLog ? "settings.diagLogOn" : "settings.diagLogOff");
     }
   });
 
@@ -785,7 +690,7 @@ export function buildSettingsPanel(
     // back here would print the previous drag step (see renderCap).
     renderCap(cap);
   });
-  onResizeMerged(renderScaleLabel);
+  onViewportChange(renderScaleLabel);
   onUIScaleModeChange(renderChoices);
   onWindowModeChange(renderChoices);
   onFontChange(renderChoices);
@@ -862,6 +767,8 @@ export class Menu {
       onFpsCap: cb.onFpsCap,
       isGpuVsyncDisabled: cb.isGpuVsyncDisabled,
       onToggleGpuVsync: cb.onToggleGpuVsync,
+      isDiagLogEnabled: cb.isDiagLogEnabled,
+      onToggleDiagLog: cb.onToggleDiagLog,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,
       onBack: () => this.panels.hideAll(),

@@ -16,11 +16,26 @@ export interface PointerLockDeps {
    *  captured, so the cursor stays visible through the startup, the settings check, the world entry
    *  and every menu — and is hidden only while a world is actually running under the player's hand. */
   canControl: () => boolean;
+  /** 窗口是不是**前台**（`platform/shell.ts` 的 winFocused）。
+   *
+   *  **捕获必须只在前台开着。** 原生捕获走的是 `ClipCursor`，它**根本不看**窗口是不是前台；浏览器那条
+   *  `requestPointerLock` 会被 Chromium 拒（所以老版本可以省掉这个门禁，注释里也正是这么写的）—— 但
+   *  Tauri 版换成原生之后，省掉它就等于允许"后台开捕获"：光标被夹在一个后台窗口的矩形里（那块区域上是
+   *  别的应用）、视角还在转（原始输入是 RIDEV_INPUTSINK，后台也收）、光标还被全局隐藏。
+   *  最容易踩的一处是**进世界时的自动 relock**（加载期间切走，加载完照样捕获）—— 见
+   *  `win.rs::capture_foreground_check`，那是系统级兜底，这里是正常路径上的门禁。 */
+  focused: () => boolean;
   logDebug: (line: string) => void;
+  /** 重试一个被拒绝的锁：**到期时间放进世界**（`DELAYED_INTENTS::schedule`，见 ecs/systems/delays.ts），
+   *  由 `ui.delays` 在下一帧应用。这里原来是 `setTimeout(tryLock, 1300)` —— 一个只属于本模块的定时器，
+   *  schedule 看不见、暂停时照样跑、也没法在日志里列出来。 */
+  scheduleRetry: (delayMs: number, source: string) => void;
+  /** 再写一次光标（`reapplyCursor` 的 0 / 120 ms 两次补写）：同样是延时意图，不是本模块的定时器。 */
+  scheduleCursor: (delayMs: number) => void;
 }
 
-// All relock() calls come from direct user interaction (clicking singleplayer / E closing the inventory / ESC resuming), so no focus gating anymore:
-// Chromium rejects requestPointerLock when the window is not foreground (triggering a 1300ms retry), which naturally prevents "capturing" the mouse.
+// relock() 仍然**要求窗口在前台**（deps.focused）。老注释说"不需要焦点门禁"是因为浏览器那条
+// requestPointerLock 本来就会拒；Tauri 版走原生 ClipCursor，它不看前台 —— 那个假设不成立了。
 
 export class PointerLock {
   /** 诊断：上一次写下去的 CSS 值，只在**变化**时打日志（免得每帧刷屏） */
@@ -30,17 +45,28 @@ export class PointerLock {
 
   relock(source: string): void {
         this.deps.logDebug(`LOCK request [${source}]`);
-    const tryLock = (): void => {
+    this.attempt(source);
+  }
+
+  /** 到期重试（由 `ui.delays` 调用）：和 `relock` 同一条路径，只是多一行"这是重试"。 */
+  retry(source: string): void {
+    this.deps.logDebug(`LOCK retry [${source}]`);
+    this.attempt(source);
+  }
+
+  private attempt(source: string): void {
       if (this.deps.isUiModal()) return;
+      if (!this.deps.focused()) {
+        this.deps.logDebug(`LOCK skipped [${source}]: window is not foreground`);
+        return;
+      }
       const p = this.deps.input.lock();
       if (p) {
         p.catch(() => {
                     this.deps.logDebug(`LOCK rejected [${source}], retrying in 1300ms`);
-          setTimeout(tryLock, 1300);
+          this.deps.scheduleRetry(1300, source);
         });
       }
-    };
-    tryLock();
   }
 
     // Cursor: hidden ONLY while the player actually controls the mouse (a world running, no modal UI
@@ -66,9 +92,9 @@ export class PointerLock {
     // 那样这次"强制变化"就变成空操作，Chromium 也就不会重新推光标了。
     // （`auto` 和 `default` 都是箭头，肉眼无差别，但值确实变了。）
     document.body.style.setProperty("cursor", "auto", "important");
-    setTimeout(() => this.applyCursor(), 0);
+    this.deps.scheduleCursor(0);
     // 渲染进程可能慢一拍，补一次
-    setTimeout(() => this.applyCursor(), 120);
+    this.deps.scheduleCursor(120);
   }
 
   applyCursor(): void {

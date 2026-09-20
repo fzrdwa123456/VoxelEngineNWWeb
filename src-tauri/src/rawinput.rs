@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -41,6 +41,11 @@ const BATCH_MS: u64 = 4;
 // 办法就是让浏览器**永远看不到 ESC**：钩子吞掉，再从这儿推给前端合成一个真的 KeyboardEvent。
 const WH_KEYBOARD_LL: i32 = 13;
 const VK_ESCAPE: u32 = 0x1B;
+/// 菜单键（Apps）：键盘上的"上下文菜单"手势之一
+const VK_APPS: u32 = 0x5D;
+/// F10 与 Shift 组合 = 与菜单键等价的手势（单独 F10 不动它：那可能是玩家的绑定键）
+const VK_F10: u32 = 0x79;
+const VK_SHIFT: u32 = 0x10;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_SYSKEYDOWN: u32 = 0x0104;
@@ -108,6 +113,7 @@ struct KbDllHookStruct {
 }
 
 extern "system" {
+    fn GetAsyncKeyState(v_key: i32) -> i16;
     fn RegisterRawInputDevices(devices: *const RawInputDevice, count: u32, cb_size: u32) -> i32;
     fn GetRawInputData(
         h_raw_input: isize,
@@ -152,6 +158,8 @@ extern "system" {
     fn CallNextHookEx(hook: isize, code: i32, w_param: usize, l_param: isize) -> isize;
     fn GetForegroundWindow() -> isize;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+    /// 走到顶层（GA_ROOT=2）/ 属主根（GA_ROOTOWNER=3）—— 用来判断"前台是不是我们这一族的窗口"
+    fn GetAncestor(hwnd: isize, flags: u32) -> isize;
     fn GetCurrentProcessId() -> u32;
 }
 
@@ -176,22 +184,91 @@ static ESC_REPEATS: AtomicI32 = AtomicI32::new(0);
 static ESC_UPS: AtomicI32 = AtomicI32::new(0);
 /// 按下状态（用来区分"首次按下"和"长按重复"）
 static ESC_IS_DOWN: AtomicBool = AtomicBool::new(false);
+/// 钩子**被调用过**多少次（一次按键 +1）。探针用：它一直是 0 就说明钩子压根没被调用
+/// （装上了但没生效 vs 根本没装上，是两种完全不同的病，这一条直接区分）。
+static HOOK_SEEN: AtomicI32 = AtomicI32::new(0);
+/// 探针只发一次（免得刷屏）
+static PROBE_SENT: AtomicBool = AtomicBool::new(false);
 
 /// 前台窗口属于本进程吗？不是就**不吞** —— 否则用户在别的程序里按 ESC 也会被我们吃掉。
+///
+/// **按 HWND / 祖先链判断，不按"前台那个窗口的进程号"。** 原来比的是
+/// `GetWindowThreadProcessId(GetForegroundWindow()) == 我们的 pid`，在 Tauri/WebView2 下前台 HWND 可能是
+/// **WebView2 自己的子窗口**（属于 `msedgewebview2.exe`），于是这个判断恒为 false —— 后果是钩子"装上了
+/// 但一个键都不吞"：菜单键 / Shift+F10 漏进页面（日志里 `code=ContextMenu` 就是证据），连 ESC 的那层防护
+/// 也一起失效（原生捕获下 ESC 照样能用，所以一直没暴露）。
+/// 现在接受三种情况：前台就是我们的窗口、前台的**根窗口**是我们的、或前台的**属主根窗口**是我们的。
 unsafe fn foreground_is_ours() -> bool {
-    let hwnd = GetForegroundWindow();
-    if hwnd == 0 {
+    let fg = GetForegroundWindow();
+    if fg == 0 {
         return false;
     }
+    if window_is_ours(fg) {
+        return true;
+    }
+    // GA_ROOT = 2：把子窗口一路走到顶层（WebView2 的子窗口就落在这里）
+    let root = GetAncestor(fg, 2);
+    if root != 0 && root != fg && window_is_ours(root) {
+        return true;
+    }
+    // GA_ROOTOWNER = 3：再兜一层属主链（弹出窗口的宿主）
+    let owner = GetAncestor(fg, 3);
+    owner != 0 && owner != fg && owner != root && window_is_ours(owner)
+}
+
+/// 这个窗口的线程/进程是我们吗
+unsafe fn window_is_ours(hwnd: isize) -> bool {
     let mut pid: u32 = 0;
     GetWindowThreadProcessId(hwnd, &mut pid);
     pid != 0 && pid == GetCurrentProcessId()
+}
+
+/// 一行探针文本（由推送线程发一次事件，前端写进 debug.log）：
+/// `seen` = 钩子被调用过多少次（0 = 钩子没被调用）；后面是前台窗口、它的根窗口、属主根窗口的 HWND/PID
+/// 和我们的 PID —— "前台是不是我们的窗口"那个判断为什么是 false，这一行就能看出来。
+fn hook_probe_line() -> String {
+    unsafe {
+        let pid_of = |h: isize| -> u32 {
+            let mut p: u32 = 0;
+            if h != 0 {
+                GetWindowThreadProcessId(h, &mut p);
+            }
+            p
+        };
+        let fg = GetForegroundWindow();
+        let root = if fg != 0 { GetAncestor(fg, 2) } else { 0 };
+        let owner = if fg != 0 { GetAncestor(fg, 3) } else { 0 };
+        format!(
+            "HOOKPROBE seen={} hook={:#x} fg={:#x}/pid={} root={:#x}/pid={} owner={:#x}/pid={} ours={}",
+            HOOK_SEEN.load(Ordering::Relaxed),
+            ESC_HOOK.load(Ordering::Relaxed) as usize,
+            fg as usize,
+            pid_of(fg),
+            root as usize,
+            pid_of(root),
+            owner as usize,
+            pid_of(owner),
+            GetCurrentProcessId()
+        )
+    }
 }
 
 /// WH_KEYBOARD_LL 回调。**必须极快**：几次比较 + 原子自增，然后 `return 1` 吞掉。
 unsafe extern "system" fn esc_hook(code: i32, w_param: usize, l_param: isize) -> isize {
     if code >= 0 && l_param != 0 {
         let kb = &*(l_param as *const KbDllHookStruct);
+        HOOK_SEEN.fetch_add(1, Ordering::Relaxed); // 探针：钩子确实被调用了（原子操作，安全）
+        // **菜单键 / Shift+F10 也要吞。** 它们是"上下文菜单"的键盘手势：Windows 收到之后会进入菜单
+        // 状态并把光标切成箭头（DOM 那层 `contextmenu` 的 preventDefault 挡不住这一步），我们的 8ms
+        // 光标哨兵随即又把它按回隐藏 —— 玩家看到的就是**鼠标闪一下**；它还可能弹出窗口菜单。和 ESC
+        // 同一招：在 Windows/Chromium 看到之前就吞掉，既没有闪烁也没有菜单。
+        // 只在"前台是本窗口"时吞（和 ESC 一样），并且只吞 Shift+F10（单独 F10 不吞，它可能是玩家的绑定键）。
+        let shift_f10 = kb.vk_code == VK_F10 && (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
+        if kb.vk_code == VK_APPS || shift_f10 {
+            if foreground_is_ours() {
+                return 1;
+            }
+        }
         if kb.vk_code == VK_ESCAPE && foreground_is_ours() {
             match w_param as u32 {
                 WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -295,6 +372,8 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
 pub struct MouseDelta {
     pub dx: i32,
     pub dy: i32,
+    /// 发出时刻（推送线程启动起的毫秒数）。前端拿它估"这条事件在队列里压了多久" —— 见 RAWLAG 行。
+    pub t: u64,
 }
 
 /// 被钩子吞掉的 ESC，推给前端去合成一个真的 KeyboardEvent（见 src/platform/rawinput.ts）
@@ -416,18 +495,43 @@ pub fn start(app: AppHandle) -> Result<(), String> {
     // 推送线程：定速把累加值取走清零并发事件（前端同步 poll() 拿的是自己那份累加器）
     std::thread::spawn(move || {
         let mut tick: u32 = 0;
+        let t0 = Instant::now();
+        // ===== RAWMON 诊断（每秒一行）=====
+        // 目的：把"按住键 + 转视角不顺滑"从猜测变成数字。这一行同时报告四条可能的路径上**这一秒各动了
+        // 多少次**：emits=我们推给前端的 IPC 事件数（上限 250/s）；wmIn=系统送来的原始鼠标包数；
+        // cursorFix=光标哨兵**真的纠正了**多少次（`CURSOR_ENFORCED` 的增量，一直涨 = 在跟系统拉锯）；
+        // hookSeen=低级键盘钩子被调用次数（一直是 0 = 钩子根本没进输入路径）。后面几个是当时的状态。
+        let mut emits: u32 = 0;
+        let mut last_wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
+        let mut last_fix = crate::win::cursor_enforced_count() as i32;
+        let mut last_seen = HOOK_SEEN.load(Ordering::Relaxed);
+        let mut last_mon = Instant::now();
         while RUNNING.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(BATCH_MS));
             tick = tick.wrapping_add(1);
             // 光标哨兵：每两次 tick（≈8ms）校对一次可见性，把被 Windows 菜单模式 / Chromium
             // 推送时机弄乱的状态按回期望值。稳态下 GetCursorInfo 一致，不做任何额外动作。
+            // 光标哨兵：**每 tick（≈4ms）**校对一次可见性（原来是每两次）——"菜单键闪一下"正是"系统把
+            // 光标亮起来 → 哨兵按回去"之间的那段时间，周期减半就把它压短一半（前端那边还会在按键瞬间
+            // 主动重写一次隐藏状态，两边一起抢这一帧）。
+            crate::win::cursor_sentinel(&app);
             if tick % 2 == 0 {
-                crate::win::cursor_sentinel(&app);
+                // 捕获必须只在前台开着：不是前台就拆掉，并告诉前端（前端做"放鼠标 + 该暂停就暂停"）。
+                // 只在 Rust 侧释放不够 —— 前端的 INPUT_STATE.locked 还是 true，视角照转、光标照隐藏。
+                if crate::win::capture_foreground_check(&app) {
+                    let _ = app.emit("capture-lost", ());
+                }
+                // 探针：4s / 8s / 12s 各发一次（原来"开机 1.5 秒发一次"是在还没按键时发的，等于没答问题）。
+                // 按键过程中 seen 不涨，就说明钩子确实一次都没被调用；hook=0x0 说明装入就没成功。
+                if tick == 1000 || tick == 2000 || tick == 3000 {
+                    let _ = app.emit("hook-probe", hook_probe_line());
+                }
             }
             let dx = ACC_DX.swap(0, Ordering::Relaxed);
             let dy = ACC_DY.swap(0, Ordering::Relaxed);
             if dx != 0 || dy != 0 {
-                let _ = app.emit(EVENT, MouseDelta { dx, dy });
+                emits += 1;
+                let _ = app.emit(EVENT, MouseDelta { dx, dy, t: t0.elapsed().as_millis() as u64 });
             }
             // 被钩子吞掉的 ESC 边沿：同样按批推，顺序 down -> repeat -> up
             // （人不可能 4ms 内按两次，所以这个顺序实际上不会乱）
@@ -439,6 +543,33 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             }
             for _ in 0..ESC_UPS.swap(0, Ordering::Relaxed) {
                 let _ = app.emit(ESC_EVENT, EscEvent { down: false, repeat: false });
+            }
+
+            // RAWMON：每秒一行（走事件由前端写进 debug.log，和 HOOKPROBE 同一条路）
+            let now = Instant::now();
+            if now.duration_since(last_mon).as_millis() >= 1000 {
+                let wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
+                let fix = crate::win::cursor_enforced_count() as i32;
+                let seen = HOOK_SEEN.load(Ordering::Relaxed);
+                let (desired, showing) = crate::win::cursor_state();
+                let line = format!(
+                    "RAWMON emits={} wmIn={} cursorFix={} hookSeen={} ridFail={} desired={} showing={} capture={} fgOurs={}",
+                    emits,
+                    wm - last_wm,
+                    fix - last_fix,
+                    seen - last_seen,
+                    ACC_RID_FAIL.load(Ordering::Relaxed),
+                    desired,
+                    if showing { 1 } else { 0 },
+                    if crate::win::capture_active() { 1 } else { 0 },
+                    if unsafe { foreground_is_ours() } { 1 } else { 0 },
+                );
+                let _ = app.emit("raw-mon", line);
+                emits = 0;
+                last_wm = wm;
+                last_fix = fix;
+                last_seen = seen;
+                last_mon = now;
             }
         }
     });

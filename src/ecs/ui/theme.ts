@@ -244,6 +244,7 @@ export type UiRecipe =
   | "kb.key"
   | "kb.keycap"
   | "kb.keyLegend"
+  | "kb.line"
   | "kb.bottom"
   | "kb.title"
   | "kb.tower"
@@ -447,6 +448,12 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return `font-size:${theme.size.btn};color:${c.textDim};text-align:center;`;
     case "kb.chips":
       return "flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:0.375rem;padding-right:0.5rem;";
+    // The key bind drag's RUBBER BAND. It is a widget now (ui/menu.ts used to own an SVG element and
+    // mutate its line per mousemove): the theme gives it the accent colour and the stacking, and its
+    // GEOMETRY arrives as the widget's own UI_LAYOUT string, written by ui.keybind each frame — a layout
+    // string is appended after the recipe, so it is what decides left/top/width/rotate.
+    case "kb.line":
+      return `position:fixed;height:0.125rem;z-index:9999;pointer-events:none;border-radius:0;background:${c.accentBg};`;
     case "kb.chip":
       return `width:100%;padding:0.4375rem 0.625rem;font:0.8125rem ${theme.font.ui};color:${c.btnText};border:none;` +
         `border-radius:0.3125rem;cursor:pointer;background:${

@@ -40,6 +40,170 @@ export function createInputState(): InputState {
   return { locked: false, freeMouseActive: false, rawInputActive: false };
 }
 
+/** The WINDOW'S SIZE in CSS pixels, as data. Written by `platform/viewport.ts` — the ONE resize listener
+ *  in the process, which publishes here at event time — and read by the camera (whose projection follows
+ *  it) and by the draw (whose renderer size follows it). Those two used to be driven by a resize listener
+ *  in main.ts that reached into a three.js camera and the GPU device; and ui/uiscale.ts kept a SECOND
+ *  resize listener for the settings panel's scale label. One publisher, two consumers, both of which
+ *  RECONCILE (they compare against what they last applied) instead of being poked. */
+export interface ViewportState {
+  width: number;
+  height: number;
+}
+
+export const VIEWPORT = defineResource<ViewportState>("viewport");
+
+/** Zero-sized until the platform service publishes: a consumer must therefore treat 0 as "unknown"
+ *  rather than computing an aspect from it (see rendering/camera-view.ts). */
+export function createViewport(): ViewportState {
+  return { width: 0, height: 0 };
+}
+
+/** The POINTER's last known position (CSS pixels, viewport-relative) and which buttons are down. Published
+ *  by the DEVICE layer while it handles mousemove/mousedown/mouseup — it already listens to all three for
+ *  gameplay, so this adds no listener — and read by anything that has to follow the cursor. The key bind
+ *  drag is the first consumer: its rubber band and hover target used to be pushed by a SECOND `document`
+ *  mousemove listener inside the view. */
+export interface PointerState {
+  x: number;
+  y: number;
+  /** The event's `buttons` bitmask (1 = left) */
+  buttons: number;
+}
+
+export const POINTER = defineResource<PointerState>("pointer");
+
+export function createPointer(): PointerState {
+  return { x: 0, y: 0, buttons: 0 };
+}
+
+/** The DEVICE-TIMING state of the pointer-lock / raw-input layer: the ten fields that make
+ *  ecs/systems/input.ts race-sensitive. They used to be private fields of that system, so the only way
+ *  to see WHY a mousemove was swallowed — or to replay a race in a test — was to instrument the system.
+ *  The values are world state like the rest of the device state; what does NOT move with them is the
+ *  LOGIC (iron rule 3): every decision still happens in the same listener, in the same order, reading the
+ *  same facts. This is a change of WHERE the fields live, never of when they are read or written.
+ *
+ *  What is deliberately NOT here: the queued `InputIntent`s. Producer and consumer are the same object
+ *  there, and nothing outside it may observe a half-applied frame — a resource would be a promise the
+ *  system cannot keep. */
+export interface InputTiming {
+  /** Ignore the single synthetic fake delta at lock instant (the first mousemove after locking must not
+   *  rotate the view) */
+  skipFirstMove: boolean;
+  /** Grace window armed before an intentional unlock: swallows synthetic deltas during the
+   *  exitPointerLock / SetCursorPos race (while still locked). Absolute performance.now() deadline. */
+  lockGraceUntil: number;
+  /** Set by prepareUnlock() when it is about to release a lock we hold, so the pointerlockchange that
+   *  follows knows the unlock was ours and must NOT engage the offscreen fallback. */
+  unlockIsIntentional: boolean;
+  /** Raw-input takeover state tracking (logs one line on switch for diagnosis) */
+  rawTakeoverActive: boolean;
+  /** Offscreen check result cache (~120ms), so not every mouse event triggers layout/screen queries */
+  offscreenCacheUntil: number;
+  offscreenCached: boolean;
+  /** Last Space press (a double tap toggles flying) plus the diagnostic counters behind the F3
+   *  SPACE/MOUSE logs the debug forwarder drains. */
+  lastSpaceDown: number;
+  spaceSeq: number;
+  mouseSeq: number;
+  lastMouseLog: number;
+}
+
+export const INPUT_TIMING = defineResource<InputTiming>("inputTiming");
+
+/** One decision the DEVICE layer already made, waiting for the fixed lane's first system to write it.
+ *  The union lives here (and not in the input system) because the log below is its container; it is
+ *  structural data, so this neutral file needs no platform import. */
+export type InputIntent =
+  | { kind: "key"; code: string; down: boolean }
+  | { kind: "look"; yaw: number; pitch: number }
+  | { kind: "motion"; flying: boolean; vy: number; onGround: boolean };
+
+/** The queue of pending device intents. It used to be a PRIVATE field of ecs/systems/input.ts with the
+ *  reasoning that "nothing outside may see a half-applied frame" — that guarantee is kept by the SHAPE
+ *  instead: the only reader is `step()`, which drains the array in place at the top of the tick, and it
+ *  cannot queue while it runs (one main thread). So what an outside reader sees is exactly "the decisions
+ *  that have not been applied yet" — a pending log, which is what a resource is for. */
+export interface InputIntentLog {
+  /** Pending intents, oldest first. Emptied by the consumer at the top of the tick. */
+  intents: InputIntent[];
+}
+
+export const INPUT_INTENTS = defineResource<InputIntentLog>("inputIntents");
+
+export function createInputIntentLog(): InputIntentLog {
+  return { intents: [] };
+}
+
+/** The input system's DIAGNOSTIC LOGS (the SPACE/MOUSE windows the F3 panel shows and the debug log
+ *  forwards). They are written by the device layer as it handles events and read by `diagnostics`, i.e.
+ *  one log with two readers — which is what a resource is for. They used to travel as `queues: input`
+ *  (a system handed to another system's constructor, which the "systems never import each other" rule
+ *  only tolerated because it was a structural type). */
+export interface InputDiagnostics {
+  /** Newest-first, capped at 10 entries by the producer */
+  readonly spaceLog: string[];
+  readonly mouseLog: string[];
+}
+
+export const INPUT_DIAGNOSTICS = defineResource<InputDiagnostics>("inputDiagnostics");
+
+export function createInputDiagnostics(): InputDiagnostics {
+  return { spaceLog: [], mouseLog: [] };
+}
+
+/** The debug-log sink (`platform/debuglog.ts` + `platform/shell.ts`): the diagnostics system forwards the
+ *  input queues through it and writes its periodic PHYS line. Structural, so this neutral file needs no
+ *  platform import — and a resource, so diagnostics takes no constructor arguments at all. */
+export interface DebugLogSink {
+  /** Forward the new entries of the input queues to the log file (incremental) */
+  forward(queues: InputDiagnostics): void;
+  /** Append one line to the debug log */
+  line(text: string): void;
+}
+
+export const DEBUG_LOG = defineResource<DebugLogSink>("debugLog");
+
+/** The F3 debug panel's two widget entities (the panel and its one preformatted text line). The HUD view
+ *  SPAWNS them (spawning is a structural change, so it belongs to wiring) and `diagnostics` writes their
+ *  data — it used to call back into the `Hud` object to do it, which made a render-lane system depend on
+ *  a view. Passing the handles as data is what removes that dependency. */
+export interface F3Panel {
+  readonly panel: Entity;
+  readonly body: Entity;
+}
+
+export const F3_PANEL = defineResource<F3Panel>("f3Panel");
+
+/** The backpack/hotbar widget handles. The VIEW spawns them during wiring (a structural change) and
+ *  publishes them here; `ui.inventory` — the system — writes their data every frame. Slots are indexed by
+ *  inventory slot: `0..HOTBAR_SLOTS-1` is the hotbar strip, the rest the bag grid; `icons`/`counts` are the
+ *  two children of each slot. Passing the handles as data is what moved the reconcile out of the view and
+ *  into the system (the same shape as F3_PANEL above). */
+export interface InventoryWidgets {
+  readonly slots: readonly Entity[];
+  readonly icons: readonly Entity[];
+  readonly counts: readonly Entity[];
+}
+
+export const INVENTORY_WIDGETS = defineResource<InventoryWidgets>("inventoryWidgets");
+
+export function createInputTiming(): InputTiming {
+  return {
+    skipFirstMove: false,
+    lockGraceUntil: 0,
+    unlockIsIntentional: false,
+    rawTakeoverActive: false,
+    offscreenCacheUntil: 0,
+    offscreenCached: false,
+    lastSpaceDown: 0,
+    spaceSeq: 0,
+    mouseSeq: 0,
+    lastMouseLog: 0,
+  };
+}
+
 /** Which MODAL UI surfaces are open — the single source of truth for "a UI owns the mouse", and the
  *  reason gameplay freezes. A surface PUBLISHES here when it becomes visible and invisible; the one
  *  gate (canControl) reads it.
@@ -336,4 +500,72 @@ export const LOADING_STATE = defineResource<LoadingState>("loadingState");
 
 export function createLoadingState(): LoadingState {
   return { active: false, progress: 0, key: "", noteKey: "", noteValue: "" };
+}
+
+// ===== 5. Delayed intents: "do this in a moment" as DATA =====
+// Four `setTimeout` calls were the only way this process could say "in a moment": closing the backpack
+// relocked the mouse on the next event-loop turn, the lock manager retried a rejected lock after 1300 ms,
+// and the cursor was re-asserted after the menu/Apps key (plus `requestAnimationFrame` for one more).
+// Each was a TIMER owned by whichever module wanted it — invisible to the schedule, invisible in a debug
+// log, and still running while the game was paused.
+//
+// The shape is the TOAST's, for the same reason: the DEADLINE is data (an absolute wall-clock time) and a
+// system compares it against the clock. `ui.delays` (ecs/systems/delays.ts) applies what is due, once per
+// frame, in the ui lane — the only lane that runs in every mode, which is exactly where a lost cursor or a
+// lost capture has to be fixed. The EFFECTS stay injected there, so the queue holds nothing but data and
+// the module that owns the effect still owns it.
+export type DelayKind = "relock" | "cursor" | "lockRetry";
+
+export interface DelayedIntent {
+  /** performance.now() deadline: the intent is due once the clock has passed it */
+  readonly at: number;
+  readonly kind: DelayKind;
+  /** WHY — the reason string of a relock, so its log line reads the same as the timeout's did */
+  readonly arg: string;
+}
+
+export interface DelayedIntents {
+  /** Arm `kind` in `delayMs`. Several of the same kind may be pending at once (the cursor re-assert
+   *  deliberately fires at 0/32/80 ms), so the queue is ordered by DEADLINE and never deduplicated. */
+  schedule(kind: DelayKind, delayMs: number, arg?: string): void;
+  /** The intents whose deadline has passed, in deadline order, REMOVED from the queue. */
+  takeDue(): DelayedIntent[];
+  /** How many are waiting (diagnostics / the Node gate) */
+  readonly pending: number;
+  /** The wall clock the queue runs on — injected so the gate can drive it instead of sleeping */
+  now(): number;
+}
+
+/** Bound on the queue. The menu/Apps key schedules four re-asserts per press (twice: keydown AND keyup),
+ *  so a held or hammered key must not grow this without limit. At the cap the FURTHEST deadline is
+ *  dropped: the urgent re-asserts are the ones that win the cursor race. */
+export const DELAY_QUEUE_CAP = 64;
+
+export const DELAYED_INTENTS = defineResource<DelayedIntents>("delayedIntents");
+
+export function createDelayedIntents(clock: () => number = () => performance.now()): DelayedIntents {
+  const queue: DelayedIntent[] = [];
+  return {
+    schedule(kind: DelayKind, delayMs: number, arg = ""): void {
+      const intent: DelayedIntent = { at: clock() + Math.max(0, delayMs), kind, arg };
+      if (queue.length >= DELAY_QUEUE_CAP) {
+        let furthest = 0;
+        for (let i = 1; i < queue.length; i++) if (queue[i].at > queue[furthest].at) furthest = i;
+        queue.splice(furthest, 1);
+      }
+      queue.push(intent);
+      queue.sort((a, b) => a.at - b.at);
+    },
+    takeDue(): DelayedIntent[] {
+      const now = clock();
+      if (queue.length === 0 || queue[0].at > now) return [];
+      let n = 0;
+      while (n < queue.length && queue[n].at <= now) n++;
+      return queue.splice(0, n);
+    },
+    get pending(): number {
+      return queue.length;
+    },
+    now: clock,
+  };
 }

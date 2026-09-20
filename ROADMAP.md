@@ -398,8 +398,14 @@ unused machinery today, and unused machinery is what makes a codebase unreadable
 
 Written down because "is everything ECS now?" is a question that deserves a list rather than a
 feeling. Method: summed `(Get-Content <file>).Count` over `src/**/*.ts` (every line, blank ones
-included; `Get-ChildItem -Recurse -File -Include *.ts -Path src`). `main.ts` holds **5
-`addEventListener`, 1 `requestAnimationFrame`, 0 `setInterval`**.
+included; `Get-ChildItem -Recurse -File -Include *.ts -Path src`). `main.ts` holds **0
+`addEventListener`, 1 `requestAnimationFrame`, 0 `setInterval`** — the window guards
+(`platform/window-guards.ts`, 6 listeners), the ONE resize listener (`platform/viewport.ts`) and the bind
+gesture's five (`platform/bind-gesture.ts`) are device-layer modules now (they used to be the composition
+root's), and the RECONCILER owns six listeners on the UI MOUNT ROOT rather than six per widget (delegated,
+§5.2 P1.11). The process has **0 `setInterval`**: the last one was the 8 ms raw-mouse poll, removed in
+P1.11; what is left is four `setTimeout`s (the boot macrotask yield, the log flush, the drag's click-shield
+fallback, a short cursor re-assert).
 
 **GROUP A IS DONE** (the five rows that used to be here, each moved into `AGENTS.md`):
 the loop is ONE rAF chain whose body the mode picks; the frame cap goes through the `SetFpsCap`
@@ -412,16 +418,26 @@ with the boot screen (§3.8).
 
 What is left is the two smaller buckets below.
 
-**B. Deliberate non-ECS (a DECISION, do not "fix"):** three.js / GPU / DOM objects (camera, renderer,
-perf sampler, elements) stay constructor dependencies; `VoxelWorld` stays a resource; the chunk mesh
-cache stays system state; the pointer-lock and raw-input timing stay system fields (§4); the bind
-gesture's event-time arm paths stay in `ui/menu.ts` (§5.2 P4); the key bind drag rubber band stays an
-SVG in the view (§3.7); the config modules still APPLY themselves (the `<style>`, the CSS custom
-property, the root font size) while their VALUES are resources; `windowMode`/`vsyncDisabled` stay
-plain config because nothing reads them on the tick.
+**B. Deliberate non-ECS (a DECISION, do not "fix"):** the pointer-lock and raw-input LOGIC stays in the
+event-time listeners (its STATE is the INPUT_TIMING resource — §5.2 P1.8), and so does the BIND GESTURE's
+event-time half: the click shield's two arm paths, the drag's mousedown/mouseup, the wheel block and the
+key-capture handler (§5.2 P1.9) — every one of them a decision that can only be taken inside the event that
+must be cancelled; what a system BUILDS for itself — the block outline, a baked icon canvas — is its own
+object rather than a resource; the
+config modules own the FILES while their VALUES live in resources — and
+the global style applies itself nowhere any more (`fonts`/`uiscale` publish the font pair and the root
+font size, and the RECONCILER writes them, diffed per frame); `windowMode`/`vsyncDisabled` stay
+plain config because nothing reads them on the tick (the DIAGNOSTIC-LOG switch is another one: it is read by
+the log sink, not by a system). The UI EVENT LAYER is delegated rather than per-widget (§5.2 P1.11), and the
+raw-mouse look is accumulated at event time and applied ONCE PER FRAME — both are "one owner, one place"
+choices, not leftovers.
+The rows that used to sit here are gone: the three.js/GPU/DOM objects, `VoxelWorld` and the chunk mesh
+cache are RESOURCES (§5.2 P1.7), the input race guards' state is too (P1.8), and the window listener, the
+menu background, the diagnostics dependencies and the view's DOM listeners went the same way (P1.9).
 
 **C. Inert leftovers** (dead code and stale comments, NOT bugs — §4): the main menu's world-type
-panel, `wasMaximizedBeforeFullscreen`, the unused `centerCursor` export in `platform/shell.ts`.
+panel, and the unused `centerCursor` export in `platform/shell.ts` (the live one is in `platform/rawinput.ts`;
+`wasMaximizedBeforeFullscreen` left this list when the fullscreen path stopped needing it).
 (The hand-built loading overlay used to be on this list; the startup screen replaced it, §3.8.)
 
 ---
@@ -531,6 +547,117 @@ Still outstanding:
   touches in a STOPPED state (main menu, backpack) silently removes its behaviour. That is what the ui
   lane and the `dom.*`-writer assertion exist to prevent.
   What is left is not a surface: §3.7 lists the drag rubber band and the four config modules.
+- **P1.7 — the presentation objects became RESOURCES.** `SCENE3D`, `CAMERA3D`, `RENDERER3D`,
+  `PERF_SAMPLER`, `CANVAS_HOST` (`index.html`'s `#app`), `UI_MOUNT` (the widget mount root) and
+  `CHUNK_MESHES` (the chunk-mesh cache: parent group, meshes and the "no geometry" set, built by
+  `createChunkMeshCache(group)`) used to arrive as CONSTRUCTOR ARGUMENTS — the only shared state in the
+  process with no owner, and the reason a system could not be constructed by a test. They are world state,
+  so the composition root INSERTS them (`ecs/presentation.ts`) and each system resolves what it uses in its
+  constructor body. The access declarations still name the objects as external targets (`camera3d`,
+  `chunkMeshes`, `framebuffer`) — the schedule models those NAMES, not the resource handles — so no
+  ordering changed. What it bought: the chunk stream keeps no private mesh cache, `diagnostics` takes NO
+  constructor arguments (its sampler, renderer, voxel world, log sink and F3 panel are all resources), the
+  device layer takes its canvas from `RENDERER3D.domElement` (the element the pointer is locked to IS the
+  element the GPU draws into), and `check:ecs` asserts both halves: the root inserts every one of them and
+  no system is handed one any more. `Type-only` three.js imports keep `ecs/presentation.ts` loadable in
+  Node.
+- **P1.8 — the input race guards' STATE became a resource.** `INPUT_TIMING` (ecs/resources.ts) holds which
+  mousemove is the synthetic lock-instant one, whether the unlock was ours, the grace deadline, the
+  offscreen cache and the F3 SPACE/MOUSE counters — the fields, NOT the logic. That split is the whole
+  point: iron rule 3's decisions stay in the DOM listeners at event time (`skipFirstMove`,
+  `lockGraceUntil`, the raw-input takeover arbitration, the spike guards), the listeners still only QUEUE,
+  and `step()` (fixed lane, first) applies. Moving the fields made the races INSPECTABLE (a test can arm a
+  grace window and read it back) and let the gate assert that `pointerlock` publishes nothing into the
+  resource and that `input.ts` no longer owns a second copy of any of it.
+- **P1.9 — the last non-ECS edges: window, menu background, diagnostics, the view's listeners.** `DONE` in
+  five parts. (1) `platform/viewport.ts` owns the ONE `window` resize listener and only PUBLISHES the
+  `VIEWPORT` resource; `cameraView.render` reconciles the projection from it and the FRAME (main.ts's
+  `applyViewportSize`, its first act, before the mode body) reconciles `renderer.setSize` — the composition
+  root's listener (which reached into a camera and the GPU device) and
+  ui/uiscale.ts's second one (which only fed the settings label) are both gone.
+  THE FRAME, NOT THE DRAW, and that is a fixed bug rather than a preference: the first version applied the
+  size inside `renderer.draw`, which a MENU frame and a LOAD frame never run (they pump the ui lane alone),
+  so resizing at the main menu left the panorama's canvas at its old pixel size and the background stopped
+  scaling until a world was entered. The canvas follows the window in EVERY mode, applied only when the
+  size changed and only once `renderer.init()` has run. (2) The main-menu panorama
+  is `rendering/menu-background.ts`: a system object whose state is the `MENU_BACKGROUND` resource, instead
+  of four module-level `let`s and a free function in main.ts. It is deliberately NOT registered in a lane —
+  the schedule has no run conditions and a MENU frame never runs the render lane — so what it buys is an
+  OWNER for the state and one entry point, not a batch. (3) `diagnostics` takes NO constructor arguments:
+  its sampler, renderer, voxel world, the input SPACE/MOUSE log, the log sink and the F3 panel's widget
+  handles are all resources, and the F3 text moved here from the HUD view. (4) The hotbar digit keys moved
+  from a `document` keydown listener inside the inventory VIEW to `ui.navigation`'s edge handling — which
+  also fixed a real bug: with no gate at all, 1..9 selected slots at the main menu, on the loading screen
+  and behind the pause menu. (5) The key bind drag's rubber band is a WIDGET (`kb.line`) whose UI_LAYOUT
+  string `ui.keybind` rewrites per frame; the pointer position is the `POINTER` resource, published by the
+  device layer that already handles mousemove, so `ui/menu.ts` creates no element and the drag's two mouseup
+  listeners became one. The gesture's event-time half stays exactly where it was — see §3.10 B.
+- **P1.10 — a window GEOMETRY change is a device signal, and the capture is foreground-gated.** Two
+  reported bugs, one shape. (a) Dragging the window's border while a world was LOADING let the entry lock
+  the mouse on top of the drag: both the drag and the view then worked, with the cursor roaming. Windows
+  emits a burst of Resized/Moved events for the drag, so the signal is the same shape as losing the window
+  (`onWinGeometry` → hand the mouse back, pause if the player was playing), with an 800 ms suppression
+  window around OUR OWN programmatic mode switch (fullscreen must not open the pause menu), and it does
+  nothing at all outside a world (that early return is a fixed bug too: a window drag at the main menu used
+  to write hundreds of `WINGEOM` lines). Rust re-clips the capture rectangle on the way through. (b) The
+  native capture is `ClipCursor`, which does NOT look at the foreground (unlike the browser's
+  `requestPointerLock`), so the NW.js version could drop its focus gate — this port cannot. The gate now
+  exists in three layers: the NORMAL path (`PointerLockDeps.focused`, shipped from `winFocused`, so `relock`
+  refuses to capture out of the foreground — and the focus-regained relock still works because `win-focus`
+  sets the flag first), the AUTOMATIC path (`enterWorld` captures only when focused; otherwise it shows the
+  pause menu, so "not foreground ⇒ paused" stays closed), and the SYSTEM-level net
+  (`win::capture_foreground_check`, two consecutive ticks with a foreign foreground → release + restore the
+  cursor + emit `capture-lost`, which the frontend handles exactly like a blur).
+- **P1.11 — the last of the UI/device edges, plus the input-cadence bug.** `DONE` in six parts.
+  (1) THE RECONCILER'S EVENTS ARE DELEGATED: `ecs/ui/system.ts` used to attach SIX listeners to every
+  widget at mount time (six closures each, none of them enumerable from outside); it now attaches one per
+  event type to the UI MOUNT ROOT and finds the widget by walking up from `ev.target` — the same walk
+  `hitTest` already did. `click`/`input`/`mousedown`/`mouseup` bubble, so they delegate as they are; hover
+  is an ancestor-chain DIFF over `mouseover`/`mouseout` because `mouseenter`/`mouseleave` do NOT bubble
+  (the diff preserves "a parent and a child can both be hovered"), and `contains()` is what clears the
+  chain when the pointer leaves the tree. Two behaviour refinements fell out: a `mouseup` ANYWHERE inside
+  the tree ends a press (the per-widget listener only heard releases on the widget, so a press that ended
+  elsewhere stayed pressed), and the nearest widget with an action wins (a slider stops the walk — it
+  reports through `input`).
+  (2) THE DELAYED INTENTS ARE DATA: four `setTimeout`s owned "do this in a moment" — closing the backpack
+  relocking the mouse (`relockSoon`), the lock manager's 1300 ms retry after a rejection, and the cursor
+  re-asserts at 0/120 ms (focus regained) and 0/32/80 ms (the menu/Apps key). They are the
+  `DELAYED_INTENTS` resource now (a list of `{at, kind, arg}` wall-clock deadlines, the TOAST's shape,
+  capped at 64) and `ui.delays` — a ui-lane system AFTER `ui.navigation` (it writes the same two external
+  targets, so the conflict rule FORCES that edge) and BEFORE `ui.widgets` — applies what is due through
+  injected effects. The lane is 10 systems / 9 batches.
+  (3) TAB IS CANCELLED, NOT SWALLOWED. The first version of the focus-traversal fix did
+  `preventDefault(); return;`, which silently made TAB UNBINDABLE in a world (the panel accepts Tab, the
+  key never reached `queueKey`). `preventDefault()` alone is the whole fix for the traversal -> the window
+  blur -> the pause menu; the rest of the handler runs for TAB like for every other key.
+  (4) KEYBOARD ACTIVATION OF WIDGETS IS OFF: a widget element is focusable, so TAB+ENTER/SPACE (and a
+  programmatic `.click()`) produced a `click` and drove the UI. The delegated click handler drops
+  `ev.detail === 0` — a real press/release carries the click COUNT — so the mouse is unaffected.
+  (5) THE LOOK IS APPLIED ONCE PER FRAME (this is the one that fixed a real, user-visible bug). The
+  raw-mouse deltas came in through `setInterval(..., 8)`, so "how many look samples a frame gets" depended
+  on the phase between that timer (0.125 kHz) and the frame (60 Hz): nominally 1.67/frame, in practice
+  2/2/1 — and **Chromium runs input tasks (keydown/keyup) BEFORE timer tasks**, so holding a key
+  (autorepeat ~30/s) stretched the timer to 9-12 ms and the per-frame sample count spread over 0/1/2/3.
+  Measured with the `FRAME ... pf=[...]` probe: key NOT held -> 122-127 samples/s and 90% of frames at
+  exactly 2; key HELD -> 84-110 samples/s and only ~40% of frames at 2. Per-frame rotation therefore
+  differed by up to 3x — the reported "holding a key makes the view less smooth". Fix: every guard stays at
+  EVENT time (`rawDelta`: takeover, lock grace, spike — same order, same thresholds, `INPUT_TIMING`
+  unchanged) and only what passes is ACCUMULATED; `frame()` calls `input.frameLook()` before any fixed step
+  and pushes the whole frame's displacement as ONE `look` intent. Result measured on the same machine:
+  `pf=[1:60]`, i.e. exactly one application per frame even while holding a key at 100+ px/frame. The spike
+  guard stays PER DELTA on purpose (a fast flick may exceed 1000 px in one frame and must not be thrown
+  away). `frameLook` clears the accumulator when no world is running, so the capture that is already on
+  during an entry cannot dump a backlog into the first game frame.
+  (6) THE PROBES, AND THEIR SWITCH. The investigation above needed numbers, so the FRAME/LOOK/RAWLAG/
+  RAWMON/STALL probes were added (the last two come from Rust: the emitter's per-second line reports
+  `emits`/`wmIn`/`cursorFix`/`hookSeen` plus the cursor and capture state, and `MouseDelta` carries its send
+  time so the frontend can measure queue backlog). They are kept — they answer "is it the frame loop, the
+  IPC transport, the cursor sentinel or the keyboard hook?" in one run — behind the settings panel's
+  "日志检测" toggle (`settings.json`'s `diagLog`, default ON, repaired by type like every other setting),
+  which filters the probe prefixes in `logDebug`; `appendDebugLog` (errors/console) always writes.
+  Two findings from that instrumentation are worth keeping in mind: the LL keyboard hook has NEVER fired
+  (`HOOKPROBE seen=0`, so the device-layer listeners are the only protection against the menu-key gesture),
+  and the cursor sentinel needs no correction in a steady game (`cursorFix=0`).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `ui/inventory.ts`. The per-entity capabilities that used to be
@@ -564,21 +691,23 @@ Verified still present; each is a trap for the next reader:
 
 | Where | Says | Reality |
 |---|---|---|
-| `platform/rawinput.ts:5-7` | raw input is used "only when the lock was cancelled … discarded when locked" | `input.ts` says the takeover rule is "**lock state irrelevant**" |
-| `platform/pointerlock.ts:11-12` | "all `relock()` calls come from direct user interaction" | `main.ts` also relocks on **window focus** |
-| `platform/shell.ts:203-206` | describes a `winctl.exe` topmost fallback | the call is commented out (`:210`); the real path is `setAlwaysOnTop` |
 | `rendering/textures.ts:1-2,13`, `blockregistry.ts:32`, `ui/i18n.ts:2-4` | a built-in `default.zip` / `defaultmod.zip` | `scripts/rearrange.mjs` produces neither, and none exists in the tree |
-| `ui/inventory.ts:197` | `refreshIcons()` re-bakes icons on UI-scale change | the method is **never called** (`iconSize` is fixed at 40) |
-| `main.ts:373-376` | an `after` naming a system registered later "would silently drop the edge" | nothing is silent: `Schedule.batch()` THROWS (`"X" must run before "Y" but was batched no earlier`, a message that also misnames an `after` as "before"). The rule it is trying to state is "register a system before anything that points at it" — see §3.9 for the minimal reproduction |
+| `main.ts` (the `navTrees` comment) | an `after` naming a system registered later "would silently drop the edge" | nothing is silent: the schedule resolves names at `start()`, and `Schedule.batch()` THROWS (`"X" must run before "Y" but was batched no earlier`, a message that also misnames an `after` as "before"). The rule it is trying to state is "register a system before anything that points at it" — see §3.9 for the minimal reproduction |
 | `packs/*/lang/*.json` `bind.hint` | "select a button, then click a key" | while capturing, a keycap mousedown is consumed and the click swallowed — the only exit is Esc |
-| Dead code | `shell.ts:201,228` `wasMaximizedBeforeFullscreen` is written and never read; `shell.ts`'s `centerCursor` export is never imported (the live one is in `platform/rawinput.ts`) | — |
+| Dead code | `platform/shell.ts`'s `centerCursor` export is never imported (the live one is in `platform/rawinput.ts`) | — |
+
+(Four rows left this table across P1.7-P1.11: the raw-input header no longer claims the takeover rule is
+"discarded when locked", `platform/pointerlock.ts` no longer claims every `relock()` comes from direct user
+interaction (the focus-regained and world-entry paths are documented), the `winctl.exe`/`unTopmost` story is
+gone with the kiosk path, `ui/inventory.ts`'s never-called `refreshIcons()` went with the view rewrite, and
+`wasMaximizedBeforeFullscreen` is no longer even declared.)
 
 ---
 
 # 6. The verification loop (there are no tests)
 
 1. `node ./node_modules/typescript/bin/tsc --noEmit` — the type gate.
-2. `npm run check:ecs` — the ECS invariant gate (`scripts/check-ecs.mjs`, 47 assertion groups,
+2. `npm run check:ecs` — the ECS invariant gate (`scripts/check-ecs.mjs`, 54 assertion groups,
    `RESULT: OK|FAILED`). Run it after touching the ECS, a component, a command, a resource, a recipe,
    a stage or a system's access declaration. It compiles into git-ignored `node_modules/.cache/`, so it
    writes nothing tracked. Two of its groups read SOURCE TEXT (with comments stripped), and its batch

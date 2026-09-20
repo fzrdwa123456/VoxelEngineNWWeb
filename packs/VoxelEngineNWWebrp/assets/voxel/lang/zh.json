@@ -19,6 +19,8 @@
   "settings.unlimited": "无限",
   "settings.vsyncOff": "垂直同步: 已关闭(重启生效)",
   "settings.vsyncOn": "垂直同步: 已开启(重启生效)",
+  "settings.diagLogOff": "日志检测: 已关闭(只记事件)",
+  "settings.diagLogOn": "日志检测: 已开启(含诊断探针)",
   "settings.language": "语言",
   "settings.languageFont": "语言与字体",
   "settings.font": "字体",

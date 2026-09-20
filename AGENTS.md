@@ -42,10 +42,12 @@ src/
 │                           screen) — see "Boot" below.
 │                           `setLoopMode("load" | "game" | "menu")` is a pure
 │                           mode write — there is no second chain to start or stop and nothing to
-│                           cancel. It holds no game logic and reads no component column; the few
-│                           listeners it keeps are the ones whose default action must be cancelled in
-│                           the event itself (pointerlockchange log, contextmenu, the Space shield,
-│                           resize) — everything else is a queued device intent or a command.
+│                           cancel. It holds no game logic and reads no component column, and it keeps
+│                           NO listener of its own: the ones whose default action must be cancelled
+│                           inside the event (pointerlockchange log, ESC/contextmenu preventDefault,
+│                           the Space shield) are `platform/window-guards.ts`, the ONE resize listener
+│                           is `platform/viewport.ts`, and everything else is a queued device intent
+│                           or a command.
 │                           It has NO `setInterval` and no second "is it running" flag.
 ├── blockregistry.ts        block data registry (merges blocks.json across packs). NOTE: the
 │                           voxel mesher does NOT consult it yet — see voxel/ below.
@@ -85,7 +87,10 @@ src/
 │   │                        PREV_POSITION together. HUMANOID_BODY / DEFAULT_REACH are spawn
 │   │                        DEFAULTS, not state. No three.js, no registry import.
 │   ├── resources.ts         the world-scoped singletons: LOCAL_PLAYER (an entity handle), VOXEL,
-│   │                        INPUT_STATE (pointer-lock/device state), UI_MODAL (which modal UI
+│   │                        INPUT_STATE (pointer-lock/device state) and INPUT_TIMING (the state the
+│   │                        input race guards keep: which mousemove is the synthetic lock-instant one,
+│   │                        whether the unlock was OURS, the grace deadline, the offscreen cache and the
+│   │                        F3 SPACE/MOUSE counters — the fields, not the logic), UI_MODAL (which modal UI
 │   │                        surfaces are open AND which settings sub-page is up: mainMenu / menu /
 │   │                        inventory / settings / gen — the sub-page is navigation DATA, not a view
 │   │                        field), FPS_CAP (the frame-rate cap AND its domain: read by the loop's
@@ -99,6 +104,10 @@ src/
 │   │                        cursor, so ui.picker and ui.navigation both see every edge exactly once),
 │   │                        PICKER_STATE (the F3+F4 picker's open/sel/held keys) and TOAST (the HUD
 │   │                        message + its wall-clock deadline, armed by the ShowToast command).
+│   │                        Plus DELAYED_INTENTS: the "do this in a moment" queue — a LIST of
+│   │                        `{ at, kind: relock|cursor|lockRetry, arg }` deadlines on the SAME wall clock,
+│   │                        applied once per frame by `ui.delays`. It is the toast's shape because
+│   │                        four `setTimeout`s used to own that question (see ecs/systems/delays.ts).
 │   │                        Plus LOADING_STATE: the LOADING SCREEN (active, progress, the stage's
 │   │                        i18n key, and the settings check's outcome as a key + a list of names).
 │   │                        The drivers publish it through SetLoadingStage; `ui.loading` paints it —
@@ -121,6 +130,18 @@ src/
 │   │                        Also the predicates the gameplay gate reads:
 │   │                        canControl(devices, ui), isModalUi, isMenuUi. A neutral file so no
 │   │                        system imports another and voxel/ stays ECS-free.
+│   ├── presentation.ts      the three.js / GPU / DOM objects the WORLD owns: SCENE3D, CAMERA3D,
+│   │                        RENDERER3D (the device layer takes its canvas from `domElement`),
+│   │                        PERF_SAMPLER, CANVAS_HOST (index.html's `#app`), UI_MOUNT (the root every
+│   │                        widget is appended to) and CHUNK_MESHES (the chunk-mesh cache: parent group,
+│   │                        meshes, the "no geometry" set — `createChunkMeshCache(group)`). These used
+│   │                        to be constructor ARGUMENTS; a system resolves what it uses in its own
+│   │                        constructor body instead, which gives each object one owner and makes it a
+│   │                        SEAM a test can stub (the Node gate drives the chunk stream with a plain
+│   │                        object for the group). Type-only imports of three.js, so this module stays
+│   │                        loadable in Node. It does NOT change the schedule: the conflict model is
+│   │                        keyed by the declared target NAMES (`camera3d`, `chunkMeshes`, …), not by
+│   │                        resource handles, so those declarations stay as they are.
 │   ├── commands.ts          the concrete commands: SetMode, Teleport, SelectSlot, SwapSlots, ShowToast,
 │   │                        SetLoadingStage (a partial stage update for the loading screen) and
 │   │                        SetFpsCap (the one setting that is also world state — the frame gate reads
@@ -142,10 +163,28 @@ src/
 │       │                   guarded by `isCapturing()`, maps the button to a bind ACTION and CODE,
 │       │                   publishes a button edge and takes the press/release decision — a button
 │       │                   bound to "inventory" produces ONLY an edge, because whether the bag opens
-│       │                   is ui.navigation's call), and it owns the 8 ms raw-input POLL
-│       │                   (`startRawPolling(source)`, called once by main.ts) — a device cadence,
-│       │                   not a second loop. The only system with DOM listeners, so it resolves its
-│       │                   data in the constructor rather than at start().
+│       │                   is ui.navigation's call). The RAW-MOUSE deltas arrive per event
+│       │                   (`rawDelta`, ~4 ms: the Rust push cadence) and are APPLIED once per frame
+│       │                   (`frameLook`, called by the frame before any fixed step). There is no timer
+│       │                   in that path any more: the 8 ms poll it replaced was stretched to 9–12 ms
+│       │                   whenever a key was held (Chromium runs input tasks before timer tasks), so
+│       │                   the number of look samples per frame jumped between 0 and 3 and the view
+│       │                   juddered — measured with the `FRAME … pf=[…]` probe. Its race-guard FIELDS are
+│       │                   the INPUT_TIMING resource
+│       │                   (which mousemove is the synthetic one, whether the unlock was ours, the
+│       │                   grace deadline, the offscreen cache, the F3 counters) — the LOGIC and its
+│       │                   order stay in the listeners, untouched. The queued intents are deliberately
+│       │                   NOT a resource: nothing outside may see a half-applied frame. The only system
+│       │                   with DOM listeners, so it resolves its
+│       │                   data in the constructor rather than at start(). A click may capture the mouse
+│       │                   only while a WORLD runs (`inWorld` is injected): the loading screen owns no
+│       │                   modal flag, so the UI_MODAL guard alone let a click there engage the native
+│       │                   capture before a world existed — and the entry then re-locked on top of it.
+│       │                   The companion rule lives in main.ts: a WINDOW GEOMETRY change is a device
+│       │                   signal (Rust's `win-geometry` on Resized/Moved/DPI) treated like losing the
+│       │                   window — hand the mouse back, pause if playing — because dragging a border
+│       │                   keeps the window FOCUSED (no blur) while the capture's ClipCursor rectangle
+│       │                   goes stale (see ROADMAP §5.2 P1.10).
 │       ├── controller.ts   drains the VIEW deltas → yaw + pitch clamp (pitch is clamped to
 │       │                   ±89.4° in EVERY mode; there is no wrap past the zenith). While the
 │       │                   player is UNCONTROLLABLE it DROPS the buffer instead of holding it:
@@ -179,10 +218,21 @@ src/
 │       │                   drains VoxelWorld.takeDirty() so block edits re-mesh immediately.
 │       │                   It also owns the WARM-UP a world entry drives: `warmUp` builds a whole
 │       │                   window at once behind the loading screen, and `needsWarmUp` answers
-│       │                   "is there anything left to build here" (false = enter at once)
+│       │                   "is there anything left to build here" (false = enter at once).
+│       │                   The MESH CACHE (the parent group, the meshes, the "no geometry" set) is the
+│       │                   CHUNK_MESHES resource, not a private field; the system keeps only the
+│       │                   window bookkeeping (the wanted set and the last column it was built for).
 │       └── diagnostics.ts  render lane: perf window, the PHYS log line, the input queues'
 │                           incremental forwarding, the GPU timestamp read; it WRITES THE F3 TEXT
 │                           WIDGET (not the DOM) and refreshes the F3 panel
+│       └── delays.ts       ui lane, after ui.navigation: the DELAYED INTENTS (ecs/resources.ts::
+│                           DELAYED_INTENTS) — whatever WALL-CLOCK deadline has passed is applied here
+│                           through injected effects. It is the shape the toast uses (data, not a
+│                           timer), and it exists because four `setTimeout`s used to be the only way
+│                           to say "in a moment": closing the backpack relocking the mouse, the lock
+│                           manager's 1300 ms retry, and the cursor re-asserts at 0/120 ms (focus
+│                           regained) and 0/32/80 ms (the menu/Apps key — the layer that wins the
+│                           cursor-flash race, so it is the one place a missed deadline is visible)
 │   ├── ui/                  the UI WIDGET layer — "UI is data" (see ECS conventions):
 │   │   ├── theme.ts         UI_THEME: every colour token, plus recipeStyle(), the ONE style table
 │   │   │                    (recipe + state -> style string), plus the global stylesheet an inline
@@ -222,7 +272,9 @@ src/
 │   │   │                    every frame from the bind table, so two panel instances cannot desync; the
 │   │   │                    drag's state (which chip, which keycap, the live pointer, the click shield)
 │   │   │                    is data too. The ARM PATHS stay in ui/menu.ts (click-synthesis timing), and
-│   │   │                    the rubber band is drawn through injected show/hide callbacks.
+│   │   │                    the rubber band is a WIDGET: this system writes its geometry (UI_LAYOUT) and
+│   │   │                    its shown flag from the gesture + the POINTER resource, and the reconciler
+│   │   │                    paints it — the view owns no element and no mousemove listener any more.
 │   │   ├── navigation.ts    UiNavigationSystem + stepBackSettings(): which MODAL SURFACE is up, as
 │   │   │                    data. It drains the same key/button EDGES through its own reader and
 │   │   │                    takes the decisions the ESC if-chain used to take over five views'
@@ -240,25 +292,66 @@ src/
 │   │   │                    resolves its adjacency — see ROADMAP §3.9); the trees it paints are injected
 │   │   │                    through a getter because the menus are wired after the Schedule is built.
 │   │   └── system.ts        UiRenderSystem: reconciles every widget's element once per frame
-│   │                        (mount / unmount / update / wire) and is the ONLY code that creates,
-│   │                        styles or listens to one. It also owns hover/press state, the marquee
+│   │                        (mount / unmount / update) and is the ONLY code that creates, styles or
+│   │                        listens to one. It also applies the GLOBAL STYLE to the document
+│   │                        root — the font pair and the root font size, read from the FONT / UI_SCALE
+│   │                        resources (injected as `currentFontCss()` / `currentRootFontPx()`) and
+│   │                        written only when they change, which is why a resize needs no callback.
+│   │                        The EVENTS ARE DELEGATED to the mount root: ONE listener per type for the
+│   │                        whole tree (it used to attach six to every widget at mount time, each a
+│   │                        closure over an entity), and the widget an event belongs to is found by
+│   │                        walking up from `ev.target` — the same walk `hitTest` makes. Hover is an
+│   │                        ancestor-chain DIFF over the bubbling `mouseover` (mouseenter/mouseleave do
+│   │                        NOT bubble): the widgets above the new target are compared with the ones
+│   │                        the previous event left, and the difference is the enter/leave set, so a
+│   │                        parent and a child can still be hovered at once.
+│   │                        It is POINTER-ONLY: a keyboard-generated `click` (TAB then ENTER/SPACE, or a
+│   │                        programmatic `.click()`) carries `detail === 0` and is dropped, because the
+│   │                        UI is mouse-driven — a real press/release carries the click COUNT. The
+│   │                        focus ring and a focused slider's arrow keys are NOT filtered (only `click`
+│   │                        is), so if the keyboard should not reach the UI at all, that is a separate
+│   │                        `tabIndex` decision.
+│   │                        It owns hover/press state, the marquee
 │   │                        for text that does not fit, the "back to the TOP" edge of every role the
 │   │                        theme lists as scrollable (an EDGE, not a stored position: a list starts
 │   │                        at the top whenever its PANEL — or any ancestor — becomes visible, and
 │   │                        while it stays up the position is the browser's), and the hit test the
 │   │                        key bind drag asks ("which widget is under this point"). In the ui STAGE.
 ├── rendering/              anything drawn: camera-view.ts (the CameraViewSystem: interpolation from
-│                           PREV_POSITION -> POSITION plus the orientation quaternion, and the
+│                           PREV_POSITION -> POSITION plus the orientation quaternion, written into the
+│                           world's CAMERA3D resource, and the
 │                           shared viewDirection() the block raycast uses — a CONSUMER of the
 │                           snapshot, never its writer),
+│                           menu-background.ts (the MenuBackgroundSystem: the main menu's panorama +
+│                           spin/flip state, which IS the MENU_BACKGROUND resource; deliberately NOT
+│                           registered in a lane — a MENU frame never runs the render lane, so what it
+│                           buys is an OWNER for the state and one entry point, not a batch),
 │                           textures.ts (pack chain resolution), blockicons.ts (icon baking),
 │                           chunkmesh.ts (face-culled chunk geometry + the checker material)
 ├── platform/               host/browser services, produce data only: shell.ts (NW.js:
 │                           settings/logs/window — it owns settings.json, whose VALUES live in the
-│                           config resources), keybinds.ts (owns the DEFAULTS + code validation and
+│                           config resources, and it owns the DIAGNOSTIC-PROBE SWITCH: the settings
+│                           panel's "日志检测" toggle, default ON, filters the probe lines
+│                           (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/
+│                           `HOOKPROBE`) inside `logDebug`, while `appendDebugLog` — the error/console
+│                           channel — always writes; the probe PREFIX TABLE there is the one place a
+│                           new probe has to be registered), keybinds.ts (owns the DEFAULTS + code validation and
 │                           reads/writes the KEYMAP resource), rawinput.ts, pointerlock.ts (relock +
-│                           the cursor; it publishes NO cached "click may grab the lock" any more),
-│                           debuglog.ts, perf.ts
+│                           the cursor; it publishes NO cached "click may grab the lock" any more, and it
+│                           REFUSES to capture while the window is not in the FOREGROUND — the native
+│                           ClipCursor path has no such check of its own, unlike the browser's
+│                           requestPointerLock, so the gate is explicit; the Rust emitter adds a
+│                           system-level net that tears a background capture down and emits `capture-lost`,
+│                           which the frontend handles exactly like a blur),
+│                           debuglog.ts, perf.ts, window-guards.ts (the listeners whose default action
+│                           must be cancelled INSIDE the event: the pointerlockchange log, the ESC and
+│                           contextmenu preventDefaults, the Space shield, and the menu/Apps-key cursor
+│                           re-assert), bind-gesture.ts (the bind gesture's five DEVICE listeners: the
+│                           one-shot click shield, the merged mouseup = shield fallback + drag end, the
+│                           wheel block, the key capture and the drag's mousedown — its STATE is
+│                           KEYBIND_GESTURE, its panels are `ui.keybind`, and only this event-time half
+│                           stays in `ui/menu.ts`'s arm paths), viewport.ts (the ONE `window` resize
+│                           listener; it only PUBLISHES the VIEWPORT resource)
 └── ui/                     DOM interfaces. `loading.ts` (the loading screen's tree: the startup AND
                             a world entry), `hud.ts`, `menu.ts` (pause menu + shared settings panel, key
                             binds included), `mainmenu.ts` and `inventory.ts` build their widget trees
@@ -269,12 +362,13 @@ src/
                             picker and the key bind gesture's state are systems/resources in `ecs/` now.
                             What remains here is the WIRING (which widget goes where, which
                             action id a button carries), the arm paths of the bind gesture, and the
-                            views' component writes. Two exceptions remain: the key bind DRAG RUBBER
-                            BAND (an SVG overlay in `menu.ts`, drawn on request from the keybind system)
-                            and `i18n`/`fonts`/`uiscale`/`background`, which are configuration, not
-                            game state: they still APPLY themselves (a `<style>`, a CSS custom property,
-                            the root font size, the pack chain's background kind) while their VALUES live
-                            in the LOCALE / FONT / UI_SCALE resources. Every modal surface PUBLISHES its
+                            views' component writes. The one named exception is the key bind DRAG RUBBER
+                            BAND (an SVG overlay in `menu.ts`, drawn on request from the keybind system).
+                            The config modules are VALUES ONLY: `i18n` answers from the LOCALE resource,
+                            `fonts`/`uiscale` publish the font css pair and the root font size
+                            (`currentFontCss()` / `currentRootFontPx()`), `background` answers from the
+                            pack chain (memoised) — and the RECONCILER is what applies the global style.
+                            Every modal surface PUBLISHES its
                             visibility into UI_MODAL instead of making gameplay ask six container
                             booleans whether a UI is up.
 packs/                      official example mod + resource pack (copy into game/)
@@ -329,7 +423,8 @@ rAF game loop — ONE chain; `frame()` picks its body from `loopMode` (see setLo
             6. ui.toast                            // the HUD message, against its wall-clock deadline
             7. ui.keybind                          // the bind panels (derived) + the drag highlight/rubber band
             8. ui.navigation                       // ESC/inventory-key/button EDGES -> UI_MODAL's navigation state, and the ONE painter of the modal widget trees
-            9. ui.widgets                          // reconcile every WIDGET's element (theme + i18n)
+            9. ui.delays                           // apply the delayed intents whose wall-clock deadline has passed (relock / lock retry / cursor re-assert)
+           10. ui.widgets                          // reconcile every WIDGET's element (theme + i18n)
 
     "menu" -> menuFrame():                      // nothing is simulated and nothing draws over the last
       renderMenuBackground()                    //   world frame; the MAIN MENU is the one state where the
@@ -377,7 +472,7 @@ resolved order — determinism over a fake thread. `world.scheduleReport()` prin
 ```
 SCHEDULE fixed: 6 systems, 5 batches, 1 parallel pair(s) [player.input | (motion.snapshot ~ player.controller) | player.movement | player.collision | player.interaction]
 SCHEDULE render: 4 systems, 2 batches, 3 parallel pair(s) [(cameraView.render ~ chunk.stream ~ diagnostics) | renderer.draw]
-SCHEDULE ui: 9 systems, 8 batches, 1 parallel pair(s) [(ui.hud ~ ui.bindings) | ui.loading | ui.inventory | ui.picker | ui.toast | ui.keybind | ui.navigation | ui.widgets]
+SCHEDULE ui: 10 systems, 9 batches, 1 parallel pair(s) [(ui.hud ~ ui.bindings) | ui.loading | ui.inventory | ui.picker | ui.toast | ui.keybind | ui.navigation | ui.delays | ui.widgets]
 ```
 
 Reading those reports: the fixed lane's batch 0 is a REAL read-after-write (`player.input` writes
@@ -387,9 +482,14 @@ ui lane is a CHAIN because the conflict model is per COMPONENT, not per entity: 
 UI_STATE/UI_TEXT on different widgets. The one REAL pair there is `ui.hud ~ ui.bindings`
 (UI_STATE vs UI_INPUT) — what a batch looks like when the components are genuinely disjoint.
 
-`ui.navigation` is last of the writers on purpose: only it turns `UI_MODAL` into widget visibility,
-so it must follow every writer that could touch the same modal trees and precede `ui.widgets` (which
-is why it is registered first of the two — an `after: ["ui.widgets"]` would be the opposite order).
+`ui.navigation` is last of the WIDGET-DATA writers on purpose: only it turns `UI_MODAL` into widget
+visibility, so it must follow every writer that could touch the same modal trees and precede
+`ui.widgets` (which is why it is registered first of the two — an `after: ["ui.widgets"]` would be the
+opposite order). `ui.delays` sits between them: it writes no widget data at all, but it shares
+`ui.navigation`'s two external targets (`pointerLock` / `cursor`), so the conflict rule forces that
+edge — and its own `before: ["ui.widgets"]` is what keeps the reconciler the last system in the lane
+(without it the two would share a batch and "the reconciler is last" would be an accident of the
+resolved order).
 
 Two rules are enforced at boot, both of which used to be conventions:
 
@@ -468,7 +568,9 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
    real Chromium/Windows races. Do not simplify or reorder without replaying them. The DOM listeners
    still take every one of those decisions at EVENT time and only QUEUE the result; `step()` (fixed
    lane, first) writes it. That split is what lets input be an ordinary scheduled system — keep the
-   decisions on the event side.
+   decisions on the event side. The guards' STATE is the INPUT_TIMING resource (so a test and a log can
+   see why a mousemove was swallowed) — that is a move of where the fields live and NOT a licence to
+   touch the logic: reordering a guard is still a rule-3 replay job.
 4. **All game state changes happen on the single JS main thread** in a deterministic order.
    The only other threads are the rawinput native plugin's collector thread (atomic
    accumulator, polled every 8 ms) and the GPU. Keep it that way.
@@ -490,9 +592,20 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
     `world.get(entity, CONTROL)`. For object-valued state (a `Set`, the item array).
 - **Component or resource?** Ask two questions: how many are there, and does it die with an entity?
   One per world → RESOURCE (time, the input device, `VOXEL`, `LOCAL_PLAYER`). One per entity →
-  component. GPU/DOM/OS objects → neither (constructor dependencies). `HUMANOID_BODY` /
+  component. `HUMANOID_BODY` /
   `DEFAULT_REACH` are spawn DEFAULTS, not state — the numbers each entity actually uses live in
   BODY / REACH.
+- **A GPU/DOM object is a RESOURCE, not an argument** (`ecs/presentation.ts`). There is one scene, one
+  camera, one renderer, one UI mount root and one chunk-mesh cache per world, and they do not die with
+  an entity: that is the definition of a resource. They used to be constructor dependencies, which made
+  the objects a system writes every frame the only shared state in the process with no owner — and the
+  only way to learn who used one was to read main.ts. Now the composition root creates the object,
+  inserts it, and each system resolves it in its constructor body (iron rule 6); a test drives a render
+  system by inserting a stub. What is still NOT a resource and never will be: the objects a system
+  BUILDS for itself (the block outline, the menu-background panorama scene, a baked icon canvas) —
+  those die with their owner, and the DOM/GPU elements of a VIEW (an element, an SVG rubber band) are
+  their view's business. The DECLARED TARGETS (`camera3d`, `chunkMeshes`, `framebuffer`) stay in the
+  access sets: the schedule models names, not resource handles.
 - **CONFIGURATION splits the same way, by whether it is READ ON THE TICK.** A setting that a system or
   the reconciler asks for every step/frame IS world state and lives in a resource (`KEYMAP` — read by
   movement/interaction/input every tick; `LOCALE` — the reconciler re-derives every widget's text from
@@ -626,7 +739,7 @@ settings check, the world, the movement modes, every menu, the key binds, the in
 `docs/TESTING.md`**, together with what a failure at each step means. Read it before saying a change
 works, and extend it when a behaviour lands.
 
-**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 50
+**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 54
 assertion groups, ends with `RESULT: OK` / `RESULT: FAILED`). It compiles the ECS plus the fixed lane
 with the same `tsc` the build uses into `node_modules/.cache/voxelengine-ecs-check` (git-ignored, so
 it writes nothing tracked; Node still resolves the real `three`), then asserts what no type-checker
@@ -644,7 +757,12 @@ can:
   tree the reconciler expects, no migrated surface builds an element or writes a style string or uses
   `display` as its own state (the drag rubber band is the one named exception), the icon cache's
   synchronous peek building the same key as the bake, and a bound widget taking its value from its
-  source on its own grid and range (a slider's min/max/step must reach the ELEMENT);
+  source on its own grid and range (a slider's min/max/step must reach the ELEMENT). The RECONCILER's
+  half of that group runs it against a stub DOM and proves the DELEGATION: no widget element carries a
+  listener of its own, the mount root owns one per type, a click on a child label reaches the button, a
+  slider click dispatches nothing (it reports through `input`), the ancestor-chain diff shades a parent
+  when a child is entered and clears it when the pointer leaves the tree, a press ends on any `mouseup`
+  inside it, and `ev.detail === 0` (TAB+ENTER/SPACE, `.click()`) is dropped;
 - **the systems as systems** — a deferred `SetLoadingStage` moving LOADING_STATE and `ui.loading` painting it
   (the stage line as a re-derivable key, the percentage raw, one `active` boolean per bar segment —
   asserted at 0% and 50% — and the settings note as a translated label over literal names); the startup
@@ -656,8 +774,13 @@ can:
   ENTRY while keeping unknown keys and treating an absent one as a first run; the F3+F4 picker; the
   toast (a wall-clock deadline, a key vs a value); the bind panels being DERIVED (two instances cannot
   desync); the ESC ladder one rung at a time; the input system's handlers only QUEUE-ing while
-  `step()` writes; and the loop state (one mode, one transition, one rAF, no cancel, a body per mode,
-  `load` included);
+  `step()` writes; the TAB swallow being a CANCEL (`preventDefault` with the key still delivered, so a
+  Tab bind works) and the same line proving the capture only cancels it while the mouse is captured; a
+  DELAYED INTENT being data with a wall-clock deadline (due in deadline order, not early, capped, and the
+  three files that used to own a `setTimeout` now owning none); the diagnostic-probe switch (one filter in
+  `logDebug`, the error channel unfiltered, the prefix table, the panel's two states, the label translated
+  in all three dictionaries); and the loop state (one mode, one transition, one rAF, no cancel, a body per
+  mode, `load` included);
 - **the declarations** — rebuilt from `main.ts`'s own registrations plus each `*_ACCESS` constant: the
   batch grouping of all three lanes (the report above), a declared order holding in either registration
   order, every `dom.*` writer in the ui lane,
@@ -733,14 +856,35 @@ When work lands, move the entry here and delete it there.
   Still the densest file — the two shield-arm paths and the Esc-during-drag branch are
   load-bearing click-synthesis handling. Do not merge the arm paths. The GESTURE'S STATE is
   `KEYBIND_GESTURE` data now and the panels are derived by `ui.keybind`, so what is left here is the
-  event-time half (which listener fires, when the shield arms) plus the rubber band's SVG.
-- The UI is migrated; what is NOT: (1) the key bind DRAG RUBBER BAND is still an SVG element owned by
-  `ui/menu.ts` — a pointer overlay whose geometry changes on every mousemove, so a widget would be a
-  widget rewritten per pointer event; the SYSTEM decides when a line is due and the view draws it.
-  (2) `i18n`/`fonts`/`uiscale`/`background` still APPLY themselves (a `<style>`, a CSS custom property,
-  the root font size, the pack chain's background kind) because a CSS side effect is not entity data —
-  but the VALUE (language, font id, scale mode, bind table) is the LOCALE / FONT / UI_SCALE / KEYMAP
-  resource, and the background kind is memoised. (3) The EVENT-TIME half of the bind gesture has no ECS
+  event-time half (which listener fires, when the shield arms) — and NOTHING ELSE: the rubber band is a
+  widget whose geometry `ui.keybind` writes, and the pointer position comes from the `POINTER` resource,
+  so this file creates no element and listens for no mousemove.
+- **The low-level keyboard hook is INSTALLED BUT NEVER CALLED.** `rawinput.rs::esc_hook` gets a valid hook
+  handle and its thread pumps messages, yet the probe line (`HOOKPROBE seen=…`, written to debug.log 4 s /
+  8 s / 12 s after start) reports `seen=0` after dozens of keystrokes, with the foreground window confirmed
+  to be our own process. So "swallow the key before Windows/Chromium sees it" **is not available in this
+  environment**, and the ESC protection it was written for has never actually been active (harmless in
+  practice: the native capture means there is no browser lock to escape). Anything that must have a key
+  suppressed has to be done in the page or in a window procedure — do not build on the hook.
+- **The menu/Apps key's one-frame cursor flash is a RACE we win, not a call we cancel.** Chromium treats that
+  key (and Shift+F10) as "show a context menu" and REVEALS the system cursor for it; the reveal happens
+  outside the page (WebView2/Windows), so `preventDefault` cannot stop it. `platform/window-guards.ts`
+  therefore cancels the gesture on BOTH `keydown` and `keyup` and then RE-ASSERTS the hidden cursor
+  immediately (plus rAF and 0/32/80 ms), so the momentary reveal is never painted; the Rust cursor sentinel
+  polls every tick (≈4 ms) as the net. WebView2's own context menus are disabled and the window procedure
+  swallows `WM_CONTEXTMENU`/`SC_MOUSEMENU`, but neither of those stops the reveal — the menu is not what
+  shows the cursor, so do not "simplify" the re-assert loop away.
+- The UI is migrated; what is NOT: (1) the EVENT-TIME HALF of the bind gesture — the click shield's two
+  ARM PATHS, the drag's mousedown/mouseup, the wheel block and the key-capture handler. Those decisions can
+  only be taken INSIDE the event that must be cancelled (the shield must be armed before the synthetic
+  click that follows mouseup), so they are device-layer code, not state; the rubber band they draw is a
+  widget now.
+  (2) the CONFIG modules own the FILES while the VALUE (language, font id, scale mode, bind table) is the
+  LOCALE / FONT / UI_SCALE / KEYMAP resource, and the background kind is a memoised query of the pack
+  chain. They no longer APPLY anything themselves: `fonts`/`uiscale` publish the font css pair and the
+  root font size and the RECONCILER writes them to the document root, diffed, once per frame — which is
+  also why the resize callback that used to re-run the root font size is gone. (3) The EVENT-TIME half of
+  the bind gesture has no ECS
   shape and should not get one: which listener fires, when the one-shot click shield arms, and the two
   one-shot wiring flags are click-synthesis timing. Its STATE (chip, keycap, shield bit, live pointer)
   is `KEYBIND_GESTURE`, and the panel NAVIGATION is `UI_MODAL` painted by `ui.navigation`.

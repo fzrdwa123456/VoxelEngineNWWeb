@@ -39,6 +39,9 @@ const SOURCES = [
   "src/ecs/systems/input.ts",
   "src/ecs/systems/chunkstream.ts",
   "src/ecs/systems/diagnostics.ts",
+  // The delayed intents (relock / lock retry / cursor re-assert): the ui-lane system that applies
+  // whatever wall-clock deadline has passed. It owns no timer and touches no DOM itself.
+  "src/ecs/systems/delays.ts",
   // The widget layer: pure data + one pure style function + the action table + the reconciler. None of
   // them touches the DOM at import time, which is what lets this gate load them.
   "src/ecs/ui/theme.ts",
@@ -53,6 +56,10 @@ const SOURCES = [
   "src/ecs/ui/toast.ts",
   "src/ecs/ui/loading.ts",
   "src/ecs/ui/hud.ts",
+  // The inventory reconcile (a system now — it used to be `Inventory.sync()`, a method on the view, which
+  // is why this file was not compiled here before). It imports the icon baker + the block registry, both
+  // of which are import-safe in Node (the WebGPU renderer they use is created lazily on the first bake).
+  "src/ecs/ui/inventory.ts",
   "src/ecs/ui/keybind.ts",
   "src/ecs/ui/navigation.ts",
   "src/rendering/camera-view.ts",
@@ -517,6 +524,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // Driven on a stub voxel whose chunks are all AIR (getChunk -> null), so no mesh is ever built and
   // the mesher's material — which needs a DOM — is never touched.
   const { ChunkStreamSystem } = load("ecs/systems/chunkstream.js");
+  const P = load("ecs/presentation.js");
   const streamWorld = new World();
   streamWorld.insertResource(VOXEL, {
     ensureChunk() {},
@@ -528,13 +536,21 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // per definition (a second World may not INSERT a component — the one-World rule — but the chunk
   // stream only reads the row).
   streamWorld.insertResource(LOCAL_PLAYER, localPlayer);
-  const stream = new ChunkStreamSystem(streamWorld, { add() {}, remove() {} });
+  // The mesh CACHE is the CHUNK_MESHES resource, not a private field, so the gate inserts a stub one
+  // (a plain object stands in for the parent THREE.Group). That seam is the point of the change: this
+  // system is driven here with no GPU at all.
+  const meshCache = P.createChunkMeshCache({ add() {}, remove() {} });
+  streamWorld.insertResource(P.CHUNK_MESHES, meshCache);
+  const stream = new ChunkStreamSystem(streamWorld);
 
   assert(stream.needsWarmUp(1, 3), "a window that has never been built needs warming");
   stream.prime(1, 3);
   // What `warmUp` does, without the per-batch yields: a sync loop the gate can run.
   for (let i = 0; i < 500 && stream.pendingCount() > 0; i++) stream.step();
   equal(stream.pendingCount(), 0, "every chunk in the window is decided");
+  // …and WHERE the decision is remembered is the resource: the cache is the world's, not the system's.
+  equal(meshCache.meshes.size, 0, "an all-air world builds no mesh");
+  assert(meshCache.empty.size > 0, "the 'no geometry' answers were written into the world's cache");
   equal(stream.needsWarmUp(1, 3), false, "…so a re-entry into THIS window shows no screen");
   assert(stream.needsWarmUp(900, 900), "a window somewhere else still needs one");
   // (read directly: the section's `readSource`/`stripComments` helpers are defined further down)
@@ -720,12 +736,15 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   const W = load("ecs/ui/widgets.js");
   const { UiRenderSystem } = load("ecs/ui/system.js");
   const { defaultUiTheme, UI_THEME } = load("ecs/ui/theme.js");
-  const { createUiActions, UI_ACTIONS } = load("ecs/ui/actions.js");
+  const { createUiActions, onUiAction, UI_ACTIONS } = load("ecs/ui/actions.js");
+  const P = load("ecs/presentation.js");
 
   const made = [];
-  const mkEl = () => {
+  const mkEl = (tag = "div") => {
     const el = {
+      tagName: tag.toUpperCase(),
       children: [],
+      parentElement: null,
       dataset: {},
       style: {},
       textContent: "",
@@ -733,13 +752,30 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
       value: "",
       scrollWidth: 0,
       clientWidth: 0,
+      scrollTop: 0,
+      /** Listeners by type. The delegation check reads these: a widget element must have NONE. */
+      listeners: {},
+      /** What `<input type=range>` reports on an `input` event — read off the widget's own element. */
+      get valueAsNumber() {
+        return Number(this.value);
+      },
       appendChild(child) {
+        child.parentElement = el;
         this.children.push(child);
         return child;
       },
       remove() {},
-      scrollTop: 0,
-      addEventListener() {},
+      contains(node) {
+        let n = node;
+        while (n) {
+          if (n === el) return true;
+          n = n.parentElement;
+        }
+        return false;
+      },
+      addEventListener(type, fn) {
+        (this.listeners[type] ??= []).push(fn);
+      },
     };
     el.style.cssText = "";
     el.style.setProperty = (name, value) => {
@@ -751,13 +787,45 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
 
   const previousDocument = globalThis.document;
   const mount = mkEl();
-  globalThis.document = { createElement: () => mkEl(), elementFromPoint: () => null };
+  // The document ROOT: the reconciler applies the GLOBAL STYLE to it (the font pair + the root font size),
+  // because the config modules do not apply themselves any more. Count the writes — the point is that it
+  // writes what CHANGED and nothing per frame (which is what lets the resize callback go away).
+  const root = mkEl();
+  let rootVarWrites = 0;
+  let rootFontSizeWrites = 0;
+  let rootFontSize = "";
+  let fontUi = "a-ui";
+  let rootPx = 16;
+  const rootSetProperty = root.style.setProperty;
+  root.style.setProperty = (name, value) => {
+    rootVarWrites++;
+    rootSetProperty(name, value);
+  };
+  Object.defineProperty(root.style, "fontSize", {
+    get: () => rootFontSize,
+    set: (value) => {
+      rootFontSize = value;
+      rootFontSizeWrites++;
+    },
+  });
+  globalThis.document = {
+    createElement: (tag) => mkEl(tag),
+    elementFromPoint: () => null,
+    documentElement: root,
+  };
   try {
     // The SAME World the prefab check used (one World per component definition).
     const world = widgetWorld;
     world.insertResource(UI_THEME, defaultUiTheme());
     world.insertResource(UI_ACTIONS, createUiActions());
-    const system = new UiRenderSystem(world, { mount, translate: (key) => key });
+    // The mount root is a RESOURCE (ecs/presentation.ts) now, so it is inserted rather than passed:
+    // `uiStage` in the real game, this stub element here.
+    world.insertResource(P.UI_MOUNT, mount);
+    const system = new UiRenderSystem(world, {
+      translate: (key) => key,
+      fontCss: () => ({ ui: fontUi, mono: "a-mono" }),
+      rootFontPx: () => rootPx,
+    });
 
     const plain = W.spawnButton(world, null, "settings.btn", "check.a", "", "label");
     const icon = W.spawnPanel(world, null, "inv.icon", { image: { url: "", scrim: false } });
@@ -765,6 +833,29 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
       image: { url: "", scrim: false },
     });
     system.step();
+
+    // ── the GLOBAL STYLE is the reconciler's, and it writes it on CHANGE ───────────────────────────
+    // The font pair and the root font size used to be applied by ui/fonts.ts and ui/uiscale.ts
+    // themselves: a DOM write from outside any system, unconditional per call, and re-run on every
+    // resize. They publish the VALUE now and the reconciler diffs it — which is exactly why the
+    // resize callback could be deleted.
+    equal(root.style["--font-ui"], "a-ui", "the font pair reaches the document root");
+    equal(rootFontSize, "16px", "…and so does the root font size");
+    const styleWrites = rootVarWrites + rootFontSizeWrites;
+    system.step();
+    equal(rootVarWrites + rootFontSizeWrites, styleWrites, "unchanged values are not rewritten every frame");
+    fontUi = "b-ui";
+    rootPx = 24;
+    system.step();
+    equal(root.style["--font-ui"], "b-ui", "a font switch lands on the next frame");
+    equal(rootFontSize, "24px", "…and a scale change with it");
+    equal(rootVarWrites + rootFontSizeWrites, styleWrites + 2, "…writing what changed, and nothing else");
+    // A resize is the same story: the value is recomputed from the live window every frame, so nothing
+    // has to be notified of it. Only the new number is written.
+    rootPx = 32;
+    system.step();
+    equal(rootFontSize, "32px", "a resize reaches the root without any resize handler");
+    equal(rootVarWrites + rootFontSizeWrites, styleWrites + 3, "…as one write");
 
     const elOf = (recipe) => made.find((el) => el.dataset.uiRecipe === recipe);
     const plainEl = elOf("settings.btn");
@@ -857,9 +948,197 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     // A recipe the theme does NOT list as scrollable is never touched.
     equal(plainEl.scrollTop, 0, "a non-scrollable recipe keeps its own (untouched) position");
     assert(capA && capB && capPanel, "the list entities exist");
+
+    // ── the DELEGATED events: one listener per TYPE on the mount root, none per widget ─────────────
+    // Six listeners used to be attached to every widget at mount time (click, input, mouseenter,
+    // mouseleave, mousedown, mouseup) — six closures each, none of them enumerable from outside. The
+    // reconciler listens to the mount root now and finds the widget by walking up from `ev.target`;
+    // hover is an ancestor-chain DIFF, because mouseenter/mouseleave do not bubble. Both halves are
+    // asserted on the same stub DOM.
+    const actions = world.resource(UI_ACTIONS);
+    const fired = [];
+    onUiAction(actions, "check.delegated", (value) => fired.push(value));
+    onUiAction(actions, "check.moved", (value) => fired.push(`moved:${value}`));
+    const mark = made.length;
+    const btn = W.spawnButton(world, null, "settings.btn", "check.delegated", "v1");
+    const btnLabel = W.spawnLabel(world, btn, "settings.btnRow", "check.label");
+    const slider2 = W.spawnSlider(world, null, "settings.range", "check.moved", "", {
+      min: 0,
+      max: 10,
+      step: 1,
+      initial: 3,
+    });
+    system.step();
+    const [btnEl2, labelEl2, sliderEl2] = made.slice(mark);
+    assert(!!btn && !!btnLabel && !!slider2, "the delegated widgets exist");
+    assert(!!btnEl2 && !!labelEl2 && !!sliderEl2, "…and were mounted");
+    equal(
+      made.slice(mark).reduce((n, el) => n + Object.keys(el.listeners).length, 0),
+      0,
+      "no widget element carries a listener of its own",
+    );
+    equal(
+      Object.keys(mount.listeners).sort().join(","),
+      "click,input,mousedown,mouseout,mouseover,mouseup",
+      "the mount root owns one listener per delegated type",
+    );
+
+    /** Bubble one synthetic event from `target` up to (and including) the mount root. `detail` is the
+     *  click COUNT: >= 1 is a real press/release (Chromium's own synthesis from mousedown+mouseup
+     *  included), 0 is what TAB+ENTER/SPACE — and a programmatic `.click()` — produce. */
+    const fire = (type, target, relatedTarget = null, detail = 1) => {
+      const ev = { type, target, relatedTarget, detail };
+      let node = target;
+      while (node) {
+        for (const fn of node.listeners[type] ?? []) fn(ev);
+        if (node === mount) break;
+        node = node.parentElement;
+      }
+    };
+
+    // A click on a LABEL inside the button resolves to the button (the walk up from ev.target).
+    fire("click", labelEl2);
+    equal(fired.join(","), "v1", "a click on a child label reaches the button's action");
+    // A click on a SLIDER dispatches nothing: it reports through `input` (the test `wire()` made).
+    fire("click", sliderEl2);
+    equal(fired.join(","), "v1", "a click on a slider is not a click action");
+    // …and its `input` carries the value, read off the widget's OWN element.
+    sliderEl2.value = "7";
+    fire("input", sliderEl2);
+    equal(fired.join(","), "v1,moved:7", "a slider reports the value it was moved to");
+
+    // KEYBOARD activation is DROPPED. A widget element is focusable, so TAB then ENTER (or SPACE) fires a
+    // `click` with `detail === 0` — the UI is mouse-driven, and the filter lives on the EVENT, so a real
+    // press/release (which carries the click count) is untouched.
+    const dispatched = fired.length;
+    fire("click", labelEl2, null, 0);
+    equal(fired.length, dispatched, "a keyboard-generated click (detail 0) does NOT dispatch");
+    fire("click", labelEl2, null, 1);
+    equal(fired.length, dispatched + 1, "…while a real press/release still does");
+    fire("click", labelEl2, null, 2);
+    equal(fired.length, dispatched + 2, "…a double click included");
+
+    // HOVER: entering the label hovers the button above it…
+    const idle = btnEl2.style.cssText;
+    fire("mouseover", labelEl2);
+    system.step();
+    assert(btnEl2.style.cssText !== idle, "hovering a child shades the button above it");
+    // …leaving the tree (no mouseover inside it, and the new target is not ours) clears it.
+    fire("mouseout", btnEl2, null);
+    system.step();
+    equal(btnEl2.style.cssText, idle, "leaving the tree takes the shade back");
+
+    // PRESS: down on the label presses the button, and ANY release inside the tree ends it — the
+    // per-widget listener only heard a release on the widget itself, so a press that ended elsewhere
+    // stayed pressed until the pointer left and came back.
+    fire("mousedown", labelEl2);
+    system.step();
+    assert(btnEl2.style.cssText !== idle, "pressing the child presses the button");
+    fire("mouseup", mount);
+    system.step();
+    equal(btnEl2.style.cssText, idle, "a release anywhere in the tree ends the press");
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
+  }
+
+  // …and the SOURCE says the same thing: every listener is on the mount root, none on a widget.
+  const reconcilerSrc = stripComments(readSource("src/ecs/ui/system.ts"));
+  equal(
+    countOf(reconcilerSrc, /element\.addEventListener|addEventListener\("mouseenter"|addEventListener\("mouseleave"/g),
+    0,
+    "the reconciler attaches nothing to a widget element",
+  );
+  assert(/this\.mountRoot\.addEventListener\("click"/.test(reconcilerSrc), "the click listener is on the mount root");
+  assert(/if \(ev\.detail === 0\) return;/.test(reconcilerSrc), "a keyboard-generated click is dropped");
+  assert(/addEventListener\("mouseover"/.test(reconcilerSrc) && /diffHover\(/.test(reconcilerSrc),
+    "hover is an ancestor-chain diff over the bubbling mouseover");
+});
+
+check("a delayed intent is DATA with a deadline, applied by a system — never a timer", () => {
+  // Four `setTimeout`s used to be the only way this process could say "in a moment": closing the backpack
+  // relocking the mouse, the lock manager's 1300 ms retry, and the cursor re-asserts after the window
+  // regained focus (0/120 ms) or after the menu/Apps key (0/32/80 ms). Each was a timer owned by whichever
+  // module wanted it. The DEADLINE is a resource now, which is what makes the timing assertable at all —
+  // the gate drives the clock instead of sleeping through it.
+  const R = load("ecs/resources.js");
+  const { DelaySystem, DELAYS_ACCESS } = load("ecs/systems/delays.js");
+
+  let now = 1000;
+  const queue = R.createDelayedIntents(() => now);
+  equal(queue.pending, 0, "nothing is pending at the start");
+  queue.schedule("cursor", 0);
+  queue.schedule("cursor", 32);
+  queue.schedule("cursor", 80);
+  queue.schedule("lockRetry", 1300, "world entered");
+  equal(queue.pending, 4, "four intents armed");
+  equal(queue.takeDue().map((i) => i.at - 1000).join(","), "0", "a 0 ms intent is due AT its deadline");
+  now = 1032;
+  equal(queue.takeDue().map((i) => i.kind).join(","), "cursor", "the 32 ms one is due at 32 ms");
+  now = 1079;
+  equal(queue.takeDue().length, 0, "…and the 80 ms one is not early");
+  now = 1080;
+  equal(queue.takeDue().length, 1, "…and it is due at 80 ms");
+  equal(queue.pending, 1, "the 1300 ms retry is still waiting");
+  now = 2300;
+  equal(
+    queue.takeDue().map((i) => `${i.kind}:${i.arg}`).join(","),
+    "lockRetry:world entered",
+    "the retry carries the reason it was asked for",
+  );
+  equal(queue.pending, 0, "the queue drains");
+
+  // A deadline is not early: the comparison is `at <= now`, and not a frame before it.
+  let tick = 2000;
+  const notYet = R.createDelayedIntents(() => tick);
+  notYet.schedule("relock", 100, "inventory E");
+  tick = 2099;
+  equal(notYet.takeDue().length, 0, "a deadline is not early");
+  tick = 2100;
+  equal(notYet.takeDue().length, 1, "…and fires the moment it is reached");
+
+  // The cap: the menu/Apps key schedules four re-asserts per press (keydown AND keyup), so the queue must
+  // not grow without limit. At the cap the FURTHEST deadline goes — the urgent re-asserts are the ones
+  // that win the cursor race.
+  for (let i = 0; i < R.DELAY_QUEUE_CAP + 8; i++) queue.schedule("cursor", 0);
+  equal(queue.pending, R.DELAY_QUEUE_CAP, "the queue is capped");
+  equal(queue.takeDue().length, R.DELAY_QUEUE_CAP, "…and still delivers every slot it kept");
+
+  // The system applies them through the INJECTED effects, in deadline order, once per step.
+  const world = new World();
+  const appliedQueue = R.createDelayedIntents(() => now);
+  world.insertResource(R.DELAYED_INTENTS, appliedQueue);
+  const seen = [];
+  const system = new DelaySystem(world, {
+    relock: (reason) => seen.push(`relock:${reason}`),
+    lockRetry: (source) => seen.push(`retry:${source}`),
+    cursor: () => seen.push("cursor"),
+    log: () => {},
+  });
+  system.step();
+  equal(seen.length, 0, "an empty queue applies nothing");
+  appliedQueue.schedule("relock", 0, "inventory E");
+  appliedQueue.schedule("cursor", 0);
+  appliedQueue.schedule("lockRetry", 1300, "menu resume");
+  system.step();
+  equal(seen.join(","), "relock:inventory E,cursor", "only what is due fires, in deadline order");
+  equal(system.appliedCount, 2, "…and it is counted");
+  now += 1300;
+  system.step();
+  equal(seen.join(","), "relock:inventory E,cursor,retry:menu resume", "the retry fires past its deadline");
+  equal(system.pendingCount, 0, "nothing is left waiting");
+
+  // What it declares is what forces the order in the ui lane: it writes ui.navigation's two targets.
+  equal(DELAYS_ACCESS.writesExternal.join(","), "pointerLock,cursor", "it declares the targets it writes");
+  // …and the modules that used to own a timer do not any more. THIS is the regression the group exists
+  // for: a `setTimeout` returning anywhere on this path puts "when does this happen" back outside the
+  // world, where the schedule cannot see it and a paused game still runs it.
+  for (const rel of [
+    "src/platform/pointerlock.ts",
+    "src/platform/window-guards.ts",
+    "src/ecs/systems/delays.ts",
+  ]) {
+    equal(countOf(stripComments(readSource(rel)), /setTimeout|setInterval/g), 0, `${rel} still owns a timer`);
   }
 });
 
@@ -961,7 +1240,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   }
   // The UI SYSTEMS the views migrated into: no DOM, no styling, and —the point of the migration —no
   // `document.addEventListener` (only the device layer listens) and no private timer for "how long".
-  for (const rel of ["src/ecs/ui/picker.ts", "src/ecs/ui/toast.ts", "src/ecs/ui/keybind.ts"]) {
+  for (const rel of ["src/ecs/ui/picker.ts", "src/ecs/ui/toast.ts", "src/ecs/ui/keybind.ts", "src/ecs/systems/delays.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b|rgba?\(/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /document\.|createElement|style\.cssText/g), 0, `${rel} still touches the DOM`);
@@ -992,8 +1271,10 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   assert(/spawnButton\(/.test(readSource("src/ui/menu.ts")), "the settings panel composes buttons");
   assert(/spawnGridKey\(/.test(readSource("src/ui/menu.ts")), "the visual keyboard composes keycaps");
   assert(/onUiAction\(/.test(readSource("src/ui/mainmenu.ts")), "the main menu dispatches actions");
-  assert(/spawnButton\(/.test(readSource("src/ui/inventory.ts")), "the inventory composes slot buttons");
-  assert(/setUiImage\(/.test(readSource("src/ui/inventory.ts")), "…and fills icon slots as data");
+  assert(/spawnButton\(/.test(readSource("src/ui/inventory.ts")), "the inventory VIEW composes slot buttons");
+  assert(/setUiImage\(/.test(readSource("src/ecs/ui/inventory.ts")), "…and the SYSTEM fills icon slots as data");
+  equal(countOf(stripComments(readSource("src/ui/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
+    "the view writes no widget data any more (that is the system's job)");
 });
 
 // ===== the three UI systems the views migrated into =====
@@ -1143,6 +1424,9 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
   const N = load("ecs/ui/navigation.js");
   const world = widgetWorld;
   world.insertResource(UI_MODAL, createUiModalState());
+  // The hotbar keys select a slot on the LOCAL player (ui.navigation owns them now, not the inventory
+  // view), so this system resolves that handle at construction.
+  world.insertResource(LOCAL_PLAYER, localPlayer);
   const edges = world.resource(KEY_EVENTS); // inserted by the picker check above
   const mkPanel = (recipe) => W.spawnPanel(world, null, recipe, { hidden: true });
   const ids = ["settings", "lang", "pack", "keybind"];
@@ -1323,13 +1607,20 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
 
   const bound = new Set(["KeyW"]);
   let capturing = null;
-  const lines = [];
+  // The rubber band is a WIDGET now: the system writes its UI_LAYOUT (the geometry) and its UI_STATE
+  // (shown), and the reconciler paints it. `keycapAt` is the view's hit test, injected.
+  const line = W.spawnLayoutBox(world, null, "kb.line", "left:0;top:0;width:0;");
+  W.setUiVisible(world, line, false);
+  const R = load("ecs/resources.js");
+  const pointer = R.createPointer();
+  world.insertResource(R.POINTER, pointer);
+  const keycapUnder = new Map([["100,200", a.key]]);
   const system = new K.UiKeybindSystem(world, {
     boundCodes: () => bound,
     capturing: () => capturing,
     bindOf: (action) => (action === "forward" ? "KeyW" : ""),
-    showLine: (x1, y1, x2, y2) => lines.push(`${x1},${y1},${x2},${y2}`),
-    hideLine: () => lines.push("hide"),
+    line,
+    keycapAt: (x, y) => keycapUnder.get(`${x},${y}`) ?? null,
   });
 
   system.step();
@@ -1346,19 +1637,27 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   equal(world.get(b.chip, W.UI_STATE).selected, true, "the SECOND instance agrees (one source, no copies)");
   equal(world.get(b.legend, W.UI_TEXT).key, "W", "…legends included");
 
-  // The drag: the gesture carries WHERE it is and WHAT it is over; the system decides what that means.
-  gesture.drag = { action: "forward", button: 0, anchorX: 10, anchorY: 20, moved: true };
-  gesture.hover = a.key;
-  gesture.pointerX = 100;
-  gesture.pointerY = 200;
+  // The drag: the gesture says WHICH chip is being dragged and where the drag was ANCHORED; WHERE THE
+  // POINTER IS comes from the POINTER resource (the device layer publishes it — it owns the mousemove
+  // listener), and the system derives the threshold, the hover target and the line's geometry from the two.
+  gesture.drag = { action: "forward", button: 0, anchorX: 10, anchorY: 20, moved: false };
+  pointer.x = 12;
+  pointer.y = 21;
   system.step();
-  equal(lines[0], "10,20,100,200", "the rubber band follows the gesture data");
+  equal(world.get(line, W.UI_STATE).hidden, true, "within the 6px threshold the gesture is still a click");
+  pointer.x = 100;
+  pointer.y = 200;
+  system.step();
+  equal(world.get(line, W.UI_STATE).hidden, false, "past the threshold the rubber band is SHOWN");
+  const lineCss = world.get(line, W.UI_LAYOUT).css;
+  assert(/left:10px;top:20px;width:201\.246/.test(lineCss), `the geometry is DATA, anchored at the drag's anchor (${lineCss})`);
+  assert(/rotate\(63\.4/.test(lineCss), "…and rotated to point at the pointer");
   equal(world.get(a.key, W.UI_STATE).selected, true, "the hovered keycap is lit");
 
   gesture.drag = null;
   gesture.hover = null;
   system.step();
-  equal(lines[lines.length - 1], "hide", "letting go hides the line");
+  equal(world.get(line, W.UI_STATE).hidden, true, "letting go hides the line");
   equal(world.get(a.key, W.UI_STATE).selected, false, "…and clears the highlight");
   K.clearKeybindPanels();
 });
@@ -1389,14 +1688,10 @@ function registrations() {
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
-    INVENTORY_VIEW_ACCESS: (() => {
-      const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ui", "inventory.ts"), "utf8");
-      const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
-      const widgets = load("ecs/ui/widgets.js");
-      const names = [...new Set([...block.matchAll(/\b(UI_[A-Z]+)\b/g)].map((m) => m[1]))];
-      if (names.length === 0) throw new Error("INVENTORY_VIEW_ACCESS declares no widget component");
-      return { reads: [C.INVENTORY], writes: names.map((name) => widgets[name]) };
-    })(),
+    // The inventory reconcile is a SYSTEM now (ecs/ui/inventory.ts), so its declared access is loaded like
+    // every other one. It used to be a method on the VIEW, which the gate could only read as source text
+    // (the view imports the renderer and is not compiled here).
+    INVENTORY_VIEW_ACCESS: load("ecs/ui/inventory.js").INVENTORY_VIEW_ACCESS,
     UI_RENDER_ACCESS: load("ecs/ui/system.js").UI_RENDER_ACCESS,
     UI_BINDING_ACCESS: load("ecs/ui/bindings.js").UI_BINDING_ACCESS,
     UI_LOADING_ACCESS: load("ecs/ui/loading.js").UI_LOADING_ACCESS,
@@ -1405,6 +1700,7 @@ function registrations() {
     UI_TOAST_ACCESS: load("ecs/ui/toast.js").UI_TOAST_ACCESS,
     UI_KEYBIND_ACCESS: load("ecs/ui/keybind.js").UI_KEYBIND_ACCESS,
     UI_NAVIGATION_ACCESS: load("ecs/ui/navigation.js").UI_NAVIGATION_ACCESS,
+    DELAYS_ACCESS: load("ecs/systems/delays.js").DELAYS_ACCESS,
   };
   return blocks.map((block) => {
     const accessName = /\.\.\.([A-Z_]+_ACCESS)/.exec(block)?.[1];
@@ -1462,6 +1758,10 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["ui.toast"],
     ["ui.keybind"],
     ["ui.navigation"],
+    // The delayed intents are applied right after the systems that decide them and before the frame is
+    // painted. It writes ui.navigation's two targets (`pointerLock` / `cursor`), so the conflict rule
+    // FORCES the edge — and `before: ["ui.widgets"]` is what keeps the reconciler the last system.
+    ["ui.delays"],
     ["ui.widgets"],
   ];
   equal(JSON.stringify(names("fixed")), JSON.stringify(expectedFixed), "fixed batches");
@@ -1832,8 +2132,50 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   assert(/writeSettings\(report\.merged\)/.test(main), "…and writes the repaired file back");
   assert(/backupSettingsFile\(\)/.test(main), "an UNREADABLE file is backed up before being rebuilt");
   assert(/writeSettings\(\{ \.\.\.inForce \}\)/.test(main), "…and rebuilt from the values in force");
-  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds"]) {
+  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds", "diagLog"]) {
     assert(new RegExp(`\\n    ${key}:`).test(main), `the schema lists "${key}"`);
+  }
+  // The "日志检测" switch is a plain boolean in the same file, so a hand-edited `"diagLog": "yes"` is
+  // repaired by TYPE like every other unusable value.
+  const diag = diffSettings({ diagLog: "yes" }, { ...inForce, diagLog: true });
+  equal(diag.fixed.join(","), "diagLog", "the diagnostic-log switch is repaired like any other setting");
+  equal(diag.merged.diagLog, true, "…by writing the value in force");
+});
+
+check("the diagnostic probes have ONE switch, and it filters at the log sink", () => {
+  // The probe lines (FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE#/HOOKPROBE) are what made the
+  // "held key" investigation possible, and they are also the only thing that writes several lines per
+  // second forever. The switch is a settings-panel toggle (default ON) and it filters in `logDebug` — the
+  // ONE place every probe line passes through — so the event lines (BOOT / SETTINGS / LOCK / CURSOR /
+  // ERROR …) are never affected, and a new probe only has to be added to the prefix table.
+  const shell = stripComments(readSource("src/platform/shell.ts"));
+  assert(/export function setDiagLogEnabled/.test(shell) && /export function isDiagLogEnabled/.test(shell),
+    "the switch is a getter/setter pair on the log sink");
+  assert(/if \(!diagLogEnabled && isProbeLine\(line\)\) return;/.test(shell),
+    "…and logDebug filters the probe lines with it");
+  assert(/export function appendDebugLog/.test(shell) && !/isProbeLine/.test(shell.split("export function appendDebugLog")[1].split("export function logDebug")[0]),
+    "the error/console channel (appendDebugLog) stays unfiltered");
+  for (const prefix of ["PHYS ", "FRAME ", "STALL ", "LOOK#", "RAWLAG ", "RAWMON ", "HOOKPROBE ", "SPACE#", "MOUSE#"]) {
+    assert(shell.includes(`"${prefix}"`), `the filter table knows the "${prefix.trim()}" probe`);
+  }
+  const main = stripComments(readSource("src/main.ts"));
+  assert(/setDiagLogEnabled\(readSettings\(\)\.diagLog !== false\)/.test(main),
+    "the composition root loads it (default ON)");
+  assert(/s\.diagLog = isDiagLogEnabled\(\)/.test(main), "…and persists it with the other settings");
+  const menu = stripComments(readSource("src/ui/menu.ts"));
+  assert(/settings\.diagLogOn/.test(menu) && /settings\.diagLogOff/.test(menu),
+    "the shared settings panel renders it as a two-state toggle");
+  // The label has to exist in every shipped dictionary, or the button would show the raw key.
+  for (const lang of ["zh", "en", "ja"]) {
+    const dict = JSON.parse(
+      require("node:fs").readFileSync(
+        path.join(ROOT, "packs", "VoxelEngineNWWebrp", "assets", "voxel", "lang", `${lang}.json`),
+        "utf8",
+      ),
+    );
+    for (const key of ["settings.diagLogOn", "settings.diagLogOff"]) {
+      assert(typeof dict[key] === "string" && dict[key].length > 0, `${key} is translated (${lang})`);
+    }
   }
 });
 
@@ -1922,6 +2264,32 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   assert(/"locale"/.test(stripComments(readSource("src/ecs/ui/system.ts"))),
     "the reconciler declares the language read");
 
+  // The GLOBAL STYLE (the font pair + the root font size) is the reconciler's to apply, not the config
+  // modules'. They used to fire `applyFont()` / `applyUIScale()` themselves: a DOM write from outside
+  // any system, past no barrier, and — for the root font size — repeated unconditionally on every resize.
+  // The values live with the resources; the write is HERE, diffed against what was last applied.
+  const renderSrc = stripComments(readSource("src/ecs/ui/system.ts"));
+  const fontsSrc = stripComments(readSource("src/ui/fonts.ts"));
+  const scaleSrc = stripComments(readSource("src/ui/uiscale.ts"));
+  const bootSrc = stripComments(readSource("src/main.ts"));
+  for (const [file, src] of [["src/ui/fonts.ts", fontsSrc], ["src/ui/uiscale.ts", scaleSrc]]) {
+    // The mount root uiStage is this module's own business (the reconciler is HANDED it). What it may
+    // not do any more is apply the DOCUMENT ROOT's style — that is the reconciler's one DOM write.
+    equal(countOf(src, /documentElement|style\.(?:setProperty|fontSize)/g), 0,
+      `${file} still applies the global style itself`);
+  }
+  assert(/export function currentFontCss\(\)/.test(fontsSrc), "fonts.ts exports the VALUE (the css pair)");
+  assert(/export function currentRootFontPx\(\)/.test(scaleSrc), "uiscale.ts exports the VALUE (the root size)");
+  assert(/readsExternal:\s*\[[^\]]*"font"[^\]]*"uiScale"/.test(renderSrc),
+    "…and the reconciler declares reads of both (or its model of itself is a lie)");
+  for (const [what, needle] of [
+    ["the font pair", /document\.documentElement\.style\.setProperty\("--font-/],
+    ["the root font size", /document\.documentElement\.style\.fontSize/],
+  ]) {
+    assert(needle.test(renderSrc), `the reconciler applies ${what}`);
+  }
+  equal(countOf(bootSrc, /applyFont\(|applyUIScale\(/g), 0, "the composition root applies neither by hand");
+
   // The cached click permission is gone from all three places that used to move it around.
   equal(countOf(stripComments(readSource("src/ecs/resources.ts")), /clickLockAllowed/g), 0,
     "INPUT_STATE has no click-permission field");
@@ -1934,7 +2302,145 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   assert(!/insertResource\((?:DICT|DICTS|BLOCKS|BLOCK_REGISTRY|CATALOG)/.test(main), "assets are not resources");
 });
 
-check("ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ui", "inventory.ts"), "utf8");
+check("the presentation objects are RESOURCES, not constructor dependencies", () => {
+  // The three.js scene, the camera, the renderer, the frame-time sampler, the canvas host, the UI mount
+  // root and the chunk-mesh cache used to arrive as CONSTRUCTOR ARGUMENTS — the only shared state in the
+  // process with no owner. They are world state, so the world holds them and each system resolves what
+  // it uses (ecs/presentation.ts). Both halves are asserted: the root inserts every one, and none of
+  // them is handed to a system any more — that second half is the regression this group exists for.
+  const P = load("ecs/presentation.js");
+  const main = stripComments(readSource("src/main.ts"));
+  for (const name of [
+    "SCENE3D",
+    "CAMERA3D",
+    "RENDERER3D",
+    "PERF_SAMPLER",
+    "CANVAS_HOST",
+    "UI_MOUNT",
+    "CHUNK_MESHES",
+  ]) {
+    assert(typeof P[name]?.name === "string", `${name} is a resource token`);
+    assert(new RegExp(`insertResource\\(${name},`).test(main), `the composition root inserts ${name}`);
+  }
+  // The consumers resolve them from the World — the shape every other resource uses.
+  for (const [file, token] of [
+    ["src/rendering/camera-view.ts", "CAMERA3D"],
+    ["src/ecs/systems/chunkstream.ts", "CHUNK_MESHES"],
+    ["src/ecs/systems/diagnostics.ts", "PERF_SAMPLER"],
+    ["src/ecs/systems/diagnostics.ts", "RENDERER3D"],
+    ["src/ecs/systems/input.ts", "RENDERER3D"],
+    ["src/ecs/ui/system.ts", "UI_MOUNT"],
+  ]) {
+    assert(
+      new RegExp(`resource\\(${token}\\)`).test(stripComments(readSource(file))),
+      `${file} resolves ${token}`,
+    );
+  }
+  // …and the constructor signatures lost their presentation arguments.
+  for (const [what, needle] of [
+    ["the camera view", /new CameraViewSystem\(world\)/],
+    ["the chunk stream", /new ChunkStreamSystem\(world\)/],
+    ["the device layer", /new PlayerInputSystem\(world, logDebug, inWorld\)/],
+    ["the reconciler", /new UiRenderSystem\(world, \{\s*translate:/],
+  ]) {
+    assert(needle.test(main), `${what} takes no presentation object any more`);
+  }
+  const diagDeps = /new DiagnosticsSystem\(([^)]*)\)/.exec(main);
+  assert(diagDeps !== null, "diagnostics is constructed");
+  equal(diagDeps[1].trim(), "world", "diagnostics takes NOTHING but the world (a view callback and another "
+    + "system's queues used to be constructor arguments — they are resources now)");
+  // The CANVAS SIZE belongs to the FRAME, not to a lane: a MENU frame and a LOAD frame run the ui lane
+  // alone, so a size applied by `renderer.draw` was applied only in a game — resize at the main menu and the
+  // panorama's canvas kept its old pixel size until a world was entered (that bug shipped once).
+  assert(/function frame\(\)[\s\S]{0,200}applyViewportSize\(\)/.test(main),
+    "the frame applies the viewport size, before the mode body");
+  assert(/run: \(\) => world\.resource\(RENDERER3D\)\.render\(/.test(main),
+    "…and the draw only draws (it must not resize the canvas)");
+  // A WINDOW GEOMETRY change is a DEVICE signal treated like losing the window: hand the mouse back and
+  // pause if the player was playing. It is deliberately NOT a blur — dragging a border keeps the window
+  // focused and the cursor inside its rect — and it is the only signal that catches the reported bug
+  // (start a resize-drag while a world loads, the entry locks the mouse on top of it, then both the drag
+  // and the view rotation work).
+  assert(/onWinGeometry\(/.test(main), "the window's geometry change is handled as a signal");
+  assert(/suppressGeometryPause\(\)/.test(main) && /performance\.now\(\) < suppressGeometryUntil/.test(main),
+    "…while our OWN window-mode switch suppresses it (fullscreen must not open the pause menu)");
+  // CAPTURE REQUIRES THE FOREGROUND. The browser path refuses pointer lock by itself, which is why the NW.js
+  // version could drop the focus gate; the NATIVE capture (ClipCursor) does not look at the foreground at
+  // all, so an AUTOMATIC relock — the world entry is the one — would capture the mouse while the user is in
+  // another app. Three places, and the gate pins all three.
+  const pointerlockSrc = stripComments(readSource("src/platform/pointerlock.ts"));
+  assert(/focused: \(\) => boolean/.test(pointerlockSrc), "the lock manager takes a foreground predicate");
+  assert(/if \(!this\.deps\.focused\(\)\)/.test(pointerlockSrc), "…and refuses to capture without it");
+  assert(/focused: winFocused/.test(main), "…which the composition root ships from the shell");
+  assert(/if \(winFocused\(\)\) \{[\s\S]{0,120}relock\("world entered"\)/.test(main),
+    "the world entry captures only in the foreground (otherwise it pauses)");
+  assert(/onCaptureLost\(/.test(main), "…and a rust-side teardown is handled as a lost window");
+  const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
+  assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
+    "the rust sentinel tears a background capture down and notifies the frontend");
+  // A2: the chunk-mesh cache is the resource, not a private field of the streaming system.
+  const stream = stripComments(readSource("src/ecs/systems/chunkstream.ts"));
+  equal(countOf(stream, /private readonly meshes|private readonly empty|this\.meshes|this\.empty\b/g), 0,
+    "chunkstream keeps no private mesh cache");
+  assert(/createChunkMeshCache\(/.test(main), "the cache is created by the composition root");
+  // …and the module stays importable in Node: no three.js at RUNTIME. It is typed against it, which is
+  // what makes the gate above possible (no GPU, no DOM).
+  const presentation = stripComments(readSource("src/ecs/presentation.ts"));
+  assert(/import type \* as THREE/.test(presentation), "presentation.ts types against three.js");
+  equal(countOf(presentation, /^import (?!type)[^\n]*three\/webgpu/gm), 0,
+    "…with a TYPE-ONLY import (a runtime one would break the Node gate)");
+});
+
+check("the input race guards' state is a RESOURCE (and the logic did not move)", () => {
+  // A3: the ten fields that make player.input race-sensitive are INPUT_TIMING now. What the change buys
+  // is that the STATE is visible — a test and a log can see why a mousemove was swallowed — never that
+  // the logic is different. So this group asserts where the facts live, and the behavior check further
+  // down asserts that arming the grace window shows up in the resource.
+  const R = load("ecs/resources.js");
+  assert(typeof R.INPUT_TIMING?.name === "string", "INPUT_TIMING is a resource token");
+  assert(typeof R.createInputTiming === "function", "…with a factory");
+  const timing = R.createInputTiming();
+  for (const field of [
+    "skipFirstMove",
+    "lockGraceUntil",
+    "unlockIsIntentional",
+    "rawTakeoverActive",
+    "offscreenCacheUntil",
+    "offscreenCached",
+    "lastSpaceDown",
+    "spaceSeq",
+    "mouseSeq",
+    "lastMouseLog",
+  ]) {
+    assert(field in timing, `the timing resource carries ${field}`);
+  }
+  const src = stripComments(readSource("src/ecs/systems/input.ts"));
+  equal(
+    countOf(
+      src,
+      /private (?:readonly )?(?:skipFirstMove|lockGraceUntil|unlockIsIntentional|rawTakeoverActive|offscreenCacheUntil|offscreenCached|lastSpaceDown|spaceSeq|mouseSeq|lastMouseLog)\b/g,
+    ),
+    0,
+    "player.input keeps no private copy of a race-guard field",
+  );
+  assert(/resource\(INPUT_TIMING\)/.test(src), "…it resolves the resource instead");
+  // A click may not CAPTURE the mouse before a world exists: the loading screen owns no modal flag, so the
+  // UI_MODAL guard let a click there engage the native capture — and the world entry then re-locked on top
+  // of it, which is the state the resize-drag bug needed.
+  assert(/!this\.inWorld\(\)/.test(src), "…and the click-to-capture path requires a running world");
+  // The queued intents are a resource TOO (INPUT_INTENTS) — but they stayed the system's own producer and
+  // consumer: no private field, a getter over the resource's array, and the drain happens in place at the
+  // top of the tick. That shape is what keeps "nothing outside sees a half-applied frame" true.
+  assert(/resource\(INPUT_INTENTS\)/.test(src), "…so is the pending intent queue");
+  assert(/private get pending\(\): InputIntent\[\]/.test(src), "…read through a getter, not a private copy");
+  equal(countOf(src, /private pending: InputIntent\[\]/g), 0, "the old private queue field is gone");
+  assert(/queue\.length = 0/.test(src), "…and the tick still drains it in place (no allocation, no reordering)");
+  assert(/writesExternal: \[[^\]]*"inputTiming"/.test(src), "…and the access declaration names it");
+  assert(/insertResource\(INPUT_TIMING,/.test(stripComments(readSource("src/main.ts"))),
+    "the composition root inserts it");
+});
+
+check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ecs", "ui", "inventory.ts"), "utf8");
   const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
   assert(/reads:\s*\[INVENTORY\]/.test(block), "reads INVENTORY");
   // It writes WIDGET DATA now, not DOM: that is what makes it conflict with the reconciler and what
@@ -2150,7 +2656,7 @@ check("player.input is a scheduled system with a declared access set", () => {
   for (const target of ["pointerLock", "windowGeometry"]) {
     assert((def.readsExternal ?? []).includes(target), `readsExternal declares "${target}"`);
   }
-  for (const target of ["inputState", "inputDiagnosticQueues"]) {
+  for (const target of ["inputState", "inputTiming", "inputDiagnosticQueues"]) {
     assert((def.writesExternal ?? []).includes(target), `writesExternal declares "${target}"`);
   }
   const diagnostics = registrations().find((d) => d.name === "diagnostics");
@@ -2181,9 +2687,21 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     },
     pointerLockElement: null,
   };
+  // The race guards' state is the INPUT_TIMING resource now (A3), so the check seeds it and restores it:
+  // leaving a grace window armed here would swallow the next check's mousemove.
+  const R = load("ecs/resources.js");
+  world.insertResource(R.INPUT_TIMING, R.createInputTiming());
+  const timing = world.resource(R.INPUT_TIMING);
+  // …and the three other resources the device layer resolves: the SPACE/MOUSE diagnostic log, the pending
+  // intent queue and the pointer position (all of them world state now, so they are inserted, not handed in).
+  world.insertResource(R.INPUT_DIAGNOSTICS, R.createInputDiagnostics());
+  world.insertResource(R.INPUT_INTENTS, R.createInputIntentLog());
+  world.insertResource(R.POINTER, R.createPointer());
+  const diag = world.resource(R.INPUT_DIAGNOSTICS);
   const saved = {
     devices: { ...devices },
     ui: { ...ui },
+    timing: { ...timing },
     control: { mode: control.mode, flying: control.flying },
     motion: { vy: motion.vy, onGround: motion.onGround },
     yaw: C.VIEW.yawDelta[index],
@@ -2191,7 +2709,10 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
   };
   control.keys.clear();
   try {
-    const input = new PlayerInputSystem(world, dom, () => {});
+    // The device layer takes its canvas from the RENDERER3D resource (that element IS the renderer's
+    // `domElement`), so the stub renderer is what makes this stub canvas reach it.
+    world.insertResource(load("ecs/presentation.js").RENDERER3D, { domElement: dom });
+    const input = new PlayerInputSystem(world, () => {});
     for (const type of ["click"]) {
       assert(typeof domListeners[type] === "function", `the canvas listens for ${type} (lock grab)`);
     }
@@ -2213,6 +2734,29 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     input.step();
     equal(control.keys.has("KeyW"), false, "…and the tick releases it");
 
+    // 1b. TAB: the browser default is CANCELLED while the game owns the mouse — Chromium's focus traversal
+    //     walks out of the tab order, the window deactivates and our "lost the window → pause" handler fires
+    //     (`code=Tab` → `WINFOCUS blur` → `blur -> pause menu`). But the KEY must not be SWALLOWED: the bind
+    //     panel accepts Tab, and an early return here recorded the bind and then never fired it — which is
+    //     exactly the bug this asserts.
+    let tabDefault = false;
+    handlers.keydown({ code: "Tab", repeat: false, preventDefault: () => { tabDefault = true; } });
+    equal(tabDefault, true, "TAB's focus traversal is cancelled while the mouse is captured");
+    equal(control.keys.has("Tab"), false, "…and nothing is written at event time");
+    input.step();
+    equal(control.keys.has("Tab"), true, "…but the key DOES reach the tick, so a TAB bind can fire");
+    handlers.keyup({ code: "Tab" });
+    input.step();
+    equal(control.keys.has("Tab"), false, "…and it releases like any other key");
+    // In a MENU (not captured) TAB keeps its default: the page still needs focus traversal there.
+    Object.assign(devices, { locked: false });
+    tabDefault = false;
+    handlers.keydown({ code: "Tab", repeat: false, preventDefault: () => { tabDefault = true; } });
+    equal(tabDefault, false, "…while in a menu the browser keeps its own TAB behaviour");
+    handlers.keyup({ code: "Tab" });
+    input.step();
+    Object.assign(devices, { locked: true });
+
     // 2. mouse look: scaled at event time, added by the tick.
     const yaw = C.VIEW.yawDelta[index];
     const pitch = C.VIEW.pitchDelta[index];
@@ -2226,10 +2770,10 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     control.mode = "walk";
     motion.vy = 0;
     motion.onGround = true;
-    const logged = Math.min(10, input.spaceLog.length + 1);
+    const logged = Math.min(10, diag.spaceLog.length + 1);
     handlers.keydown({ code: "Space", repeat: false });
     equal(motion.vy, 0, "the jump impulse waits for the tick");
-    equal(input.spaceLog.length, logged, "…but the press itself is logged at press time");
+    equal(diag.spaceLog.length, logged, "…but the press itself is logged at press time");
     input.step();
     equal(motion.vy, 7.5, "step() writes the impulse");
     equal(control.keys.has("Space"), true, "…and the held key");
@@ -2240,10 +2784,10 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     //    pressed twice inside one frame must not jump twice (the first press is not applied yet).
     motion.vy = 0;
     motion.onGround = true;
-    const bindLogged = Math.min(10, input.spaceLog.length + 1);
+    const bindLogged = Math.min(10, diag.spaceLog.length + 1);
     input.bindPress("Space");
     input.bindPress("Space");
-    equal(input.spaceLog.length, bindLogged, "a second press of the same frame is ignored as held");
+    equal(diag.spaceLog.length, bindLogged, "a second press of the same frame is ignored as held");
     equal(motion.vy, 0, "…and neither press has written anything yet");
     input.step();
     equal(motion.vy, 7.5, "step() writes the bind's impulse exactly once");
@@ -2258,6 +2802,18 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     handlers.keydown({ code: "Space", repeat: false });
     input.step();
     equal(motion.vy, 0, "a press while a modal UI owns the input writes no impulse at all");
+
+    // 6. the race guards' state lives in a RESOURCE now (INPUT_TIMING) — and the point of the move is
+    //    that the gate can SEE it. `prepareUnlock()` is still ONE synchronous call at the same moment
+    //    (iron rule 3: nothing about the timing changed); what changed is that "was the grace window
+    //    armed" used to require instrumenting the system to answer.
+    Object.assign(ui, { inventory: false });
+    Object.assign(devices, { locked: true, freeMouseActive: true });
+    equal(timing.lockGraceUntil, 0, "no grace window is armed before an intentional unlock");
+    input.prepareUnlock();
+    assert(timing.lockGraceUntil > performance.now(), "…and arming it is visible IN the resource");
+    equal(timing.unlockIsIntentional, true, "…together with 'this unlock was ours'");
+    equal(devices.freeMouseActive, false, "…while free-mouse mode drops at once, as before");
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -2266,6 +2822,7 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     Object.assign(motion, saved.motion);
     Object.assign(devices, saved.devices);
     Object.assign(ui, saved.ui);
+    Object.assign(timing, saved.timing);
     C.VIEW.yawDelta[index] = saved.yaw;
     C.VIEW.pitchDelta[index] = saved.pitch;
   }

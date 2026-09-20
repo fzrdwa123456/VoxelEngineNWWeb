@@ -51,6 +51,13 @@ export async function preloadShell(): Promise<ShellSnapshot> {
     windowFocused = false;
     blurListeners.forEach((cb) => cb());
   });
+  void listen("win-geometry", () => {
+    geometryListeners.forEach((cb) => cb());
+  });
+  // Rust 侧的兜底：捕获开着但窗口不是前台（ClipCursor 不看前台），约 32ms 内就会被拆掉并通知这里。
+  void listen("capture-lost", () => {
+    captureLostListeners.forEach((cb) => cb());
+  });
   flushSoon();
   return snap;
 }
@@ -134,6 +141,38 @@ export function initShell(): void {
   };
 }
 
+// ===== 诊断探针的开关（设置面板里的"日志检测"）=====
+// 原因：为了查"按住键转视角不顺滑"，输入/帧/光标这几条路都挂上了周期性的探针行（`FRAME`/`LOOK`/
+// `RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/`HOOKPROBE`）。它们很有用（以后再查这类问题
+// 直接看日志），但一秒好几行、会一直写盘。所以给一个开关，**默认开**，关掉后 debug.log 只留真正的
+// 事件记录（BOOT / SETTINGS / LOCK / CURSOR / GEOMETRY / ERROR / REJECT / KBCAP…）。
+//
+// 开关的**唯一过滤点在 logDebug 里**（所有探针行都从那里过），所以加探针只需要把前缀加进这张表。
+// `loadDebugLog` 之外的东西不受影响：`appendDebugLog` 是错误/console 的通道，永远写。
+let diagLogEnabled = true;
+/** 探针行的前缀（`SPACE#`/`MOUSE#`/`LOOK#` 带序号，所以按前缀判）。 */
+const PROBE_PREFIXES = [
+  "PHYS ",
+  "FRAME ",
+  "STALL ",
+  "LOOK#",
+  "RAWLAG ",
+  "RAWMON ",
+  "HOOKPROBE ",
+  "SPACE#",
+  "MOUSE#",
+];
+export function isDiagLogEnabled(): boolean {
+  return diagLogEnabled;
+}
+export function setDiagLogEnabled(on: boolean): void {
+  diagLogEnabled = on;
+}
+function isProbeLine(line: string): boolean {
+  for (const p of PROBE_PREFIXES) if (line.startsWith(p)) return true;
+  return false;
+}
+
 // logs\debug.log only: the exact line, no timestamp (the shell's own error handlers)
 export function appendDebugLog(line: string): void {
   queue("debug", line);
@@ -141,6 +180,7 @@ export function appendDebugLog(line: string): void {
 
 // logs\debug.log with a [<ms>ms] prefix — the general-purpose logger every module uses
 export function logDebug(line: string): void {
+  if (!diagLogEnabled && isProbeLine(line)) return; // 探针关掉：不写盘（事件记录照写）
   appendDebugLog(`[${performance.now().toFixed(0)}ms] ${line}`);
 }
 
@@ -195,6 +235,12 @@ export function showWindow(): void {
 let windowFocused = false;
 const focusListeners = new Set<() => void>();
 const blurListeners = new Set<() => void>();
+/** 窗口几何变化（缩放 / 移动 / DPI）。注意它**不是**"鼠标离开应用"：拖边框时窗口仍然有焦点、
+ *  光标也还在窗口矩形内（只是在非客户区），所以 blur/mouseleave 都不会来 —— 见 main.ts 的
+ *  onWinGeometry 和 win.rs::reclip_mouse_capture 里那段说明。 */
+const geometryListeners = new Set<() => void>();
+/** 捕获被 Rust 侧拆掉了（"捕获开着但窗口不是前台"的系统级兜底）：前端据此放鼠标、必要时暂停。 */
+const captureLostListeners = new Set<() => void>();
 
 export function trackWindowFocus(): void {
   windowFocused = snapshot.focused;
@@ -219,6 +265,20 @@ export function onWinFocus(cb: () => void): void {
 
 export function onWinBlur(cb: () => void): void {
   blurListeners.add(cb);
+}
+
+/** 窗口几何变了（缩放 / 移动 / DPI）。它**不是**"鼠标离开应用"：拖边框/标题栏时窗口仍然是焦点窗口，
+ *  光标也还在窗口矩形里（只是落在非客户区），所以既没有 blur 也不会 mouseleave —— 想抓"用户在弄窗口"
+ *  只能靠这个信号（见 main.ts 的 onWinGeometry）。 */
+export function onWinGeometry(cb: () => void): void {
+  geometryListeners.add(cb);
+}
+
+/** 捕获被 Rust 侧拆掉了：`capture-foreground-check` 发现"捕获开着但窗口不是前台"就会释放并发这个事件。
+ *  前端要把它当"丢了窗口"处理（放鼠标 + 世界里且无 UI 时暂停）—— 只在 Rust 侧释放不够，前端的
+ *  `INPUT_STATE.locked` 还是 true。 */
+export function onCaptureLost(cb: () => void): void {
+  captureLostListeners.add(cb);
 }
 
 // ===== GPU vsync 开关 =====

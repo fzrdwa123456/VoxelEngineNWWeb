@@ -71,6 +71,7 @@ unsafe fn client_rect_on_screen(hwnd: isize) -> Option<Rect> {
 pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     unsafe {
         if !on {
+            CAPTURE_HWND.store(0, Ordering::Relaxed);
             return ClipCursor(std::ptr::null()) != 0;
         }
         if hwnd == 0 {
@@ -84,6 +85,9 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
             return false;
         }
         let ok = ClipCursor(&rc) != 0;
+        if ok {
+            CAPTURE_HWND.store(hwnd, Ordering::Relaxed);
+        }
         // **故意不动光标位置**。捕获是"转隐藏"的一步，按规则**隐藏路径不居中、不挪光标** ——
         // 之前这里有一句 SetCursorPos(窗口中心)，结果进世界 / 点「回到游戏」时玩家会看见
         // 光标先往窗口中间跳一下再消失（就是"隐藏却居中了"那个毛病）。
@@ -92,11 +96,77 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     }
 }
 
+/// **窗口几何变了：把裁剪矩形重新算一遍。**
+///
+/// 为什么必须有：`ClipCursor` 的矩形是「开始捕获那一刻」算的，窗口一缩放/移动它就**过时**了 ——
+/// 光标于是能跑到边框/标题栏（**非客户区**，Chromium 的 `cursor:none` 管不到），玩家就能一边拖窗口
+/// 一边转视角，松手后光标还在窗口里到处滑。
+///
+/// 前端现在对「捕获期间的几何变化」是**直接放捕获 +（世界里且无 UI 时）弹暂停菜单**（main.ts 的
+/// `onWinGeometry`），所以多数情况下这里无事可做；但**程序自己改窗口模式**（全屏 / 窗口化）时前端会
+/// 抑制那次暂停 —— 那时捕获还开着，矩形必须跟上。它顺带覆盖 DPI 变化、窗口吸附、被别的程序挪动等
+/// 其它几何变化。返回是否真的重夹了（诊断用）。
+pub fn reclip_mouse_capture() -> bool {
+    let hwnd = CAPTURE_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe {
+        let rc = match client_rect_on_screen(hwnd) {
+            Some(r) => r,
+            None => return false,
+        };
+        if rc.right <= rc.left || rc.bottom <= rc.top {
+            return false;
+        }
+        ClipCursor(&rc) != 0
+    }
+}
+
 /// 无条件释放捕获（失焦 / 退出时的安全网；重复调用无害）
 pub fn release_mouse_capture() {
+    CAPTURE_HWND.store(0, Ordering::Relaxed);
     unsafe {
         ClipCursor(std::ptr::null());
     }
+}
+
+/// **捕获只允许在前台开着 —— 这条是系统级兜底。**
+///
+/// 为什么必须有：`ClipCursor` **不看**窗口是不是前台，而原始输入用的是 `RIDEV_INPUTSINK`（**后台也收**）。
+/// 于是"在后台把捕获打开"的后果是三重同时发生的 —— 全都实测过：
+///   * 系统光标被夹在我们窗口的矩形里，而那块屏幕区域上现在是**别的应用** —— 光标出不去；
+///   * 视角照样跟着转（后台的原始输入照收）；
+///   * 光标被全局隐藏（CSS/意图都是 hidden，8ms 哨兵还每 16ms 强制维持）。
+///
+/// 前端已经加了焦点门禁（`PointerLock` 的 `focused`）挡住正常路径（进世界时的自动 relock 是最容易踩的
+/// 一处），这一条是**兜底**：任何让捕获在非前台打开或继续存在的路径（UAC 抢焦点、系统级切换、前端漏掉的
+/// 事件）都会在约 32ms 内被拆掉。
+///
+/// 返回 `true` 表示**刚刚释放**：调用方负责 emit `capture-lost` 让前端做"放鼠标 +（世界里且无 UI 时）
+/// 暂停"那一套 —— 只在 Rust 侧释放是不够的，前端那边的 `INPUT_STATE.locked` 还是 true（视角照转、光标
+/// 照隐藏），等于没救。释放与恢复光标都 marshal 到主线程（`SetCursor`/`ShowCursor`/`ClipCursor` 那套的
+/// 规矩；这个函数本身跑在原始输入的推送线程上）。
+pub fn capture_foreground_check(app: &tauri::AppHandle) -> bool {
+    let hwnd = CAPTURE_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        FG_MISMATCH_TICKS.store(0, Ordering::Relaxed);
+        return false;
+    }
+    if unsafe { GetForegroundWindow() } == hwnd {
+        FG_MISMATCH_TICKS.store(0, Ordering::Relaxed);
+        return false;
+    }
+    if FG_MISMATCH_TICKS.fetch_add(1, Ordering::Relaxed) + 1 < 2 {
+        return false; // 前台切换的瞬间本来就会短暂不一致：连续两次（≈32ms）才动手
+    }
+    FG_MISMATCH_TICKS.store(0, Ordering::Relaxed);
+    let h = app.clone();
+    let _ = h.run_on_main_thread(move || {
+        release_mouse_capture();
+        apply_cursor(true); // 光标跟着放出来，别把它留在隐藏状态
+    });
+    true
 }
 
 /// 切回焦点之后"踢"一下光标，让它**重新画到屏幕上**。
@@ -146,6 +216,11 @@ pub fn kick_cursor_repaint() {
 static DESIRED_CURSOR: AtomicU8 = AtomicU8::new(0); // 0=未知 1=可见 2=隐藏
 static CURSOR_HWND: AtomicIsize = AtomicIsize::new(0);
 static CURSOR_ENFORCED: AtomicU32 = AtomicU32::new(0); // 纠正次数（诊断）
+/// 当前**开着**捕获的那个窗口（0 = 没捕获）。`set_mouse_capture` 记下、`release_mouse_capture` 清掉，
+/// 于是「窗口几何变了要不要重夹一下」有一个便宜的答案（见 `reclip_mouse_capture`）。
+static CAPTURE_HWND: AtomicIsize = AtomicIsize::new(0);
+/// 连续几次 tick 发现"捕获开着但窗口不是前台"（去抖：前台切换的瞬间本来就会短暂不一致）
+static FG_MISMATCH_TICKS: AtomicU8 = AtomicU8::new(0);
 
 #[repr(C)]
 struct CursorInfo {
@@ -207,10 +282,17 @@ fn apply_cursor(visible: bool) {
 // （对比：用低级键盘钩子吞掉 Alt 会把 Alt+Tab 一起废掉，所以不采用。）
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_KEYMENU: usize = 0xF100;
+/// 键盘的"上下文菜单"手势（菜单键 / Shift+F10）在系统层也会以 WM_CONTEXTMENU 送到窗口：默认处理会
+/// "准备弹出菜单"，而弹出前 Windows 会把光标显示出来 —— 我们那个 8ms 光标哨兵随即又按回隐藏，玩家看到的
+/// 就是"鼠标闪一下"。和 Alt 的 SC_KEYMENU 同一招：在窗口过程里吞掉，不调 DefWindowProc。
+/// （页面里的 contextmenu preventDefault 拦不住这一步，WebView2 自带菜单也已经关了 —— 都不是它。）
+const WM_CONTEXTMENU: u32 = 0x007B;
+/// SC_MOUSEMENU：请求打开窗口菜单的另一种形式（和 SC_KEYMENU 同一族）
+const SC_MOUSEMENU: usize = 0xF090;
 const GWLP_WNDPROC: i32 = -4;
 const WM_NCDESTROY: u32 = 0x0082;
 
-/// 子类化之前的窗口过程，除 SC_KEYMENU 外全部转发给它（也就是 tao 自己的那份）
+/// 子类化之前的窗口过程，除上面那几条菜单消息外全部转发给它（也就是 tao 自己的那份）
 static OLD_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 
 unsafe extern "system" fn menu_suppressor_proc(
@@ -219,8 +301,10 @@ unsafe extern "system" fn menu_suppressor_proc(
     w_param: usize,
     l_param: isize,
 ) -> isize {
-    if msg == WM_SYSCOMMAND && (w_param & 0xFFF0) == SC_KEYMENU {
-        // 吞掉：不调 DefWindowProc，"Alt 打开系统菜单"就不会发生
+    let sys_menu = msg == WM_SYSCOMMAND
+        && ((w_param & 0xFFF0) == SC_KEYMENU || (w_param & 0xFFF0) == SC_MOUSEMENU);
+    if sys_menu || msg == WM_CONTEXTMENU {
+        // 吞掉：不调 DefWindowProc，菜单模式/上下文菜单都不会启动（也就不会把光标亮出来）
         return 0;
     }
     let old = OLD_WNDPROC.load(Ordering::SeqCst);
@@ -317,6 +401,18 @@ pub fn cursor_enforced_count() -> u32 {
     CURSOR_ENFORCED.load(Ordering::Relaxed)
 }
 
+/// 诊断（RAWMON 行）：期望的光标状态（0 未知 / 1 可见 / 2 隐藏）与系统此刻**是否真的显示**光标。
+/// 两个数放一起看就能判断"哨兵是不是在跟系统拉锯"：`desired=2 showing=1` 反复出现 = 系统一直把光标
+/// 显示回来、哨兵一直按回去 —— 每次都要 marshal 到主线程，而主线程正是跑渲染的那条。
+pub fn cursor_state() -> (u8, bool) {
+    (DESIRED_CURSOR.load(Ordering::Relaxed), cursor_visible_now())
+}
+
+/// 诊断（RAWMON 行）：现在有没有开着鼠标捕获（ClipCursor）
+pub fn capture_active() -> bool {
+    CAPTURE_HWND.load(Ordering::Relaxed) != 0
+}
+
 /// 让 WebView2 **重新决定一次光标形状** —— 发一条 `WM_SETCURSOR` 给光标下的那个窗口。
 ///
 /// 这就是 Windows 在处理**真实鼠标输入之前**做的事，所以 Chromium 会走完全相同的路径
@@ -404,6 +500,7 @@ extern "system" {
     fn ClientToScreen(hwnd: isize, point: *mut Point) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
     fn GetCursorInfo(info: *mut CursorInfo) -> i32;
+    fn GetForegroundWindow() -> isize;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
     // 这两个在 rawinput.rs 里也声明了（那边不是 pub，所以这里再声明一份；
@@ -447,10 +544,21 @@ pub fn disable_browser_accelerator_keys(window: &WebviewWindow, log_root: std::p
                 .and_then(|core| core.Settings())
                 .and_then(|settings| settings.cast::<ICoreWebView2Settings3>())
                 .and_then(|settings3| settings3.SetAreBrowserAcceleratorKeysEnabled(false))
+                // **WebView2 自己的上下文菜单也要关**。它由**宿主**弹出（不是页面弹的），所以页面里
+                // `contextmenu` 的 preventDefault 挡不住它；而它在菜单键 / Shift+F10 / 右键时会弹一个
+                // 弹窗 —— Windows 会给弹窗一个**可见光标**，我们的 8ms 光标哨兵随即又把它按回隐藏，玩家
+                // 看到的就是"鼠标闪一下"。游戏里右键是"放方块"，本来就不需要任何上下文菜单。
+                .and_then(|_| {
+                    webview
+                        .controller()
+                        .CoreWebView2()
+                        .and_then(|core| core.Settings())
+                        .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(false))
+                })
         };
         let line = match result {
-            Ok(()) => "webview2: browser accelerator keys DISABLED (F3/Ctrl+F/F5/F12 no longer reach the browser)".to_string(),
-            Err(e) => format!("webview2: FAILED to disable browser accelerator keys: {e}"),
+            Ok(()) => "webview2: browser accelerator keys + DEFAULT CONTEXT MENUS disabled".to_string(),
+            Err(e) => format!("webview2: FAILED to disable browser accelerator keys / context menus: {e}"),
         };
         crate::game::append_boot(&log_root, &line);
     }) {

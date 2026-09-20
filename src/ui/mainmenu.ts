@@ -84,6 +84,8 @@ export class MainMenu {
       onFpsCap: cb.onFpsCap,
       isGpuVsyncDisabled: cb.isGpuVsyncDisabled,
       onToggleGpuVsync: cb.onToggleGpuVsync,
+      isDiagLogEnabled: cb.isDiagLogEnabled,
+      onToggleDiagLog: cb.onToggleDiagLog,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,
       onBack: () => this.panels.hideAll(),

@@ -4,38 +4,17 @@
 // createElement, no style string and no CSS literal left in this file.
 //
 // What is NOT here any more, and where it went: the F3 toggle and its `debugVisible` boolean (the
-// panel's own UI_STATE.hidden is the state, and ecs/ui/picker.ts toggles it), and `showToast()` with its
+// panel's own UI_STATE.hidden is the state, and ecs/ui/picker.ts toggles it), `showToast()` with its
 // `setTimeout` (the message and its wall-clock deadline are the TOAST resource, armed by the ShowToast
-// command and driven by ecs/ui/toast.ts). Both were "how long / whether" questions owned by a view.
+// command and driven by ecs/ui/toast.ts), and `updateDebug()` (the F3 TEXT is written by
+// ecs/systems/diagnostics.ts now, from the panel's two widget handles — the `F3_PANEL` resource — so a
+// render-lane system no longer calls into a view). All three were "how long / whether / what does it
+// say" questions owned by a view.
 //
 // Note what disappeared with the DOM: `onLangChange(refresh)` — the reconciler re-derives every label
 // from its i18n key once per frame, so a language switch needs no subscription anywhere.
 import type { Entity, World } from "../ecs/World";
-import { UI_STATE, setUiText, spawnLabel, spawnPanel } from "../ecs/ui/widgets";
-import { t } from "./i18n";
-
-export interface DebugLog {
-  label: string;
-  lines: string[];
-}
-
-export interface DebugInfo {
-  fps: number;
-  fpsCap: number;
-  x: number;
-  y: number;
-  z: number;
-  chunks: number;
-    /** null when the device does not support timestamp-query */
-  gpuMs: number | null;
-  mode: string;
-  onGround: boolean;
-  vy: number;
-  feet: number;
-    /** Nearest block top below; null when none */
-  top: number | null;
-  logs: DebugLog[];
-}
+import { spawnLabel, spawnPanel } from "../ecs/ui/widgets";
 
 export class Hud {
   private readonly crosshair: Entity;
@@ -78,29 +57,9 @@ export class Hud {
     this.toastBody = spawnLabel(world, this.toast, "text.label");
   }
 
-  /** Called once per stats frame by ecs/systems/diagnostics.ts. Display only: it writes one text
-   *  widget and never reads back from it. Whether it is SHOWN is the panel's own UI_STATE — read here,
-   *  not mirrored into a field (a second copy is how "the panel was toggled but the text kept
-   *  updating/went stale" happens). */
-  updateDebug(info: DebugInfo): void {
-    if (this.world.get(this.debugPanel, UI_STATE)?.hidden !== false) return;
-    const topFinite = info.top !== null && Number.isFinite(info.top);
-    const topStr = topFinite ? (info.top as number).toFixed(4) : t("f3.none");
-    const diff = topFinite ? (info.feet - (info.top as number)).toFixed(4) : "-";
-    const diffE = topFinite ? (info.feet - (info.top as number)).toExponential(2) : "-";
-    let text =
-      `FPS: ${info.fps.toFixed(1)} (${t("f3.cap")} ${info.fpsCap === 0 ? t("f3.unlimited") : info.fpsCap})\n` +
-      `XYZ: ${info.x.toFixed(2)} / ${info.y.toFixed(2)} / ${info.z.toFixed(2)}\n` +
-      `${t("f3.chunks")}: ${info.chunks}\n` +
-      (info.gpuMs !== null
-        ? `GPU: ${info.gpuMs.toFixed(2)} ms ≈ ${t("f3.maxFps")} ${Math.round(1000 / info.gpuMs)} FPS\n`
-        : `GPU: ${t("f3.gpuNa")}\n`) +
-      `${t("f3.phys")}: ${t("f3.mode")}=${t(`mode.${info.mode}`)} ${t("f3.ground")}=${info.onGround} ` +
-      `vy=${info.vy.toFixed(2)} feet=${info.feet.toFixed(4)} ${t("f3.top")}=${topStr} ` +
-      `${t("f3.diff")}=${diff} ${t("f3.diffE")}=${diffE}\n`;
-    for (const l of info.logs) {
-      if (l.lines.length > 0) text += `${l.label}(${t("f3.recent")}${l.lines.length}):\n${l.lines.join("\n")}\n`;
-    }
-    setUiText(this.world, this.debugBody, text, true);
+  /** The F3 panel and its text line, for the composition root to publish as the F3_PANEL resource
+   *  (diagnostics writes the text; the panel's UI_STATE.hidden is read there too). */
+  get debugPanelEntities(): { panel: Entity; body: Entity } {
+    return { panel: this.debugPanel, body: this.debugBody };
   }
 }

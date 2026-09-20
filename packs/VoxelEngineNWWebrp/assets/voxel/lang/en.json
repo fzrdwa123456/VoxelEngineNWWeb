@@ -19,6 +19,8 @@
   "settings.unlimited": "Unlimited",
   "settings.vsyncOff": "VSync: Disabled (restart to apply)",
   "settings.vsyncOn": "VSync: Enabled (restart to apply)",
+  "settings.diagLogOff": "Diagnostic log: OFF (events only)",
+  "settings.diagLogOn": "Diagnostic log: ON (probes included)",
   "settings.language": "Language",
   "settings.languageFont": "Language & Font",
   "settings.font": "Font",

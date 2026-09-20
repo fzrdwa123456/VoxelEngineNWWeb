@@ -6,12 +6,16 @@
 //
 //   Rust 采集线程 -> AtomicI32 累加 -> 节流线程每 4ms swap+emit
 //                                            ↓  Tauri 事件
-//   这里的监听器累加进本地 accDx/accDy  <- 前端
+//   这里的监听器：记诊断 + 把增量交给 `onDelta`  <- 前端
 //                                            ↓
-//   poll() 同步取走并清零（调用点一行没改）
+//   PlayerInputSystem.rawDelta()：接管/宽限/尖峰判定（事件期，rule 3），通过的部分累加
+//                                            ↓
+//   frame() 每帧一次 input.frameLook()：整帧位移变成**一个** look 意图
 //
-// 语义没变：都是"按帧批量消费相对增量"。节流是必要的，WM_INPUT 一秒上百条，
-// 一条一个 IPC 事件会把 webview 淹掉。
+// **注意最后两步**：判定在事件期、应用在帧边界。中间**没有定时器**了 —— 原来那个 8ms
+// `setInterval(…, 8)` 会被 Chromium 的输入任务优先级挤成 9~12ms 一档（按住键时尤其明显），
+// 于是"每帧分到几份视角增量"在 0/1/2/3 之间乱跳，就是"按住键转视角不顺滑"的来源。
+// 节流（4ms 合批）还是要的：WM_INPUT 一秒几百条，一条一个 IPC 事件会把 webview 淹掉。
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -30,8 +34,6 @@ export interface RawInputHandle {
    *  （退回 `requestPointerLock()`，又撞上 ESC 解锁 + 冷却），raw-input 视角接管也一起失效。
    *  resolve 的值就是可用性。 */
   readonly ready: Promise<boolean>;
-  /** Take the accumulated delta and reset it */
-  poll(): { dx: number; dy: number };
 }
 
 /** Rust `rawinput_stats` 的形状 */
@@ -44,9 +46,23 @@ interface RawStats {
   escHook: boolean;
 }
 
-let accDx = 0;
-let accDy = 0;
 let available = false;
+
+/** ===== 诊断（RAWLAG 行，每秒一行）：原始增量事件的**到达节奏**与**队列积压** =====
+ *
+ *  「按住键转视角不顺滑」要么是事件被丢/被量化，要么是事件在队列里压住了。这一行把两件事都量出来：
+ *   * `gapMax`  —— 相邻两条事件的最大到达间隔。稳态应该是 ~4ms（Rust 每 4ms 推一次）；
+ *                  如果按键期间它跳到几十毫秒、然后又连着来一串，那就是"堵塞 + 一次性冲出"。
+ *   * `backlog` —— 事件在队列里压了多久。Rust 和 JS 的时钟原点不同，所以用**最小偏移做基线**：
+ *                  offset = performance.now() - payload.t，全程最小值≈纯传输延迟；当前 offset 减掉它
+ *                  就是"比最顺的时候多压了多久"。这就是积压毫秒数的直接测量。 */
+let evCount = 0;
+let gapMax = 0;
+let lastArrive = 0;
+let minOffset = Number.POSITIVE_INFINITY;
+let backlogSum = 0;
+let backlogMax = 0;
+let lagAt = 0;
 
 /** ===== 方案 B：被 Rust 钩子吞掉的 ESC =====
  *
@@ -73,13 +89,40 @@ function installEscBridge(): void {
   });
 }
 
-export function startRawInput(): RawInputHandle {
+/** 启动原始输入监听。`onDelta` 在**每一条**事件到达时被调用（Rust 每 4ms 推一块），
+ *  由调用方（`PlayerInputSystem.rawDelta`）逐个做接管/宽限/尖峰判定并累加到本帧 ——
+ *  视角的**应用**因此每帧恰好一次（见 `input.ts::frameLook`）。
+ *
+ *  **这里不再是"累积到自己人手里、等 8ms 定时器来 poll"**：那个定时器是"按住键转视角不顺滑"的
+ *  元凶 —— Chromium 把按键这种输入任务排在定时器任务之前，按住键（自动重复 ~30 次/秒）会把
+ *  8ms 的采样挤成 9~12ms 一档，每帧分到的份数在 0/1/2/3 之间乱跳（探针 `pf` 实测）。 */
+export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInputHandle {
   // 先挂监听器再启动采集：反过来的话最前面几毫秒的增量会丢
-  void listen<{ dx: number; dy: number }>("raw-input", (event) => {
-    accDx += event.payload.dx;
-    accDy += event.payload.dy;
+  void listen<{ dx: number; dy: number; t?: number }>("raw-input", (event) => {
+    const now = performance.now();
+    const { dx, dy } = event.payload;
+    evCount++;
+    if (lastArrive > 0) {
+      const gap = now - lastArrive;
+      if (gap > gapMax) gapMax = gap;
+    }
+    lastArrive = now;
+    const t = event.payload.t;
+    if (typeof t === "number") {
+      const offset = now - t;
+      if (offset < minOffset) minOffset = offset;
+      const backlog = offset - minOffset;
+      backlogSum += backlog;
+      if (backlog > backlogMax) backlogMax = backlog;
+    }
+    onDelta(dx, dy);
   });
   installEscBridge();
+  // 一次性探针（Rust 推送线程发的）：钩子到底有没有被调用（seen=0 就是没有），以及前台窗口是谁 ——
+  // Rust 侧拿不到日志根目录（AppState.root 是私有的），所以走事件由这里写进 debug.log。
+  void listen<string>("hook-probe", (event) => logDebug(String(event.payload)));
+  // RAWMON：Rust 每秒报一次"这一秒谁在动"（emits / wmIn / cursorFix / hookSeen / 光标与捕获状态）
+  void listen<string>("raw-mon", (event) => logDebug(String(event.payload)));
 
   const ready = invoke<RawStats>("rawinput_start")
     .then((stats) => {
@@ -107,13 +150,27 @@ export function startRawInput(): RawInputHandle {
       return available;
     },
     ready,
-    poll: () => {
-      const out = { dx: accDx, dy: accDy };
-      accDx = 0;
-      accDy = 0;
-      return out;
-    },
   };
+}
+
+/** 每秒一行 RAWLAG 的诊断文本（调用方 = 帧探针，负责写进 debug.log）；不足一秒返回 null。
+ *  原来这一行是在 8ms 的 poll() 里打的，而那个定时器已经删掉了（见 startRawInput 的说明）。 */
+export function rawLagLine(): string | null {
+  const now = performance.now();
+  if (lagAt === 0) {
+    lagAt = now;
+    return null;
+  }
+  if (now - lagAt < 1000) return null;
+  const line =
+    `RAWLAG ev=${evCount}/s gapMax=${gapMax.toFixed(1)}ms ` +
+    `backlogAvg=${(evCount > 0 ? backlogSum / evCount : 0).toFixed(2)}ms backlogMax=${backlogMax.toFixed(1)}ms`;
+  lagAt = now;
+  evCount = 0;
+  gapMax = 0;
+  backlogSum = 0;
+  backlogMax = 0;
+  return line;
 }
 
 /** 诊断：WM_INPUT 收到了多少条、丢了多少绝对坐标事件（F3 面板上能看出原始输入到底有没有在跑） */

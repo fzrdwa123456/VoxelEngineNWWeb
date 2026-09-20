@@ -15,6 +15,11 @@
 // their `style.filter`/`style.outline` writes came from). The reconciler tracks them per element and
 // feeds them into the style table, so the theme stays the only place a colour is decided.
 //
+// THE EVENTS ARE DELEGATED TO THE MOUNT ROOT — one listener per event type for the whole tree, not six
+// per widget. A click finds its widget by walking up from `ev.target`, which is the same walk `hitTest`
+// already does for "what is the cursor over"; hover is an ancestor-chain DIFF, because
+// `mouseenter`/`mouseleave` do not bubble (see installDelegation).
+//
 // WHAT A SYSTEM MAY NOT DO: spawn or despawn a widget (iron rule 1). That is why lists have a fixed
 // capacity and hide their unused tail (see spawnList) instead of growing with the data.
 //
@@ -23,6 +28,7 @@
 // without a DOM (nothing here runs at import time).
 import type { Entity } from "../World";
 import { NULL_ENTITY, type SystemAccess, type World } from "../World";
+import { UI_MOUNT } from "../presentation";
 import { dispatchUiAction, UI_ACTIONS, type UiActionHandler } from "./actions";
 import { recipeStyle, UI_THEME, type UiTheme } from "./theme";
 import {
@@ -46,14 +52,18 @@ export const UI_RENDER_ACCESS: SystemAccess = {
   reads: [UI_TREE, UI_TEXT, UI_LOOK, UI_STATE, UI_ACTION, UI_INPUT, UI_LAYOUT, UI_IMAGE, UI_TIP],
   writesExternal: ["dom.ui"],
   // It re-derives every widget's text through `translate` every frame, so it reads the LOCALE resource.
-  readsExternal: ["locale"],
+  // `font` / `uiScale` are here for the same reason: the global style it reconciles (see
+  // reconcileAppliedStyle) is the value of the FONT / UI_SCALE resources.
+  readsExternal: ["locale", "font", "uiScale"],
 };
 
 export interface UiRenderDeps {
-  /** Where root widgets are mounted (ui/uiscale.ts's `uiStage` in the real game) */
-  readonly mount: HTMLElement;
   /** i18n lookup — injected so this module never imports the UI layer */
   readonly translate: (key: string) => string;
+  /** The CSS values of the font in force — injected (ui/fonts.ts::currentFontCss), same reason. */
+  readonly fontCss: () => { ui: string; mono: string };
+  /** The root font size the current scale mode + window size call for (ui/uiscale.ts::currentRootFontPx) */
+  readonly rootFontPx: () => number;
   /** Where a dispatch failure is reported (a widget whose action nobody registered) */
   readonly log?: (line: string) => void;
 }
@@ -62,9 +72,6 @@ export interface UiRenderDeps {
 interface Drawn {
   style: string;
   text: string;
-  /** DOM-transient interaction state (hover/press), fed into the style table */
-  hovered: boolean;
-  pressed: boolean;
   /** The background image last written ("" = none) + the tint data behind it */
   image: string;
   /** The tooltip last written */
@@ -92,10 +99,24 @@ export interface UiHit {
 export class UiRenderSystem {
   private readonly theme: UiTheme;
   private readonly actions: ReadonlyMap<string, UiActionHandler>;
+  /** Where root widgets are mounted: the UI_MOUNT resource (ui/uiscale.ts's `uiStage` element in the
+   *  real game). A RESOURCE rather than a dependency (ecs/presentation.ts) — the mount root is where
+   *  every widget lives, i.e. world state, and resolving it here keeps the element out of the wiring
+   *  arguments. Assigned in the constructor body (iron rule 6). */
+  private readonly mountRoot: HTMLElement;
   private readonly elements = new Map<Entity, HTMLElement>();
   private readonly entityOf = new Map<HTMLElement, Entity>();
   private readonly drawn = new Map<Entity, Drawn>();
+  /** DOM-transient interaction state, fed into the style table every frame. A SET rather than a flag per
+   *  widget: the delegated hover handler computes the whole ancestor chain, so "who is hovered now" is a
+   *  set by construction — and the diff against it is what replaces mouseenter/mouseleave. */
+  private readonly hovered = new Set<Entity>();
+  private readonly pressed = new Set<Entity>();
   private stylesheetInjected = false;
+  /** The global style last applied to the document root (null = nothing yet, so the first frame writes) */
+  private appliedFontUi: string | null = null;
+  private appliedFontMono: string | null = null;
+  private appliedRootFontPx: number | null = null;
 
   constructor(
     private readonly world: World,
@@ -103,12 +124,42 @@ export class UiRenderSystem {
   ) {
     this.theme = world.resource(UI_THEME);
     this.actions = world.resource(UI_ACTIONS);
+    this.mountRoot = world.resource(UI_MOUNT);
+    this.installDelegation();
+  }
+
+  /** The global style the game applies to the document root: the font pair and the root font size.
+   *
+   *  **This used to be `applyFont()` in ui/fonts.ts and `applyUIScale()` in ui/uiscale.ts** — side
+   *  effects fired by the config modules themselves: outside any system, past no barrier, unable to
+   *  declare what they read, and writing the DOM unconditionally on every call (and on every resize).
+   *  Now the VALUES are still the FONT / UI_SCALE resources, and the write happens HERE — in the one
+   *  system allowed to touch the DOM (`check:ecs` asserts there is exactly one) — diffed against what
+   *  was last applied, the same reconcile-don't-paint discipline as every widget. Because it re-derives
+   *  from the live window size every frame, a resize needs no callback of its own. */
+  private reconcileAppliedStyle(): void {
+    const font = this.deps.fontCss();
+    if (font.ui !== this.appliedFontUi) {
+      this.appliedFontUi = font.ui;
+      document.documentElement.style.setProperty("--font-ui", font.ui);
+    }
+    if (font.mono !== this.appliedFontMono) {
+      this.appliedFontMono = font.mono;
+      document.documentElement.style.setProperty("--font-mono", font.mono);
+    }
+    const px = this.deps.rootFontPx();
+    if (px !== this.appliedRootFontPx) {
+      this.appliedRootFontPx = px;
+      document.documentElement.style.fontSize = `${px}px`;
+    }
   }
 
   /** Render-lane step: unmount what died, then mount/update in creation order (a parent is always
    *  created before its children, so ascending `order` is enough to have every parent element ready). */
   step(): void {
     this.injectStylesheet();
+    // Before the widgets: so the very first frame a widget is painted already has the right font and rem base.
+    this.reconcileAppliedStyle();
     const handles = [...this.world.query(UI_TREE).entities()];
     const live = new Set(handles);
 
@@ -161,7 +212,7 @@ export class UiRenderSystem {
     if (!this.theme.stylesheet) return;
     const style = document.createElement("style");
     style.textContent = this.theme.stylesheet;
-    this.deps.mount.appendChild(style);
+    this.mountRoot.appendChild(style);
   }
 
   private orderOf(entity: Entity): number {
@@ -196,55 +247,119 @@ export class UiRenderSystem {
     const element = document.createElement(tree.tag);
     if (tree.tag === "input") (element as HTMLInputElement).type = "range";
     const parent =
-      tree.parent === NULL_ENTITY ? this.deps.mount : (this.elements.get(tree.parent) ?? this.deps.mount);
+      tree.parent === NULL_ENTITY ? this.mountRoot : (this.elements.get(tree.parent) ?? this.mountRoot);
     parent.appendChild(element);
     this.elements.set(entity, element);
     this.entityOf.set(element, entity);
-    this.wire(entity, element);
     return element;
   }
 
-  /** Attach the listeners a widget's DATA asks for. A widget with no action gets none: the reconciler
-   *  is not "a DOM layer with handlers", it is the interpreter of what the data says the widget is. */
-  private wire(entity: Entity, element: HTMLElement): void {
-    const action = this.world.get(entity, UI_ACTION);
-    if (!action) return;
-    const input = this.world.get(entity, UI_INPUT);
-    if (input) {
-      // A slider reports through the same table as a click, carrying the value it was moved to. The
-      // reconciler does NOT write the component back: whoever owns the slider does that, so this system
-      // keeps writing no component at all (see UI_RENDER_ACCESS).
-      element.addEventListener("input", () => {
-        const moved = (element as HTMLInputElement).valueAsNumber;
-        dispatchUiAction(this.actions, action.action, String(moved), this.deps.log);
-      });
-      return;
+  /** The delegated listeners: ONE per event type, on the MOUNT ROOT, for the whole widget tree.
+   *
+   *  **A widget used to get six listeners of its own** (click, input, mouseenter, mouseleave, mousedown,
+   *  mouseup) the moment it was mounted — six closures per widget, each one holding an entity, and none of
+   *  them reachable from anywhere but the element. The reconciler now listens to the one element it already
+   *  owns, and finds the widget a DOM event belongs to by walking up from `ev.target` — the same walk
+   *  `hitTest` does for "what is the cursor over". Two things fall out of it beyond the listener count:
+   *  a widget spawned with no action and given one later works, and a click on a label INSIDE a button
+   *  resolves to the button without a listener on the label.
+   *
+   *  `click`, `input`, `mousedown`, `mouseup` all BUBBLE, so they delegate as they are. `mouseenter` /
+   *  `mouseleave` do NOT, which is why hover is `mouseover`/`mouseout` plus an ancestor-chain DIFF: the
+   *  widgets above the new target are compared against the ones the previous event left behind, and the
+   *  difference IS the enter/leave set. That preserves what the per-element listeners did — a parent and a
+   *  child can both be hovered at once — without a listener per element. */
+  private installDelegation(): void {
+    this.mountRoot.addEventListener("click", (ev) => {
+      // POINTER-ONLY: a widget element is focusable, so TAB then ENTER (or SPACE) produces a `click` —
+      // and so does any programmatic `.click()`. Both carry `detail === 0`, while a REAL press/release
+      // carries the click COUNT (>= 1, Chromium's own synthesis from mousedown+mouseup included).
+      // The UI is mouse-driven by design, so a keyboard-generated click is dropped here rather than
+      // special-cased per element; nothing else about a click changes.
+      if (ev.detail === 0) return;
+      const entity = this.actionTarget(ev.target);
+      // The same test `wire()` used: a SLIDER reports through `input` (it has UI_INPUT), and a widget with
+      // no action has nothing to dispatch.
+      if (entity === null || !this.tracksPointer(entity)) return;
+      const action = this.world.get(entity, UI_ACTION);
+      if (action) dispatchUiAction(this.actions, action.action, action.value, this.deps.log);
+    });
+
+    this.mountRoot.addEventListener("input", (ev) => {
+      const entity = this.actionTarget(ev.target);
+      if (entity === null) return;
+      const action = this.world.get(entity, UI_ACTION);
+      if (!action || !this.world.get(entity, UI_INPUT)) return;
+      // The value comes from the widget's OWN element, exactly as the per-widget listener read it (the
+      // event target may be a descendant). The reconciler does not write the component back: whoever owns
+      // the slider does that (see UI_RENDER_ACCESS), through the same action table as a click.
+      const element = this.elements.get(entity) as HTMLInputElement | undefined;
+      const moved = element ? element.valueAsNumber : Number.NaN;
+      dispatchUiAction(this.actions, action.action, String(moved), this.deps.log);
+    });
+
+    this.mountRoot.addEventListener("mousedown", (ev) => {
+      for (const entity of this.trackableChain(ev.target)) this.pressed.add(entity);
+    });
+    // A release ends the press wherever it happens INSIDE the tree — the per-widget listener only heard
+    // releases on the widget itself, so a press that ended outside it stayed "pressed" until the pointer
+    // left and came back.
+    this.mountRoot.addEventListener("mouseup", () => this.pressed.clear());
+
+    this.mountRoot.addEventListener("mouseover", (ev) => this.diffHover(ev.target));
+    // Leaving the tree (onto the canvas, or out of the window) fires no `mouseover` inside it, so the chain
+    // is cleared from the way OUT: `contains` answers "is the new target still ours".
+    this.mountRoot.addEventListener("mouseout", (ev) => {
+      const to = ev.relatedTarget as Node | null;
+      if (to === null || !this.mountRoot.contains(to)) this.diffHover(null);
+    });
+  }
+
+  /** The nearest widget ancestor of `node` that carries an ACTION, or null. A widget without one (a
+   *  container, a label) must not stop the walk: a click inside a button is a click on the button.
+   *
+   *  A widget WITH an action DOES stop it, even when the click is ignored afterwards (a slider): the click
+   *  then belongs to the slider — which reports through `input` — and not to a container above it that
+   *  happens to carry an action of its own. The per-widget listeners bubbled that click to the container;
+   *  no surface in the game nests a slider inside an actionable container, and "the nearest widget wins" is
+   *  the rule the rest of this method already follows. */
+  private actionTarget(node: EventTarget | null): Entity | null {
+    let el = node as HTMLElement | null;
+    while (el && el !== this.mountRoot) {
+      const entity = this.entityOf.get(el);
+      if (entity !== undefined && this.world.get(entity, UI_ACTION)) return entity;
+      el = el.parentElement;
     }
-    element.addEventListener("click", () => {
-      dispatchUiAction(this.actions, action.action, action.value, this.deps.log);
-    });
-    // Interaction state. No forced update: `hovered`/`pressed` feed the style string, and the frame
-    // compares it — so the shade lands on the next frame, which is under a millisecond at 120 Hz.
-    const state = (): Drawn | undefined => this.drawn.get(entity);
-    element.addEventListener("mouseenter", () => {
-      const d = state();
-      if (d) d.hovered = true;
-    });
-    element.addEventListener("mouseleave", () => {
-      const d = state();
-      if (d) {
-        d.hovered = false;
-        d.pressed = false;
-      }
-    });
-    element.addEventListener("mousedown", () => {
-      const d = state();
-      if (d) d.pressed = true;
-    });
-    element.addEventListener("mouseup", () => {
-      const d = state();
-      if (d) d.pressed = false;
-    });
+    return null;
+  }
+
+  /** Does this widget track hover/press? An actionable widget that is NOT a slider — the exact test the
+   *  per-widget `wire()` made before it attached the four interaction listeners. */
+  private tracksPointer(entity: Entity): boolean {
+    return this.world.get(entity, UI_ACTION) !== undefined && this.world.get(entity, UI_INPUT) === undefined;
+  }
+
+  /** Every widget above `node` that tracks hover/press (nearest first, as a set). */
+  private trackableChain(node: EventTarget | null): Set<Entity> {
+    const chain = new Set<Entity>();
+    let el = node as HTMLElement | null;
+    while (el && el !== this.mountRoot) {
+      const entity = this.entityOf.get(el);
+      if (entity !== undefined && this.tracksPointer(entity)) chain.add(entity);
+      el = el.parentElement;
+    }
+    return chain;
+  }
+
+  /** The enter/leave diff that replaces mouseenter/mouseleave (null = the pointer left the tree). */
+  private diffHover(node: EventTarget | null): void {
+    const next = this.trackableChain(node);
+    for (const entity of this.hovered) {
+      if (next.has(entity)) continue;
+      this.hovered.delete(entity);
+      this.pressed.delete(entity); // leaving also releases: `mouseleave` did both
+    }
+    for (const entity of next) this.hovered.add(entity);
   }
 
   private unmount(entity: Entity): void {
@@ -253,6 +368,9 @@ export class UiRenderSystem {
     if (element) this.entityOf.delete(element);
     this.elements.delete(entity);
     this.drawn.delete(entity);
+    // The interaction sets are keyed by entity too: a recycled handle must not come back hovered.
+    this.hovered.delete(entity);
+    this.pressed.delete(entity);
   }
 
   private update(entity: Entity, element: HTMLElement, isLeaf: boolean): void {
@@ -269,8 +387,6 @@ export class UiRenderSystem {
       drawn = {
         style: "",
         text: "\u0000",
-        hovered: false,
-        pressed: false,
         image: "\u0000",
         tip: "\u0000",
         value: "\u0000",
@@ -286,7 +402,15 @@ export class UiRenderSystem {
     const style =
       recipeStyle(
         recipe,
-        { selected: state?.selected ?? false, active: state?.active ?? false, hovered: drawn.hovered, pressed: drawn.pressed },
+        {
+          selected: state?.selected ?? false,
+          active: state?.active ?? false,
+          // The delegated handlers' sets (see installDelegation). Reading them here is what makes the
+          // interaction state reach the style table — and, through the `drawn.style` diff below, the DOM
+          // exactly once per change, on the next frame.
+          hovered: this.hovered.has(entity),
+          pressed: this.pressed.has(entity),
+        },
         this.theme,
       ) +
       (layout?.css ?? "") +

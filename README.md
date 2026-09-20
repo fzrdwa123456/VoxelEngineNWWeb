@@ -55,7 +55,7 @@ npm run app:portable     # 打包成 release\VoxelEngineTauri\：exe + WebView2L
 只验前端（不碰 Rust）：
 
 ```powershell
-npm run check                          # tsc --noEmit(strict) + check:ecs（50 组断言）
+npm run check                          # tsc --noEmit(strict) + check:ecs（54 组断言）
 npm run build                          # tsc && vite build -> dist\
 node scripts/build-all.mjs --cargo     # 再带上 cargo check
 ```
@@ -66,14 +66,21 @@ node scripts/build-all.mjs --cargo     # 再带上 cargo check
 
 ```
 game\config\settings.json       设置（唯一写入点：write_settings 命令）
+                                language / font / uiScale / windowMode / fpsCap / keybinds / diagLog
 game\config\vsync.json          GPU vsync 开关（重启生效，对应原版改写 chromium-args）
 game\config\settings.bad.json   读不动的设置文件的备份（启动修复时留）
-game\logs\debug.log             引擎日志
+game\logs\debug.log             引擎日志（"日志检测"关掉后只剩事件行，见下）
 game\logs\renderer.log          console.error / warn
 game\resourcepacks\<包>\        资源包（文件夹或 .zip）
 game\mods\<mod>\                mod（blocks.json + block\*.png）
 game\saves\
 ```
+
+**`diagLog`（设置面板里的"日志检测"，默认开）**：开 = `debug.log` 里额外写入诊断探针行
+（`FRAME` 帧时间与每帧鼠标采样直方图、`LOOK` 输入计数、`RAWLAG` 事件到达与队列积压、`RAWMON` Rust 侧
+每秒统计、`STALL` 卡顿、`PHYS`、`SPACE#`/`MOUSE#`、`HOOKPROBE`）；关 = 这些行一律不写，只留事件记录
+（`BOOT`/`SETTINGS`/`LOCK`/`CURSOR`/`GEOMETRY`/`ERROR` 等）。排查"手感/卡顿/输入"这类问题时开着它，
+平时关掉可以让日志保持干净、也不再多写盘。开关即时生效，不需要重启。
 
 * **dev**（`cargo` / `tauri dev`）：exe 在 `src-tauri\target\debug\`，往上三级是仓库根，
   数据放 `<仓库根>\game\`（`scripts/rearrange.mjs` 也建在那里，两边必须一致）。
@@ -87,12 +94,12 @@ game\saves\
 | 原来（NW.js） | 现在（Tauri v2） |
 |---|---|
 | `platform/shell.ts`：`eval("require")("node:fs")` 同步读写 + `nw.Window.get()` | 重写：启动一次 `invoke("preload_shell")` 把设置/窗口/vsync 取进内存，**`readSettings()` 保持同步**；窗口操作走自定义命令 |
-| `platform/rawinput.ts`：`require("rawinput.node")` 这个 NAPI 插件 | 重写：采集在 Rust（`src-tauri/src/rawinput.rs`），Rust 每 4ms `emit("raw-input")` 推增量，前端累加后 **`poll()` 依然同步** |
+| `platform/rawinput.ts`：`require("rawinput.node")` 这个 NAPI 插件 | 重写：采集在 Rust（`src-tauri/src/rawinput.rs`），Rust 每 4ms `emit("raw-input")` 推增量；前端逐条做判定（事件期）并累加，**每帧 `frameLook()` 应用一次** —— 视角路径上没有任何定时器 |
 | `rendering/textures.ts`：`node:fs` 列目录 + 读 zip | 字节由 Rust 扫好（`packs.rs`）一次性取来，**MC 命名空间归一化/优先级/layering 一行没动** |
 | `main.ts` 顶部 `initShell()` | 多了两行 `await preloadShell(); await preloadPacks();` —— Tauri 命令是异步的，而后面所有读都是同步的 |
 
 **除这三个文件外，`src/` 下其余文件、几十处 `logDebug`/`readSettings`/`resolveTexture`
-调用点，一个都没改**；`check:ecs` 的 50 组断言全部照常通过。
+调用点，一个都没改**；`check:ecs` 的 54 组断言全部照常通过。
 
 ## 与原版的已知差异
 
@@ -171,7 +178,7 @@ game\saves\
 | 项目 | 结果 |
 |---|---|
 | `tsc --noEmit`（strict） | **0 errors** |
-| `npm run check:ecs` | **50 assertion groups passed / RESULT: OK** |
+| `npm run check:ecs` | **54 assertion groups passed / RESULT: OK** |
 | `vite build` | **✓ 67 modules transformed，456ms** |
 | `cargo check`（`x86_64-pc-windows-gnu`） | **exit 0，3m42s** |
 | `cargo build`（链接 exe） | **exit 0，17s → `voxelengine-tauri.exe`** |

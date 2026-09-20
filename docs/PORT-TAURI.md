@@ -24,7 +24,7 @@ src/rendering/textures.ts    node:fs 列目录/读文件 + path
 | `readSettings()` / `readSettingsChecked()` / `isGpuVsyncDisabled()` / `getWindowMode()` | 启动时 `await preloadShell()` 一次取进内存，之后读内存 |
 | `resolveTexture()` / `resolveBytes()` / `resolveAllBytes()` / `listPacks()` | 启动时 `await preloadPacks()` 一次性把包字节取进内存 |
 | `logDebug()` / `appendDebugLog()` | 攒批（64 行 / 200ms）后异步发，API 仍是 `void` 同步 |
-| `startRawInput().poll()` | Rust 推事件，前端本地累加，`poll()` 仍是同步取走 |
+| `startRawInput()` | Rust 推事件，前端逐条交给 `input.rawDelta()`（判定仍在事件期），每帧 `frameLook()` 应用一次 |
 
 于是 `main.ts` 顶部多了两行 `await` —— 这是**唯一一处启动顺序上的改动**。
 
@@ -88,8 +88,36 @@ std::thread::spawn(move || loop {
 });
 ```
 
-前端对应地把事件累加进本地的 `accDx/accDy`，`poll()` 取走清零 —— 调用点（`PlayerInputSystem.applyRawInput`）
-一行没改。节流是必要的：`WM_INPUT` 一秒上百条，一条一个 IPC 事件会把 webview 淹掉。
+前端把这个事件直接交给 `PlayerInputSystem.rawDelta(dx, dy)`：接管/宽限/尖峰判定仍在这里（事件期，
+rule 3），但**只累加、不应用**；`frame()` 每帧调一次 `input.frameLook()`，把整帧位移变成**一个**
+`look` 意图。节流（4 ms 合批）还是必要的：`WM_INPUT` 一秒几百条，一条一个 IPC 事件会把 webview 淹掉。
+
+> 这里曾经是"事件累加进本地 `accDx/accDy`，前端每 8 ms `setInterval` 取走一次"。那个定时器是
+> **"按住键转视角不顺滑"的元凶**：Chromium 把 keydown 这类输入任务排在定时器任务之前，按住键
+> （自动重复 ~30 次/秒）会把 8 ms 采样挤成 9~12 ms 一档，于是"每帧分到几份"在 0/1/2/3 之间乱跳
+> （实测：不按键 122~127 份/秒、90% 的帧恰好 2 份；按住键掉到 84~110 份/秒、只有 ~40% 的帧是 2 份）。
+> 改成每帧取一次后，每帧转角度 = 该帧鼠标的真实位移，与主线程在忙什么无关。这是全工程**最后一个
+> `setInterval`**，现在前端一个都不剩。
+
+### 鼠标捕获：原生 ClipCursor + 前台门禁 + ESC 桥
+
+原版用浏览器的 pointer lock（`requestPointerLock`），Tauri 版**不碰它**，走 Win32 `ClipCursor` 把系统
+光标物理夹在窗口客户区里，配合 `SetCursorPos(中心)` 与一个 4ms 的"光标哨兵"（`win::cursor_sentinel`，
+只在"期望的可见性和系统实际不符"时才纠正，稳态零开销）。视觉上等价，但换来三条原版没有的责任：
+
+1. **前台门禁**：`ClipCursor` **不看窗口是不是前台**（浏览器那条 `requestPointerLock` 会自己拒绝），
+   而后端原始输入是 `RIDEV_INPUTSINK`（后台也收）。所以"只在前台捕获"必须显式做，三层：
+   `PointerLockDeps.focused`（正常路径拒绝）、`enterWorld` 进世界时的自动 relock（不在前台就改开暂停
+   菜单）、`win::capture_foreground_check`（系统级兜底：连续两次 tick 前台不是我们 → 放鼠标 + 恢复
+   光标 + 发 `capture-lost`，前端按 blur 处理）。
+2. **ESC 的默认解锁动作**：浏览器的"ESC 解锁"发生在**浏览器进程**、页面拿到事件之前，`preventDefault()`
+   拦不住。Rust 侧装了 `WH_KEYBOARD_LL` 钩子想把 ESC（以及菜单键/Shift+F10 那个上下文菜单手势）吞掉，
+   再从 `esc` 事件合成一个真的 `KeyboardEvent` 派发给页面。**但实测这个钩子从未被调用过**
+   （`logs\debug.log` 里 `HOOKPROBE seen=0`，多次运行一致）——所以今天真正起作用的是"原生捕获 + 前端
+   `preventDefault` + 光标哨兵"这三样，钩子属于"装上但无效、失败即放行"的那部分。
+3. **光标可见性归 Rust 管**：CSS 的 `cursor` 只是意图，真正决定屏幕上看不见的是 `SetCursor` 的推送，
+   而它的时机不可靠（失焦那一刻的推送会被系统丢掉）。所以前端只告诉 Rust"期望可见/隐藏"
+   （`cursor_intent` 命令），哨兵每 4ms 校对一次。
 
 ### packs.rs 与 textures.ts 的分工
 
@@ -134,7 +162,7 @@ import 了 `@tauri-apps/api`（纯 ESM），Node 的 CJS `require` 会炸 ——
 | 步骤 | 命令 | 结果 |
 |---|---|---|
 | 类型检查 | `tsc --noEmit -p tsconfig.json` | 0 errors |
-| ECS 门禁 | `node scripts/check-ecs.mjs` | 50 assertion groups passed / RESULT: OK |
+| ECS 门禁 | `node scripts/check-ecs.mjs` | 54 assertion groups passed / RESULT: OK |
 | 前端产物 | `vite build` | ✓ 67 modules transformed，456ms |
 | Rust 检查 | `cargo check`（`x86_64-pc-windows-gnu`） | exit 0，3m42s |
 | Rust 链接 | `cargo build`（改了 `crate-type` 之后） | **exit 0，17s -> `voxelengine-tauri.exe`（208MB debug）** |

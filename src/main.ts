@@ -1,7 +1,7 @@
 import * as THREE from "three/webgpu";
 import { World } from "./ecs/World";
 import { CONTROL, HUMANOID_BODY, spawnPlayer } from "./ecs/components/Player";
-import { createFont, createFrameCap, createInputState, createKeyEventLog, createKeyMap, createLocale, createPickerState, createScale, createToastState, createUiModalState, LOADING_STATE, createLoadingState, FONT, FPS_CAP, INPUT_STATE, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, LOCAL_PLAYER, PICKER_STATE, TOAST, UI_MODAL, UI_SCALE, VOXEL } from "./ecs/resources";
+import { createFont, createFrameCap, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createPickerState, createScale, createToastState, createUiModalState, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "./ecs/resources";
 import { SetLoadingStage, SetFpsCap, SetMode, ShowToast, Teleport } from "./ecs/commands";
 import { INPUT_ACCESS, PlayerInputSystem } from "./ecs/systems/input";
 import { CONTROLLER_ACCESS, PlayerControllerSystem } from "./ecs/systems/controller";
@@ -11,11 +11,14 @@ import { BlockInteractionSystem, INTERACTION_ACCESS } from "./ecs/systems/intera
 import { CHUNK_STREAM_ACCESS, ChunkStreamSystem } from "./ecs/systems/chunkstream";
 import { PositionSnapshotSystem, SNAPSHOT_ACCESS } from "./ecs/systems/snapshot";
 import { DiagnosticsSystem, DIAGNOSTICS_ACCESS } from "./ecs/systems/diagnostics";
+import { DELAYS_ACCESS, DelaySystem } from "./ecs/systems/delays";
 import { CAMERA_VIEW_ACCESS, CameraViewSystem } from "./rendering/camera-view";
+import { MenuBackgroundSystem } from "./rendering/menu-background";
 import { defaultUiTheme, UI_THEME } from "./ecs/ui/theme";
 import { UI_RENDER_ACCESS, UiRenderSystem } from "./ecs/ui/system";
 import { createUiActions, UI_ACTIONS } from "./ecs/ui/actions";
 import { createUiSources, UI_BINDING_ACCESS, UiBindingSystem, UI_SOURCES } from "./ecs/ui/bindings";
+import { CAMERA3D, CANVAS_HOST, CHUNK_MESHES, createChunkMeshCache, createMenuBackground, MENU_BACKGROUND, PERF_SAMPLER, RENDERER3D, SCENE3D, UI_MOUNT } from "./ecs/presentation";
 import { createKeybindGesture, KEYBIND_GESTURE, UI_KEYBIND_ACCESS, UiKeybindSystem } from "./ecs/ui/keybind";
 import { spawnPickerPanel, UI_PICKER_ACCESS, UiPickerSystem } from "./ecs/ui/picker";
 import { UI_TOAST_ACCESS, UiToastSystem } from "./ecs/ui/toast";
@@ -23,16 +26,19 @@ import { UI_LOADING_ACCESS, UiLoadingSystem } from "./ecs/ui/loading";
 import { UI_HUD_ACCESS, UiHudSystem } from "./ecs/ui/hud";
 import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "./ecs/ui/navigation";
 import { LoadingScreen } from "./ui/loading";
-import { Inventory, INVENTORY_VIEW_ACCESS } from "./ui/inventory";
-import { bindKeybindDrag, boundCodes, hideKeybindLine, Menu, showKeybindLine } from "./ui/menu";
+import { Inventory } from "./ui/inventory";
+import { INVENTORY_VIEW_ACCESS, UiInventorySystem } from "./ecs/ui/inventory";
+import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, Menu, spawnKeybindLine } from "./ui/menu";
 import { MainMenu } from "./ui/mainmenu";
 import { Hud } from "./ui/hud";
 import { PointerLock } from "./platform/pointerlock";
 import { t, loadLang, getLang, onLangChange, type Lang } from "./ui/i18n";
-import { loadUIScaleMode, getUIScaleMode, onUIScaleModeChange, applyUIScale, uiStage } from "./ui/uiscale";
-import { loadFont, getFontId, onFontChange } from "./ui/fonts";
-import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, winFocused, quitApp, onWinFocus, onWinBlur, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "./platform/shell";
-import { startRawInput, centerCursor } from "./platform/rawinput";
+import { loadUIScaleMode, getUIScaleMode, onUIScaleModeChange, currentRootFontPx, uiStage } from "./ui/uiscale";
+import { loadFont, getFontId, onFontChange, currentFontCss } from "./ui/fonts";
+import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "./platform/shell";
+import { startRawInput, centerCursor, rawLagLine } from "./platform/rawinput";
+import { installWindowGuards } from "./platform/window-guards";
+import { adoptViewport, currentViewport } from "./platform/viewport";
 import { DebugLogForwarder } from "./platform/debuglog";
 import { PerfSampler } from "./platform/perf";
 import { loadBinds, getBind, getBindsAll, getCapturing, onBindsChange, isCapturing, buttonToAction, buttonToCode } from "./platform/keybinds";
@@ -83,6 +89,10 @@ loadLang(locale, readSettings().language);
 loadFont(font, readSettings().font);
 loadUIScaleMode(uiScale, readSettings().uiScale);
 loadBinds(keymap, readSettings().keybinds);
+// The "日志检测" switch (settings panel): the periodic DIAGNOSTIC PROBES are on by default, and the
+// setting decides whether `logDebug` writes them. Set BEFORE anything logs a probe line, so a file with
+// the switch off never sees one.
+setDiagLogEnabled(readSettings().diagLog !== false);
 const saveSettings = (fpsCapOverride?: number): void => {
     // Read-modify-write merge, avoids clobbering other settings (windowMode etc.)
   const s = readSettings();
@@ -91,6 +101,7 @@ const saveSettings = (fpsCapOverride?: number): void => {
   s.uiScale = getUIScaleMode();
   s.windowMode = getWindowMode();
   s.keybinds = getBindsAll();
+  s.diagLog = isDiagLogEnabled();
   // The override exists because the frame cap reaches the world through a COMMAND, which applies at
   // the next barrier: persisting the resource here would write the PREVIOUS value to disk. Every other
   // setting is a config singleton, so it is already settled when this runs.
@@ -108,7 +119,10 @@ onBindsChange(saveSettings);
 // mesher deliberately does not consult it yet — it draws the built-in checker block.
 loadBlockRegistry();
 
-const app = document.getElementById("app")!;
+// The canvas host: the element the renderer's canvas gets attached to. Like the UI mount root, it is a
+// RESOURCE (ecs/presentation.ts) — the boot driver reads it back from the world rather than closing over
+// a wiring variable.
+const canvasHost = document.getElementById("app")!;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -178,8 +192,53 @@ world.insertResource(LOCAL_PLAYER, player);
 // 光标策略要读它（canControl），所以留一个引用
 const inputState = createInputState();
 world.insertResource(INPUT_STATE, inputState);
+// The race guards' own state (ecs/resources.ts::InputTiming): which mousemove is the synthetic
+// lock-instant one, whether the unlock was ours, the grace deadline, the offscreen cache, the
+// diagnostic counters. It used to be private fields of player.input; the LOGIC did not move with them
+// (iron rule 3), only the place the facts live — so a test and the gate can read them.
+world.insertResource(INPUT_TIMING, createInputTiming());
+// The input system's SPACE/MOUSE diagnostic log: written by the device layer, forwarded and printed by
+// diagnostics — one log with two readers, so it is a resource rather than one system handing itself to
+// another.
+world.insertResource(INPUT_DIAGNOSTICS, createInputDiagnostics());
+// The device intents waiting for the tick (`player.input` is the only writer AND the only reader; the
+// array is world state so the queue is inspectable, and `step()` drains it in place).
+world.insertResource(INPUT_INTENTS, createInputIntentLog());
+// The pointer's last known position (published by the device layer; read by the key bind drag).
+world.insertResource(POINTER, createPointer());
+// The DELAYED INTENTS: "do this in a moment" as data (an absolute wall-clock deadline), applied by
+// `ui.delays` once per frame. Four `setTimeout`s used to be the only way to say it — closing the backpack
+// relocking the mouse, the lock manager's 1300 ms retry, and the cursor re-asserts after the window
+// regained focus or after the menu/Apps key. See ecs/resources.ts for why the deadline is a resource.
+const delayedIntents = createDelayedIntents();
+world.insertResource(DELAYED_INTENTS, delayedIntents);
+// The window's size (VIEWPORT): published by the ONE resize listener in platform/viewport.ts, read by the
+// camera (its projection) and by the draw (the renderer's size). Adopting installs the listener and
+// publishes the current size at once, so the first frame is already correct.
+const viewport = createViewport();
+world.insertResource(VIEWPORT, viewport);
+adoptViewport(viewport);
+// The debug-log sink. A structural adapter over the two platform entry points, so diagnostics reads it
+// from the world and takes NO constructor arguments (see ecs/resources.ts::DebugLogSink).
+world.insertResource(DEBUG_LOG, { forward: (q: InputDiagnostics) => dbgFwd.forward(q), line: logDebug });
 world.insertResource(UI_MODAL, uiModal);
 world.insertResource(VOXEL, voxel);
+// ===== Presentation resources: the three.js / GPU / DOM objects, owned by the world =====
+// These were CONSTRUCTOR DEPENDENCIES: the scene, the camera, the renderer, the frame-time sampler, the
+// canvas host, the UI mount root and the chunk-mesh group used to be handed to each system that needed
+// one. They are world state like everything else here, so they are RESOURCES and each system resolves
+// what it uses in its own constructor body. See ecs/presentation.ts for what that buys — and for the one
+// thing it deliberately does NOT change: the access declarations still name these objects as targets
+// (`camera3d`, `chunkMeshes`, …), because the schedule's conflict model is keyed by those NAMES, not by
+// resource handles.
+world.insertResource(SCENE3D, scene);
+world.insertResource(CAMERA3D, camera);
+world.insertResource(RENDERER3D, renderer);
+world.insertResource(PERF_SAMPLER, perf);
+world.insertResource(CANVAS_HOST, canvasHost);
+world.insertResource(UI_MOUNT, uiStage);
+world.insertResource(CHUNK_MESHES, createChunkMeshCache(chunkGroup));
+world.insertResource(MENU_BACKGROUND, createMenuBackground());
 // The configuration resources loaded above: the bind table and the language are read on the tick by
 // systems that declare them (`readsExternal`), so they belong to the world rather than to a module.
 world.insertResource(KEYMAP, keymap);
@@ -213,21 +272,36 @@ world.insertResource(UI_THEME, defaultUiTheme());
 world.insertResource(UI_ACTIONS, createUiActions());
 world.insertResource(UI_SOURCES, createUiSources());
 const hud = new Hud(world);
+// The F3 panel's two widget handles, published for diagnostics (which writes the text) — the HUD view
+// spawns the tree, the system owns the data written into it.
+world.insertResource(F3_PANEL, hud.debugPanelEntities);
 const picker = spawnPickerPanel(world);
 // The startup screen's tree: spawned hidden during wiring (spawning is a structural change, so it
 // belongs here or inside a command) and shown for as long as LOADING_STATE.active says the startup runs.
 const loadingScreen = new LoadingScreen(world);
 
-const input = new PlayerInputSystem(world, renderer.domElement, logDebug);
+// The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
+// CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
+// so no system is handed one. See ecs/presentation.ts.
+const input = new PlayerInputSystem(world, logDebug, inWorld);
 const controller = new PlayerControllerSystem(world);
 const movement = new PlayerMovementSystem(world);
 const collision = new CollisionSystem(world);
-const cameraView = new CameraViewSystem(world, camera);
+const cameraView = new CameraViewSystem(world);
 const snapshot = new PositionSnapshotSystem(world);
-const chunkStream = new ChunkStreamSystem(world, chunkGroup);
-// The reconciler that owns every widget's DOM element. It mounts roots on uiStage (the same element the
-// hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never imports src/ui/.
-const uiRender = new UiRenderSystem(world, { mount: uiStage, translate: t, log: logDebug });
+const chunkStream = new ChunkStreamSystem(world);
+// The reconciler that owns every widget's DOM element. It mounts roots on the world's UI_MOUNT resource
+// (the same element the hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never
+// imports src/ui/.
+// `fontCss` / `rootFontPx` come along for the same reason: the FONT and UI_SCALE resources hold the
+// values, and the reconciler — the one system allowed to write the DOM — is what applies them to the
+// document root (see its reconcileAppliedStyle).
+const uiRender = new UiRenderSystem(world, {
+  translate: t,
+  fontCss: currentFontCss,
+  rootFontPx: currentRootFontPx,
+  log: logDebug,
+});
 // Resolves every BOUND widget's value from its source (ecs/ui/bindings.ts), so a slider that shows
 // shared state never holds a private copy of it.
 const uiBindings = new UiBindingSystem(world, logDebug);
@@ -252,14 +326,16 @@ const uiToast = new UiToastSystem(world, hud.toastPanel, hud.toastText);
 // the ui lane with the other widget-data writers — that lane is also the only one that runs in `load`
 // mode, which is exactly the mode the screen is shown in.
 const uiLoading = new UiLoadingSystem(world, loadingScreen);
-// The bind panels' data: derived every frame from the bind table, with the platform reads injected so
-// this layer stays free of platform imports (and so the gate can drive it with fakes).
+// The key bind drag's data: derived every frame from the bind table + the GESTURE + the POINTER resource,
+// with the platform reads injected so this layer stays free of platform imports (and so the gate can drive
+// it with fakes). `line` is the rubber-band WIDGET the view only spawns — the system writes its geometry.
+const keybindLine = spawnKeybindLine(world);
 const uiKeybind = new UiKeybindSystem(world, {
   boundCodes,
   capturing: getCapturing,
   bindOf: getBind,
-  showLine: showKeybindLine,
-  hideLine: hideKeybindLine,
+  line: keybindLine,
+  keycapAt: keycapAtPoint,
 });
 // The key bind drag asks the UI SYSTEM what is under the cursor: only it owns the elements (the
 // hand-written panel kept its own cross-instance table of keycap elements to do this).
@@ -268,14 +344,10 @@ bindKeybindDrag({ world, hitTest: (x, y) => uiRender.hitTest(x, y), gesture: key
 // itself, so the hand you see and the hand that places a block cannot disagree.
 const interaction = new BlockInteractionSystem(world);
 scene.add(interaction.outline);
-const diagnostics = new DiagnosticsSystem(world, {
-  perf,
-  hud,
-  renderer,
-  debugLog: dbgFwd,
-  queues: input,
-  logDebug,
-});
+const diagnostics = new DiagnosticsSystem(world);
+// The main-menu background step (deliberately not registered in a lane — the MENU frame is its only
+// caller, see rendering/menu-background.ts).
+const menuBg = new MenuBackgroundSystem(world);
 
 // Inventory VIEW (toggled with E; freezes the PLAYER and releases the mouse while open). It owns NO
 // game state: the stacks and the selection are the player's INVENTORY component, and this object only
@@ -295,6 +367,10 @@ const diagnostics = new DiagnosticsSystem(world, {
 // pointer-lock effects that used to live in the callback (release on open, relock on close) are
 // edge-triggered from the same state inside ui.navigation.
 const inv = new Inventory(world, player);
+// The handles the reconcile writes into (the view only spawns them): `ui.inventory` reads the component
+// and writes these widgets, which is why the view is no longer called once per frame.
+world.insertResource(INVENTORY_WIDGETS, inv.widgets);
+const uiInventory = new UiInventorySystem(world);
 // The GAMEPLAY widgets' visibility: the crosshair and the hotbar exist in every mode (they were spawned
 // visible and nothing wrote their flag), so one system owns that flag and derives it from "is a world
 // running". It needs the hotbar, which is why it is built here rather than with the other UI systems.
@@ -417,7 +493,7 @@ world.addSystem({
   name: "ui.inventory",
   stage: "ui",
   ...INVENTORY_VIEW_ACCESS,
-  run: () => inv.sync(),
+  run: () => uiInventory.step(),
 });
 world.addSystem({
   name: "diagnostics",
@@ -478,11 +554,17 @@ const navigation = new UiNavigationSystem(world, {
   // (the startup, and the world being built behind it during an entry).
   inWorld,
   prepareUnlock: () => input.prepareUnlock(),
+  // A key bind DRAG owns ESC while it is live: this system (the ONE decision-maker for ESC) cancels it
+  // instead of stepping back through the ladder.
+  dragging: () => keybindGesture.drag !== null,
+  cancelDrag: (reason) => cancelKeybindDrag(reason),
   // 原生捕获：不走 document.exitPointerLock（见 platform/mousecapture.ts）
   exitPointerLock: () => input.releaseCapture(),
   centerCursor,
   relock: (reason) => pointerLock.relock(reason),
-  relockSoon: (reason) => setTimeout(() => pointerLock.relock(reason), 0),
+  // "Relock, but not in this key dispatch": the DEADLINE goes into the world and `ui.delays` applies it
+  // (it used to be a `setTimeout(…, 0)` here — a timer owned by the composition root).
+  relockSoon: (reason) => delayedIntents.schedule("relock", 0, reason),
   applyCursor: () => pointerLock.applyCursor(),
   log: logDebug,
 });
@@ -492,6 +574,24 @@ world.addSystem({
   after: ["ui.keybind"],
   ...UI_NAVIGATION_ACCESS,
   run: () => navigation.step(),
+});
+// The delayed intents (ecs/systems/delays.ts): whatever deadline has passed is applied HERE — after the
+// system that decided it, before the frame is painted. Both halves of that order are FORCED rather than
+// stylistic: it writes the two targets ui.navigation writes (`pointerLock` / `cursor`), which the schedule
+// refuses to leave unordered, and the reconciler must stay the last system in the lane.
+const delays = new DelaySystem(world, {
+  relock: (reason) => pointerLock.relock(reason),
+  lockRetry: (source) => pointerLock.retry(source),
+  cursor: () => pointerLock.applyCursor(),
+  log: logDebug,
+});
+world.addSystem({
+  name: "ui.delays",
+  stage: "ui",
+  after: ["ui.navigation"],
+  before: ["ui.widgets"],
+  ...DELAYS_ACCESS,
+  run: () => delays.step(),
 });
 world.addSystem({
   // Ordered by a REAL dependency: every system above WRITES widget data (icons, counts, the selected
@@ -504,6 +604,7 @@ world.addSystem({
   ...UI_RENDER_ACCESS,
   run: () => uiRender.step(),
 });
+// The size the draw last applied to the renderer — this system's own state (it owns the framebuffer).
 world.addSystem({
   // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself
   // keeps it after their producers.
@@ -512,16 +613,20 @@ world.addSystem({
   after: ["cameraView.render", "chunk.stream"],
   readsExternal: ["camera3d", "chunkMeshes"],
   writesExternal: ["framebuffer"],
-  run: () => renderer.render(scene, camera),
+  // It reads the three objects it draws with from the WORLD, not from wiring variables: they are
+  // resources now (SCENE3D / CAMERA3D / RENDERER3D — see ecs/presentation.ts). The declared targets
+  // above stay as they are: the schedule models those NAMES, not the resource handles.
+  // It does NOT resize the canvas: that belongs to the FRAME, not to this lane (see applyViewportSize).
+  run: () => world.resource(RENDERER3D).render(world.resource(SCENE3D), world.resource(CAMERA3D)),
 });
 
 // (world.start() moved below: ui.navigation needs the widget trees the surfaces build during wiring.)
 
 // Raw mouse input (Rust plugin): takes over view rotation when pointer lock is cancelled with the window partially offscreen.
-// The 8 ms poll now lives in the device layer (`input.startRawPolling`), which is where a device cadence
-// belongs; whether the deltas are USED is decided inside input.applyRawInput (discarded when locked/in menus).
-const rawInput = startRawInput();
-input.startRawPolling(rawInput);
+// **事件到达即判定、每帧只应用一次**：`rawDelta` 在每条事件里做接管/宽限/尖峰判定并把通过的部分累加，
+// `frame()` 每帧调一次 `input.frameLook()` 把它作为一个 look 意图排进队列 —— 视角不再经过任何定时器
+// （原来那个 8ms `setInterval` 会被按键事件挤成 9~12ms 一档，"按住键转视角不顺滑"就是它）。
+const rawInput = startRawInput((dx, dy) => input.rawDelta(dx, dy));
 // **必须等 ready 落地再赋值。** 原版 startRawInput() 是同步 NAPI，available 当场为真，
 // 所以这里原来是 `input.rawInputActive = rawInput.available` 一行同步赋值；Tauri 版它是
 // `invoke("rawinput_start").then()` 才置真的，同步读会**永久**拿到 false ——
@@ -543,12 +648,24 @@ pointerLock = new PointerLock({
   // 光标的判据：玩家**真的在控制鼠标**才隐藏。不能用 !isUiModal —— 加载界面不占模态面，
   // 那样会让加载界面把光标藏起来（历史遗留 bug）。
   canControl: () => canControl(inputState, uiModal),
+  // 捕获只允许在前台开着（原生 ClipCursor 不看前台；浏览器那条 requestPointerLock 本来就会拒）。
+  focused: winFocused,
   logDebug,
+  // 这两个都是**延时意图**，不是本模块的定时器：到期时间进 DELAYED_INTENTS，由 ui.delays 应用。
+  scheduleRetry: (delayMs, source) => delayedIntents.schedule("lockRetry", delayMs, source),
+  scheduleCursor: (delayMs) => delayedIntents.schedule("cursor", delayMs),
 });
 
-// Diagnostics: record pointer lock state changes (locked/unlocked done) to verify cursor-centering races
-document.addEventListener("pointerlockchange", () => {
-    logDebug(`LOCKCHANGE ${document.pointerLockElement ? "locked" : "unlocked"}`);
+// The window-level guards (pointerlockchange log, ESC/contextmenu preventDefault, the Space shield) are
+// device-layer listeners that must decide INSIDE the event, so they live in `platform/window-guards.ts`
+// and are installed here with the two facts they need. The composition root holds no listener of its own.
+installWindowGuards({
+  isUiModal: uiOpen,
+  log: logDebug,
+  applyCursor: () => pointerLock.applyCursor(),
+  // The menu/Apps key's re-assert schedule (0/32/80 ms after the immediate write) is a DELAYED INTENT now:
+  // the listener cancels the default and records the deadlines, `ui.delays` applies them once per frame.
+  scheduleCursor: (delayMs) => delayedIntents.schedule("cursor", delayMs),
 });
 
 // Settings callbacks (shared by the pause menu and main menu)
@@ -573,8 +690,28 @@ const onToggleGpuVsync = (disabled: boolean): boolean => {
   return ok;
 };
 
+/** 设置面板里的"日志检测"开关：只控制**诊断探针行**写不写盘（见 platform/shell.ts::logDebug 的前缀
+ *  过滤），不碰任何游戏状态，也不需要重启。默认开。 */
+const onToggleDiagLog = (on: boolean): boolean => {
+  setDiagLogEnabled(on);
+  saveSettings();
+  // 这行本身**不是**探针（前缀不在表里），所以关掉之后仍然会写下来 —— 正好留下"谁把它关了"的记录。
+  logDebug(`DIAGLOG probes ${on ? "enabled" : "disabled (探针行不再写盘)"}`);
+  return true;
+};
+
 // Window mode: runtime enter/leaveFullscreen switch (no restart); exiting fullscreen goes through the settings panel "windowed"
+/** Until when a geometry change must NOT be treated as "the user is messing with the window". Windows
+ *  emits a burst of Resized/Moved events for a programmatic window-mode switch (and for the fullscreen
+ *  transition), and pausing on those would be a regression: switching to fullscreen must not open the
+ *  pause menu. Rust still re-clips the capture rectangle for them (win::reclip_mouse_capture). */
+let suppressGeometryUntil = 0;
+const suppressGeometryPause = (): void => {
+  suppressGeometryUntil = performance.now() + 800;
+};
+
 const onSetWindowMode = (mode: WindowMode): void => {
+  suppressGeometryPause(); // our own window-mode change is NOT "the user is messing with the window"
   setWindowMode(mode);
     logDebug(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
 };
@@ -591,6 +728,8 @@ const menu = new Menu(world, {
   onFpsCap,
   onToggleGpuVsync,
   isGpuVsyncDisabled: () => isGpuVsyncDisabled(),
+  onToggleDiagLog,
+  isDiagLogEnabled: () => isDiagLogEnabled(),
   getFpsCap: () => frameCap.cap,
   getWindowMode: () => getWindowMode(),
   onSetWindowMode,
@@ -663,7 +802,16 @@ async function enterWorld(mode: string): Promise<void> {
   world.commands.send(SetLoadingStage, { active: false });
   setLoopMode("game");
   pointerLock.applyCursor();
-  pointerLock.relock("world entered");
+  // 进世界**必须在前台**才捕获。加载期间切到别的应用的话，这里 relock 会把原生捕获开在一个**后台**窗口上
+  // （光标被夹在那块屏幕区域里、而那块区域上是别的应用；原始输入后台也收所以视角照转；光标还被全局隐藏），
+  // 而且**不会**再有 blur 事件来救它（焦点早就丢了）。所以按"非前台 ⇒ 暂停"处理：直接进暂停菜单，
+  // 切回来时 onWinFocus 会看到 UI 开着而不自动捕获（菜单不自动关，手动恢复 —— 既有约定）。
+  if (winFocused()) {
+    pointerLock.relock("world entered");
+  } else {
+    menu.show();
+    logDebug("WORLD entered while not foreground -> pause menu (no capture)");
+  }
 }
 
 // Main menu: singleplayer picks a world type then enters; multiplayer placeholder; settings/exit
@@ -691,6 +839,8 @@ const mainMenu = new MainMenu(world, {
   onFpsCap,
   isGpuVsyncDisabled,
   onToggleGpuVsync,
+  isDiagLogEnabled,
+  onToggleDiagLog,
   getWindowMode,
   onSetWindowMode,
 });
@@ -716,18 +866,22 @@ for (const line of world.scheduleReport()) logDebug(line);
 
 // Window leaves the foreground (minimized/switched away/clicking another window): immediately show the pause menu (only while actually playing).
 // Re-focus: while playing with no UI open, auto-relock (MC behavior: an open menu does not auto-close, resume manually).
-onWinBlur(() => {
-  // 诊断：**无条件**记录一次（原来那行只在真的开菜单时才打，看不到"事件有没有来"）
-  logDebug(`WINFOCUS blur inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
+/** The window is GONE — either it lost focus, or the native capture was torn down because we are not in the
+ *  foreground any more (Rust's `capture_foreground_check`). ONE handler for both: to the game they mean the
+ *  same thing. Hand the mouse back, and pause if the player was playing. */
+const onWindowLost = (reason: string): void => {
+  logDebug(`${reason} inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
   input.prepareUnlock();
-  // 交出鼠标：原生捕获要在这里放掉（Rust 侧失焦也会兜底释放）
+  // 交出鼠标：原生捕获要在这里放掉（Rust 侧失焦/非前台也会兜底释放）
   input.releaseCapture();
   if (inWorld() && !uiOpen()) {
     menu.show();
     pointerLock.applyCursor();
-        logDebug("BLUR lost focus -> pause menu");
+    logDebug(`${reason} -> pause menu`);
   }
-});
+};
+onWinBlur(() => onWindowLost("WINFOCUS blur"));
+onCaptureLost(() => onWindowLost("CAPTURELOST not foreground"));
 onWinFocus(() => {
   // 诊断：**无条件**记录一次
   logDebug(`WINFOCUS focus inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
@@ -739,37 +893,40 @@ onWinFocus(() => {
   }
 });
 
-// ESC's DEFAULT ACTION is still blocked here, because a preventDefault can only happen in the event that
-// must be cancelled — but the DECISION is `ui.navigation`'s: it reads the Escape EDGE the device layer
-// publishes and steps back through the navigation state (UI_MODAL). This listener used to hold a
-// five-branch if-chain over four private view fields.
-document.addEventListener("keydown", (ev) => {
-  if (ev.code !== "Escape") return;
-  ev.preventDefault();  // #7907: block the default unlock; we control menu open/close
+// Window GEOMETRY changed (resized / moved / DPI scale). **This is not "the mouse left the app":** dragging
+// a border or the title bar keeps the window focused and the cursor inside its rect (over the NON-CLIENT
+// area), so neither blur nor mouseleave fires — while the native capture's ClipCursor rectangle quietly goes
+// stale. That combination is exactly the reported bug: start a resize-drag while a world is loading, the
+// entry locks the mouse on top of it, and from then on the drag AND the view rotation both work, with the
+// cursor roaming the window afterwards.
+//
+// So the treatment is the BLUR treatment (hand the mouse back, pause if the player was playing), triggered
+// by the only reliable signal there is. Rust re-clips the rectangle on the way here, which covers the
+// suppressed case (our own window-mode switch keeps the capture on).
+onWinGeometry(() => {
+  if (performance.now() < suppressGeometryUntil) return; // our own fullscreen/windowed switch
+  // NOT IN A WORLD: nothing is captured and there is nothing to pause, so do (and LOG) nothing. This used
+  // to run on every geometry event regardless of the mode, which meant hundreds of debug.log lines for one
+  // window drag at the main menu (and a pointless native-capture release per event).
+  if (!inWorld()) return;
+  const open = uiOpen();
+  // …and a menu already owns the mouse: release anything stale, but do not pause (there is nothing to
+  // pause) and do not log per event — a drag would flood the log the same way.
+  input.prepareUnlock();
+  input.releaseCapture();
+  if (open) return;
+  logDebug(`WINGEOM locked=${input.locked}`);
+  menu.show();
+  pointerLock.applyCursor();
+  logDebug("GEOMETRY changed -> pause menu");
 });
 
-// (F3+F4 / F3 is `ui.picker`; the mouse-button binds, the ESC ladder and the inventory key are
-// `player.input` (the edge) + `ui.navigation` (the decision) — see those files.)
-
-// Right-click is a game action (place), so the browser's default context menu must never appear:
-// in a pointer-locked window it interrupts the frame and pulls the cursor away for a moment.
-// This is the ONLY place contextmenu is handled anywhere in the codebase. It does not affect
-// rebinding — the bind-capture path in ui/menu.ts works off mousedown, not contextmenu.
-document.addEventListener("contextmenu", (ev) => ev.preventDefault());
-
-// Space shield: whenever any UI is open, Space's browser default (scroll the nearest
-// scrollable ancestor of the focused element — e.g. the keybind chip list after clicking
-// a chip) is swallowed. Gameplay Space (no UI open) is unaffected; capture mode still
-// receives the event and binds it via its own handler (double preventDefault is harmless).
-document.addEventListener(
-  "keydown",
-  (ev) => {
-    if (ev.code !== "Space") return;
-    const anyUiOpen = uiOpen();
-    if (anyUiOpen) ev.preventDefault();
-  },
-  true,
-);
+// The ESC preventDefault, the contextmenu block and the Space shield are installed by
+// `installWindowGuards` above (platform/window-guards.ts): a preventDefault can only happen in the event
+// that must be cancelled, so they are device-layer listeners rather than anything a lane could run — but
+// they are no longer the composition root's. The DECISIONS stay where they were: `ui.navigation` reads the
+// Escape EDGE and steps back through UI_MODAL; the mouse-button binds and the inventory key are
+// `player.input`'s (the edge) + `ui.navigation`'s (the decision); `F3`/`F3+F4` are `ui.picker`'s.
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 // Directional light: ambient alone lights every face of a block identically, which renders the
@@ -777,15 +934,11 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(1, 1.5, 0.75);
 scene.add(sun);
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  if (menuBgCamera) {
-    menuBgCamera.aspect = window.innerWidth / window.innerHeight;
-    menuBgCamera.updateProjectionMatrix();
-  }
-});
+// The window resize handler that used to live here is GONE: it reached into the camera and the GPU
+// device the moment the event arrived, and it was one of TWO resize listeners (ui/uiscale.ts kept the
+// other). platform/viewport.ts owns the single listener now and only PUBLISHES the VIEWPORT resource;
+// the camera's projection is reconciled by cameraView.render and the renderer's size by the draw below.
+// The menu-background camera reads the same resource in its own step (rendering/menu-background.ts).
 
 const timer = new THREE.Timer();
 timer.connect(document);  // Page Visibility API: delta=0 when minimized/background, auto-reset on resume
@@ -852,7 +1005,7 @@ function renderFrame(): void {
 //  command barrier is what used to be needed for it, back when it did stop the loop.)
 // Cheap by construction: an empty command queue plus a query over a dozen UI entities.
 function menuFrame(): void {
-  renderMenuBackground();
+  menuBg.step();
   world.renderUi();
 }
 
@@ -866,16 +1019,122 @@ function loadFrame(): void {
   world.renderUi();
 }
 
+/** The canvas follows the WINDOW, once per frame, in EVERY mode — this is the frame's first act.
+ *
+ *  WHY IT IS HERE AND NOT IN THE DRAW. The one resize listener (`platform/viewport.ts`) only publishes the
+ *  VIEWPORT resource; somebody has to apply it to the renderer, and that somebody must run in the modes
+ *  where the render lane does NOT: a MENU frame is the panorama step plus the ui lane, and a LOAD frame is
+ *  the ui lane alone — neither draws, so a size applied by `renderer.draw` was applied ONLY in a game. The
+ *  symptom was exact and was reported: resize at the main menu and the panorama's canvas kept its old
+ *  pixel size (the drawing surface, not the projection — the menu camera's aspect IS reconciled, in
+ *  MenuBackgroundSystem), so the background stopped scaling until a world was entered.
+ *
+ *  The size is applied only when it CHANGED, and only after `renderer.init()` — the renderer is
+ *  constructed during wiring but initialised behind the loading screen, and a load frame runs before that.
+ */
+let appliedViewportW = 0;
+let appliedViewportH = 0;
+let rendererReady = false;
+function applyViewportSize(): void {
+  if (!rendererReady) return;
+  const vp = world.resource(VIEWPORT);
+  if (vp.width <= 0 || vp.height <= 0) return;
+  if (vp.width === appliedViewportW && vp.height === appliedViewportH) return;
+  appliedViewportW = vp.width;
+  appliedViewportH = vp.height;
+  renderer.setSize(vp.width, vp.height);
+}
+
+/** ===== FRAME 诊断（每秒一行 + 停顿告警）=====
+ *  为什么需要：`PHYS`（diagnostics）只在 game 模式、粒度 500ms，光靠它分不清"主线程被占住一下"和
+ *  "帧时间整体变长"。这里用 rAF 的**真实间隔**每秒报一次：n / avg / max（毫秒），以及停顿次数和最长停顿
+ *  —— 超过 80ms 立刻单独打一行 `STALL`。三种模式都覆盖，所以"按住键转视角时是不是堵住了"这一行就能答。 */
+const FRAME_STALL_MS = 80;
+let frameLast = 0;
+let frameN = 0;
+let frameSum = 0;
+let frameMax = 0;
+let frameStalls = 0;
+let frameStallMax = 0;
+let frameStatAt = 0;
+/** 每帧 look 采样份数的直方图（下标 = 份数，0..12 归到最后一格）+ 每帧鼠标像素当量的 min/avg/max。
+ *  这两组数字回答的是 `LOOK`/`RAWLAG` 那两行**答不了**的问题：视角是"每帧均匀推进"还是"每帧份数不匀"
+ *  （8ms 拉一次 ≈ 1.67 份/帧 → 2,2,1 的图案；快转时就是眼睛看到的"一格一格"）。 */
+const framePfBuckets = new Array<number>(13).fill(0);
+let framePxMin = Number.POSITIVE_INFINITY;
+let framePxMax = 0;
+let framePxSum = 0;
+let framePxN = 0;
+function frameProbe(): void {
+  const now = performance.now();
+  if (frameLast > 0) {
+    const gap = now - frameLast;
+    frameN++;
+    frameSum += gap;
+    if (gap > frameMax) frameMax = gap;
+    if (gap > FRAME_STALL_MS) {
+      frameStalls++;
+      if (gap > frameStallMax) frameStallMax = gap;
+      logDebug(`STALL gap=${gap.toFixed(0)}ms mode=${loopMode}`);
+    }
+  }
+  frameLast = now;
+  // 这一帧的鼠标：几份采样、多少像素当量（读即清零）
+  const meter = input.takeLookFrameMeter();
+  framePfBuckets[Math.min(meter.samples, framePfBuckets.length - 1)]++;
+  if (meter.samples > 0) {
+    framePxN++;
+    framePxSum += meter.px;
+    if (meter.px < framePxMin) framePxMin = meter.px;
+    if (meter.px > framePxMax) framePxMax = meter.px;
+  }
+  if (frameStatAt === 0) {
+    frameStatAt = now;
+    return;
+  }
+  if (now - frameStatAt < 1000) return;
+  // RAWLAG 也跟着每秒一行（它原来挂在被删掉的 8ms poll 上，现在由帧探针驱动）
+  const lag = rawLagLine();
+  if (lag) logDebug(lag);
+  const pf: string[] = [];
+  for (let i = 0; i < framePfBuckets.length; i++) if (framePfBuckets[i] > 0) pf.push(`${i}:${framePfBuckets[i]}`);
+  logDebug(
+    `FRAME n=${frameN} avg=${(frameN > 0 ? frameSum / frameN : 0).toFixed(2)}ms max=${frameMax.toFixed(1)}ms ` +
+      `stalls=${frameStalls} stallMax=${frameStallMax.toFixed(0)}ms mode=${loopMode} locked=${input.locked ? 1 : 0} ` +
+      `pf=[${pf.join(" ")}] px=${framePxN > 0 ? `${framePxMin.toFixed(1)}/${(framePxSum / framePxN).toFixed(1)}/${framePxMax.toFixed(1)}` : "-"} (${framePxN})`,
+  );
+  frameStatAt = now;
+  frameN = 0;
+  frameSum = 0;
+  frameMax = 0;
+  frameStalls = 0;
+  frameStallMax = 0;
+  framePfBuckets.fill(0);
+  framePxMin = Number.POSITIVE_INFINITY;
+  framePxMax = 0;
+  framePxSum = 0;
+  framePxN = 0;
+}
+
 /** One frame. The mode picks the body; the chain re-arms itself, and the try/catch keeps ONE bad frame
  *  from killing the loop for good (a broken chain used to freeze the picture until a restart). */
 function frame(): void {
   try {
+    applyViewportSize(); // before the mode body: the canvas follows the window whoever is drawing
+    // THE LOOK IS APPLIED ONCE PER FRAME, here, before any fixed step: the raw deltas that arrived since
+    // the last frame become ONE `look` intent, so a frame's rotation is exactly that frame's mouse
+    // movement. It used to be an 8 ms `setInterval` poll feeding several intents per frame, which the
+    // browser's input-task priority stretched to 9-12 ms as soon as a key was held (measured: `pf` went
+    // from "90% of frames at exactly 2 samples" to a 0/1/2/3 spread) — the judder the user reported.
+    input.frameLook();
     if (loopMode === "game") renderFrame();
     else if (loopMode === "menu") menuFrame();
     else if (loopMode === "load") loadFrame();
   } catch (err) {
     logDebug(`frame error: ${String((err as Error)?.message || err)}`);
   }
+  // 诊断放在最后：测到的是"这一帧到下一帧"的完整周期（帧体本身卡住也会算进去）
+  frameProbe();
   requestAnimationFrame(frame);
 }
 
@@ -895,35 +1154,11 @@ function inWorld(): boolean {
   return loopMode === "game";
 }
 
-// ===== Main-menu panorama background (a MENU frame's background step) =====
-// Equirectangular panorama on a sphere's inner wall; the camera sits fixed at the center rotating slowly
-// around Y (MC main-menu style panning). It is not a loop of its own any more: a MENU frame calls this,
-// and the check below is what makes it a no-op when the background mode has no panorama. Shares the
-// renderer and the camera aspect with the game view (see the resize handler).
-let menuBgScene: THREE.Scene | null = null;
-let menuBgCamera: THREE.PerspectiveCamera | null = null;
-let menuBgYaw = 0;
-let menuBgLastMs = 0;
-
-function renderMenuBackground(): void {
-  if (menuBgKind() !== "panorama") return;
-  if (!menuBgScene) {
-        // Lazy init: SphereGeometry's default UV is equirectangular; scale(-1,1,1) flips to the inner wall without mirroring
-    menuBgScene = new THREE.Scene();
-    const tex = new THREE.TextureLoader().load(resolveTexture("backgrounds/panorama.png"));
-    tex.colorSpace = THREE.SRGBColorSpace;
-    const geo = new THREE.SphereGeometry(50, 64, 32);
-    geo.scale(-1, 1, 1);
-    menuBgScene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex })));
-    menuBgCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
-    menuBgLastMs = performance.now();
-  }
-  const now = performance.now();
-  menuBgYaw += Math.min((now - menuBgLastMs) / 1000, 0.1) * 0.03;  // Slow spin ~0.03 rad/s, a full turn in ~3.5 min
-  menuBgLastMs = now;
-  menuBgCamera!.quaternion.setFromEuler(new THREE.Euler(0, menuBgYaw, 0));
-  renderer.render(menuBgScene!, menuBgCamera!);
-}
+// ===== Main-menu background =====
+// It is `rendering/menu-background.ts` now: a SYSTEM OBJECT whose state is the MENU_BACKGROUND resource
+// (ecs/presentation.ts). The scene, the camera and the two spin numbers used to be four module-level
+// `let`s here with this free function beside them — state with no owner, reachable by the menu frame only
+// through a closure. The object is built with the other systems below, and a MENU frame calls its step().
 
 logDebug(`BOOT render=rAF(60Hz) winFocused=${winFocused()}`);
 
@@ -983,6 +1218,7 @@ function checkSettingsAtBoot(): { noteKey: string; noteValue: string } {
     windowMode: getWindowMode(),
     fpsCap: frameCap.cap,
     keybinds: getBindsAll(),
+    diagLog: isDiagLogEnabled(),
   };
   const checked = readSettingsChecked();
   if (checked.problem) {
@@ -1012,9 +1248,10 @@ function checkSettingsAtBoot(): { noteKey: string; noteValue: string } {
 
 async function boot(): Promise<void> {
   const bootStart = performance.now();
-  // The root font size first: the startup screen is sized in rem like every other surface, and the
-  // scale mode that decides it was loaded from the settings file at the top of this file.
-  applyUIScale();
+  // The root font size is NOT applied here any more. It used to be a hand-written `applyUIScale()` call
+  // before the first stage; now the reconciler applies it (with the font pair) on every frame, diffed
+  // against what it last wrote — and it does so at the TOP of the step, before it paints a single widget,
+  // so the very first stage already renders at the right size and the loading screen needs no special case.
   // ACTIVATE the screen before the first stage — and note this line is load-bearing, not decoration:
   // `ui.loading` only paints while LOADING_STATE.active is true (its root is spawned hidden), so a driver
   // that forgets it leaves the window showing the HUD ALONE — a black page with a crosshair and a
@@ -1030,6 +1267,7 @@ async function boot(): Promise<void> {
   // at creation ("show": false) precisely so nothing white can flash, and revealing it before the first
   // paint would trade that for a black rectangle.
   showWindow();
+  suppressGeometryPause(); // the reveal itself resizes/moves the window
   applyWindowModeAtStart();
 
   const settings = checkSettingsAtBoot();
@@ -1037,8 +1275,12 @@ async function boot(): Promise<void> {
 
   await loadingStage(0.3, "loading.gpu");
   await renderer.init();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  app.appendChild(renderer.domElement);
+  // From here the canvas may be sized (a load frame runs before this point) — and the size comes from the
+  // VIEWPORT resource like every later resize, so there is ONE rule for "how big is the canvas".
+  rendererReady = true;
+  applyViewportSize();
+  // The canvas host is read back from the world: "where the game's canvas goes" is world state too.
+  world.resource(CANVAS_HOST).appendChild(renderer.domElement);
   logDebug(`BOOT graphics ready at ${(performance.now() - bootStart).toFixed(0)}ms`);
 
   // The world is NOT built here any more: `enterWorld()` does that behind this same screen (see its

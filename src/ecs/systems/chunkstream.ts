@@ -11,8 +11,9 @@
 // The wanted-key set is rebuilt only when the player crosses a chunk boundary, and meshes are
 // built under a per-frame budget so the initial fill spreads over a couple of seconds instead
 // of stalling. Chunks whose mesh came out empty (uniform solid, which is what the default
-// generator produces) are remembered in `empty` and never retried — that cache assumes static
-// terrain; an editable world must invalidate it on write.
+// generator produces) are remembered in the cache's `empty` set and never retried — that cache assumes
+// static terrain; an editable world must invalidate it on write. The cache itself (the parent group and
+// both sets) is the CHUNK_MESHES resource rather than a private field: see ecs/presentation.ts.
 import * as THREE from "three/webgpu";
 import { CHUNK_SIZE } from "../../voxel/chunk";
 import {
@@ -27,6 +28,7 @@ import {
 } from "../../voxel/world";
 import { ChunkGeometry, getChunkMaterial } from "../../rendering/chunkmesh";
 import { POSITION } from "../components/Player";
+import { CHUNK_MESHES, type ChunkMeshCache, type ChunkMeshEntry } from "../presentation";
 import { LOCAL_PLAYER, VOXEL } from "../resources";
 import { entityIndex, type SystemAccess, type World } from "../World";
 
@@ -45,15 +47,6 @@ export const RENDER_RADIUS_CHUNKS = 8;
  *  Air chunks bail out immediately, so a high value mostly costs cheap early-outs. */
 const MESH_BUDGET_PER_FRAME = 24;
 
-interface ChunkMeshEntry {
-  readonly mesh: THREE.Mesh;
-  /** The chunk's REUSABLE geometry — a rebuild refills this instead of replacing the mesh */
-  readonly geom: ChunkGeometry;
-  readonly cx: number;
-  readonly cy: number;
-  readonly cz: number;
-}
-
 const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
   [1, 0, 0],
   [-1, 0, 0],
@@ -64,9 +57,11 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
 ];
 
 export class ChunkStreamSystem {
-  private readonly meshes = new Map<string, ChunkMeshEntry>();
-  /** Chunk identities that produced no geometry (kept so they are not retried every frame) */
-  private readonly empty = new Set<string>();
+  /** The world's chunk-mesh cache (ecs/presentation.ts): the parent group every mesh is added to, the
+   *  meshes themselves and the "no geometry" set. It used to be three private fields plus a THREE.Group
+   *  handed in as a constructor argument — the cache is GPU state that outlives a frame, so the world
+   *  owns it. Resolved in the constructor BODY (iron rule 6). */
+  private readonly cache: ChunkMeshCache;
   /** Column offsets ordered near-first, so the ground under the player appears first */
   private readonly offsets: ReadonlyArray<readonly [number, number]>;
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
@@ -76,12 +71,10 @@ export class ChunkStreamSystem {
   private lastPcx = Number.NaN;
   private lastPcz = Number.NaN;
 
-  constructor(
-    private readonly world: World,
-    private readonly group: THREE.Group,
-  ) {
+  constructor(private readonly world: World) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
+    this.cache = world.resource(CHUNK_MESHES);
     const offsets: Array<[number, number]> = [];
     for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
       for (let dz = -RENDER_RADIUS_CHUNKS; dz <= RENDER_RADIUS_CHUNKS; dz++) {
@@ -110,7 +103,7 @@ export class ChunkStreamSystem {
     if (this.wanted === null) return this.offsets.length * CHUNK_Y_COUNT;
     let pending = 0;
     for (const key of this.wanted) {
-      if (!this.meshes.has(key) && !this.empty.has(key)) pending++;
+      if (!this.cache.meshes.has(key) && !this.cache.empty.has(key)) pending++;
     }
     return pending;
   }
@@ -126,7 +119,7 @@ export class ChunkStreamSystem {
   needsWarmUp(x: number, z: number): boolean {
     const wanted = this.wantedKeys(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
     for (const key of wanted) {
-      if (!this.meshes.has(key) && !this.empty.has(key)) return true;
+      if (!this.cache.meshes.has(key) && !this.cache.empty.has(key)) return true;
     }
     return false;
   }
@@ -178,13 +171,13 @@ export class ChunkStreamSystem {
     let budget = MESH_BUDGET_PER_FRAME;
     for (const key of this.wanted) {
       if (budget <= 0) break;
-      if (this.meshes.has(key) || this.empty.has(key)) continue;
+      if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
       budget--;
       this.build(key);
     }
 
     if (moved) {
-      for (const entry of this.meshes.values()) this.place(entry);
+      for (const entry of this.cache.meshes.values()) this.place(entry);
     }
   }
 
@@ -202,12 +195,12 @@ export class ChunkStreamSystem {
   }
 
   private unloadOutside(wanted: Set<string>): void {
-    for (const [key, entry] of this.meshes) {
+    for (const [key, entry] of this.cache.meshes) {
       if (wanted.has(key)) continue;
-      this.group.remove(entry.mesh);
+      this.cache.group.remove(entry.mesh);
       entry.geom.dispose();
-      this.meshes.delete(key);
-      this.empty.delete(key);
+      this.cache.meshes.delete(key);
+      this.cache.empty.delete(key);
     }
   }
 
@@ -218,16 +211,16 @@ export class ChunkStreamSystem {
    *  A chunk that had no mesh needs one built, and a chunk that just lost its last visible face
    *  must go back into the "empty" set. */
   private rebuild(key: string): void {
-    const entry = this.meshes.get(key);
+    const entry = this.cache.meshes.get(key);
     if (entry) {
       if (entry.geom.rebuild(this.voxel, entry.cx, entry.cy, entry.cz) > 0) return;
-      this.group.remove(entry.mesh);
+      this.cache.group.remove(entry.mesh);
       entry.geom.dispose();
-      this.meshes.delete(key);
-      this.empty.add(key);
+      this.cache.meshes.delete(key);
+      this.cache.empty.add(key);
       return;
     }
-    this.empty.delete(key);
+    this.cache.empty.delete(key);
     if (this.wanted?.has(key)) this.build(key);
   }
 
@@ -243,15 +236,15 @@ export class ChunkStreamSystem {
     const geom = new ChunkGeometry();
     if (geom.rebuild(this.voxel, cx, cy, cz) === 0) {
       geom.dispose();
-      this.empty.add(key);
+      this.cache.empty.add(key);
       return;
     }
 
     const mesh = new THREE.Mesh(geom.geometry, getChunkMaterial());
     mesh.matrixAutoUpdate = false;
     const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz };
-    this.group.add(mesh);
-    this.meshes.set(key, entry);
+    this.cache.group.add(mesh);
+    this.cache.meshes.set(key, entry);
     this.place(entry);
   }
 

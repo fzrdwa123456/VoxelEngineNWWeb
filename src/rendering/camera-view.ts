@@ -9,7 +9,8 @@
 // that has a previous position; this system is purely a CONSUMER of it.
 import * as THREE from "three/webgpu";
 import { ORIENTATION, POSITION, PREV_POSITION } from "../ecs/components/Player";
-import { LOCAL_PLAYER } from "../ecs/resources";
+import { CAMERA3D } from "../ecs/presentation";
+import { LOCAL_PLAYER, VIEWPORT, type ViewportState } from "../ecs/resources";
 import { entityIndex, type SystemAccess, type World } from "../ecs/World";
 
 /** Declared access. Reads the player's pose and writes the three.js camera; it shares the render
@@ -48,16 +49,35 @@ export function viewDirection(
 
 export class CameraViewSystem {
   private readonly index: number;
+  /** The world's camera, resolved in the constructor BODY (iron rule 6: a field initializer runs before
+   *  a parameter property is assigned, so `this.world` is not readable there). The camera is a RESOURCE
+   *  (ecs/presentation.ts) rather than an argument — it is world state, not a per-system object. */
+  private readonly camera: THREE.PerspectiveCamera;
+  /** The window size (VIEWPORT): the projection follows it, reconciled here instead of being pushed into
+   *  the camera by a resize listener in the composition root. */
+  private readonly viewport: ViewportState;
+  /** The aspect last written into the projection, so a resize is applied ONCE (NaN = nothing yet) */
+  private appliedAspect = Number.NaN;
 
-  constructor(
-    private readonly world: World,
-    private readonly camera: THREE.PerspectiveCamera,
-  ) {
+  constructor(private readonly world: World) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
+    this.camera = world.resource(CAMERA3D);
+    this.viewport = world.resource(VIEWPORT);
   }
 
   /** Per-frame: interpolate the position and rebuild the orientation quaternion */
   render(alpha: number): void {
+    // The projection first: a size of 0 means the platform service has not published yet, so the aspect
+    // is left alone rather than computed from it (a 0-height window would make the aspect Infinity).
+    const { width, height } = this.viewport;
+    if (width > 0 && height > 0) {
+      const aspect = width / height;
+      if (aspect !== this.appliedAspect) {
+        this.appliedAspect = aspect;
+        this.camera.aspect = aspect;
+        this.camera.updateProjectionMatrix();
+      }
+    }
     const index = this.index;
     const px = POSITION.x[index];
     const py = POSITION.y[index];

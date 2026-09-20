@@ -19,6 +19,8 @@
   "settings.unlimited": "無制限",
   "settings.vsyncOff": "垂直同期: 無効(再起動で適用)",
   "settings.vsyncOn": "垂直同期: 有効(再起動で適用)",
+  "settings.diagLogOff": "診断ログ: 無効(イベントのみ)",
+  "settings.diagLogOn": "診断ログ: 有効(探針を含む)",
   "settings.language": "言語",
   "settings.languageFont": "言語とフォント",
   "settings.font": "フォント",

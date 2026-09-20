@@ -14,8 +14,9 @@
 // What stays outside, deliberately: the Space/contextmenu/resize listeners in main.ts
 // (`preventDefault` can only happen in the event that must be cancelled) and the arm paths of the key
 // bind gesture (click-synthesis timing, see ui/menu.ts).
-import { UI_MODAL, type UiModalState } from "../resources";
-import { KeyEdgeReader, type KeyEventLog } from "../resources";
+import { HOTBAR_SLOTS } from "../components/Player";
+import { SelectSlot } from "../commands";
+import { LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../resources";import { KeyEdgeReader, type KeyEventLog } from "../resources";
 import { KEY_EVENTS } from "../resources";
 import type { Entity, SystemAccess, World } from "../World";
 import { UI_STATE, setUiVisible } from "./widgets";
@@ -50,6 +51,11 @@ export interface NavigationDeps {
   readonly inWorld: () => boolean;
   /** Pointer-lock effects, injected (this system writes no DOM and no device state by itself) */
   readonly prepareUnlock: () => void;
+  /** Is a key bind DRAG in progress? (the KEYBIND_GESTURE resource, read through the root). Optional: a
+   *  driver that does not model a drag (a test) simply never reports one. */
+  readonly dragging?: () => boolean;
+  /** Cancel that drag: clear the gesture and end a rebind capture. `reason` is for the log. */
+  readonly cancelDrag?: (reason: string) => void;
   readonly exitPointerLock: () => void;
   readonly centerCursor: () => void;
   readonly relock: (reason: string) => void;
@@ -80,6 +86,8 @@ export function stepBackSettings(ui: UiModalState): void {
 export class UiNavigationSystem {
   private readonly ui: UiModalState;
   private readonly reader: KeyEdgeReader;
+  /** The player whose INVENTORY the hotbar keys select on (LOCAL_PLAYER, resolved once) */
+  private readonly player: Entity;
   /** What the last frame saw, so the pointer-lock effects fire on an EDGE and not every frame */
   private inventoryOpen = false;
   private menuOpen = false;
@@ -90,6 +98,7 @@ export class UiNavigationSystem {
   ) {
     this.ui = world.resource(UI_MODAL);
     this.reader = new KeyEdgeReader(world.resource(KEY_EVENTS) as KeyEventLog);
+    this.player = world.resource(LOCAL_PLAYER);
   }
 
   /** ui lane. Decisions first (they only write the state), then the paint, then the lock effects. */
@@ -98,6 +107,15 @@ export class UiNavigationSystem {
     this.reader.drain((edge) => {
       if (!edge.down || edge.repeat) return; // a held key is one press; releases change nothing here
       if (edge.code === "Escape") {
+        // A key bind DRAG owns ESC: it cancels the drag and does NOT step back. The decision lives HERE with
+        // the rest of the ESC ladder — not in the gesture's device listener, which cannot reliably preempt
+        // the key-edge publisher (only listeners registered after it can be stopped, and the registration
+        // order is wiring order). Having it in both places is what made ESC cancel the drag AND walk up a
+        // menu level at the same time.
+        if (this.deps.dragging?.()) {
+          this.deps.cancelDrag?.("ESC");
+          return;
+        }
         this.onEscape();
         return;
       }
@@ -107,6 +125,22 @@ export class UiNavigationSystem {
         // must be RUNNING as well — the backpack belongs to a world, not to a loading screen.
         if (!this.deps.capturing() && !ui.mainMenu && !ui.menu && this.deps.inWorld()) {
           this.setInventory(!ui.inventory);
+        }
+        return;
+      }
+      // The HOTBAR keys. This used to be a `document` keydown listener inside the inventory VIEW
+      // (ui/inventory.ts): a view owning a device listener, and with NO gate at all — pressing 1..9 at
+      // the main menu, on the loading screen or with the pause menu open still moved the selection. The
+      // decision belongs here with the other key decisions (this system already owns "which key means
+      // what" for the inventory), the player and the slot count are world state, and the gate is the
+      // inventory key's gate: a world must be running, no capture owns the keyboard, no MENU is up. The
+      // backpack is deliberately NOT excluded — selecting a slot with the bag open is harmless and the
+      // hotbar highlight is the feedback.
+      if (edge.code.startsWith("Digit")) {
+        const slot = Number(edge.code.slice(5)) - 1;
+        if (slot >= 0 && slot < HOTBAR_SLOTS && !this.deps.capturing() && !ui.mainMenu && !ui.menu &&
+            this.deps.inWorld()) {
+          this.world.commands.send(SelectSlot, { entity: this.player, slot });
         }
       }
     });
