@@ -28,6 +28,9 @@ const SOURCES = [
   "src/ecs/World.ts",
   "src/ecs/components/Player.ts",
   "src/ecs/commands.ts",
+  // The boot / world-entry FLOW: the stage list is data and `runBootFlow` is the only logic (its deps are
+  // injected, so it needs no DOM and no World).
+  "src/ecs/boot.ts",
   "src/ecs/resources.ts",
   "src/ecs/systems/snapshot.ts",
   "src/ecs/systems/controller.ts",
@@ -710,6 +713,10 @@ const W = load("ecs/ui/widgets.js");
 // The tree's creation counter is a RESOURCE now (it used to be a module-level `let`, i.e. shared by every
 // World): it has to be inserted before the first spawn, exactly as main.ts does.
 widgetWorld.insertResource(W.UI_ORDER, W.createUiOrder());
+// …and so is the UI layer's PAINT state (element tables + the per-surface "last written" caches), which
+// the reconciler and the widget-data systems resolve in their constructors.
+const PAINT = load("ecs/ui/paint.js");
+widgetWorld.insertResource(PAINT.UI_PAINT, PAINT.createUiPaint(C.INVENTORY_SLOTS));
 
 check("widget prefabs build the tree the reconciler expects", () => {
   const W = load("ecs/ui/widgets.js");
@@ -1951,20 +1958,21 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   equal(countOf(main, /requestAnimationFrame\(/g), 1, "exactly one rAF chain");
   equal(countOf(main, /cancelAnimationFrame\(/g), 0, "the chain is never cancelled or restarted");
   // The body dispatches on the mode, and a menu frame is the ui lane (+ the background), nothing else.
-  assert(/if \(loopMode === "game"\) renderFrame\(\)/.test(main), "a game frame runs the fixed step + render");
-  assert(/else if \(loopMode === "menu"\) menuFrame\(\)/.test(main), "a menu frame runs the menu body");
+  // The MODE is `LOOP_STATE.mode` now (ecs/resources.ts): the loop body dispatches on world data.
+  assert(/if \(loop\.mode === "game"\) renderFrame\(\)/.test(main), "a game frame runs the fixed step + render");
+  assert(/else if \(loop\.mode === "menu"\) menuFrame\(\)/.test(main), "a menu frame runs the menu body");
   assert(/function menuFrame\(\)[\s\S]{0,200}world\.renderUi\(\)/.test(main), "…which is the ui lane alone");
   // …and a LOAD frame is the ui lane alone too, because the loading screen is widget data and the
   // renderer does not exist yet. It used to have no body at all ("nothing yet"), which is why the
   // loading screen could not have been painted by the loop before `renderer.init()`.
-  assert(/else if \(loopMode === "load"\) loadFrame\(\)/.test(main), "a load frame runs the loading screen");
+  assert(/else if \(loop\.mode === "load"\) loadFrame\(\)/.test(main), "a load frame runs the loading screen");
   assert(/function loadFrame\(\)[\s\S]{0,200}world\.renderUi\(\)/.test(main), "…which is the ui lane alone");
   // …and BOTH flows have to be in that mode while their screen is up: the startup starts in it, and a
   // world entry (driven from the MENU) has to switch into it, or every frame in between is a menu frame
   // that draws the panorama behind an opaque screen for nothing.
   const entryForMode = main.slice(main.indexOf("async function enterWorld("), main.indexOf("const mainMenu = new MainMenu("));
   assert(/setLoopMode\("load"\)/.test(entryForMode), "the world entry puts the loop in load mode");
-  equal(countOf(main, /loopMode = mode;/g), 1, "the mode has exactly one writer");
+  equal(countOf(main, /loop\.mode = mode;/g), 1, "the mode has exactly one writer (LOOP_STATE.mode)");
   // …and the chain is kicked off once, by calling frame() directly rather than scheduling it. The call
   // lives inside the boot driver now (it is the first thing that happens after the loading screen's
   // first stage), so the assertion has to allow its indentation while still demanding exactly one.
@@ -2047,7 +2055,8 @@ check("the startup reveals the window behind the screen, and entering a world re
   assert(bootBody.length > 0, "the startup driver is in the source");
   assert(entryBody.length > 0, "the world-entry driver is in the source");
   assert(!entryBody.includes("renderer.init"), "…and the slice ends before the startup driver");
-  const firstStage = main.indexOf('loadingStage(0, "loading.settings")');
+  // The flow's stages are DATA now (ecs/boot.ts walks them), so the first stage is found by its own key.
+  const firstStage = main.indexOf('key: "loading.settings"');
   const started = main.indexOf("frame();");
   const revealed = main.indexOf("showWindow()");
   const gpu = main.indexOf("await renderer.init()");
@@ -2065,9 +2074,17 @@ check("the startup reveals the window behind the screen, and entering a world re
     /SetLoadingStage, \{ active: true \}/.test(bootBody),
     "the startup ACTIVATES the loading screen",
   );
+  // The activation must precede STARTING the flow: the walker announces stage 0 (which pumps the ui lane
+  // through the command barrier) before it runs that stage's work, so "screen up" precedes "window shown"
+  // by construction — the source order inside the driver plus the walker's own contract.
   assert(
-    bootBody.indexOf("active: true") < bootBody.indexOf("showWindow()"),
-    "…before the window is revealed, so the first visible frame is the screen",
+    bootBody.indexOf("active: true") < bootBody.indexOf("runBootFlow(bootFlow"),
+    "…before the flow is started, so the first visible frame is the screen",
+  );
+  const walker = stripComments(readSource("src/ecs/boot.ts"));
+  assert(
+    walker.indexOf("deps.announce(stage)") < walker.indexOf("await stage.run()"),
+    "…and the walker announces every stage before it runs that stage's work",
   );
   assert(
     // Not anchored at the closing brace: the entry clears the startup's settings NOTE in the same
@@ -2184,7 +2201,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   const shell = stripComments(readSource("src/platform/shell.ts"));
   assert(/export function setDiagLogEnabled/.test(shell) && /export function isDiagLogEnabled/.test(shell),
     "the switch is a getter/setter pair on the log sink");
-  assert(/if \(!diagLogEnabled && isProbeLine\(line\)\) return;/.test(shell),
+  assert(/if \(!state\.diagLogEnabled && isProbeLine\(line\)\) return;/.test(shell),
     "…and logDebug filters the probe lines with it");
   assert(/export function appendDebugLog/.test(shell) && !/isProbeLine/.test(shell.split("export function appendDebugLog")[1].split("export function logDebug")[0]),
     "the error/console channel (appendDebugLog) stays unfiltered");
@@ -2366,8 +2383,18 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   equal(countOf(stripComments(readSource("src/platform/pointerlock.ts")), /clickLockAllowed/g), 0,
     "pointerlock.ts no longer publishes it");
 
-  // Assets stay assets: the dictionaries and the block registry are loaded once and never change.
-  assert(!/insertResource\((?:DICT|DICTS|BLOCKS|BLOCK_REGISTRY|CATALOG)/.test(main), "assets are not resources");
+  // Assets are DATA with an owner: the dictionaries, the block registry and the pack chain's background
+  // memo are loaded once and never change, but they are no longer invisible module-level `let`s — each
+  // module creates its object at import time (all three can be asked before the World exists) and the
+  // composition root INSERTS it, so the cache has a name and a reader that is not that module.
+  for (const [name, token] of [
+    ["the dictionaries", "I18N_STRINGS"],
+    ["the block registry", "BLOCK_REGISTRY"],
+    ["the background memo", "MENU_BG_KIND"],
+    ["the host state", "SHELL_STATE"],
+  ]) {
+    assert(new RegExp(`insertResource\\(${token},`).test(main), `${name} are inserted as a resource`);
+  }
 });
 
 check("the presentation objects are RESOURCES, not constructor dependencies", () => {
@@ -2430,7 +2457,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // (start a resize-drag while a world loads, the entry locks the mouse on top of it, then both the drag
   // and the view rotation work).
   assert(/onWinGeometry\(/.test(main), "the window's geometry change is handled as a signal");
-  assert(/suppressGeometryPause\(\)/.test(main) && /performance\.now\(\) < suppressGeometryUntil/.test(main),
+  assert(/suppressGeometryPause\(\)/.test(main) && /performance\.now\(\) < loop\.suppressGeometryUntil/.test(main),
     "…while our OWN window-mode switch suppresses it (fullscreen must not open the pause menu)");
   // CAPTURE REQUIRES THE FOREGROUND. The browser path refuses pointer lock by itself, which is why the NW.js
   // version could drop the focus gate; the NATIVE capture (ClipCursor) does not look at the foreground at
@@ -2927,6 +2954,9 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     //     lane drains the log. Without it, ESC unbound the action AND walked the settings panel one level
     //     back (the reported bug).
     const K = load("platform/keybinds.js");
+    // The capture STATE is the gesture resource now (platform/keybinds only holds a pointer to it), so the
+    // harness hands it one — exactly as the composition root does during wiring.
+    K.adoptKeybindGesture(load("ecs/ui/keybind.js").createKeybindGesture());
     const edgeLog = world.resource(KEY_EVENTS);
     const escapeDowns = () => edgeLog.edges.filter((e) => e.code === "Escape" && e.down).length;
     const escapeBefore = escapeDowns();
@@ -3203,6 +3233,65 @@ check("the snapshot/controller pair commutes (real systems, both registration or
     trace(forward, TICKS, 0).join("|") !== a.join("|"),
     "a yawed run must differ from a straight one, or the test proves nothing",
   );
+});
+
+check("the view paint state, the host state and the loop's own state are RESOURCES (P1.14)", () => {
+  // The tail of the data/behaviour split: everything a class kept only to know WHAT IT DREW LAST, the
+  // host module's own bookkeeping, the assets the pack chain produced, the frame loop's state and the one
+  // frame probe. All of it was module-level `let`s or private fields; all of it is data in the world now,
+  // with the same single writer as before.
+  const R = load("ecs/resources.js");
+  const P = load("ecs/ui/paint.js");
+  const B = load("ecs/boot.js");
+  const main = stripComments(readSource("src/main.ts"));
+  for (const [token, mod] of [
+    ["UI_PAINT", P],
+    ["LOOP_STATE", R],
+    ["FRAME_PROBE", R],
+    ["BOOT_FLOW", B],
+  ]) {
+    assert(typeof mod[token]?.name === "string", `${token} is a resource token`);
+    assert(new RegExp(`insertResource\\(${token},`).test(main), `the composition root inserts ${token}`);
+  }
+  // The three ASSET caches and the HOST state live in modules the gate cannot load (they reach the Tauri
+  // API through the platform layer), so their tokens and the root's inserts are asserted from source text.
+  for (const [token, file] of [
+    ["SHELL_STATE", "src/platform/shell.ts"],
+    ["I18N_STRINGS", "src/ui/i18n.ts"],
+    ["MENU_BG_KIND", "src/ui/background.ts"],
+    ["BLOCK_REGISTRY", "src/blockregistry.ts"],
+  ]) {
+    assert(new RegExp(`export const ${token}: Resource<`).test(readSource(file)), `${token} is a resource token`);
+    assert(new RegExp(`insertResource\\(${token},`).test(main), `the composition root inserts ${token}`);
+  }
+  // …and no class keeps a private FIELD of the caches that moved (accessors onto the resource are how the
+  // use sites were left alone; a raw field is what this forbids).
+  const movedFields =
+    /^\s+private (?:readonly )?(?:shown|shownKey|shownRaw|shownPercent|filled|shownNote|shownNoteKey|shownNoteVisible|hovered|lineShown|drawnSelected|outsideWorld|inventoryOpen|menuOpen|lastCursor|rawFrameDx|rawFrameDy|wanted|lastPcx|lastPcz|applied|appliedAspect|stylesheetInjected|appliedFontUi|appliedFontMono|appliedRootFontPx|reported|flushTimer|diagLogEnabled|windowFocused|installed|scheduled|cached|loaded|snapshot)\s*[:=]/gm;
+  for (const rel of [
+    "src/ecs/ui/system.ts", "src/ecs/ui/loading.ts", "src/ecs/ui/toast.ts", "src/ecs/ui/hud.ts",
+    "src/ecs/ui/keybind.ts", "src/ecs/ui/inventory.ts", "src/ecs/ui/navigation.ts", "src/ecs/ui/bindings.ts",
+    "src/ecs/systems/input.ts", "src/ecs/systems/chunkstream.ts", "src/ecs/systems/delays.ts",
+    "src/rendering/camera-view.ts", "src/platform/pointerlock.ts", "src/platform/keybinds.ts",
+    "src/platform/shell.ts", "src/platform/viewport.ts", "src/blockregistry.ts", "src/ui/i18n.ts",
+    "src/ui/background.ts",
+  ]) {
+    equal(countOf(stripComments(readSource(rel)), movedFields), 0, `${rel} keeps no moved-out private field`);
+  }
+  // The rebind capture is DATA (the gesture resource) and its decisions are a QUEUE the ui lane applies,
+  // so the device listener no longer writes the bind table and the module holds no capture state.
+  const kb = stripComments(readSource("src/ecs/ui/keybind.ts"));
+  assert(/capturing: BindAction \| null/.test(kb), "the rebind capture is gesture data");
+  assert(/rebinds: RebindIntent\[\]/.test(kb), "…and the device decisions are a queue");
+  assert(/private applyRebinds\(\)/.test(kb), "…applied by the ui.keybind system");
+  equal(countOf(stripComments(readSource("src/platform/keybinds.ts")), /^let capturing\b/gm), 0,
+    "platform/keybinds.ts keeps no capture state (it holds a pointer to the resource)");
+  // The boot/entry walks are DATA: the stage lists are declared by the composition root and the only
+  // logic is the walker, which announces a stage before running its work.
+  assert(/const BOOT_STAGES: readonly BootStage\[\]/.test(main), "the startup flow is a stage list");
+  assert(/const stages: readonly BootStage\[\]/.test(main), "…and so is the world entry's");
+  const walker = stripComments(readSource("src/ecs/boot.ts"));
+  assert(/export async function runBootFlow\(/.test(walker), "the walk itself lives in ecs/boot.ts");
 });
 
 // ===== report =====

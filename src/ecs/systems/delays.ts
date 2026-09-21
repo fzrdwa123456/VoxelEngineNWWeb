@@ -43,8 +43,6 @@ export const DELAYS_ACCESS: SystemAccess = {
 
 export class DelaySystem {
   private readonly queue: DelayedIntents;
-  /** How many intents this system has applied (diagnostics / the Node gate) */
-  private applied = 0;
 
   constructor(
     world: World,
@@ -53,8 +51,10 @@ export class DelaySystem {
     this.queue = world.resource(DELAYED_INTENTS);
   }
 
+  /** How many intents this system has applied (diagnostics / the Node gate). It is a field of the QUEUE
+   *  resource (DELAYED_INTENTS.applied) — the counter belongs with the deadlines it counts. */
   get appliedCount(): number {
-    return this.applied;
+    return this.queue.applied;
   }
 
   get pendingCount(): number {
@@ -63,7 +63,7 @@ export class DelaySystem {
 
   step(): void {
     for (const intent of this.queue.takeDue()) {
-      this.applied++;
+      this.queue.applied++;
       switch (intent.kind) {
         case "relock":
           this.deps.relock(intent.arg);

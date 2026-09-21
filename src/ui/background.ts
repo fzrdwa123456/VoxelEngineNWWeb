@@ -6,6 +6,7 @@
 //   mode's image missing / no config / bad JSON / invalid value -> "checker" (magenta/black checkerboard)
 //   (the static image's own in-chain fallback still goes through resolveTexture: mainmenu.png missing -> missing.png)
 import { packsInstalled, resolveBytes } from "../rendering/textures";
+import { defineResource, type Resource } from "../ecs/World";
 
 export type MenuBgKind = "panorama" | "static" | "checker";
 
@@ -28,23 +29,35 @@ function readMode(): MenuBgMode | null {
   return null;
 }
 
-/** The effective background form (shared by mainmenu.ts's DOM layer and the menu frame's background
- *  step). MEMOISED: the answer is derived from the pack chain, which is scanned once per process, while
- *  the menu frame asks for it every frame — without the memo that would be a JSON.parse per frame. */
-let cached: MenuBgKind | null = null;
+/** The MEMO of that answer, as DATA. It used to be a module-level `let cached`; the object exists at
+ *  import time (the menu frame and the view builder may ask before the World does) and the composition
+ *  root INSERTS it as MENU_BG_KIND, so "which background this pack chain picked" is readable from the
+ *  world instead of being invisible to everyone but this module. */
+export interface MenuBgState {
+  kind: MenuBgKind | null;
+}
+
+export const MENU_BG_KIND: Resource<MenuBgState> = defineResource<MenuBgState>("menuBgKind");
+
+const state: MenuBgState = { kind: null };
+
+/** The one instance, for the composition root to insert. */
+export function menuBgState(): MenuBgState {
+  return state;
+}
 
 export function menuBgKind(): MenuBgKind {
-  if (cached) return cached;
+  if (state.kind) return state.kind;
   // Do NOT cache the answer until the packs are installed — the memo would otherwise record "checker"
   // forever. (On the normal path the menu frame runs only after boot; this just denies it the chance.)
   if (!packsInstalled()) return "checker";
   const mode = readMode();
   if (mode === "panorama") {
-    cached = resolveBytes(PANORAMA_REL) ? "panorama" : "checker";  // Panorama missing = checkerboard
+    state.kind = resolveBytes(PANORAMA_REL) ? "panorama" : "checker";  // Panorama missing = checkerboard
   } else if (mode === "static") {
-    cached = resolveBytes(STATIC_REL) ? "static" : "checker";  // Static missing = checkerboard
+    state.kind = resolveBytes(STATIC_REL) ? "static" : "checker";  // Static missing = checkerboard
   } else {
-    cached = "checker";  // No config/bad JSON/invalid value = checkerboard
+    state.kind = "checker";  // No config/bad JSON/invalid value = checkerboard
   }
-  return cached;
+  return state.kind;
 }

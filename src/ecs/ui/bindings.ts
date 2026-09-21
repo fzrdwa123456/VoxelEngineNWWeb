@@ -13,6 +13,7 @@
 // "unlimited") is a push, because formatting is surface logic; only the VALUE is derived. And a binding
 // never writes the DOM — the reconciler does that, from the component.
 import { defineResource, type Resource, type SystemAccess, type World } from "../World";
+import { UI_PAINT, type UiBindingsPaint } from "./paint";
 import { snapToRange, UI_BIND, UI_INPUT } from "./widgets";
 
 /** A source returns the value in the WIDGET's own domain (the range the surface gave the slider), not
@@ -43,14 +44,19 @@ export const UI_BINDING_ACCESS: SystemAccess = {
 /** Resolves bound widgets, once per frame, in the ui lane and BEFORE the reconciler. */
 export class UiBindingSystem {
   private readonly sources: ReadonlyMap<string, UiSource>;
-  /** Sources that were asked for and not found — logged once each, not every frame. */
-  private readonly reported = new Set<string>();
+  /** Sources that were asked for and not found — logged once each, not every frame. The set lives in
+   *  UI_PAINT.bindings (ecs/ui/paint.ts): a "what did I already say" cache is world data too. */
+  private readonly paint: UiBindingsPaint;
+  private get reported(): Set<string> {
+    return this.paint.reported;
+  }
 
   constructor(
     private readonly world: World,
     private readonly log?: (line: string) => void,
   ) {
     this.sources = world.resource(UI_SOURCES);
+    this.paint = world.resource(UI_PAINT).bindings;
   }
 
   /** How many widgets are bound (diagnostics / the Node gate) */

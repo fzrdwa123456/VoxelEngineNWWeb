@@ -101,11 +101,13 @@ export function bindKeybindDrag(deps: KeybindDragDeps): void {
   // start/end, the wheel block and the key capture. They live in the device layer because every one of them
   // decides something inside the event itself; what is injected here is the state they read and the two
   // facts only this file knows: which action ids a chip/keycap carries, and the hit test that finds one.
+  // A BIND is no longer written here: the listener queues the decision (KEYBIND_GESTURE.rebinds) and
+  // `ui.keybind` applies it in the ui lane.
   installBindGestureHandlers({
     gesture: gestureState,
     capturing: getCapturing,
     endCapture,
-    setBind: (action, code) => setBind(action, code),
+    queueRebind: (intent) => deps.gesture.rebinds.push(intent),
     chipAction: ACTION_CHIP,
     keycapCodeAt: (x, y) => keycapAt(x, y)?.code ?? null,
     hitTest: (x, y) => deps.hitTest(x, y),

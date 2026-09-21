@@ -277,6 +277,37 @@ is ESC-only, so no other key may be swallowed by the capture;
 (4) TAB is still BINDABLE: select an action, press TAB, then use it (the menu-level TAB default is
 cancelled while the mouse is captured but the key itself still reaches the game — see the P1.11 note).
 
+AFTER the data/behaviour pass (P1.14 — the view paint caches, the host state, the asset caches, the rebind
+capture, the frame loop's state and the two boot/entry drivers all became world data; `ecs/boot.ts` walks a
+stage LIST and `ui.keybind` applies queued rebind decisions). NOTHING should look different — that is the
+point — so walk the paths where the split could have broken something:
+(1) **the startup, in order**: launch and watch the loading screen. It must appear with a bar and a stage
+line ("checking settings" → "initialising graphics" → "ready"), the window must be revealed with that screen
+already painted (never a white or black flash), the main menu must come up in well under a second, and
+`debug.log` must still show `SETTINGS …`, `BOOT graphics ready at …ms` and `BOOT ready in …ms`. A stage line
+that NEVER changes, or a window that appears only after the GPU is ready, means the stage list or the
+walker's announce-then-run order is wrong;
+(2) **entering a world**: click Singleplayer — the screen must come back with the world's stages
+(`world.spawn` → `world.terrain` → `world.chunks` → `world.ready`), the bar must fill while the chunks are
+meshed, and the world must appear with the game frame (never an empty frame). Then go back to the main menu
+and enter AGAIN: the second entry into a warm window shows NO screen and lands instantly (`WORLD already warm,
+entering without a screen`);
+(3) **the key bind panel** (this is the one whose logic moved into the lane): click an action row (it selects
+/ shows the bare name), then press a key — it must bind; press ESC — it must UNBIND and the panel must stay
+on the page (the P1.13 rule, unchanged); release a drag on a keycap — it must bind; `debug.log` must still
+carry one `KBCAP bind done (code=…)` per bind and `KBCAP mousedown …` per click, and the click that follows a
+physical press must still be swallowed (no double-select);
+(4) **the UI itself**: the HUD, the hotbar, the backpack (icons, counts, selection), the F3 panel (F3 and
+F3+F4), the toast, every settings panel and the language switch — the reconciler's element tables and its
+"what did I draw last" cache are resource data now, so a widget that fails to appear, fails to UPDATE or
+flickers is the symptom to report (an ELEMENT TABLE that got lost shows as "the whole UI is missing", a lost
+diff cache as "one widget is stale");
+(5) **the loop and its probes**: FPS must be unchanged, a resize at the main menu must still resize the
+panorama's canvas (the frame applies it, not the draw), and with the diagnostic switch ON `FRAME`/`PHYS`
+lines must keep coming — the mode, the accumulators and the counters are `LOOP_STATE`/`FRAME_PROBE` now;
+(6) **the settings file**: change the language, the FPS cap, a key bind and the diagnostic switch, quit, and
+relaunch — all four must persist (`SHELL_STATE` holds the file snapshot the modules read).
+
 AFTER the diagnostic-log switch (the settings panel's "Diagnostic log", default ON — `settings.json`'s `diagLog`):
 the probe lines (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/`HOOKPROBE`, plus the two
 that fire on ordinary activity — `KBCAP …` once per click of the key bind UI and `RAWINPUT takeover` /

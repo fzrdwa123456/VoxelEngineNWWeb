@@ -22,6 +22,7 @@ import type { BindAction } from "../../platform/keybinds";
 import { defineResource, type Resource } from "../core/resource";
 import { POINTER } from "../resources";
 import type { Entity, SystemAccess, World } from "../World";
+import { UI_PAINT, type UiKeybindPaint } from "./paint";
 import { UI_LAYOUT, UI_STATE, UI_TEXT, setUiActive, setUiLayout, setUiSelected, setUiText, setUiVisible } from "./widgets";
 
 /** A capture-free drag in progress: hold an action chip and drop it on a keycap. `button` records the
@@ -36,6 +37,18 @@ export interface ChipDrag {
   moved: boolean;
 }
 
+/** One REBIND decision the DEVICE layer already made, waiting for the ui lane to apply it. The listeners
+ *  in platform/bind-gesture.ts take every decision at EVENT time (which key, which button, whether the
+ *  drop landed on a keycap); what they may NOT do is write the bind table — that is the system's job, so
+ *  the decision is queued here as data and `ui.keybind` applies it in the lane. The codes are already
+ *  resolved (KeyboardEvent.code / buttonToCode / the keycap hit test), so this module needs no platform
+ *  import. */
+export type RebindIntent =
+  /** A key or mouse code pressed while a capture is armed ("" = unbind — Escape) */
+  | { readonly kind: "bindCapture"; readonly code: string }
+  /** A drag released on a keycap: bind that action outright (no capture involved) */
+  | { readonly kind: "bindDrag"; readonly action: string; readonly code: string };
+
 /** Everything the document-level gesture knows, as world data. */
 export interface KeybindGesture {
   /** The capture-free drag, or null */
@@ -48,12 +61,27 @@ export interface KeybindGesture {
   pointerY: number;
   /** The one-shot click shield (armed by the arm paths in ui/menu.ts; see the contract there) */
   shield: boolean;
+  /** The action a rebind CAPTURE is armed for, or null. It used to be a module-level `let` inside
+   *  platform/keybinds.ts — state with no owner, read by the ESC gate in the input system, by the panel
+   *  actions and by `ui.navigation`. It is world data now: `platform/keybinds.ts` only holds a pointer to
+   *  this object (`adoptKeybindGesture`), and the bind itself is applied by this system. */
+  capturing: BindAction | null;
+  /** Rebind decisions taken at event time, drained (and applied) by `ui.keybind` in the ui lane. */
+  readonly rebinds: RebindIntent[];
 }
 
 export const KEYBIND_GESTURE = defineResource<KeybindGesture>("keybindGesture");
 
 export function createKeybindGesture(): KeybindGesture {
-  return { drag: null, hover: null, pointerX: 0, pointerY: 0, shield: false };
+  return {
+    drag: null,
+    hover: null,
+    pointerX: 0,
+    pointerY: 0,
+    shield: false,
+    capturing: null,
+    rebinds: [],
+  };
 }
 
 /** One action chip: the label is SURFACE logic (the selected chip shows a bare i18n KEY, the others a
@@ -104,6 +132,13 @@ export interface KeybindDeps {
   readonly capturing: () => BindAction | null;
   /** Read the current code for an action ("" = unbound) */
   readonly bindOf: (action: BindAction) => string;
+  /** Write a bind — the system applies the QUEUED decisions, so this is injected like the reads. */
+  readonly setBind: (action: BindAction, code: string) => void;
+  /** End the capture after a queued bind has been applied. */
+  readonly endCapture: () => void;
+  /** One line per applied bind (`KBCAP bind done (code=…)`), so the P1.13 diagnostic survives the move
+   *  of the bind out of the event listener. */
+  readonly log: (line: string) => void;
   /** The rubber band WIDGET (spawned by the composition root from ui/menu.ts's prefab): the SYSTEM writes
    *  its geometry as data (UI_LAYOUT) and the reconciler paints it. It replaced an SVG element the view
    *  owned and mutated on every mousemove. */
@@ -123,19 +158,38 @@ export const UI_KEYBIND_ACCESS: SystemAccess = {
 
 export class UiKeybindSystem {
   /** Last text written per widget, so the 100+ keycap legends are not rewritten every frame (the
-   *  reconciler would diff them away anyway, but this keeps the ui lane cheap). */
-  private readonly drawn = new Map<Entity, string>();
-  private hovered: Entity | null = null;
-  private lineShown = false;
+   *  reconciler would diff them away anyway, but this keeps the ui lane cheap). The DATA is
+   *  UI_PAINT.keybind (ecs/ui/paint.ts): the caches are world state, this is their only writer. */
+  private readonly paint: UiKeybindPaint;
+  private get drawn(): Map<Entity, string> {
+    return this.paint.drawn;
+  }
+  private get hovered(): Entity | null {
+    return this.paint.hovered;
+  }
+  private set hovered(v: Entity | null) {
+    this.paint.hovered = v;
+  }
+  private get lineShown(): boolean {
+    return this.paint.lineShown;
+  }
+  private set lineShown(v: boolean) {
+    this.paint.lineShown = v;
+  }
 
   constructor(
     private readonly world: World,
     private readonly deps: KeybindDeps,
-  ) {}
+  ) {
+    this.paint = world.resource(UI_PAINT).keybind;
+  }
 
   /** ui lane, once per frame: derive every panel's text/state from the bind table, then apply the
    *  gesture's presentation (the hover highlight and the rubber band). */
   step(): void {
+    // The queued REBIND decisions first: they were taken inside the events of the last frame, and this is
+    // the lane that owns the bind table.
+    this.applyRebinds();
     const capturing = this.deps.capturing();
     const bound = this.deps.boundCodes();
     for (const spec of specs) {
@@ -196,6 +250,27 @@ export class UiKeybindSystem {
       setUiVisible(this.world, this.deps.line, show);
       this.lineShown = show;
     }
+  }
+
+  /** Apply what the device layer decided, in arrival order, then clear the queue. A `bindCapture` intent
+   *  is applied to whatever capture is armed NOW — a capture that was already ended (Escape handled,
+   *  another bind landed) makes it a no-op instead of binding the wrong action. */
+  private applyRebinds(): void {
+    const gesture = this.world.resource(KEYBIND_GESTURE);
+    if (gesture.rebinds.length === 0) return;
+    for (const intent of gesture.rebinds) {
+      if (intent.kind === "bindCapture") {
+        const action = this.deps.capturing();
+        if (!action) continue;
+        this.deps.setBind(action, intent.code);
+        this.deps.endCapture();
+        this.deps.log(`KBCAP bind done (code=${intent.code || "Escape"})`);
+      } else {
+        this.deps.setBind(intent.action as BindAction, intent.code);
+        this.deps.log(`KBCAP drag release action=${intent.action} code=${intent.code || "no hit"}`);
+      }
+    }
+    gesture.rebinds.length = 0;
   }
 
   private write(entity: Entity, text: string, raw: boolean): void {

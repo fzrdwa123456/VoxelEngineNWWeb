@@ -30,6 +30,7 @@ import type { Entity } from "../World";
 import { NULL_ENTITY, type SystemAccess, type World } from "../World";
 import { UI_MOUNT } from "../presentation";
 import { dispatchUiAction, UI_ACTIONS, type UiActionHandler } from "./actions";
+import { UI_PAINT, type UiDrawn, type UiPaintState } from "./paint";
 import { recipeStyle, UI_THEME, type UiTheme } from "./theme";
 import {
   UI_ACTION,
@@ -68,25 +69,9 @@ export interface UiRenderDeps {
   readonly log?: (line: string) => void;
 }
 
-/** What was last written to an element, so the frame can skip unchanged DOM */
-interface Drawn {
-  style: string;
-  text: string;
-  /** The background image last written ("" = none) + the tint data behind it */
-  image: string;
-  /** The tooltip last written */
-  tip: string;
-  /** The slider value last written, so a user's drag is never fought */
-  value: string;
-  /** The slider range last written ("min|max|step") */
-  range: string;
-  /** Marquee shift in px for text that does not fit (0 = fits) */
-  marquee: number;
-  /** Was this widget hidden on the previous frame — itself OR behind a hidden ancestor? A scrollable
-   *  role returns to the TOP on the frame it comes back, which is an EDGE: while it stays up, whatever
-   *  the user scrolled to is left alone (its position is never recorded anywhere). */
-  wasHidden: boolean;
-}
+/** What was last written to an element, so the frame can skip unchanged DOM. The SHAPE lives with the
+ *  resource that holds the values (`ecs/ui/paint.ts`), because the caches are world data now. */
+type Drawn = UiDrawn;
 
 /** A hit-test result: the widget under a point, when it carries an action. Used by interactions that
  *  must ask "what is the cursor over" — the key bind drag being the only one today. */
@@ -99,24 +84,56 @@ export interface UiHit {
 export class UiRenderSystem {
   private readonly theme: UiTheme;
   private readonly actions: ReadonlyMap<string, UiActionHandler>;
+  /** The UI paint state (ecs/ui/paint.ts): the ELEMENT TABLES, the per-widget "last written" cache, the
+   *  hover/press sets and the global style actually applied. Those were private fields of this class —
+   *  state inside behaviour, reset nowhere and visible to nobody. They are world data now, and this
+   *  system is still their only writer. */
+  private readonly paint: UiPaintState;
   /** Where root widgets are mounted: the UI_MOUNT resource, the stage element the composition root
    *  creates (`ecs/presentation.ts::createUiMount()`). A RESOURCE rather than a dependency — the mount
    *  root is where every widget lives, i.e. world state, and resolving it here keeps the element out of
    *  the wiring arguments. Assigned in the constructor body (iron rule 6). */
   private readonly mountRoot: HTMLElement;
-  private readonly elements = new Map<Entity, HTMLElement>();
-  private readonly entityOf = new Map<HTMLElement, Entity>();
-  private readonly drawn = new Map<Entity, Drawn>();
-  /** DOM-transient interaction state, fed into the style table every frame. A SET rather than a flag per
-   *  widget: the delegated hover handler computes the whole ancestor chain, so "who is hovered now" is a
-   *  set by construction — and the diff against it is what replaces mouseenter/mouseleave. */
-  private readonly hovered = new Set<Entity>();
-  private readonly pressed = new Set<Entity>();
-  private stylesheetInjected = false;
+  private get elements(): Map<Entity, HTMLElement> {
+    return this.paint.dom.elements;
+  }
+  private get entityOf(): Map<HTMLElement, Entity> {
+    return this.paint.dom.entityOf;
+  }
+  private get drawn(): Map<Entity, Drawn> {
+    return this.paint.dom.drawn;
+  }
+  private get hovered(): Set<Entity> {
+    return this.paint.dom.hovered;
+  }
+  private get pressed(): Set<Entity> {
+    return this.paint.dom.pressed;
+  }
+  private get stylesheetInjected(): boolean {
+    return this.paint.dom.stylesheetInjected;
+  }
+  private set stylesheetInjected(v: boolean) {
+    this.paint.dom.stylesheetInjected = v;
+  }
   /** The global style last applied to the document root (null = nothing yet, so the first frame writes) */
-  private appliedFontUi: string | null = null;
-  private appliedFontMono: string | null = null;
-  private appliedRootFontPx: number | null = null;
+  private get appliedFontUi(): string | null {
+    return this.paint.dom.appliedFontUi;
+  }
+  private set appliedFontUi(v: string | null) {
+    this.paint.dom.appliedFontUi = v;
+  }
+  private get appliedFontMono(): string | null {
+    return this.paint.dom.appliedFontMono;
+  }
+  private set appliedFontMono(v: string | null) {
+    this.paint.dom.appliedFontMono = v;
+  }
+  private get appliedRootFontPx(): number | null {
+    return this.paint.dom.appliedRootFontPx;
+  }
+  private set appliedRootFontPx(v: number | null) {
+    this.paint.dom.appliedRootFontPx = v;
+  }
 
   constructor(
     private readonly world: World,
@@ -124,6 +141,7 @@ export class UiRenderSystem {
   ) {
     this.theme = world.resource(UI_THEME);
     this.actions = world.resource(UI_ACTIONS);
+    this.paint = world.resource(UI_PAINT);
     this.mountRoot = world.resource(UI_MOUNT);
     this.installDelegation();
   }

@@ -17,6 +17,7 @@
 // does not touch the toast: a main-menu message is a documented case (the multiplayer placeholder is
 // drawn by the menu frame), so "gameplay UI" here means the HUD that mirrors a running world.
 import type { Entity, SystemAccess, World } from "../World";
+import { UI_PAINT, type UiHudPaint } from "./paint";
 import { UI_STATE, setUiVisible } from "./widgets";
 
 /** It writes the two HUD roots' visibility and nothing else. */
@@ -35,13 +36,23 @@ export interface HudDeps {
 }
 
 export class UiHudSystem {
-  /** Both widgets are spawned VISIBLE, so that is the state the first frame starts from. */
-  private shown = true;
+  /** Both widgets are spawned VISIBLE, so that is the state the first frame starts from. The VALUE lives
+   *  in UI_PAINT.hud (ecs/ui/paint.ts::createUiPaint initialises it to true, matching the spawn). */
+  private readonly paint: UiHudPaint;
+
+  private get shown(): boolean {
+    return this.paint.shown;
+  }
+  private set shown(v: boolean) {
+    this.paint.shown = v;
+  }
 
   constructor(
     private readonly world: World,
     private readonly deps: HudDeps,
-  ) {}
+  ) {
+    this.paint = world.resource(UI_PAINT).hud;
+  }
 
   /** ui lane, once per frame. A hide/show only when the answer CHANGES: the record is data the
    *  reconciler diffes, but writing it every frame would be noise (and `setUiVisible` is write-only,

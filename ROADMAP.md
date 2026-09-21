@@ -419,27 +419,32 @@ with the boot screen (§3.8).
 What is left is the two smaller buckets below.
 
 **B. Deliberate non-ECS (a DECISION, do not "fix"):** the pointer-lock and raw-input LOGIC stays in the
-event-time listeners (its STATE is the INPUT_TIMING resource — §5.2 P1.8), and so does the BIND GESTURE's
+event-time listeners (its STATE is the INPUT_TIMING resource — §5.2 P1.8) — and since §5.2 P1.14 those
+listeners hold NO state at all: they publish facts (the intent queue, the rebind queue, the edge log, the
+gesture resource) and every policy is applied in a lane. The same goes for the BIND GESTURE's
 event-time half: the click shield's two arm paths, the drag's mousedown/mouseup, the wheel block and the
 key-capture handler (§5.2 P1.9) — every one of them a decision that can only be taken inside the event that
-must be cancelled; per-CALL scratch an operation builds and throws away (a bake's canvas, its render
-target and its temporary scene) and the DOM elements of a VIEW (the rubber band's SVG); the
+must be cancelled, and each one now records DATA (the gesture resource, a queued rebind) rather than calling
+into a table; per-CALL scratch an operation builds and
+throws away (a bake's canvas, its render
+target and its temporary scene); the
 config modules own the FILES while their VALUES live in resources — and
 the global style applies itself nowhere any more (`fonts`/`uiscale` publish the font pair and the root
 font size, and the RECONCILER writes them, diffed per frame); `windowMode`/`vsyncDisabled` stay
 plain config because nothing reads them on the tick (the DIAGNOSTIC-LOG switch is another one: it is read by
-the log sink, not by a system). The UI EVENT LAYER is delegated rather than per-widget (§5.2 P1.11), and the
+the log sink, not by a system — its VALUE is `SHELL_STATE.diagLogEnabled`). The UI EVENT LAYER is delegated
+rather than per-widget (§5.2 P1.11), and the
 raw-mouse look is accumulated at event time and applied ONCE PER FRAME — both are "one owner, one place"
 choices, not leftovers.
 The rows that used to sit here are gone: the three.js/GPU/DOM objects, `VoxelWorld` and the chunk mesh
 cache are RESOURCES (§5.2 P1.7), the input race guards' state is too (P1.8), and the window listener, the
 menu background, the diagnostics dependencies and the view's DOM listeners went the same way (P1.9).
-The LAST four rows — "the block outline and a baked icon canvas are a system's own object", "the widget
-order counter is module state", "the UI stage is mounted at import by a config module" and "the fixed lane
-writes the wireframe" — went in §5.2 P1.12: ICON_BAKE, CHUNK_MATERIAL, BLOCK_OUTLINE / `block.outline`,
-UI_ORDER, `createUiMount()` and the two counter blocks of INPUT_DIAGNOSTICS. The rule that came out of it
-is in AGENTS.md: anything that OUTLIVES the call that made it is a resource, even when the system builds
-it lazily; only per-call scratch and a view's own elements stay outside.
+The LAST rows — the view paint caches, the host state, the asset caches, the rebind capture, the frame
+loop's own state and the two boot/entry drivers' sequences — went in §5.2 P1.14. What remains outside the
+data model is the irreducible ADAPTER layer, and it is worth naming precisely because it will never move:
+a DOM listener must exist to receive the event and call `preventDefault` inside it; a rAF callback must
+exist to drive the three lanes; exactly one system writes the DOM; and the file/pack I/O has to happen
+somewhere. Every one of those is now stateless — it either publishes data or walks a data-declared flow.
 
 **C. Inert leftovers** (dead code and stale comments, NOT bugs — §4): the main menu's world-type
 panel, and the unused `centerCursor` export in `platform/shell.ts` (the live one is in `platform/rawinput.ts`;
@@ -729,6 +734,35 @@ Still outstanding:
   key must keep reaching the log (ui.navigation's inventory/digit branches gate on `capturing()`
   themselves, and TAB must stay BINDABLE). `check:ecs`'s "the device handlers only QUEUE" group now asserts
   both halves: ESC IS published with no capture armed, and publishes NOTHING while one is.
+- **P1.14 — the data/behaviour split finished: view paint state, host state, assets, the loop and the boot
+  flow.** `DONE`. The rule this pass applied is not "ECS-ify everything" but "state in the world, logic in a
+  system or a walker, adapters hold neither":
+  (1) `UI_PAINT` (new, `ecs/ui/paint.ts`) is the UI layer's "what did I paint last" data: the reconciler's
+  ELEMENT TABLES and per-widget drawn cache, the hover/press sets, the applied global style, and the diff
+  caches of `ui.loading` / `ui.toast` / `ui.hud` / `ui.keybind` / `ui.inventory` / `ui.navigation` /
+  `ui.bindings`. They were private fields of eight classes — state inside behaviour, resettable nowhere.
+  The classes keep thin accessors onto the resource, so the use sites did not move.
+  (2) The same treatment for the non-UI caches: `INPUT_INTENTS.frameDx/Dy` (the frame's accumulated look),
+  `CHUNK_MESHES.wantedKeys/lastPcx/lastPcz` (the streaming window's bookkeeping), `DELAYED_INTENTS.applied`,
+  `PICKER_STATE.outsideWorld`, `VIEWPORT.appliedAspect/listenerInstalled/publishScheduled` and
+  `INPUT_STATE.appliedCursor` (which emptied `PointerLock`'s last private field).
+  (3) The HOST state is a resource: `SHELL_STATE` (settings snapshot, log-flush deadline, diagnostic switch,
+  foreground flag) — created by `platform/shell.ts` at import time, because a log line can be written before
+  the World exists, and inserted by the composition root. The ASSET caches went the same way: `I18N_STRINGS`
+  (the built dictionaries), `BLOCK_REGISTRY` and `MENU_BG_KIND` (the pack chain's background memo).
+  (4) The REBIND CAPTURE is data + a queue: `KEYBIND_GESTURE.capturing` replaces the module-level
+  `let capturing` in `platform/keybinds.ts` (which now only holds a pointer to the resource), and the device
+  listeners no longer write the bind table — they publish a `RebindIntent` (`bindCapture` / `bindDrag`) that
+  `ui.keybind` applies in the lane, with the `KBCAP bind done` line moving with it.
+  (5) The frame LOOP's state is `LOOP_STATE` (mode, both accumulators, the canvas size last applied, the
+  geometry-suppression deadline) and the FRAME probe's dozen counters are `FRAME_PROBE` — the loop BODY stays
+  the composition root's (a rAF callback is not a lane), but it now reads world data.
+  (6) The BOOT / WORLD-ENTRY flows are `BOOT_FLOW` + a stage list (`ecs/boot.ts`): the stages (progress, i18n
+  key, the work) are declared by the composition root as DATA, the settings check's outcome is a field of the
+  flow, and the only logic left is `runBootFlow` — announce a stage, yield one macrotask so the browser paints
+  it, then run its work. `check:ecs` pins all of it (its own group) and now counts **56** assertion groups.
+  What is still outside is exactly the irreducible adapter layer: listeners that must `preventDefault` in the
+  event, the rAF callback that drives the lanes, the ONE DOM writer, and file/pack I/O.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `ui/inventory.ts`. The per-entity capabilities that used to be

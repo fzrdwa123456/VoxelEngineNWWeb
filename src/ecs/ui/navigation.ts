@@ -19,6 +19,7 @@ import { SelectSlot } from "../commands";
 import { LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../resources";import { KeyEdgeReader, type KeyEventLog } from "../resources";
 import { KEY_EVENTS } from "../resources";
 import type { Entity, SystemAccess, World } from "../World";
+import { UI_PAINT, type UiNavigationPaint } from "./paint";
 import { UI_STATE, setUiVisible } from "./widgets";
 
 /** The settings sub-panel ids, as data. `ui/menu.ts` owns the panel list; this is the same four. */
@@ -88,9 +89,21 @@ export class UiNavigationSystem {
   private readonly reader: KeyEdgeReader;
   /** The player whose INVENTORY the hotbar keys select on (LOCAL_PLAYER, resolved once) */
   private readonly player: Entity;
-  /** What the last frame saw, so the pointer-lock effects fire on an EDGE and not every frame */
-  private inventoryOpen = false;
-  private menuOpen = false;
+  /** What the last frame saw, so the pointer-lock effects fire on an EDGE and not every frame. The DATA
+   *  is UI_PAINT.navigation (ecs/ui/paint.ts) — a paint cache is world state like everything else. */
+  private readonly paintCache: UiNavigationPaint;
+  private get inventoryOpen(): boolean {
+    return this.paintCache.inventoryOpen;
+  }
+  private set inventoryOpen(v: boolean) {
+    this.paintCache.inventoryOpen = v;
+  }
+  private get menuOpen(): boolean {
+    return this.paintCache.menuOpen;
+  }
+  private set menuOpen(v: boolean) {
+    this.paintCache.menuOpen = v;
+  }
 
   constructor(
     private readonly world: World,
@@ -99,6 +112,7 @@ export class UiNavigationSystem {
     this.ui = world.resource(UI_MODAL);
     this.reader = new KeyEdgeReader(world.resource(KEY_EVENTS) as KeyEventLog);
     this.player = world.resource(LOCAL_PLAYER);
+    this.paintCache = world.resource(UI_PAINT).navigation;
   }
 
   /** ui lane. Decisions first (they only write the state), then the paint, then the lock effects. */

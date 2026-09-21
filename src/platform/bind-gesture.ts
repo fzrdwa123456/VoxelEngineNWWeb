@@ -20,16 +20,20 @@
 // (highlight + rubber band, derived per frame). What the view keeps is the part only it can answer: which
 // action ids a chip/keycap carries and the hit test that finds one, injected here as callbacks.
 import type { BindAction } from "./keybinds";
-import type { KeybindGesture } from "../ecs/ui/keybind";
+import type { KeybindGesture, RebindIntent } from "../ecs/ui/keybind";
 import type { UiHit } from "../ecs/ui/system";
 
 export interface BindGestureDeviceDeps {
   /** The gesture's state (the KEYBIND_GESTURE resource; null before wiring) */
   readonly gesture: () => KeybindGesture | null;
-  /** The action a rebind capture is armed for, or null (platform/keybinds) */
+  /** The action a rebind capture is armed for, or null (platform/keybinds reads the gesture resource) */
   readonly capturing: () => BindAction | null;
+  /** Abort a capture outright (the abnormal paths: a capture that started mid-drag) */
   readonly endCapture: () => void;
-  readonly setBind: (action: BindAction, code: string) => void;
+  /** Queue a rebind decision for the ui lane (`ui.keybind` applies it — the bind table is the SYSTEM's
+   *  to write, the event only decides). `code` is already resolved here: KeyboardEvent.code for a key,
+   *  `buttonToCode` for a button, the keycap hit test for a drag drop. */
+  readonly queueRebind: (intent: RebindIntent) => void;
   /** The action id an action CHIP carries — a capture-free drag may only start on one */
   readonly chipAction: string;
   /** The KEYCAP code under a point, or null (the view owns the keycap action id and the hit test) */
@@ -80,9 +84,13 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
     deps.armShield(true); // mouseup-armed: the synthetic click consumes it first (see the arm path)
     if (deps.capturing()) return; // A capture started mid-drag (abnormal path): abort the bind
     const code = deps.keycapCodeAt(ev.clientX, ev.clientY);
-    deps.log(`KBCAP drag release action=${action} code=${code ?? "no hit"}`);
-    if (!code) return; // Released on empty space: no-op
-    deps.setBind(action, code);
+    if (!code) {
+      deps.log(`KBCAP drag release action=${action} code=no hit`);
+      return; // Released on empty space: no-op
+    }
+    // The bind itself is the ui lane's job (`ui.keybind` drains the queue); the EVENT only reports
+    // "this action was dropped on this key", which is the half only an event can know.
+    deps.queueRebind({ kind: "bindDrag", action, code });
   });
 
   // Capture state / capture-free drag in progress: forbid all wheel scrolling (prevents the bind options
@@ -124,9 +132,9 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
     if (!action) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    deps.endCapture();
-    deps.setBind(action, ev.code === "Escape" ? "" : ev.code); // Esc = unbind the action
-    deps.log(`KBCAP bind done (code=${ev.code})`);
+    // The bind table is written by `ui.keybind`, not here: the event decides WHICH code, the lane applies
+    // it. Escape means "unbind" ("" = unbound).
+    deps.queueRebind({ kind: "bindCapture", code: ev.code === "Escape" ? "" : ev.code });
   });
 
   // Any mouse button (incl. left) binds its code on press while capturing. preventDefault stops the focused
@@ -158,14 +166,13 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
     }
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    deps.endCapture();
     // One-shot shield for the upcoming synthetic click: only button 0 synthesizes one (right/middle/side
     // produce contextmenu/auxclick). Armed without a self-timeout — cleared by the click shield on
     // consumption or by the mouseup fallback above.
     if (ev.button === 0) deps.armShield(false);
     const code = deps.buttonToCode(ev.button); // Left/middle/right/X1/X2 all bind immediately
     if (!code) return;
-    deps.setBind(action, code);
+    deps.queueRebind({ kind: "bindCapture", code });
     deps.log(`KBCAP mousedown bind done (${code})`);
   });
 }

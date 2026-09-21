@@ -78,6 +78,13 @@ export interface ChunkMeshCache {
   /** Keys that produced NO geometry (a uniform chunk has no visible face) kept so they are not retried
    *  every frame. Invalidated on a block write, exactly like the meshes themselves. */
   readonly empty: Set<string>;
+  /** The window's WANTED key set, rebuilt only when the player crosses a chunk boundary (null until the
+   *  first build). It was a private field of the streaming system; "which chunks does this window want"
+   *  is state of the cache, so it is readable here. */
+  wantedKeys: Set<string> | null;
+  /** The player column the wanted set was built for (NaN = never built) */
+  lastPcx: number;
+  lastPcz: number;
 }
 
 export const CHUNK_MESHES: Resource<ChunkMeshCache> = defineResource<ChunkMeshCache>("chunkMeshes");
@@ -85,7 +92,14 @@ export const CHUNK_MESHES: Resource<ChunkMeshCache> = defineResource<ChunkMeshCa
 /** The cache is created around the group the composition root built (kept as an argument so this module
  *  never constructs a three.js object itself). */
 export function createChunkMeshCache(group: THREE.Group): ChunkMeshCache {
-  return { group, meshes: new Map(), empty: new Set() };
+  return {
+    group,
+    meshes: new Map(),
+    empty: new Set(),
+    wantedKeys: null,
+    lastPcx: Number.NaN,
+    lastPcz: Number.NaN,
+  };
 }
 
 /** The MAIN-MENU background's three.js state: the panorama scene and the camera that spins inside it,

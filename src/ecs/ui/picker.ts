@@ -71,8 +71,14 @@ export class UiPickerSystem {
   private readonly items: readonly Entity[];
   /** Its own cursor into the shared edge log (ui.navigation reads the same edges) */
   private readonly reader: KeyEdgeReader;
-  /** What the last frame did about it, so the panels are only touched when the answer changes */
-  private outsideWorld = false;
+  /** What the last frame did about it, so the panels are only touched when the answer changes. The value
+   *  is `PICKER_STATE.outsideWorld` (its own resource), i.e. data with an owner. */
+  private get outsideWorld(): boolean {
+    return this.state.outsideWorld;
+  }
+  private set outsideWorld(v: boolean) {
+    this.state.outsideWorld = v;
+  }
 
   constructor(
     private readonly world: World,

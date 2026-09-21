@@ -20,6 +20,7 @@ import { INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../components/Playe
 import { ICON_BAKE, type IconBakeState } from "../presentation";
 import { INVENTORY_WIDGETS, LOCAL_PLAYER, type InventoryWidgets } from "../resources";
 import type { SystemAccess, World } from "../World";
+import { UI_PAINT, type UiInventoryPaint } from "./paint";
 import {
   setUiImage,
   setUiSelected,
@@ -50,19 +51,28 @@ export class UiInventorySystem {
   private readonly widgets: InventoryWidgets;
   /** The icon bake's cache/pending maps (a RESOURCE — see ecs/presentation.ts::ICON_BAKE) */
   private readonly bake: IconBakeState;
-  /** Last drawn signature per slot, so a frame can skip the widgets that did not change */
-  private readonly drawn: string[] = new Array<string>(INVENTORY_SLOTS).fill("\u0000");
-  /** Slots whose icon is still BAKING. `drawn` only re-paints on a content change, and the bake lands on
-   *  a later frame, so without this the checker placeholder would stay on screen forever — the promise
-   *  continuation that used to write the widget is gone (it wrote a component from outside a lane). The
-   *  system notices the finished bake as DATA on its next run instead. */
-  private readonly waiting = new Uint8Array(INVENTORY_SLOTS);
-  private drawnSelected = -1;
+  /** The reconcile caches (drawn signatures, which slots are still waiting for a bake, the selection
+   *  last highlighted). They are UI_PAINT.inventory now (ecs/ui/paint.ts) — world data with an owner,
+   *  instead of three private arrays inside the system. */
+  private readonly paint: UiInventoryPaint;
+  private get drawn(): string[] {
+    return this.paint.drawn;
+  }
+  private get waiting(): Uint8Array {
+    return this.paint.waiting;
+  }
+  private get drawnSelected(): number {
+    return this.paint.drawnSelected;
+  }
+  private set drawnSelected(v: number) {
+    this.paint.drawnSelected = v;
+  }
 
   constructor(private readonly world: World) {
     this.inv = world.get(world.resource(LOCAL_PLAYER), INVENTORY)!;
     this.widgets = world.resource(INVENTORY_WIDGETS);
     this.bake = world.resource(ICON_BAKE);
+    this.paint = world.resource(UI_PAINT).inventory;
   }
 
   /** Render-lane reconcile: diff against the last drawn state, write only what changed. */

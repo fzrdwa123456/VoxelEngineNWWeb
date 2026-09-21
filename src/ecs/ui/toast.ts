@@ -14,6 +14,7 @@
 // time, paused or not), which is what the F3 log and the user's eye both expect.
 import { TOAST, type ToastState } from "../resources";
 import type { Entity, SystemAccess, World } from "../World";
+import { UI_PAINT, type UiToastPaint } from "./paint";
 import { UI_STATE, UI_TEXT, setUiText, setUiVisible } from "./widgets";
 
 /** It writes the toast's own widgets and nothing else. */
@@ -27,10 +28,28 @@ export class UiToastSystem {
   private readonly panel: Entity;
   private readonly body: Entity;
   /** What is on screen right now (the widgets are diffed by the reconciler; this skips re-writing
-   *  them every frame, which is the same reason ui.inventory keeps a drawn signature). */
-  private shown = false;
-  private shownKey = "";
-  private shownRaw = false;
+   *  them every frame, which is the same reason ui.inventory keeps a drawn signature). The DATA is the
+   *  UI_PAINT.toast block (ecs/ui/paint.ts). */
+  private readonly paint: UiToastPaint;
+
+  private get shown(): boolean {
+    return this.paint.shown;
+  }
+  private set shown(v: boolean) {
+    this.paint.shown = v;
+  }
+  private get shownKey(): string {
+    return this.paint.shownKey;
+  }
+  private set shownKey(v: string) {
+    this.paint.shownKey = v;
+  }
+  private get shownRaw(): boolean {
+    return this.paint.shownRaw;
+  }
+  private set shownRaw(v: boolean) {
+    this.paint.shownRaw = v;
+  }
 
   constructor(
     private readonly world: World,
@@ -40,6 +59,7 @@ export class UiToastSystem {
     this.state = world.resource(TOAST);
     this.panel = panel;
     this.body = body;
+    this.paint = world.resource(UI_PAINT).toast;
   }
 
   /** ui lane, once per frame: puts the armed message up, then takes it down when its deadline passes. */

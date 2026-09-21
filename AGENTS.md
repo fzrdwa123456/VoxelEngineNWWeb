@@ -635,6 +635,26 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   component. `HUMANOID_BODY` /
   `DEFAULT_REACH` are spawn DEFAULTS, not state — the numbers each entity actually uses live in
   BODY / REACH.
+- **"What did I write last" is DATA too.** A reconciler or a widget-data system needs one thing that is not
+  game state: the value it painted last frame, so it can skip an unchanged write. Those caches are resources
+  now, not private fields: `UI_PAINT` (ecs/ui/paint.ts) holds the reconciler's ELEMENT TABLES, the per-widget
+  drawn cache, the hover/press sets, the applied global style, and the diff caches of `ui.loading`,
+  `ui.toast`, `ui.hud`, `ui.keybind`, `ui.inventory`, `ui.navigation` and `ui.bindings`; the same treatment
+  applies outside the UI (`INPUT_INTENTS.frameDx/Dy`, `CHUNK_MESHES.wantedKeys/lastPcx/lastPcz`,
+  `DELAYED_INTENTS.applied`, `PICKER_STATE.outsideWorld`, `VIEWPORT.appliedAspect/listenerInstalled/
+  publishScheduled`, `INPUT_STATE.appliedCursor`). A cache is never read to ANSWER a question — every value
+  it mirrors is re-derived from its owner every frame — so losing one costs a repaint, never a wrong answer.
+  The classes keep thin accessors onto the resource, which is why the use sites read the same as before.
+- **The host, the assets and the loop are data as well.** `SHELL_STATE` (platform/shell.ts) is the shell's
+  own bookkeeping — the settings snapshot, the log-flush deadline, the diagnostic-probe switch and the
+  foreground flag — created by that module at import time (a log line can be written before the World
+  exists) and inserted by the composition root; `I18N_STRINGS`, `BLOCK_REGISTRY` and `MENU_BG_KIND` are the
+  pack chain's asset caches, same pattern. `LOOP_STATE` (the mode, both accumulators, the canvas size last
+  applied, the geometry-suppression deadline) and `FRAME_PROBE` (the frame probe's counters) are the one
+  frame loop's state; the loop BODY stays in `main.ts` — a rAF callback is not a lane — but it now reads and
+  writes world data. `BOOT_FLOW` + `ecs/boot.ts` do the same for the two drivers: the stages (progress, i18n
+  key, work) are a DATA list declared by the composition root and `runBootFlow` is the only logic — announce
+  a stage, yield one macrotask so the browser paints it, then run its work.
 - **A GPU/DOM object is a RESOURCE, not an argument** (`ecs/presentation.ts`). There is one scene, one
   camera, one renderer, one UI mount root, one chunk-mesh cache, one item-icon baker, one chunk material
   and one target wireframe per world, and they do not die with

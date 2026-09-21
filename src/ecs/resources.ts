@@ -32,12 +32,16 @@ export interface InputState {
   freeMouseActive: boolean;
   /** The raw-input (WM_INPUT) plugin is available, so free-mouse mode can use its deltas */
   rawInputActive: boolean;
+  /** The cursor value the shell last APPLIED ("none" while playing, "default" with a UI up; null before
+   *  the first write). `platform/pointerlock.ts` used to keep this in a private field — it is a fact about
+   *  the window, not about the lock manager, so it belongs here with the rest of the device state. */
+  appliedCursor: "none" | "default" | null;
 }
 
 export const INPUT_STATE = defineResource<InputState>("inputState");
 
 export function createInputState(): InputState {
-  return { locked: false, freeMouseActive: false, rawInputActive: false };
+  return { locked: false, freeMouseActive: false, rawInputActive: false, appliedCursor: null };
 }
 
 /** The WINDOW'S SIZE in CSS pixels, as data. Written by `platform/viewport.ts` — the ONE resize listener
@@ -49,6 +53,14 @@ export function createInputState(): InputState {
 export interface ViewportState {
   width: number;
   height: number;
+  /** The aspect ratio the camera's projection was last BUILT for (`cameraView.render` writes it, and
+   *  compares against it to know when to rebuild). A paint cache, but one the camera reconciler owns —
+   *  kept here rather than as a private field of the system, like every other "what did I apply" value. */
+  appliedAspect: number;
+  /** The ONE resize listener has been installed (`platform/viewport.ts` — its own idempotence flag) */
+  listenerInstalled: boolean;
+  /** A coalesced "size changed" notification is already armed for the next frame */
+  publishScheduled: boolean;
 }
 
 export const VIEWPORT = defineResource<ViewportState>("viewport");
@@ -56,7 +68,13 @@ export const VIEWPORT = defineResource<ViewportState>("viewport");
 /** Zero-sized until the platform service publishes: a consumer must therefore treat 0 as "unknown"
  *  rather than computing an aspect from it (see rendering/camera-view.ts). */
 export function createViewport(): ViewportState {
-  return { width: 0, height: 0 };
+  return {
+    width: 0,
+    height: 0,
+    appliedAspect: Number.NaN,
+    listenerInstalled: false,
+    publishScheduled: false,
+  };
 }
 
 /** The POINTER's last known position (CSS pixels, viewport-relative) and which buttons are down. Published
@@ -128,12 +146,96 @@ export type InputIntent =
 export interface InputIntentLog {
   /** Pending intents, oldest first. Emptied by the consumer at the top of the tick. */
   intents: InputIntent[];
+  /** The raw mouse displacement that PASSED every guard since the last frame, waiting for the frame's
+   *  single `frameLook()` to turn it into ONE `look` intent. It used to be two private fields of the
+   *  input system: it is "the mouse movement this frame has not been given to the view yet", i.e. pending
+   *  input — the same thing this resource is for, and now visible while it waits. */
+  frameDx: number;
+  frameDy: number;
 }
 
 export const INPUT_INTENTS = defineResource<InputIntentLog>("inputIntents");
 
 export function createInputIntentLog(): InputIntentLog {
-  return { intents: [] };
+  return { intents: [], frameDx: 0, frameDy: 0 };
+}
+
+/** The three lanes' driver state: which MODE the one frame loop is in, the fixed-step and frame-cap
+ *  accumulators, the viewport size the renderer was last sized to, and the window-geometry suppression
+ *  deadline. They used to be seven module-level `let`s in main.ts — the loop's own bookkeeping, which the
+ *  composition root could neither inspect nor reset. The loop BODY stays the adapter (a rAF callback
+ *  cannot be a lane), but its state is world data now, like every other singleton. */
+export type LoopMode = "load" | "game" | "menu";
+
+export interface LoopState {
+  mode: LoopMode;
+  /** Fixed-step accumulator (seconds not yet simulated) */
+  physAcc: number;
+  /** Frame-cap accumulator: one frame is drawn once its budget has passed */
+  renderAcc: number;
+  /** The size the renderer was last sized to (0 = never) */
+  appliedViewportW: number;
+  appliedViewportH: number;
+  /** `renderer.init()` has finished, so the canvas may be sized */
+  rendererReady: boolean;
+  /** Until this wall-clock time, a window geometry change is OUR OWN switch and must not pause */
+  suppressGeometryUntil: number;
+}
+
+export const LOOP_STATE = defineResource<LoopState>("loopState");
+
+export function createLoopState(): LoopState {
+  return {
+    // "load" until the boot driver picks a mode, so the first transition always applies
+    mode: "load",
+    physAcc: 0,
+    renderAcc: 0,
+    appliedViewportW: 0,
+    appliedViewportH: 0,
+    rendererReady: false,
+    suppressGeometryUntil: 0,
+  };
+}
+
+/** The FRAME probe's accumulators (one line per second + stall warnings + the per-frame look meter).
+ *  Pure diagnostics, but the same rule as every other counter: they are data with an owner instead of a
+ *  dozen module-level `let`s in the composition root. */
+export interface FrameProbeState {
+  last: number;
+  n: number;
+  sum: number;
+  max: number;
+  stalls: number;
+  stallMax: number;
+  statAt: number;
+  /** Histogram of the per-frame look sample count (index = count, the last bucket folds the tail) */
+  readonly pfBuckets: number[];
+  pxMin: number;
+  pxMax: number;
+  pxSum: number;
+  pxN: number;
+}
+
+export const FRAME_PROBE = defineResource<FrameProbeState>("frameProbe");
+
+/** How many buckets the per-frame look histogram has (0..12 samples, folded into the last one) */
+export const FRAME_PF_BUCKETS = 13;
+
+export function createFrameProbe(): FrameProbeState {
+  return {
+    last: 0,
+    n: 0,
+    sum: 0,
+    max: 0,
+    stalls: 0,
+    stallMax: 0,
+    statAt: 0,
+    pfBuckets: new Array<number>(FRAME_PF_BUCKETS).fill(0),
+    pxMin: Number.POSITIVE_INFINITY,
+    pxMax: 0,
+    pxSum: 0,
+    pxN: 0,
+  };
 }
 
 /** The RAW-TRANSPORT counters behind the once-a-second `RAWLAG` line: the arrival rhythm of the
@@ -513,12 +615,15 @@ export interface PickerState {
   /** The chord's two keys, held: F3+F4 opens the picker, F3 release applies it */
   f3: boolean;
   f4: boolean;
+  /** What `ui.picker` last did about "is a world running" — its paint cache, kept here rather than as a
+   *  private field of the system (the panels are only touched when the answer changes). */
+  outsideWorld: boolean;
 }
 
 export const PICKER_STATE = defineResource<PickerState>("pickerState");
 
 export function createPickerState(): PickerState {
-  return { open: false, sel: 0, f3: false, f4: false };
+  return { open: false, sel: 0, f3: false, f4: false, outsideWorld: false };
 }
 
 // ===== 3. The toast =====
@@ -613,6 +718,9 @@ export interface DelayedIntents {
   takeDue(): DelayedIntent[];
   /** How many are waiting (diagnostics / the Node gate) */
   readonly pending: number;
+  /** How many have been applied since boot (`ui.delays` counts them here — a diagnostic fact about the
+   *  queue belongs to the queue, not to a private field of the system that drains it). */
+  applied: number;
   /** The wall clock the queue runs on — injected so the gate can drive it instead of sleeping */
   now(): number;
 }
@@ -626,7 +734,7 @@ export const DELAYED_INTENTS = defineResource<DelayedIntents>("delayedIntents");
 
 export function createDelayedIntents(clock: () => number = () => performance.now()): DelayedIntents {
   const queue: DelayedIntent[] = [];
-  return {
+  const state = {
     schedule(kind: DelayKind, delayMs: number, arg = ""): void {
       const intent: DelayedIntent = { at: clock() + Math.max(0, delayMs), kind, arg };
       if (queue.length >= DELAY_QUEUE_CAP) {
@@ -647,6 +755,9 @@ export function createDelayedIntents(clock: () => number = () => performance.now
     get pending(): number {
       return queue.length;
     },
+    /** `ui.delays` increments this; it is a plain field so the reader can see the count in the world. */
+    applied: 0,
     now: clock,
   };
+  return state;
 }

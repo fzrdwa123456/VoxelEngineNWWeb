@@ -156,9 +156,21 @@ export class PlayerInputSystem {
   // per-frame meter the FRAME probe reads. This system writes them and prints both lines once a second;
   // the device layer writes the raw-transport half. Declared in ecs/resources.ts.
   /** Raw displacement (pixels) that passed every guard and waits for this frame's single `frameLook()`
-   *  application. The decisions are made in `rawDelta()`; this only accumulates what got through. */
-  private rawFrameDx = 0;
-  private rawFrameDy = 0;
+   *  application. The decisions are made in `rawDelta()`; this only accumulates what got through. The
+   *  ACCUMULATOR is `INPUT_INTENTS.frameDx/frameDy` (ecs/resources.ts) — pending input is world data, and
+   *  these accessors are the only members left here. */
+  private get rawFrameDx(): number {
+    return this.intents.frameDx;
+  }
+  private set rawFrameDx(v: number) {
+    this.intents.frameDx = v;
+  }
+  private get rawFrameDy(): number {
+    return this.intents.frameDy;
+  }
+  private set rawFrameDy(v: number) {
+    this.intents.frameDy = v;
+  }
 
   /** The pending intents (the resource's array — read in place, never copied) */
   private get pending(): InputIntent[] {

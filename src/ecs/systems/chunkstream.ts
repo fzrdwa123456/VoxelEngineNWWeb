@@ -70,9 +70,28 @@ export class ChunkStreamSystem {
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
   private readonly voxel: VoxelWorld;
-  private wanted: Set<string> | null = null;
-  private lastPcx = Number.NaN;
-  private lastPcz = Number.NaN;
+  /** The streaming window's own bookkeeping: the wanted key set and the column it was built for. It is
+   *  a field of the CHUNK_MESHES resource (`wantedKeys`/`lastPcx`/`lastPcz`) rather than of this system —
+   *  "which chunks this window wants" is state of the world's chunk cache, and a second system (or a
+   *  test) may now read it. */
+  private get wanted(): Set<string> | null {
+    return this.cache.wantedKeys;
+  }
+  private set wanted(v: Set<string> | null) {
+    this.cache.wantedKeys = v;
+  }
+  private get lastPcx(): number {
+    return this.cache.lastPcx;
+  }
+  private set lastPcx(v: number) {
+    this.cache.lastPcx = v;
+  }
+  private get lastPcz(): number {
+    return this.cache.lastPcz;
+  }
+  private set lastPcz(v: number) {
+    this.cache.lastPcz = v;
+  }
 
   constructor(private readonly world: World) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));

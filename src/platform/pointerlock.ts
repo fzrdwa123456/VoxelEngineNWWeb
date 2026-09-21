@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 export interface PointerLockDeps {
   /** What the lock manager needs from the input system (structural, no concrete class) */
   input: { lock(): Promise<void> | undefined };
+  /** The DEVICE state resource (`INPUT_STATE`): `appliedCursor` is the cursor value this manager last
+   *  wrote, i.e. a fact about the window that belongs in the world rather than in a private field. */
+  state: { appliedCursor: "none" | "default" | null };
   /** Whether a modal UI currently owns the mouse. ONE predicate, supplied by the composition root
    *  from the UI_MODAL resource — it replaced two separate callbacks (isMenuOpen / isInvOpen) whose
    *  OR only existed at the call sites. */
@@ -45,10 +48,6 @@ export interface PointerLockDeps {
 // native ClipCursor, which does not look at the foreground — that assumption no longer holds.
 
 export class PointerLock {
-  /** Diagnostics: the last CSS value written, logged only when it **changes** (so it does not flood every
-   *  frame) */
-  private lastCursor: "none" | "default" | null = null;
-
   constructor(private readonly deps: PointerLockDeps) {}
 
   relock(source: string): void {
@@ -113,8 +112,11 @@ export class PointerLock {
   applyCursor(): void {
     const can = this.deps.canControl();
     const value: "none" | "default" = can ? "none" : "default";
-    if (value !== this.lastCursor) {
-      this.lastCursor = value;
+    // Diagnostics: the last CSS value written, logged only when it **changes** (so it does not flood every
+    // frame). The VALUE lives in INPUT_STATE.appliedCursor — a fact about the window, not a private field
+    // of this manager — so the gate and the log can read it.
+    if (value !== this.deps.state.appliedCursor) {
+      this.deps.state.appliedCursor = value;
       // Diagnostics: the decision on the CSS side. Read together with the system-side [cursor] probes in
       // boot.log, it pinpoints the moment an inconsistency like "CSS says visible, the system says
       // hidden" happens.

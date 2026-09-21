@@ -22,6 +22,7 @@
 import { packsInstalled, resolveAllBytes } from "../rendering/textures";
 import { logDebug } from "../platform/shell";
 import type { LocaleState } from "../ecs/resources";
+import { defineResource, type Resource } from "../ecs/World";
 
 export type Lang = "zh" | "en" | "ja";
 
@@ -46,15 +47,30 @@ const EMPTY: Dict = {};
 /** Stand-in used while the packs are not installed: it allocates nothing and caches nothing */
 const NOTHING: Record<Lang, Dict> = { zh: EMPTY, en: EMPTY, ja: EMPTY };
 
-/** The three built dictionaries; **built and cached only once the packs are installed** (see the header) */
-let STRINGS: Record<Lang, Dict> | null = null;
+/** The three built dictionaries, as DATA. They are built lazily (only once the packs are installed) and
+ *  cached — the cache used to be a module-level `let`. The object exists at import time, because a
+ *  dictionary may be asked for before the World does, and the composition root INSERTS it as
+ *  I18N_STRINGS: the cache has a name, an owner and a reader that is not this module. */
+export interface I18nStringsState {
+  strings: Record<Lang, Dict> | null;
+}
+
+export const I18N_STRINGS: Resource<I18nStringsState> =
+  defineResource<I18nStringsState>("i18nStrings");
+
+const state: I18nStringsState = { strings: null };
+
+/** The one instance, for the composition root to insert. */
+export function i18nStringsState(): I18nStringsState {
+  return state;
+}
 
 function dicts(): Record<Lang, Dict> {
   if (!packsInstalled()) return NOTHING;
-  if (!STRINGS) {
-    STRINGS = { zh: loadPackDict("zh"), en: loadPackDict("en"), ja: loadPackDict("ja") };
+  if (!state.strings) {
+    state.strings = { zh: loadPackDict("zh"), en: loadPackDict("en"), ja: loadPackDict("ja") };
   }
-  return STRINGS;
+  return state.strings;
 }
 
 /** The LOCALE resource, adopted at boot. Null only before `loadLang` (a unit test with no World), in

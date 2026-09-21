@@ -12,6 +12,7 @@
 import { LOADING_SEGMENTS, LOADING_STATE, type LoadingState } from "../resources";
 import type { SystemAccess, World } from "../World";
 import type { LoadingScreen } from "../../ui/loading";
+import { UI_PAINT, type UiLoadingPaint } from "./paint";
 import { UI_STATE, UI_TEXT, setUiActive, setUiText, setUiVisible } from "./widgets";
 
 /** It writes the loading screen's own widgets and nothing else. */
@@ -23,18 +24,57 @@ export class UiLoadingSystem {
   private readonly state: LoadingState;
   private readonly screen: LoadingScreen;
   /** What is on screen right now, so a frame that changes nothing writes nothing (the reconciler
-   *  diffs the DOM; this skips handing it the same values — the same shape as ui.toast). */
-  private shown = false;
-  private shownKey = "\u0000";
-  private shownPercent = -1;
-  private filled = -1;
-  private shownNote = "\u0000";
-  private shownNoteKey = "\u0000";
-  private shownNoteVisible = false;
+   *  diffs the DOM; this skips handing it the same values — the same shape as ui.toast). The DATA is the
+   *  UI_PAINT.loading block (ecs/ui/paint.ts); these accessors are the only members left here. */
+  private readonly paint: UiLoadingPaint;
+
+  private get shown(): boolean {
+    return this.paint.shown;
+  }
+  private set shown(v: boolean) {
+    this.paint.shown = v;
+  }
+  private get shownKey(): string {
+    return this.paint.shownKey;
+  }
+  private set shownKey(v: string) {
+    this.paint.shownKey = v;
+  }
+  private get shownPercent(): number {
+    return this.paint.shownPercent;
+  }
+  private set shownPercent(v: number) {
+    this.paint.shownPercent = v;
+  }
+  private get filled(): number {
+    return this.paint.filled;
+  }
+  private set filled(v: number) {
+    this.paint.filled = v;
+  }
+  private get shownNote(): string {
+    return this.paint.shownNote;
+  }
+  private set shownNote(v: string) {
+    this.paint.shownNote = v;
+  }
+  private get shownNoteKey(): string {
+    return this.paint.shownNoteKey;
+  }
+  private set shownNoteKey(v: string) {
+    this.paint.shownNoteKey = v;
+  }
+  private get shownNoteVisible(): boolean {
+    return this.paint.shownNoteVisible;
+  }
+  private set shownNoteVisible(v: boolean) {
+    this.paint.shownNoteVisible = v;
+  }
 
   constructor(private readonly world: World, screen: LoadingScreen) {
     this.state = world.resource(LOADING_STATE);
     this.screen = screen;
+    this.paint = world.resource(UI_PAINT).loading;
   }
 
   /** ui lane, once per frame: shows the screen while a loading run is on, hides it for good afterwards. */

@@ -1,7 +1,7 @@
 import * as THREE from "three/webgpu";
 import { World } from "./ecs/World";
-import { CONTROL, HUMANOID_BODY, spawnPlayer } from "./ecs/components/Player";
-import { createFont, createFrameCap, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createPickerState, createScale, createToastState, createUiModalState, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "./ecs/resources";
+import { CONTROL, HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "./ecs/components/Player";
+import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "./ecs/resources";
 import { SetLoadingStage, SetFpsCap, SetMode, ShowToast, Teleport } from "./ecs/commands";
 import { INPUT_ACCESS, PlayerInputSystem } from "./ecs/systems/input";
 import { CONTROLLER_ACCESS, PlayerControllerSystem } from "./ecs/systems/controller";
@@ -9,6 +9,7 @@ import { MOVEMENT_ACCESS, PlayerMovementSystem } from "./ecs/systems/movement";
 import { COLLISION_ACCESS, CollisionSystem } from "./ecs/systems/collision";
 import { BlockInteractionSystem, INTERACTION_ACCESS } from "./ecs/systems/interaction";
 import { BlockOutlineSystem, OUTLINE_ACCESS } from "./rendering/outline";
+import { BOOT_FLOW, createBootFlow, runBootFlow, type BootFlowDeps, type BootStage } from "./ecs/boot";
 import { CHUNK_STREAM_ACCESS, ChunkStreamSystem } from "./ecs/systems/chunkstream";
 import { PositionSnapshotSystem, SNAPSHOT_ACCESS } from "./ecs/systems/snapshot";
 import { DiagnosticsSystem, DIAGNOSTICS_ACCESS } from "./ecs/systems/diagnostics";
@@ -19,6 +20,7 @@ import { defaultUiTheme, UI_THEME } from "./ecs/ui/theme";
 import { UI_RENDER_ACCESS, UiRenderSystem } from "./ecs/ui/system";
 import { createUiActions, UI_ACTIONS } from "./ecs/ui/actions";
 import { createUiOrder, UI_ORDER } from "./ecs/ui/widgets";
+import { createUiPaint, UI_PAINT } from "./ecs/ui/paint";
 import { createUiSources, UI_BINDING_ACCESS, UiBindingSystem, UI_SOURCES } from "./ecs/ui/bindings";
 import { CAMERA3D, BLOCK_OUTLINE, CANVAS_HOST, CHUNK_MATERIAL, CHUNK_MESHES, createBlockOutline, createChunkMaterial, createChunkMeshCache, createIconBake, createMenuBackground, createUiMount, ICON_BAKE, MENU_BACKGROUND, PERF_SAMPLER, RENDERER3D, SCENE3D, UI_MOUNT } from "./ecs/presentation";
 import { createKeybindGesture, KEYBIND_GESTURE, UI_KEYBIND_ACCESS, UiKeybindSystem } from "./ecs/ui/keybind";
@@ -34,19 +36,19 @@ import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, Menu, sp
 import { MainMenu } from "./ui/mainmenu";
 import { Hud } from "./ui/hud";
 import { PointerLock } from "./platform/pointerlock";
-import { t, loadLang, getLang, onLangChange, type Lang } from "./ui/i18n";
+import { t, loadLang, getLang, onLangChange, i18nStringsState, I18N_STRINGS, type Lang } from "./ui/i18n";
 import { loadUIScaleMode, getUIScaleMode, onUIScaleModeChange, currentRootFontPx } from "./ui/uiscale";
 import { loadFont, getFontId, onFontChange, currentFontCss } from "./ui/fonts";
-import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "./platform/shell";
+import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, shellState, SHELL_STATE, type WindowMode } from "./platform/shell";
 import { startRawInput, centerCursor } from "./platform/rawinput";
 import { installWindowGuards } from "./platform/window-guards";
 import { adoptViewport, currentViewport } from "./platform/viewport";
 import { DebugLogForwarder } from "./platform/debuglog";
 import { PerfSampler } from "./platform/perf";
-import { loadBinds, getBind, getBindsAll, getCapturing, onBindsChange, isCapturing, buttonToAction, buttonToCode } from "./platform/keybinds";
-import { menuBgKind } from "./ui/background";
+import { loadBinds, getBind, getBindsAll, getCapturing, onBindsChange, isCapturing, buttonToAction, buttonToCode, setBind, endCapture, adoptKeybindGesture } from "./platform/keybinds";
+import { menuBgKind, menuBgState, MENU_BG_KIND } from "./ui/background";
 import { preloadPacks, resolveTexture } from "./rendering/textures";
-import { allBlockIds, loadBlockRegistry } from "./blockregistry";
+import { allBlockIds, blockRegistryState, BLOCK_REGISTRY, loadBlockRegistry } from "./blockregistry";
 import { VoxelWorld, WORLD_SURFACE_Y } from "./voxel/world";
 
 // Pixel font (Fusion Pixel, OFL open source): proportional font for general UI, monospace for F3/count panels
@@ -229,6 +231,17 @@ world.insertResource(DELAYED_INTENTS, delayedIntents);
 // publishes the current size at once, so the first frame is already correct.
 const viewport = createViewport();
 world.insertResource(VIEWPORT, viewport);
+// The HOST state the shell owns (platform/shell.ts): the settings snapshot, the log-flush deadline, the
+// diagnostic-probe switch and the foreground flag. It used to be four module-level `let`s there; the
+// object is created by that module (a log line may be written before this body runs) and inserted here,
+// so the host's state is world data too.
+world.insertResource(SHELL_STATE, shellState());
+// The ASSET caches, which are data as well: the built dictionaries, the merged block registry and the
+// pack chain's background memo. Each module creates its object at import time (all three are read before
+// the World exists) and this is where they become named resources.
+world.insertResource(I18N_STRINGS, i18nStringsState());
+world.insertResource(BLOCK_REGISTRY, blockRegistryState());
+world.insertResource(MENU_BG_KIND, menuBgState());
 adoptViewport(viewport);
 // The debug-log sink. A structural adapter over the two platform entry points, so diagnostics reads it
 // from the world and takes NO constructor arguments (see ecs/resources.ts::DebugLogSink).
@@ -300,6 +313,9 @@ world.insertResource(LOADING_STATE, createLoadingState());
 // once per frame. One object, two readers, no second copy of the drag state.
 const keybindGesture = createKeybindGesture();
 world.insertResource(KEYBIND_GESTURE, keybindGesture);
+// The rebind CAPTURE is part of that resource now (`capturing`), so platform/keybinds.ts only needs a
+// pointer to it — adopted here, before any listener can ask "is a capture running".
+adoptKeybindGesture(keybindGesture);
 // Widget theme (every UI colour/space token) + the ACTION TABLE (what a clickable widget's id means)
 // + the HUD tree. Spawning widgets is a STRUCTURAL change, so it belongs here during wiring or inside a
 // command — never inside a system. The action table is a resource because it is world state too: a
@@ -307,6 +323,24 @@ world.insertResource(KEYBIND_GESTURE, keybindGesture);
 world.insertResource(UI_THEME, defaultUiTheme());
 world.insertResource(UI_ACTIONS, createUiActions());
 world.insertResource(UI_SOURCES, createUiSources());
+// The UI layer's PAINT state (ecs/ui/paint.ts): the reconciler's element tables and per-widget "last
+// written" cache, the loading/toast/HUD/keybind/inventory/navigation diff caches and the bindings'
+// reported-source set. They used to be private fields of eight classes — state inside behaviour, reset
+// nowhere and invisible to the schedule, to a test and to the log. Inserted before the first frame.
+world.insertResource(UI_PAINT, createUiPaint(INVENTORY_SLOTS));
+// The ONE frame loop's own state (`LOOP_STATE`) and the FRAME probe's accumulators (`FRAME_PROBE`):
+// the mode, the accumulators, the canvas size last applied, the geometry-suppression deadline and the
+// dozen probe counters used to be module-level `let`s in this file. Resolved into local aliases here so
+// the loop's body keeps reading the way it always did.
+world.insertResource(LOOP_STATE, createLoopState());
+world.insertResource(FRAME_PROBE, createFrameProbe());
+// The boot / world-entry FLOW (ecs/boot.ts): which flow is running, its stage list and the settings
+// note the second stage reports. The drivers in this file only START a flow; the walk itself is that
+// module's, and the sequence is data.
+world.insertResource(BOOT_FLOW, createBootFlow());
+const loop = world.resource(LOOP_STATE);
+const probe = world.resource(FRAME_PROBE);
+const bootFlow = world.resource(BOOT_FLOW);
 // The widget tree's creation counter (UI_TREE.order). It is inserted BEFORE the first spawn below —
 // spawnUiNode draws every order from it, and a missing resource would throw on the first widget.
 world.insertResource(UI_ORDER, createUiOrder());
@@ -373,6 +407,11 @@ const uiKeybind = new UiKeybindSystem(world, {
   boundCodes,
   capturing: getCapturing,
   bindOf: getBind,
+  // The bind itself is applied by THIS system now (it drains the queued device decisions), so the writes
+  // are injected like the reads: the event listener only reports what happened.
+  setBind,
+  endCapture,
+  log: logDebug,
   line: keybindLine,
   keycapAt: keycapAtPoint,
 });
@@ -700,6 +739,8 @@ let pointerLock: PointerLock;
 
 pointerLock = new PointerLock({
   input,
+  // The cursor value it last applied lives in the device state resource (INPUT_STATE.appliedCursor).
+  state: inputState,
   isUiModal: uiOpen,
   // The cursor test: hide it only while the player **really is controlling the mouse**. `!isUiModal`
   // will not do — the loading screen holds no modal surface, so that would make the loading screen
@@ -765,10 +806,10 @@ const onToggleDiagLog = (on: boolean): boolean => {
 /** Until when a geometry change must NOT be treated as "the user is messing with the window". Windows
  *  emits a burst of Resized/Moved events for a programmatic window-mode switch (and for the fullscreen
  *  transition), and pausing on those would be a regression: switching to fullscreen must not open the
- *  pause menu. Rust still re-clips the capture rectangle for them (win::reclip_mouse_capture). */
-let suppressGeometryUntil = 0;
+ *  pause menu. Rust still re-clips the capture rectangle for them (win::reclip_mouse_capture).
+ *  The deadline is LOOP_STATE.suppressGeometryUntil (ecs/resources.ts) — the loop's own data. */
 const suppressGeometryPause = (): void => {
-  suppressGeometryUntil = performance.now() + 800;
+  loop.suppressGeometryUntil = performance.now() + 800;
 };
 
 const onSetWindowMode = (mode: WindowMode): void => {
@@ -841,16 +882,28 @@ async function enterWorld(mode: string): Promise<void> {
     // menu, so without this line every frame in between is a MENU frame, which draws the panorama
     // behind an opaque screen for nothing (and `loadFrame` — the mode's own body — would never run).
     setLoopMode("load");
-    await loadingStage(0, "world.spawn");
-    await loadingStage(0.15, "world.terrain");
-    // Generate (no meshing) the spawn window: collision needs real blocks on the very first tick.
-    chunkStream.prime(SPAWN.x, SPAWN.z);
-    await loadingStage(0.2, "world.chunks");
-    await chunkStream.warmUp(paint, (done, total) => {
-      // The bar owns almost the whole entry: the GPU was paid for at boot.
-      world.commands.send(SetLoadingStage, { progress: total > 0 ? 0.2 + 0.75 * (done / total) : 0.2 });
-    });
-    await loadingStage(1, "world.ready");
+    // The entry's stages, as DATA (ecs/boot.ts): the work of a stage runs after its own announcement has
+    // been painted, so the bar never claims to be doing something it has not started.
+    const stages: readonly BootStage[] = [
+      { progress: 0, key: "world.spawn" },
+      {
+        progress: 0.15,
+        key: "world.terrain",
+        // Generate (no meshing) the spawn window: collision needs real blocks on the very first tick.
+        run: () => chunkStream.prime(SPAWN.x, SPAWN.z),
+      },
+      {
+        progress: 0.2,
+        key: "world.chunks",
+        run: () =>
+          chunkStream.warmUp(paint, (done, total) => {
+            // The bar owns almost the whole entry: the GPU was paid for at boot.
+            world.commands.send(SetLoadingStage, { progress: total > 0 ? 0.2 + 0.75 * (done / total) : 0.2 });
+          }),
+      },
+      { progress: 1, key: "world.ready" },
+    ];
+    await runBootFlow(bootFlow, "world", stages, flowDeps);
     logDebug(`WORLD ready at ${(performance.now() - entryStart).toFixed(0)}ms`);
   } else {
     // Nothing to build: the world is already on screen behind the menu, so it comes back at once.
@@ -970,7 +1023,7 @@ onWinFocus(() => {
 // by the only reliable signal there is. Rust re-clips the rectangle on the way here, which covers the
 // suppressed case (our own window-mode switch keeps the capture on).
 onWinGeometry(() => {
-  if (performance.now() < suppressGeometryUntil) return; // our own fullscreen/windowed switch
+  if (performance.now() < loop.suppressGeometryUntil) return; // our own fullscreen/windowed switch
   // NOT IN A WORLD: nothing is captured and there is nothing to pause, so do (and LOG) nothing. This used
   // to run on every geometry event regardless of the mode, which meant hundreds of debug.log lines for one
   // window drag at the main menu (and a pointless native-capture release per event).
@@ -1024,13 +1077,11 @@ timer.connect(document);  // Page Visibility API: delta=0 when minimized/backgro
 //             simulate or draw yet (the renderer does not even exist during the startup's first stages).
 //             It is called `load` and not `boot` because it serves both flows (it was `boot` while it
 //             was only the startup's mode, and the name was a lie once a world entry used it too).
-type LoopMode = "load" | "game" | "menu";
-
-let loopMode: LoopMode = "load"; // "load" until the bottom of this file picks a mode, so the first transition always applies
-// Fixed-step physics: step size + time accumulator (decoupled from frame timing, MC-style fixed tps)
+// The loop's own state is a RESOURCE (`LOOP_STATE`, ecs/resources.ts): the mode, the two accumulators,
+// the size the canvas was last set to and the geometry-suppression deadline used to be seven module-level
+// `let`s here. The frame BODY stays this file's (a rAF callback is not a lane) — what moved is its state.
+// Fixed-step physics: step size (decoupled from frame timing, MC-style fixed tps)
 const PHYS_DT = 1 / 120;
-let physAcc = 0;
-let renderAcc = 0;
 
 /** The game's frame: advance the simulation at a FIXED step (frame-rate independent movement), gate
  *  drawing and stats on the frame cap, then run the render lane and the ui lane. */
@@ -1039,25 +1090,25 @@ function renderFrame(): void {
   const delta = Math.min(timer.getDelta(), 0.1);
 
     // Fixed-step physics advance: movement is independent of frame duration, constant per step (removes movement jitter from uneven frame timing)
-  physAcc += delta;
+  loop.physAcc += delta;
   let steps = 0;
-  while (physAcc >= PHYS_DT && steps < 12) {
+  while (loop.physAcc >= PHYS_DT && steps < 12) {
     world.stepFixed(PHYS_DT);
-    physAcc -= PHYS_DT;
+    loop.physAcc -= PHYS_DT;
     steps++;
   }
 
   // FPS cap gate: skip rendering and stats until the frame budget is reached (physics already advanced above at fixed steps)
   if (frameCap.cap > 0) {
     const budget = 1 / frameCap.cap;
-    renderAcc += delta;
-    if (renderAcc < budget) return;
-    renderAcc %= budget;
+    loop.renderAcc += delta;
+    if (loop.renderAcc < budget) return;
+    loop.renderAcc %= budget;
   }
 
   // Per-frame systems: view interpolation -> chunk meshing -> diagnostics -> draw
   // (alpha = remainder of the physics tick). The ECS command barrier runs first inside render().
-  world.render(Math.min(physAcc / PHYS_DT, 1), delta);
+  world.render(Math.min(loop.physAcc / PHYS_DT, 1), delta);
 }
 
 // ===== A MENU frame: the ui lane alone, plus the panorama background =====
@@ -1097,17 +1148,14 @@ function loadFrame(): void {
  *
  *  The size is applied only when it CHANGED, and only after `renderer.init()` — the renderer is
  *  constructed during wiring but initialised behind the loading screen, and a load frame runs before that.
- */
-let appliedViewportW = 0;
-let appliedViewportH = 0;
-let rendererReady = false;
+ *  Both facts (`appliedViewportW/H`, `rendererReady`) are fields of LOOP_STATE (ecs/resources.ts). */
 function applyViewportSize(): void {
-  if (!rendererReady) return;
+  if (!loop.rendererReady) return;
   const vp = world.resource(VIEWPORT);
   if (vp.width <= 0 || vp.height <= 0) return;
-  if (vp.width === appliedViewportW && vp.height === appliedViewportH) return;
-  appliedViewportW = vp.width;
-  appliedViewportH = vp.height;
+  if (vp.width === loop.appliedViewportW && vp.height === loop.appliedViewportH) return;
+  loop.appliedViewportW = vp.width;
+  loop.appliedViewportH = vp.height;
   renderer.setSize(vp.width, vp.height);
 }
 
@@ -1116,73 +1164,60 @@ function applyViewportSize(): void {
  *  it cannot tell "the main thread was occupied for a moment" from "frame time grew overall". This uses
  *  the rAF **real interval** to report once per second: n / avg / max (milliseconds), plus the stall
  *  count and the longest stall — above 80 ms it immediately logs a separate `STALL` line. All three
- *  modes are covered, so "does holding a key to turn the view block" is the one line that answers it. */
+ *  modes are covered, so "does holding a key to turn the view block" is the one line that answers it.
+ *  Every counter is a field of the FRAME_PROBE resource (ecs/resources.ts) — the probe's accounts used to
+ *  be a dozen module-level `let`s here. */
 const FRAME_STALL_MS = 80;
-let frameLast = 0;
-let frameN = 0;
-let frameSum = 0;
-let frameMax = 0;
-let frameStalls = 0;
-let frameStallMax = 0;
-let frameStatAt = 0;
-/** Histogram of the per-frame look sample count (index = count, 0..12 folded into the last bucket) + the
- *  min/avg/max of the per-frame mouse pixel equivalent. These two numbers answer what the `LOOK`/`RAWLAG`
- *  lines **cannot**: whether the view advances evenly per frame or in an uneven number of samples per
- *  frame (polling at 8 ms ≈ 1.67 samples/frame → a 2,2,1 pattern; when turning fast that is the
- *  "one notch at a time" the eye sees). */
-const framePfBuckets = new Array<number>(13).fill(0);
-let framePxMin = Number.POSITIVE_INFINITY;
-let framePxMax = 0;
-let framePxSum = 0;
-let framePxN = 0;
 function frameProbe(): void {
   const now = performance.now();
-  if (frameLast > 0) {
-    const gap = now - frameLast;
-    frameN++;
-    frameSum += gap;
-    if (gap > frameMax) frameMax = gap;
+  if (probe.last > 0) {
+    const gap = now - probe.last;
+    probe.n++;
+    probe.sum += gap;
+    if (gap > probe.max) probe.max = gap;
     if (gap > FRAME_STALL_MS) {
-      frameStalls++;
-      if (gap > frameStallMax) frameStallMax = gap;
-      logDebug(`STALL gap=${gap.toFixed(0)}ms mode=${loopMode}`);
+      probe.stalls++;
+      if (gap > probe.stallMax) probe.stallMax = gap;
+      logDebug(`STALL gap=${gap.toFixed(0)}ms mode=${loop.mode}`);
     }
   }
-  frameLast = now;
+  probe.last = now;
   // This frame's mouse: how many samples, how many pixel equivalents (the read clears both)
   const meter = input.takeLookFrameMeter();
-  framePfBuckets[Math.min(meter.samples, framePfBuckets.length - 1)]++;
+  probe.pfBuckets[Math.min(meter.samples, probe.pfBuckets.length - 1)]++;
   if (meter.samples > 0) {
-    framePxN++;
-    framePxSum += meter.px;
-    if (meter.px < framePxMin) framePxMin = meter.px;
-    if (meter.px > framePxMax) framePxMax = meter.px;
+    probe.pxN++;
+    probe.pxSum += meter.px;
+    if (meter.px < probe.pxMin) probe.pxMin = meter.px;
+    if (meter.px > probe.pxMax) probe.pxMax = meter.px;
   }
-  if (frameStatAt === 0) {
-    frameStatAt = now;
+  if (probe.statAt === 0) {
+    probe.statAt = now;
     return;
   }
-  if (now - frameStatAt < 1000) return;
+  if (now - probe.statAt < 1000) return;
   // (The RAWLAG line is printed by `player.input` itself now, right after LOOK: the transport counters
   // moved into INPUT_DIAGNOSTICS, so the system that owns them is the one that formats them.)
   const pf: string[] = [];
-  for (let i = 0; i < framePfBuckets.length; i++) if (framePfBuckets[i] > 0) pf.push(`${i}:${framePfBuckets[i]}`);
+  for (let i = 0; i < probe.pfBuckets.length; i++) {
+    if (probe.pfBuckets[i] > 0) pf.push(`${i}:${probe.pfBuckets[i]}`);
+  }
   logDebug(
-    `FRAME n=${frameN} avg=${(frameN > 0 ? frameSum / frameN : 0).toFixed(2)}ms max=${frameMax.toFixed(1)}ms ` +
-      `stalls=${frameStalls} stallMax=${frameStallMax.toFixed(0)}ms mode=${loopMode} locked=${input.locked ? 1 : 0} ` +
-      `pf=[${pf.join(" ")}] px=${framePxN > 0 ? `${framePxMin.toFixed(1)}/${(framePxSum / framePxN).toFixed(1)}/${framePxMax.toFixed(1)}` : "-"} (${framePxN})`,
+    `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
+      `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
+      `pf=[${pf.join(" ")}] px=${probe.pxN > 0 ? `${probe.pxMin.toFixed(1)}/${(probe.pxSum / probe.pxN).toFixed(1)}/${probe.pxMax.toFixed(1)}` : "-"} (${probe.pxN})`,
   );
-  frameStatAt = now;
-  frameN = 0;
-  frameSum = 0;
-  frameMax = 0;
-  frameStalls = 0;
-  frameStallMax = 0;
-  framePfBuckets.fill(0);
-  framePxMin = Number.POSITIVE_INFINITY;
-  framePxMax = 0;
-  framePxSum = 0;
-  framePxN = 0;
+  probe.statAt = now;
+  probe.n = 0;
+  probe.sum = 0;
+  probe.max = 0;
+  probe.stalls = 0;
+  probe.stallMax = 0;
+  probe.pfBuckets.fill(0);
+  probe.pxMin = Number.POSITIVE_INFINITY;
+  probe.pxMax = 0;
+  probe.pxSum = 0;
+  probe.pxN = 0;
 }
 
 /** One frame. The mode picks the body; the chain re-arms itself, and the try/catch keeps ONE bad frame
@@ -1196,9 +1231,9 @@ function frame(): void {
     // browser's input-task priority stretched to 9-12 ms as soon as a key was held (measured: `pf` went
     // from "90% of frames at exactly 2 samples" to a 0/1/2/3 spread) — the judder the user reported.
     input.frameLook();
-    if (loopMode === "game") renderFrame();
-    else if (loopMode === "menu") menuFrame();
-    else if (loopMode === "load") loadFrame();
+    if (loop.mode === "game") renderFrame();
+    else if (loop.mode === "menu") menuFrame();
+    else if (loop.mode === "load") loadFrame();
   } catch (err) {
     logDebug(`frame error: ${String((err as Error)?.message || err)}`);
   }
@@ -1215,13 +1250,13 @@ function frame(): void {
 // leave — it used to be stopLoop()/startLoop(), where stopping had the SIDE EFFECT of starting the ui
 // pump and starting then had to undo it two lines later.
 function setLoopMode(mode: LoopMode): void {
-  if (loopMode === mode) return;
-  loopMode = mode;
+  if (loop.mode === mode) return;
+  loop.mode = mode;
 }
 
 /** Is a world being simulated? (What the window blur/focus handlers ask: "are we actually playing".) */
 function inWorld(): boolean {
-  return loopMode === "game";
+  return loop.mode === "game";
 }
 
 // ===== Main-menu background =====
@@ -1249,23 +1284,28 @@ function paint(): Promise<void> {
     setTimeout(resolve, 0);
   });
 }
-
 /** Announce a stage, reconcile it NOW and let it paint. `key` is omitted for a stage that only moves
  *  the bar, `note` for the one stage that has something to report. Shared by BOTH flows the screen
  *  serves — the startup and entering a world — which is why it is not named after either. */
-async function loadingStage(
-  progress: number,
-  key?: string,
-  note?: { readonly key: string; readonly value: string },
-): Promise<void> {
+function announceStage(stage: BootStage): void {
   world.commands.send(SetLoadingStage, {
-    progress,
-    ...(key === undefined ? {} : { key }),
-    ...(note === undefined ? {} : { noteKey: note.key, noteValue: note.value }),
+    progress: stage.progress,
+    ...(stage.key === undefined ? {} : { key: stage.key }),
+    ...(stage.withNote ? { noteKey: bootFlow.noteKey, noteValue: bootFlow.noteValue } : {}),
   });
   world.renderUi(); // the barrier + the ui lane: the same pump a menu frame uses
-  await paint();
 }
+
+/** The walker's dependencies: the loading screen is driven through the COMMAND barrier (which only this
+ *  root may do) and the yield is a macrotask (see ecs/boot.ts::BootFlowDeps). */
+const flowDeps: BootFlowDeps = {
+  announce: announceStage,
+  paint: () =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    }),
+  now: () => performance.now(),
+};
 
 /** Validate the settings FILE against the values that actually took force, repair what cannot be
  *  used, write the corrected file back and report it.
@@ -1316,57 +1356,74 @@ function checkSettingsAtBoot(): { noteKey: string; noteValue: string } {
     : { noteKey: "loading.unknown", noteValue: report.unknown.join(", ") };
 }
 
+/** The STARTUP flow, as DATA. The order IS the feature and it is now readable in one place; each stage's
+ *  work runs after its own announcement has been painted (ecs/boot.ts::runBootFlow). The root font size
+ *  is NOT applied here any more: the reconciler applies it (with the font pair) at the top of every frame,
+ *  diffed against what it last wrote, so the very first stage already renders at the right size. */
+const BOOT_STAGES: readonly BootStage[] = [
+  {
+    progress: 0,
+    key: "loading.settings",
+    run: () => {
+      // The screen is spawned (hidden) during wiring; this frame is what shows it, and it is also the ONLY
+      // place the chain is kicked off. Calling `frame()` directly — instead of scheduling it — keeps this
+      // the single place a frame starts from; the call at the END of frame() re-arms it.
+      frame();
+      // The window is revealed only now, with the loading screen already in the DOM: the manifest hides it
+      // at creation ("show": false) precisely so nothing white can flash, and revealing it before the first
+      // paint would trade that for a black rectangle.
+      showWindow();
+      suppressGeometryPause(); // the reveal itself resizes/moves the window
+      applyWindowModeAtStart();
+      // The settings check's OUTCOME is data (bootFlow.note*), because the stage after this one reports it.
+      const settings = checkSettingsAtBoot();
+      bootFlow.noteKey = settings.noteKey;
+      bootFlow.noteValue = settings.noteValue;
+    },
+  },
+  { progress: 0.2, key: "loading.settings", withNote: true },
+  {
+    progress: 0.3,
+    key: "loading.gpu",
+    run: async () => {
+      await renderer.init();
+      // From here the canvas may be sized (a load frame runs before this point) — and the size comes from
+      // the VIEWPORT resource like every later resize, so there is ONE rule for "how big is the canvas".
+      loop.rendererReady = true;
+      applyViewportSize();
+      // The canvas host is read back from the world: "where the game's canvas goes" is world state too.
+      world.resource(CANVAS_HOST).appendChild(renderer.domElement);
+      logDebug(`BOOT graphics ready at ${(performance.now() - bootFlow.startedAt).toFixed(0)}ms`);
+    },
+  },
+  {
+    progress: 1,
+    key: "loading.ready",
+    // The startup ENDS here: the world is not built at boot any more (`enterWorld()` does that behind this
+    // same screen), so the main menu comes up as soon as the GPU can draw. The mode becomes MENU, and the
+    // first game frame draws the 3D world over the black clear.
+    run: () => {
+      renderer.setClearColor(0x000000);
+      renderer.clear();
+      mainMenu.show();
+      pointerLock.applyCursor();
+      setLoopMode("menu");
+      // Last, the startup screen comes down. Through the barrier like everything else, so the screen and
+      // the menu swap inside ONE ui lane — a direct flag write here would leave a frame showing neither.
+      world.commands.send(SetLoadingStage, { active: false });
+    },
+  },
+];
+
 async function boot(): Promise<void> {
   const bootStart = performance.now();
-  // The root font size is NOT applied here any more. It used to be a hand-written `applyUIScale()` call
-  // before the first stage; now the reconciler applies it (with the font pair) on every frame, diffed
-  // against what it last wrote — and it does so at the TOP of the step, before it paints a single widget,
-  // so the very first stage already renders at the right size and the loading screen needs no special case.
   // ACTIVATE the screen before the first stage — and note this line is load-bearing, not decoration:
   // `ui.loading` only paints while LOADING_STATE.active is true (its root is spawned hidden), so a driver
   // that forgets it leaves the window showing the HUD ALONE — a black page with a crosshair and a
   // hotbar on it, which is exactly how that bug was reported. The command lands on the barrier inside
   // the first stage's renderUi, i.e. before anything is revealed.
   world.commands.send(SetLoadingStage, { active: true });
-  // The screen is spawned (hidden) during wiring; this frame is what shows it, and it is also the ONLY
-  // place the chain is kicked off. Calling `frame()` directly — instead of scheduling it — keeps this
-  // the single place a frame starts from; the call at the END of frame() re-arms it.
-  await loadingStage(0, "loading.settings");
-  frame();
-  // The window is revealed only now, with the loading screen already in the DOM: the manifest hides it
-  // at creation ("show": false) precisely so nothing white can flash, and revealing it before the first
-  // paint would trade that for a black rectangle.
-  showWindow();
-  suppressGeometryPause(); // the reveal itself resizes/moves the window
-  applyWindowModeAtStart();
-
-  const settings = checkSettingsAtBoot();
-  await loadingStage(0.2, "loading.settings", { key: settings.noteKey, value: settings.noteValue });
-
-  await loadingStage(0.3, "loading.gpu");
-  await renderer.init();
-  // From here the canvas may be sized (a load frame runs before this point) — and the size comes from the
-  // VIEWPORT resource like every later resize, so there is ONE rule for "how big is the canvas".
-  rendererReady = true;
-  applyViewportSize();
-  // The canvas host is read back from the world: "where the game's canvas goes" is world state too.
-  world.resource(CANVAS_HOST).appendChild(renderer.domElement);
-  logDebug(`BOOT graphics ready at ${(performance.now() - bootStart).toFixed(0)}ms`);
-
-  // The world is NOT built here any more: `enterWorld()` does that behind this same screen (see its
-  // header). The startup ends as soon as the GPU can draw, so the main menu comes up fast.
-  await loadingStage(1, "loading.ready");
-  // The main menu is up and nothing is simulated, so the mode becomes MENU; entering a world switches
-  // it to "game" (via the `load` mode, while the world is built), and the first game frame draws the 3D
-  // world over the black clear below.
-  renderer.setClearColor(0x000000);
-  renderer.clear();
-  mainMenu.show();
-  pointerLock.applyCursor();
-  setLoopMode("menu");
-  // Last, the startup screen comes down. Through the barrier like everything else, so the screen and
-  // the menu swap inside ONE ui lane — a direct flag write here would leave a frame showing neither.
-  world.commands.send(SetLoadingStage, { active: false });
+  await runBootFlow(bootFlow, "boot", BOOT_STAGES, flowDeps);
   logDebug(`BOOT ready in ${(performance.now() - bootStart).toFixed(0)}ms`);
 }
 

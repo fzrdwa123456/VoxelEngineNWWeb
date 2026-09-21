@@ -14,6 +14,7 @@
 //     permissions are not needed.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { defineResource, type Resource } from "../ecs/World";
 
 /** What Rust's `preload_shell` returns (the field names match serde's camelCase one for one) */
 export interface ShellSnapshot {
@@ -28,31 +29,55 @@ export interface ShellSnapshot {
   platform: string;
 }
 
-let snapshot: ShellSnapshot = {
-  gameRoot: "(not initialized)",
-  dev: false,
-  settings: {},
-  settingsProblem: null,
-  windowMode: "windowed",
-  vsyncDisabled: true,
-  focused: true,
-  browserArgs: "",
-  platform: "tauri",
+/** The HOST state this module owns, as one DATA object: the settings snapshot it read at boot, the log
+ *  flush deadline, the diagnostic-probe switch and the foreground flag. They used to be four module-level
+ *  `let`s — state with no owner. The object exists at import time (the inline `bootReport()` in
+ *  index.html may write a log line before main.ts's body runs) and the composition root INSERTS it as
+ *  SHELL_STATE, so every reader is looking at world data instead of at four closures. */
+export interface ShellState {
+  snapshot: ShellSnapshot;
+  flushTimer: number | null;
+  diagLogEnabled: boolean;
+  windowFocused: boolean;
+}
+
+export const SHELL_STATE: Resource<ShellState> = defineResource<ShellState>("shellState");
+
+const state: ShellState = {
+  snapshot: {
+    gameRoot: "(not initialized)",
+    dev: false,
+    settings: {},
+    settingsProblem: null,
+    windowMode: "windowed",
+    vsyncDisabled: true,
+    focused: true,
+    browserArgs: "",
+    platform: "tauri",
+  },
+  flushTimer: null,
+  diagLogEnabled: true,
+  windowFocused: false,
 };
+
+/** The one instance, for the composition root to insert. */
+export function shellState(): ShellState {
+  return state;
+}
 
 /** The startup preload. **It must be awaited ONCE before initShell()**, or readSettings() reads nothing
  *  but empties. This is where the original `initShell()`'s "make the directories + clear the log" now
  *  belongs in Tauri: the Rust side has already done it. */
 export async function preloadShell(): Promise<ShellSnapshot> {
   const snap = await invoke<ShellSnapshot>("preload_shell");
-  snapshot = snap;
-  windowFocused = snap.focused;
+  state.snapshot = snap;
+  state.windowFocused = snap.focused;
   void listen("win-focus", () => {
-    windowFocused = true;
+    state.windowFocused = true;
     focusListeners.forEach((cb) => cb());
   });
   void listen("win-blur", () => {
-    windowFocused = false;
+    state.windowFocused = false;
     blurListeners.forEach((cb) => cb());
   });
   void listen("win-geometry", () => {
@@ -68,7 +93,7 @@ export async function preloadShell(): Promise<ShellSnapshot> {
 }
 
 export function shellInfo(): ShellSnapshot {
-  return snapshot;
+  return state.snapshot;
 }
 
 /** The earliest diagnostic channel: **it hits the IPC global directly, bypassing @tauri-apps/api**.
@@ -96,7 +121,6 @@ export function bootReport(message: string): void {
 const pending: Record<string, string[]> = { debug: [], renderer: [] };
 const FLUSH_LINES = 64;
 const FLUSH_MS = 200;
-let flushTimer: number | null = null;
 
 function flush(channel: "debug" | "renderer"): void {
   const lines = pending[channel].splice(0, pending[channel].length);
@@ -105,9 +129,9 @@ function flush(channel: "debug" | "renderer"): void {
 }
 
 function flushSoon(): void {
-  if (flushTimer !== null) return;
-  flushTimer = setTimeout(() => {
-    flushTimer = null;
+  if (state.flushTimer !== null) return;
+  state.flushTimer = setTimeout(() => {
+    state.flushTimer = null;
     flush("debug");
     flush("renderer");
   }, FLUSH_MS) as unknown as number;
@@ -174,7 +198,6 @@ export function initShell(): void {
 // carry a sequence number), so with the switch OFF that one line kept reaching the disk every second —
 // the exact flood the switch exists to stop, and the only probe line that escaped it. `check:ecs` now
 // pins each emitted probe line's own prefix to this table so a rename cannot silently reopen the hole.
-let diagLogEnabled = true;
 /** The probe lines' prefixes (`SPACE#`/`MOUSE#` carry a sequence number, so match by prefix). */
 const PROBE_PREFIXES = [
   "PHYS ",
@@ -197,10 +220,10 @@ const PROBE_PREFIXES = [
   "RAWINPUT hands back",
 ];
 export function isDiagLogEnabled(): boolean {
-  return diagLogEnabled;
+  return state.diagLogEnabled;
 }
 export function setDiagLogEnabled(on: boolean): void {
-  diagLogEnabled = on;
+  state.diagLogEnabled = on;
 }
 function isProbeLine(line: string): boolean {
   for (const p of PROBE_PREFIXES) if (line.startsWith(p)) return true;
@@ -214,17 +237,18 @@ export function appendDebugLog(line: string): void {
 
 // logs\debug.log with a [<ms>ms] prefix — the general-purpose logger every module uses
 export function logDebug(line: string): void {
-  if (!diagLogEnabled && isProbeLine(line)) return; // probes off: stay off disk (event records still write)
+  // probes off: stay off disk (event records still write)
+  if (!state.diagLogEnabled && isProbeLine(line)) return;
   appendDebugLog(`[${performance.now().toFixed(0)}ms] ${line}`);
 }
 
 // ===== settings.json (the values live in memory, the file is written by Rust) =====
 export function readSettings(): Record<string, unknown> {
-  return { ...snapshot.settings };
+  return { ...state.snapshot.settings };
 }
 
 export function writeSettings(s: Record<string, unknown>): void {
-  snapshot.settings = { ...s };
+  state.snapshot.settings = { ...s };
   void invoke("write_settings", { value: s }).catch(() => {});
 }
 
@@ -236,7 +260,7 @@ export interface SettingsRead {
 }
 
 export function readSettingsChecked(): SettingsRead {
-  return { settings: { ...snapshot.settings }, problem: snapshot.settingsProblem };
+  return { settings: { ...state.snapshot.settings }, problem: state.snapshot.settingsProblem };
 }
 
 /** Keep a copy of the file that is about to be replaced. A broken hand-edit is exactly the case where
@@ -268,7 +292,6 @@ export function showWindow(): void {
 
 // ===== Native window focus =====
 // Focus events are forwarded by Rust's WindowEvent::Focused as win-focus / win-blur
-let windowFocused = false;
 const focusListeners = new Set<() => void>();
 const blurListeners = new Set<() => void>();
 /** The window's geometry changed (resize / move / DPI). Note that it is **not** "the mouse left the
@@ -281,11 +304,11 @@ const geometryListeners = new Set<() => void>();
 const captureLostListeners = new Set<() => void>();
 
 export function trackWindowFocus(): void {
-  windowFocused = snapshot.focused;
+  state.windowFocused = state.snapshot.focused;
 }
 
 export function winFocused(): boolean {
-  return windowFocused;
+  return state.windowFocused;
 }
 
 export function focusWindow(): void {
@@ -327,11 +350,11 @@ export function onCaptureLost(cb: () => void): void {
 // run() reads before creating the window to decide whether to add --disable-gpu-vsync. Likewise it
 // **takes effect on restart**.
 export function isGpuVsyncDisabled(): boolean {
-  return snapshot.vsyncDisabled;
+  return state.snapshot.vsyncDisabled;
 }
 
 export function setGpuVsyncDisabled(disabled: boolean): boolean {
-  snapshot.vsyncDisabled = disabled;
+  state.snapshot.vsyncDisabled = disabled;
   void invoke("set_vsync_disabled", { disabled }).catch(() => {});
   return true;
 }

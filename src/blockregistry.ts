@@ -9,6 +9,7 @@
 // pack-root relative) / all (shorthand for all three faces); a referenced texture that no pack in the chain provides sets hasMissingTexture (neighbour faces are then not culled and alphaTest drops the fragments).
 import { packsInstalled, resolveAllBytes, textureMissing } from "./rendering/textures";
 import { logDebug } from "./platform/shell";
+import { defineResource, type Resource } from "./ecs/World";
 
 export interface BlockDef {
   id: string;
@@ -25,8 +26,24 @@ export interface BlockDef {
 
 type RawDef = { label?: unknown; color?: unknown; top?: unknown; side?: unknown; bottom?: unknown; all?: unknown };
 
-const registry = new Map<string, BlockDef>();
-let loaded = false;
+/** The registry as DATA: the merged block table and whether it has been built. It used to be a
+ *  module-level `const registry` + `let loaded`. The object exists at import time (the packs are loaded
+ *  before the World is built) and the composition root INSERTS it as BLOCK_REGISTRY, so the table has a
+ *  name and an owner and a system (or a test) can read it instead of calling into this module. */
+export interface BlockRegistryState {
+  readonly byId: Map<string, BlockDef>;
+  loaded: boolean;
+}
+
+export const BLOCK_REGISTRY: Resource<BlockRegistryState> =
+  defineResource<BlockRegistryState>("blockRegistry");
+
+const state: BlockRegistryState = { byId: new Map(), loaded: false };
+
+/** The one instance, for the composition root to insert (and for this module's own readers). */
+export function blockRegistryState(): BlockRegistryState {
+  return state;
+}
 
 // Fallback: when no pack in the chain has blocks.json (built-in mod deleted), register only the missing block
 // so the inventory/world set always has something usable (the built-in trio moved to mods\defaultmod.zip; the engine no longer bundles it)
@@ -55,12 +72,12 @@ function defFrom(id: string, raw: RawDef): BlockDef {
 
 /** Loaded once at startup: merge every pack's blocks.json (low->high priority, later merges win on same id) */
 export function loadBlockRegistry(): void {
-  if (loaded) return;
+  if (state.loaded) return;
   // Do NOT build and do NOT set `loaded` before the packs are installed — that would cache a registry
   // holding nothing but FALLBACK_DEFS forever. The original needed no such test (fs is synchronous, the
   // packs are there when the module is evaluated); a Tauri pack arrives only through `await preloadPacks()`.
   if (!packsInstalled()) return;
-  loaded = true;
+  state.loaded = true;
   const layers = resolveAllBytes("data/blocks.json");
   let merged: Record<string, RawDef> = {};
   for (const bytes of layers) {
@@ -74,18 +91,18 @@ export function loadBlockRegistry(): void {
   if (!Object.keys(merged).length) merged = FALLBACK_DEFS;  // Empty-chain fallback
   for (const [id, raw] of Object.entries(merged)) {
     if (!raw || typeof raw !== "object") continue;
-    registry.set(id, defFrom(id, raw as RawDef));
+    state.byId.set(id, defFrom(id, raw as RawDef));
   }
-    logDebug(`BLOCKREG registry loaded: ${registry.size} blocks (${layers.length} layers of blocks.json) -> [${[...registry.keys()].join(", ")}]`);
+    logDebug(`BLOCKREG registry loaded: ${state.byId.size} blocks (${layers.length} layers of blocks.json) -> [${[...state.byId.keys()].join(", ")}]`);
 }
 
 export function getBlockDef(id: string): BlockDef | undefined {
   loadBlockRegistry();
-  return registry.get(id);
+  return state.byId.get(id);
 }
 
 /** All registered block ids (fills the inventory) */
 export function allBlockIds(): string[] {
   loadBlockRegistry();
-  return [...registry.keys()];
+  return [...state.byId.keys()];
 }

@@ -8,6 +8,7 @@
 // the DEFAULTS, the validation and the display names, and it reads/writes the resource object it was
 // given by `loadBinds` — one owner, no private copy to drift.
 import type { KeyMapState } from "../ecs/resources";
+import type { KeybindGesture } from "../ecs/ui/keybind";
 
 export type BindAction =
   | "forward"
@@ -111,22 +112,35 @@ export function onBindsChange(cb: () => void): void {
 // ===== Rebind capture state =====
 // The UI layer clicks a row to enter capture; older listeners registered before the capture listener (e.g. inventory E)
 // query isCapturing() and yield, avoiding accidental game triggers while rebinding.
-let capturing: BindAction | null = null;
+//
+// THE STATE IS THE GESTURE RESOURCE (`KEYBIND_GESTURE.capturing`, ecs/ui/keybind.ts) and this module only
+// holds a POINTER to it, adopted by the composition root — a module-level `let capturing` was the last
+// piece of semantic state living outside the world (read by the input system's ESC gate, by the bind
+// panel's actions and by ui.navigation, i.e. exactly the "one value, several readers" shape a resource is
+// for). The BIND ITSELF is applied in the ui lane too (`ui.keybind` drains the queued device decisions);
+// what is left here is the table and its validation.
+let gesture: KeybindGesture | null = null;
+
+/** Hand this module the gesture resource (`KEYBIND_GESTURE`) the world owns. Until it is adopted every
+ *  capture query answers "no capture", which is the truth before wiring. */
+export function adoptKeybindGesture(g: KeybindGesture): void {
+  gesture = g;
+}
 
 export function beginCapture(action: BindAction): void {
-  capturing = action;
+  if (gesture) gesture.capturing = action;
 }
 
 export function endCapture(): void {
-  capturing = null;
+  if (gesture) gesture.capturing = null;
 }
 
 export function isCapturing(): boolean {
-  return capturing !== null;
+  return (gesture?.capturing ?? null) !== null;
 }
 
 export function getCapturing(): BindAction | null {
-  return capturing;
+  return gesture?.capturing ?? null;
 }
 
 /** KeyboardEvent.code validity: identifier starting with a letter (KeyW/Space/ControlLeft/ArrowUp/MouseLeft...) */

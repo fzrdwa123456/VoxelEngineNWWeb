@@ -15,25 +15,25 @@
 import { VIEWPORT, type ViewportState } from "../ecs/resources";
 
 let state: ViewportState | null = null;
-let installed = false;
-let scheduled = false;
 const viewCbs = new Set<() => void>();
 
 /** Start publishing into `viewport` (idempotent — the listener is installed once per process, however
- *  many times this is called). Publishes immediately, so the first frame already has a real size. */
+ *  many times this is called). Publishes immediately, so the first frame already has a real size. The
+ *  two "already installed / coalescer armed" flags are fields of the VIEWPORT resource now, so this
+ *  module keeps no state of its own. */
 export function adoptViewport(viewport: ViewportState): void {
   state = viewport;
-  if (installed) {
+  if (viewport.listenerInstalled) {
     publishNow();
     return;
   }
-  installed = true;
+  viewport.listenerInstalled = true;
   window.addEventListener("resize", () => {
     publishNow();
-    if (scheduled) return;
-    scheduled = true;
+    if (viewport.publishScheduled) return;
+    viewport.publishScheduled = true;
     requestAnimationFrame(() => {
-      scheduled = false;
+      viewport.publishScheduled = false;
       viewCbs.forEach((cb) => cb());
     });
   });
@@ -43,7 +43,15 @@ export function adoptViewport(viewport: ViewportState): void {
 /** The current size. Read by the composition root for the first `renderer.setSize` and by the
  *  menu-background step (which owns a second camera). */
 export function currentViewport(): ViewportState {
-  return state ?? { width: window.innerWidth, height: window.innerHeight };
+  return (
+    state ?? {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      appliedAspect: Number.NaN,
+      listenerInstalled: false,
+      publishScheduled: false,
+    }
+  );
 }
 
 /** Subscribe to "the window changed size" (coalesced to one call per frame). For views whose text is a

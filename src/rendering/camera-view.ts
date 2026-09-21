@@ -56,8 +56,15 @@ export class CameraViewSystem {
   /** The window size (VIEWPORT): the projection follows it, reconciled here instead of being pushed into
    *  the camera by a resize listener in the composition root. */
   private readonly viewport: ViewportState;
-  /** The aspect last written into the projection, so a resize is applied ONCE (NaN = nothing yet) */
-  private appliedAspect = Number.NaN;
+  /** The aspect last written into the projection, so a resize is applied ONCE (NaN = nothing yet). The
+   *  VALUE is `VIEWPORT.appliedAspect` (its own resource): "the aspect the projection was built for" is
+   *  state of the screen geometry, readable from the world instead of hidden in this object. */
+  private get appliedAspect(): number {
+    return this.viewport.appliedAspect;
+  }
+  private set appliedAspect(v: number) {
+    this.viewport.appliedAspect = v;
+  }
 
   constructor(private readonly world: World) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
