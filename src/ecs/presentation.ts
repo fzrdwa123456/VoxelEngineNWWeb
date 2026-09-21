@@ -51,9 +51,9 @@ export const PERF_SAMPLER: Resource<PerfSampler> = defineResource<PerfSampler>("
 /** The element the renderer's canvas is attached to (index.html's `#app`). Read by the boot driver. */
 export const CANVAS_HOST: Resource<HTMLElement> = defineResource<HTMLElement>("canvasHost");
 
-/** The UI MOUNT ROOT: every widget root the reconciler creates is appended here. ui/uiscale.ts creates
- *  the element (it also owns the root font size's value), and the reconciler reads it from the world
- *  instead of receiving it as a dependency — so "where does the UI live" is world state too. */
+/** The UI MOUNT ROOT: every widget root the reconciler creates is appended here. The composition root
+ *  builds it with `createUiMount()` below and the reconciler reads it from the world instead of receiving
+ *  it as a dependency — so "where does the UI live" is world state too. */
 export const UI_MOUNT: Resource<HTMLElement> = defineResource<HTMLElement>("uiMount");
 
 /** One chunk's GPU mesh plus the geometry it REFILLS across rebuilds (a rebuild never disposes and
@@ -116,4 +116,69 @@ export const MENU_BACKGROUND: Resource<MenuBackgroundState> =
 
 export function createMenuBackground(): MenuBackgroundState {
   return { scene: null, camera: null, yaw: 0, lastMs: 0, appliedAspect: Number.NaN };
+}
+
+/** THE UI MOUNT ROOT's factory. `ui/uiscale.ts` used to create the element and append it to `document.body`
+ *  at IMPORT time (a DOM side effect of a config module); the mount point is world state like the canvas
+ *  host, so the composition root creates it here and inserts it as UI_MOUNT. The styles are the ones the
+ *  stage always had: fixed, filling the viewport, inside the root font size's rem base. */
+export function createUiMount(): HTMLElement {
+  const stage = document.createElement("div");
+  stage.style.cssText = "position:fixed;inset:0;overflow:hidden;z-index:1;";
+  document.body.appendChild(stage);
+  return stage;
+}
+
+/** The ITEM-ICON BAKE: a SECOND offscreen WebGPURenderer (the main one is RENDERER3D) plus its two caches.
+ *  They used to be four module-level `let`s inside rendering/blockicons.ts — more GPU state with no owner,
+ *  and the one place left where a promise continuation wrote a COMPONENT (the UI image) outside a lane.
+ *  The state is a resource now: the baker operates on it, and the inventory system reads the cache to
+ *  decide whether it can draw a real icon this frame or the checker placeholder. */
+export interface IconBakeState {
+  /** The lazily created offscreen renderer (null until the first bake) */
+  renderer: THREE.WebGPURenderer | null;
+  /** Its in-flight init, so concurrent bakes share one GPU handshake */
+  rendererReady: Promise<THREE.WebGPURenderer> | null;
+  /** cache key -> baked PNG data URL */
+  readonly cache: Map<string, string>;
+  /** cache key -> the bake in flight (two slots asking for the same block share one bake) */
+  readonly pending: Map<string, Promise<string | null>>;
+}
+
+export const ICON_BAKE: Resource<IconBakeState> = defineResource<IconBakeState>("iconBake");
+
+export function createIconBake(): IconBakeState {
+  return { renderer: null, rendererReady: null, cache: new Map(), pending: new Map() };
+}
+
+/** The ONE material every chunk mesh shares. It used to be a module-level `let` in chunkmesh.ts (a GPU
+ *  object, so by the rule above it belongs to the world) and is created on first use, because the pack
+ *  chain must be installed before the checker texture can be resolved. */
+export interface ChunkMaterialState {
+  material: THREE.MeshLambertMaterial | null;
+}
+
+export const CHUNK_MATERIAL: Resource<ChunkMaterialState> =
+  defineResource<ChunkMaterialState>("chunkMaterial");
+
+export function createChunkMaterial(): ChunkMaterialState {
+  return { material: null };
+}
+
+/** The BLOCK TARGET OUTLINE: the wireframe box around the block the local player's ray hits. It used to
+ *  be a field of the interaction system, which meant the FIXED lane wrote a three.js object every tick
+ *  (`writesExternal: ["voxelBlocks", "outline"]`) — presentation state changed from the simulation lane.
+ *  Now the hit is COMPONENT data (TARGET_HIT) and rendering/outline.ts paints the mesh in the RENDER lane. */
+export interface BlockOutlineState {
+  readonly mesh: THREE.LineSegments;
+}
+
+export const BLOCK_OUTLINE: Resource<BlockOutlineState> = defineResource<BlockOutlineState>("blockOutline");
+
+/** The factory takes the MESH the composition root built and added to the scene, exactly like
+ *  `createChunkMeshCache(group)`: this module stays free of runtime three.js so the Node gate can require
+ *  it with no GPU. The mesh's flags are set by the caller (invisible until a hit, `matrixAutoUpdate`
+ *  off because the outline write sets the matrix itself). */
+export function createBlockOutline(mesh: THREE.LineSegments): BlockOutlineState {
+  return { mesh };
 }

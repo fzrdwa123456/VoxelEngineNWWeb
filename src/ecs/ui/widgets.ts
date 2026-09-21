@@ -15,7 +15,7 @@
 // spawned once and has its text written afterwards (see setUiText); a LIST is spawned at a fixed
 // capacity and hides its unused tail (see spawnList), which is also why a longer pack list cannot grow
 // the tree at runtime.
-import { defineRecord, NULL_ENTITY, type Entity, type World } from "../World";
+import { defineRecord, defineResource, NULL_ENTITY, type Entity, type Resource, type World } from "../World";
 import type { UiRecipe } from "./theme";
 
 export type UiTag = "div" | "span" | "button" | "input";
@@ -113,8 +113,19 @@ export const UI_TIP = defineRecord<{ text: string }>("uiTip", () => ({ text: "" 
  *  not own the number. */
 export const UI_BIND = defineRecord<{ source: string }>("uiBind", () => ({ source: "" }));
 
-/** Creation sequence — the reconciler appends DOM nodes in this order */
-let nextOrder = 1;
+/** Creation sequence — the reconciler appends DOM nodes in this order. It is a RESOURCE: it used to be a
+ *  module-level `let`, i.e. global state shared by every World, so a second world (a test, the gate)
+ *  continued the first one's numbering and two trees built in different worlds could not be compared.
+ *  One counter per world is what "the creation sequence of THIS tree" means. */
+export interface UiOrderState {
+  next: number;
+}
+
+export const UI_ORDER: Resource<UiOrderState> = defineResource<UiOrderState>("uiOrder");
+
+export function createUiOrder(): UiOrderState {
+  return { next: 1 };
+}
 
 export interface UiSpawnOptions {
   readonly text?: string;
@@ -140,7 +151,7 @@ export function spawnUiNode(
   world.insert(entity, UI_TREE, {
     tag,
     parent: parent ?? NULL_ENTITY,
-    order: nextOrder++,
+    order: world.resource(UI_ORDER).next++,
   });
   world.insert(entity, UI_LOOK, { recipe });
   world.insert(entity, UI_STATE, { hidden: options.hidden ?? false, selected: false, active: false });

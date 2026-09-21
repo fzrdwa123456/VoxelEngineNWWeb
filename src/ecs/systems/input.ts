@@ -148,31 +148,13 @@ export class PlayerInputSystem {
    *  below keeps every use site reading like a local field. */
   private readonly intents: InputIntentLog;
 
-  // ===== LOOK diagnostic counters (one `LOOK` line per second, purely to turn "turning is not
-  // smooth" into numbers) =====
-  // They are all **readings**: they take part in no decision and change no logic — how many raw
-  // deltas arrived this second, how many made it into the queue, which guard dropped each of the
-  // rest, how many key edges of each kind arrived, and the queue length at the sampling instant that
-  // the fixed step had not consumed yet. Knowing which link dropped something beats "it feels off".
-  private lookRaw = 0;
-  private lookApplied = 0;
-  private dropTakeover = 0;
-  private dropGrace = 0;
-  private dropSpike = 0;
-  private mmSkipFirst = 0;
-  private mmGrace = 0;
-  private mmSpike = 0;
-  private keyDowns = 0;
-  private keyRepeats = 0;
-  private keyUps = 0;
-  private lookLogAt = 0;
-  /** Per-frame meter (a `LOOK` line cannot show "how many samples land in each frame", which is what
-   *  this pair exists for): how many `look` samples were taken from the mouse this frame (= since the
-   *  previous frame) and how many **pixel equivalents** they total (`Math.hypot(yaw,pitch)/sensitivity`,
-   *  so the main loop needs no knowledge of the sensitivity). `takeLookFrameMeter()` reads and clears,
-   *  and the FRAME line takes it once per frame. */
-  private frameLookSamples = 0;
-  private frameLookPx = 0;
+  // ===== The LOOK / RAWLAG diagnostics live in the INPUT_DIAGNOSTICS resource =====
+  // They used to be private fields here (and the raw-transport ones module state in
+  // platform/rawinput.ts). They are all **readings**: they take part in no decision — how many raw
+  // deltas arrived this second, how many made it into the queue, which guard dropped each of the rest,
+  // how many key edges of each kind arrived, the queue length at the sampling instant, and the
+  // per-frame meter the FRAME probe reads. This system writes them and prints both lines once a second;
+  // the device layer writes the raw-transport half. Declared in ecs/resources.ts.
   /** Raw displacement (pixels) that passed every guard and waits for this frame's single `frameLook()`
    *  application. The decisions are made in `rawDelta()`; this only accumulates what got through. */
   private rawFrameDx = 0;
@@ -266,17 +248,17 @@ export class PlayerInputSystem {
         this.syncRawTakeoverLog(takeOver);
         if (takeOver) return;
         if (performance.now() < this.timing.lockGraceUntil) {
-          this.mmGrace++;
+          this.diag.look.mmGrace++;
           return;
         }
         if (this.timing.skipFirstMove) {
           this.timing.skipFirstMove = false;
-          this.mmSkipFirst++;
+          this.diag.look.mmSkip++;
           return;
         }
         // Synthetic spike guard (pointer lock / SetCursorPos race): normal movement never reaches this magnitude
         if (Math.abs(ev.movementX) > MAX_MOVE_DELTA || Math.abs(ev.movementY) > MAX_MOVE_DELTA) {
-          this.mmSpike++;
+          this.diag.look.mmSpike++;
           return;
         }
         // Accumulate view deltas; yaw/pitch semantics are applied by the controller at the fixed step.
@@ -299,7 +281,7 @@ export class PlayerInputSystem {
     });
     document.addEventListener("keydown", (ev) => this.onKeyDown(ev));
     document.addEventListener("keyup", (ev) => {
-      this.keyUps++;
+      this.diag.look.keyUps++;
       this.publishEdge(ev.code, false, false);
       this.queueKey(ev.code, false);
     });
@@ -346,8 +328,8 @@ export class PlayerInputSystem {
         case "look":
           VIEW.yawDelta[this.index] += intent.yaw;
           VIEW.pitchDelta[this.index] += intent.pitch;
-          this.frameLookSamples++;
-          this.frameLookPx += Math.hypot(intent.yaw, intent.pitch) / this.sensitivity;
+          this.diag.look.frameSamples++;
+          this.diag.look.framePx += Math.hypot(intent.yaw, intent.pitch) / this.sensitivity;
           break;
         case "motion":
           this.control.flying = intent.flying;
@@ -368,9 +350,9 @@ export class PlayerInputSystem {
    *  prime suspect behind "turning comes in steps when you spin fast". This pair turns it into a
    *  histogram. */
   takeLookFrameMeter(): { samples: number; px: number } {
-    const out = { samples: this.frameLookSamples, px: this.frameLookPx };
-    this.frameLookSamples = 0;
-    this.frameLookPx = 0;
+    const out = { samples: this.diag.look.frameSamples, px: this.diag.look.framePx };
+    this.diag.look.frameSamples = 0;
+    this.diag.look.framePx = 0;
     return out;
   }
 
@@ -386,32 +368,46 @@ export class PlayerInputSystem {
    *  grace window) / `dS` (spike guard) = the three drop counters; `mmSkip`/`mmG`/`mmS` = the matching
    *  drops on the browser mousemove path; `key` = this second's keydown/keydown-repeat/keyup counts
    *  (holding a key should be ≈1/30/1); `pend`/`yaw`/`pitch` = at the sampling instant, the queue
-   *  length the fixed step has not consumed yet and the view delta still waiting to be applied. */
+   *  length the fixed step has not consumed yet and the view delta still waiting to be applied.
+   *
+   *  The same flush prints `RAWLAG`, which the DEVICE layer fills in (the arrival rhythm and the queue
+   *  backlog of the raw-input events) — one window, two writers, one printer. */
   private logLook(): void {
     const now = performance.now();
-    if (this.lookLogAt === 0) {
-      this.lookLogAt = now;
+    const look = this.diag.look;
+    const raw = this.diag.raw;
+    if (look.logAt === 0) {
+      look.logAt = now;
       return;
     }
-    if (now - this.lookLogAt < 1000) return;
-    this.lookLogAt = now;
+    if (now - look.logAt < 1000) return;
+    look.logAt = now;
     this.log(
-      `LOOK raw=${this.lookRaw} app=${this.lookApplied} dTO=${this.dropTakeover} dG=${this.dropGrace} ` +
-        `dS=${this.dropSpike} mmSkip=${this.mmSkipFirst} mmG=${this.mmGrace} mmS=${this.mmSpike} ` +
-        `key=${this.keyDowns}/${this.keyRepeats}/${this.keyUps} pend=${this.pending.length} ` +
+      `LOOK raw=${look.raw} app=${look.applied} dTO=${look.dropTakeover} dG=${look.dropGrace} ` +
+        `dS=${look.dropSpike} mmSkip=${look.mmSkip} mmG=${look.mmGrace} mmS=${look.mmSpike} ` +
+        `key=${look.keyDowns}/${look.keyRepeats}/${look.keyUps} pend=${this.pending.length} ` +
         `yaw=${VIEW.yawDelta[this.index].toFixed(4)} pitch=${VIEW.pitchDelta[this.index].toFixed(4)}`,
     );
-    this.lookRaw = 0;
-    this.lookApplied = 0;
-    this.dropTakeover = 0;
-    this.dropGrace = 0;
-    this.dropSpike = 0;
-    this.mmSkipFirst = 0;
-    this.mmGrace = 0;
-    this.mmSpike = 0;
-    this.keyDowns = 0;
-    this.keyRepeats = 0;
-    this.keyUps = 0;
+    this.log(
+      `RAWLAG ev=${raw.evCount}/s gapMax=${raw.gapMax.toFixed(1)}ms ` +
+        `backlogAvg=${(raw.evCount > 0 ? raw.backlogSum / raw.evCount : 0).toFixed(2)}ms ` +
+        `backlogMax=${raw.backlogMax.toFixed(1)}ms`,
+    );
+    look.raw = 0;
+    look.applied = 0;
+    look.dropTakeover = 0;
+    look.dropGrace = 0;
+    look.dropSpike = 0;
+    look.mmSkip = 0;
+    look.mmGrace = 0;
+    look.mmSpike = 0;
+    look.keyDowns = 0;
+    look.keyRepeats = 0;
+    look.keyUps = 0;
+    raw.evCount = 0;
+    raw.gapMax = 0;
+    raw.backlogSum = 0;
+    raw.backlogMax = 0;
   }
 
   /** Is `code` held right now, counting the intents this frame has not drained yet?
@@ -488,21 +484,21 @@ export class PlayerInputSystem {
    *  menu state discards (no modal UI owns the mouse); onscreen locked state discards (movementX works, prevents double counting). */
   rawDelta(dx: number, dy: number): void {
     if (dx === 0 && dy === 0) return;
-    this.lookRaw++;
+    this.diag.look.raw++;
     const takeOver = this.rawInputShouldTakeOver();
     this.syncRawTakeoverLog(takeOver);
     if (!takeOver) {
-      this.dropTakeover++;
+      this.diag.look.dropTakeover++;
       return;
     }
     // Spike protection matching the mousemove path (previously missing): centerCursor's SetCursorPos teleport feeds
     // huge fake deltas through WM_INPUT; without these two guards that is the direct cause of "view snaps to another angle"
     if (performance.now() < this.timing.lockGraceUntil) {
-      this.dropGrace++;
+      this.diag.look.dropGrace++;
       return;
     }
     if (Math.abs(dx) > MAX_MOVE_DELTA || Math.abs(dy) > MAX_MOVE_DELTA) {
-      this.dropSpike++;
+      this.diag.look.dropSpike++;
       return;
     }
     // Accepted: accumulate for this frame's ONE look intent (the guards above already had their say,
@@ -543,7 +539,7 @@ export class PlayerInputSystem {
     const dy = this.rawFrameDy;
     this.rawFrameDx = 0;
     this.rawFrameDy = 0;
-    this.lookApplied++;
+    this.diag.look.applied++;
     this.pending.push({ kind: "look", yaw: -dx * this.sensitivity, pitch: -dy * this.sensitivity });
   }
 
@@ -656,8 +652,26 @@ export class PlayerInputSystem {
     // `preventDefault()` is the whole fix for the blur — the rest of the handler must run for TAB exactly
     // as it does for every other key.
     if (ev.code === "Tab" && this.state.locked) ev.preventDefault();
-    if (ev.repeat) this.keyRepeats++;
-    else this.keyDowns++;
+    // A REBIND CAPTURE OWNS ESC. The key bind panel's capture handler unbinds the action on ESC
+    // (platform/bind-gesture.ts), but it is installed LATER than this listener — the gesture's device
+    // listeners are mounted by `bindKeybindDrag()` in main.ts, while this one belongs to the input
+    // system's constructor — so its `stopImmediatePropagation()` cannot take an EDGE back out of the
+    // KEY_EVENTS log. `ui.navigation` therefore read the same Escape and ALSO walked one level back
+    // through the menu ladder: ESC unbound the action AND left the panel. The NW.js build installed the
+    // capture handler at IMPORT time (module-level `ui/menu.ts`), i.e. BEFORE this listener, and relied
+    // on exactly that suppression; the Tauri port's relocation into the device layer inverted the order.
+    //
+    // GATED HERE, IN THE EVENT, because this is the only moment where the answer is still true: the
+    // capture handler calls `endCapture()` synchronously, so by the time the ui lane drains the log a
+    // `capturing()` test inside `ui.navigation` would already read false (the drag path can test it
+    // there, because the drag is cleared BY that system).
+    //
+    // ONLY ESC: every other key must keep reaching the edge log and the queue, because the systems that
+    // consume global keys gate on `capturing()` themselves (ui.navigation's inventory/digit branches) and
+    // TAB must stay BINDABLE — a capture that swallows its key would make Tab unassignable again.
+    if (ev.code === "Escape" && isCapturing()) return;
+    if (ev.repeat) this.diag.look.keyRepeats++;
+    else this.diag.look.keyDowns++;
     this.publishEdge(ev.code, true, ev.repeat);
     this.queueKey(ev.code, true);
     if (ev.code === getBind("jump")) {

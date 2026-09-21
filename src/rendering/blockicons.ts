@@ -1,7 +1,12 @@
 // ===== MC-style 3D item icons: render the block model into a render target via WebGPU, read back pixels, encode a PNG cache =====
 // Bake size = display size x UI scale x devicePixelRatio (1:1 display, zero resampling, same as MC)
 // Lighting mimics MC ITEMS_3D (ambient + front/top directional)
+//
+// THE STATE IS A RESOURCE (ecs/presentation.ts::ICON_BAKE): the offscreen renderer and the two caches used
+// to be module-level here, i.e. a second GPU object with no owner. Every function below takes that state,
+// so the baker is a pure operation on world data and a system can drive it without owning a GPU.
 import * as THREE from "three/webgpu";
+import type { IconBakeState } from "../ecs/presentation";
 import { resolveTexture } from "./textures";
 import { getBlockDef } from "../blockregistry";
 
@@ -12,22 +17,17 @@ const HALF_VIEW = 0.85;
 const MIN_SIZE = 32;
 const MAX_SIZE = 256;
 
-let renderer: THREE.WebGPURenderer | null = null;
-let rendererReady: Promise<THREE.WebGPURenderer> | null = null;
-const cache = new Map<string, string>();
-const pending = new Map<string, Promise<string | null>>();
-
-function getRenderer(): Promise<THREE.WebGPURenderer> {
-  if (!rendererReady) {
-    rendererReady = (async (): Promise<THREE.WebGPURenderer> => {
+function getRenderer(bake: IconBakeState): Promise<THREE.WebGPURenderer> {
+  if (!bake.rendererReady) {
+    bake.rendererReady = (async (): Promise<THREE.WebGPURenderer> => {
       const r = new THREE.WebGPURenderer({ antialias: true });
       await r.init();
       r.setClearColor(0x000000, 0);
-      renderer = r;
+      bake.renderer = r;
       return r;
     })();
   }
-  return rendererReady;
+  return bake.rendererReady;
 }
 
 function loadTex(url: string): Promise<THREE.Texture> {
@@ -77,23 +77,35 @@ export function iconCacheKey(type: BlockType, sizePx: number): string {
 
 /** The icon for (type, size) IF it is already baked, else null. Synchronous on purpose: a caller that
  *  draws the icon whenever it happens to be ready never has to commit a placeholder to a frame. This
- *  touches no GPU object — it is a Map lookup (see the callers in ui/inventory.ts). */
-export function peekBlockIcon(type: BlockType, sizePx: number): string | null {
-  return cache.get(iconCacheKey(type, sizePx)) ?? null;
+ *  touches no GPU object — it is a Map lookup on the ICON_BAKE resource (the caller is the inventory
+ *  system, which asks once per slot per frame). */
+export function peekBlockIcon(bake: IconBakeState, type: BlockType, sizePx: number): string | null {
+  return bake.cache.get(iconCacheKey(type, sizePx)) ?? null;
 }
 
-/** Get a block's 3D icon (dataURL); the first call renders async then caches; null on failure (caller keeps the solid-color fallback) */
-export function getBlockIcon(type: BlockType, sizePx: number): Promise<string | null> {
+/** Start (or join) the bake of a block's 3D icon (dataURL), fire and forget: the result lands in
+ *  `bake.cache`, and the caller draws it on a LATER frame — that is what keeps a component write off a
+ *  promise continuation (the caller is a system, and only a system may write a component). */
+export function requestBlockIcon(bake: IconBakeState, type: BlockType, sizePx: number): void {
+  void bakeBlockIcon(bake, type, sizePx);
+}
+
+/** The bake itself: returns the data URL (also cached), null on failure (the caller keeps the checker). */
+export function bakeBlockIcon(
+  bake: IconBakeState,
+  type: BlockType,
+  sizePx: number,
+): Promise<string | null> {
   const size = clampIconSize(sizePx);
   const key = iconCacheKey(type, size);
-  const cached = cache.get(key);
+  const cached = bake.cache.get(key);
   if (cached !== undefined) return Promise.resolve(cached);
-  const p = pending.get(key);
+  const p = bake.pending.get(key);
   if (p) return p;
   const promise = (async (): Promise<string | null> => {
     try {
       const scene = await buildScene(type);
-      const r = await getRenderer();
+      const r = await getRenderer(bake);
       const rt = new THREE.WebGLRenderTarget(size, size, { samples: 4, depthBuffer: true });
       rt.texture.colorSpace = THREE.SRGBColorSpace;
       const cam = new THREE.OrthographicCamera(-HALF_VIEW, HALF_VIEW, HALF_VIEW, -HALF_VIEW, 0.1, 10);
@@ -118,13 +130,13 @@ export function getBlockIcon(type: BlockType, sizePx: number): Promise<string | 
       }
       ctx.putImageData(new ImageData(clamped, size, size), 0, 0);
       const url = canvas.toDataURL("image/png");
-      cache.set(key, url);
+      bake.cache.set(key, url);
       return url;
     } catch {
       return null;
     }
   })();
-  pending.set(key, promise);
-  promise.finally(() => pending.delete(key));
+  bake.pending.set(key, promise);
+  promise.finally(() => bake.pending.delete(key));
   return promise;
 }

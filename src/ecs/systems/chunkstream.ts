@@ -28,7 +28,7 @@ import {
 } from "../../voxel/world";
 import { ChunkGeometry, getChunkMaterial } from "../../rendering/chunkmesh";
 import { POSITION } from "../components/Player";
-import { CHUNK_MESHES, type ChunkMeshCache, type ChunkMeshEntry } from "../presentation";
+import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../presentation";
 import { LOCAL_PLAYER, VOXEL } from "../resources";
 import { entityIndex, type SystemAccess, type World } from "../World";
 
@@ -62,6 +62,9 @@ export class ChunkStreamSystem {
    *  handed in as a constructor argument — the cache is GPU state that outlives a frame, so the world
    *  owns it. Resolved in the constructor BODY (iron rule 6). */
   private readonly cache: ChunkMeshCache;
+  /** The ONE material every chunk mesh shares (CHUNK_MATERIAL, ecs/presentation.ts): a GPU object, so the
+   *  world owns it instead of chunkmesh.ts keeping a module-level `let` */
+  private readonly material: ChunkMaterialState;
   /** Column offsets ordered near-first, so the ground under the player appears first */
   private readonly offsets: ReadonlyArray<readonly [number, number]>;
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
@@ -75,6 +78,7 @@ export class ChunkStreamSystem {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
     this.cache = world.resource(CHUNK_MESHES);
+    this.material = world.resource(CHUNK_MATERIAL);
     const offsets: Array<[number, number]> = [];
     for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
       for (let dz = -RENDER_RADIUS_CHUNKS; dz <= RENDER_RADIUS_CHUNKS; dz++) {
@@ -240,7 +244,7 @@ export class ChunkStreamSystem {
       return;
     }
 
-    const mesh = new THREE.Mesh(geom.geometry, getChunkMaterial());
+    const mesh = new THREE.Mesh(geom.geometry, getChunkMaterial(this.material));
     mesh.matrixAutoUpdate = false;
     const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz };
     this.cache.group.add(mesh);

@@ -136,6 +136,55 @@ export function createInputIntentLog(): InputIntentLog {
   return { intents: [] };
 }
 
+/** The RAW-TRANSPORT counters behind the once-a-second `RAWLAG` line: the arrival rhythm of the
+ *  `raw-input` events and an estimate of how long they sat in the queue. They used to be seven
+ *  module-level `let`s inside platform/rawinput.ts — diagnostic state with no owner, written by the
+ *  device layer and printed by the input system, i.e. exactly the "one value, two readers" shape a
+ *  resource is for. */
+export interface RawTransportCounters {
+  /** Events seen in the current window */
+  evCount: number;
+  /** Longest gap between two arrivals in this window (ms) */
+  gapMax: number;
+  /** Arrival time of the previous event (0 = none yet) */
+  lastArrive: number;
+  /** Smallest (arrival - send) offset ever seen: the baseline the backlog is measured against, because
+   *  the Rust and JS clocks have different origins */
+  minOffset: number;
+  backlogSum: number;
+  backlogMax: number;
+  /** When the current RAWLAG window started (0 = the first window) */
+  lagAt: number;
+}
+
+/** The LOOK counters behind the once-a-second `LOOK` line: how many raw deltas arrived, how many became
+ *  intents, which guard dropped the rest, the key-edge counts, and the per-frame meter the FRAME probe
+ *  reads. They were private fields of the input system; they are diagnostics state, so they live next to
+ *  the SPACE/MOUSE logs. */
+export interface InputLookCounters {
+  /** Raw deltas that arrived (one per Rust push) */
+  raw: number;
+  /** Intents pushed into the queue (one per frame while moving) */
+  applied: number;
+  /** Where the rest went: the takeover was off / the lock grace window / the spike guard */
+  dropTakeover: number;
+  dropGrace: number;
+  dropSpike: number;
+  /** The same three for the browser `mousemove` path: skip-first, grace, spike */
+  mmSkip: number;
+  mmGrace: number;
+  mmSpike: number;
+  /** Key edges seen (`down`/`repeat`/`up`) — holding a key should read ≈1/30/1 per second */
+  keyDowns: number;
+  keyRepeats: number;
+  keyUps: number;
+  /** The per-frame meter: how many `look` intents the last frame consumed and their pixel-equivalent */
+  frameSamples: number;
+  framePx: number;
+  /** When the current LOOK window started (0 = the first window) */
+  logAt: number;
+}
+
 /** The input system's DIAGNOSTIC LOGS (the SPACE/MOUSE windows the F3 panel shows and the debug log
  *  forwards). They are written by the device layer as it handles events and read by `diagnostics`, i.e.
  *  one log with two readers — which is what a resource is for. They used to travel as `queues: input`
@@ -145,12 +194,44 @@ export interface InputDiagnostics {
   /** Newest-first, capped at 10 entries by the producer */
   readonly spaceLog: string[];
   readonly mouseLog: string[];
+  /** Raw-transport counters (the RAWLAG line): written by the device layer, printed by the input system */
+  readonly raw: RawTransportCounters;
+  /** LOOK counters: written at event/step time by the input system, printed by it once a second */
+  readonly look: InputLookCounters;
 }
 
 export const INPUT_DIAGNOSTICS = defineResource<InputDiagnostics>("inputDiagnostics");
 
 export function createInputDiagnostics(): InputDiagnostics {
-  return { spaceLog: [], mouseLog: [] };
+  return {
+    spaceLog: [],
+    mouseLog: [],
+    raw: {
+      evCount: 0,
+      gapMax: 0,
+      lastArrive: 0,
+      minOffset: Number.POSITIVE_INFINITY,
+      backlogSum: 0,
+      backlogMax: 0,
+      lagAt: 0,
+    },
+    look: {
+      raw: 0,
+      applied: 0,
+      dropTakeover: 0,
+      dropGrace: 0,
+      dropSpike: 0,
+      mmSkip: 0,
+      mmGrace: 0,
+      mmSpike: 0,
+      keyDowns: 0,
+      keyRepeats: 0,
+      keyUps: 0,
+      frameSamples: 0,
+      framePx: 0,
+      logAt: 0,
+    },
+  };
 }
 
 /** The debug-log sink (`platform/debuglog.ts` + `platform/shell.ts`): the diagnostics system forwards the

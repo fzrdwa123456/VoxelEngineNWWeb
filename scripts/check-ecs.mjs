@@ -63,6 +63,10 @@ const SOURCES = [
   "src/ecs/ui/keybind.ts",
   "src/ecs/ui/navigation.ts",
   "src/rendering/camera-view.ts",
+  // The block target outline: a render-lane system that reads the TARGET_HIT component and moves a
+  // three.js mesh. Import-safe in Node — it imports three.js for TYPES only and the mesh arrives as the
+  // BLOCK_OUTLINE resource, which the check inserts as a stub.
+  "src/rendering/outline.ts",
   // Import-safe in Node: the settings repair is a PURE comparison and lives in its own
   // dependency-free module (the Tauri shell it belongs to imports @tauri-apps/api, which Node's
   // CJS require cannot load) — which is exactly what the boot check asserts here.
@@ -380,6 +384,7 @@ check("spawnPlayer attaches the full component set with the documented defaults"
     C.INTERACTION,
     C.INVENTORY,
     C.PLAYER,
+    C.TARGET_HIT,
   ]) {
     equal(world.has(player, component), true, `has ${component.name}`);
   }
@@ -390,6 +395,7 @@ check("spawnPlayer attaches the full component set with the documented defaults"
   equal(C.REACH.distance[index], C.DEFAULT_REACH, "reach");
   equal(C.ORIENTATION.fwdZ[index], -1, "initial heading");
   equal(C.PLAYER.fieldNames.length, 0, "the marker carries no data");
+  equal(C.TARGET_HIT.active[index], 0, "nothing is targeted before the first raycast");
 });
 
 check("starting items fill the hotbar and nothing else", () => {
@@ -541,6 +547,9 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // system is driven here with no GPU at all.
   const meshCache = P.createChunkMeshCache({ add() {}, remove() {} });
   streamWorld.insertResource(P.CHUNK_MESHES, meshCache);
+  // The shared chunk material is a RESOURCE too, so it is inserted here — a stub with a null material,
+  // which is never reached because this world is all AIR and builds no mesh at all.
+  streamWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
   const stream = new ChunkStreamSystem(streamWorld);
 
   assert(stream.needsWarmUp(1, 3), "a window that has never been built needs warming");
@@ -698,6 +707,9 @@ check("every recipe resolves to a style, and state changes it", () => {
 const widgetWorld = new World();
 /** The widget layer, for every check in this section (the prefabs, the components, the setters) */
 const W = load("ecs/ui/widgets.js");
+// The tree's creation counter is a RESOURCE now (it used to be a module-level `let`, i.e. shared by every
+// World): it has to be inserted before the first spawn, exactly as main.ts does.
+widgetWorld.insertResource(W.UI_ORDER, W.createUiOrder());
 
 check("widget prefabs build the tree the reconciler expects", () => {
   const W = load("ecs/ui/widgets.js");
@@ -1147,18 +1159,30 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   // from painting one frame of the placeholder. It can only do that if the cache is readable without a
   // promise —and only correctly if the peek builds the same key the bake wrote.
   const icons = load("rendering/blockicons.js");
+  const P = load("ecs/presentation.js");
+  // The bake's state is a RESOURCE (ecs/presentation.ts::ICON_BAKE): the two readers operate on it, so
+  // they can be driven here with no GPU and no browser — the renderer is created on the first real bake.
+  const bake = P.createIconBake();
   equal(icons.iconCacheKey("stone", 40), "stone@40", "the key is type@size");
   equal(icons.iconCacheKey("stone", 40.4), "stone@40", "…with the size rounded");
   equal(icons.iconCacheKey("stone", 20), "stone@32", "…and clamped up to MIN_SIZE");
   equal(icons.iconCacheKey("stone", 1000), "stone@256", "…and down to MAX_SIZE");
   equal(icons.clampIconSize(40.4), 40, "the bake size comes from the same function");
   // Nothing is baked in this process, so this is a pure miss that never touches the GPU.
-  equal(icons.peekBlockIcon("stone", 40), null, "an unbaked icon peeks as null");
-  equal(icons.peekBlockIcon("stone", 1000), null, "…and a clamped request misses too");
+  equal(icons.peekBlockIcon(bake, "stone", 40), null, "an unbaked icon peeks as null");
+  equal(icons.peekBlockIcon(bake, "stone", 1000), null, "…and a clamped request misses too");
   // The two must not be able to drift apart.
   const source = readSource("src/rendering/blockicons.ts");
-  assert(/iconCacheKey\(type, size\)/.test(source), "getBlockIcon keys through iconCacheKey");
+  assert(/iconCacheKey\(type, size\)/.test(source), "the bake keys through iconCacheKey");
   assert(/cache\.get\(iconCacheKey\(type, sizePx\)\)/.test(source), "peekBlockIcon reads that same key");
+  // Item 1 of the presentation-state pass: the bake's completion may NOT write a component. It used to
+  // backfill the slot's UI_IMAGE from a `.then` continuation, i.e. a component write with no lane around
+  // it (and a frame could be painted from it at any point). The system asks for the bake and reads the
+  // cache on its next run instead.
+  const invSource = stripComments(readSource("src/ecs/ui/inventory.ts"));
+  assert(!/\.then\(/.test(invSource), "the inventory draws the icon from the cache, not from a promise");
+  assert(/requestBlockIcon\(/.test(invSource), "…and asks for a bake when the cache misses");
+  assert(!/getBlockIcon/.test(invSource), "the promise-shaped reader is gone, not merely unused");
 });
 
 check("a bound widget takes its value from its source, not from whoever built it", () => {
@@ -1685,6 +1709,7 @@ function registrations() {
     CHUNK_STREAM_ACCESS: load("ecs/systems/chunkstream.js").CHUNK_STREAM_ACCESS,
     DIAGNOSTICS_ACCESS: load("ecs/systems/diagnostics.js").DIAGNOSTICS_ACCESS,
     CAMERA_VIEW_ACCESS: load("rendering/camera-view.js").CAMERA_VIEW_ACCESS,
+    OUTLINE_ACCESS: load("rendering/outline.js").OUTLINE_ACCESS,
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
@@ -1743,7 +1768,13 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["player.collision"],
     ["player.interaction"],
   ];
-  const expectedRender = [["cameraView.render", "chunk.stream", "diagnostics"], ["renderer.draw"]];
+  // The block target wireframe joins the render producers' batch: it shares no component with them and
+  // writes a target of its own (`blockOutline`), so any order among the four is correct — and the draw,
+  // which reads the scene they fill, stays in the batch after it.
+  const expectedRender = [
+    ["cameraView.render", "chunk.stream", "block.outline", "diagnostics"],
+    ["renderer.draw"],
+  ];
   // The ui lane: every widget-data WRITER, then the reconciler that reads all of it. The writers are a
   // chain rather than a pair because the conflict model is per COMPONENT, not per entity —the
   // inventory, the picker, the toast and the bind panels write UI_STATE/UI_TEXT on DIFFERENT entities,
@@ -2143,11 +2174,13 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
 });
 
 check("the diagnostic probes have ONE switch, and it filters at the log sink", () => {
-  // The probe lines (FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE#/HOOKPROBE) are what made the
-  // "held key" investigation possible, and they are also the only thing that writes several lines per
-  // second forever. The switch is a settings-panel toggle (default ON) and it filters in `logDebug` — the
-  // ONE place every probe line passes through — so the event lines (BOOT / SETTINGS / LOCK / CURSOR /
-  // ERROR …) are never affected, and a new probe only has to be added to the prefix table.
+  // The probe lines (FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE#/HOOKPROBE/KBCAP/RAWINPUT
+  // takeover) are what made the "held key" investigation possible, and several of them fire on ordinary
+  // activity (a click writes KBCAP, a capture transition writes the takeover line), so they are the only
+  // thing that keeps writing for as long as the app runs. The switch is a settings-panel toggle (default
+  // ON) and it filters in `logDebug` — the ONE place every probe line passes through — so the event lines
+  // (BOOT / SETTINGS / WORLD / LOCK / CURSOR / ESC / ERROR …) are never affected, and a new probe only has
+  // to be added to the prefix table.
   const shell = stripComments(readSource("src/platform/shell.ts"));
   assert(/export function setDiagLogEnabled/.test(shell) && /export function isDiagLogEnabled/.test(shell),
     "the switch is a getter/setter pair on the log sink");
@@ -2155,13 +2188,48 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
     "…and logDebug filters the probe lines with it");
   assert(/export function appendDebugLog/.test(shell) && !/isProbeLine/.test(shell.split("export function appendDebugLog")[1].split("export function logDebug")[0]),
     "the error/console channel (appendDebugLog) stays unfiltered");
-  for (const prefix of ["PHYS ", "FRAME ", "STALL ", "LOOK#", "RAWLAG ", "RAWMON ", "HOOKPROBE ", "SPACE#", "MOUSE#"]) {
-    assert(shell.includes(`"${prefix}"`), `the filter table knows the "${prefix.trim()}" probe`);
+  // EVERY emitted probe line's OWN first token must be in the table — not just "the table names a
+  // probe". The table used to carry a stale `"LOOK#"` while `player.input` printed `LOOK raw=…`, so with
+  // the switch OFF that line kept being written every second (the flood the switch exists to stop) and
+  // the old assertion here happily passed, because it only checked the table against ITSELF. Each entry
+  // below is a real emitter: the file, a regex matching the literal the code formats, and the prefix the
+  // table must therefore contain.
+  for (const [file, literal, prefix] of [
+    ["src/ecs/systems/input.ts", /`LOOK raw=/, "LOOK "],
+    ["src/ecs/systems/input.ts", /`RAWLAG ev=/, "RAWLAG "],
+    ["src/ecs/systems/input.ts", /`SPACE#/, "SPACE#"],
+    ["src/ecs/systems/input.ts", /`MOUSE#/, "MOUSE#"],
+    ["src/ecs/systems/diagnostics.ts", /`PHYS mode=/, "PHYS "],
+    ["src/main.ts", /`FRAME n=/, "FRAME "],
+    ["src/main.ts", /`STALL gap=/, "STALL "],
+    ["src-tauri/src/rawinput.rs", /"RAWMON emits=\{/, "RAWMON "],
+    ["src-tauri/src/rawinput.rs", /"HOOKPROBE seen=\{/, "HOOKPROBE "],
+    // The key bind gestures fire on ordinary clicks, so they are probes too (a click must not write a
+    // line into a log whose switch is off).
+    ["src/platform/bind-gesture.ts", /`KBCAP mousedown/, "KBCAP "],
+    ["src/ui/menu.ts", /`KBCAP click interactive button/, "KBCAP "],
+    ["src/ecs/systems/input.ts", /"RAWINPUT takeover \(movementX suspended\)"/, "RAWINPUT takeover"],
+    ["src/ecs/systems/input.ts", /"RAWINPUT hands back to movementX"/, "RAWINPUT hands back"],
+  ]) {
+    assert(literal.test(readSource(file)), `${file} still emits the ${prefix.trim()} probe as expected`);
+    assert(shell.includes(`"${prefix}"`), `the filter table covers the ${prefix.trim()} probe the code emits`);
   }
+  // …while the two BOOT lines that start with the same word stay EVENT records: a bare "RAWINPUT "
+  // prefix would swallow them, and with the switch off they are the only trace of whether the native
+  // channel came up at all.
+  assert(!shell.includes('"RAWINPUT "'), "the table does not gate the BOOT RAWINPUT lines by a bare prefix");
   const main = stripComments(readSource("src/main.ts"));
-  assert(/setDiagLogEnabled\(readSettings\(\)\.diagLog !== false\)/.test(main),
-    "the composition root loads it (default ON)");
+  assert(
+    /const diagLogAtBoot = readSettings\(\)\.diagLog !== false;/.test(main) &&
+      /setDiagLogEnabled\(diagLogAtBoot\);/.test(main),
+    "the composition root loads it (default ON) before anything logs a probe",
+  );
   assert(/s\.diagLog = isDiagLogEnabled\(\)/.test(main), "…and persists it with the other settings");
+  // …and it RECORDS the state the run booted in, as an EVENT line (its prefix is deliberately not in the
+  // probe table): with the switch off, a log with no probe lines is otherwise ambiguous — "off" and "the
+  // probes never registered" look exactly the same to whoever reads it.
+  assert(/`DIAGLOG probes [^`]*at boot/.test(main), "the composition root records the switch's boot state");
+  assert(!shell.includes('"DIAGLOG '), "…as an event line: its prefix is not in the probe table");
   const menu = stripComments(readSource("src/ui/menu.ts"));
   assert(/settings\.diagLogOn/.test(menu) && /settings\.diagLogOff/.test(menu),
     "the shared settings panel renders it as a two-state toggle");
@@ -2389,6 +2457,99 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/import type \* as THREE/.test(presentation), "presentation.ts types against three.js");
   equal(countOf(presentation, /^import (?!type)[^\n]*three\/webgpu/gm), 0,
     "…with a TYPE-ONLY import (a runtime one would break the Node gate)");
+});
+
+check("the LAST module-level state is a resource too (icons, material, counters, UI order, outline)", () => {
+  // The tail of the presentation-state pass. Six things were still module state or still crossed a lane
+  // boundary the wrong way, and each of them is asserted here the same way: the facts live in a RESOURCE,
+  // the composition root creates it, and the module that used to own it keeps NO copy.
+  const P = load("ecs/presentation.js");
+  const R = load("ecs/resources.js");
+  const main = stripComments(readSource("src/main.ts"));
+
+  // 1. The item-icon bake: a second offscreen WebGPU renderer + its two caches. The bake's COMPLETION
+  //    used to write the inventory's UI_IMAGE from a `.then` continuation (a component write with no lane
+  //    around it) — that is asserted in the icon-cache group; here it is where the STATE lives.
+  assert(typeof P.ICON_BAKE?.name === "string" && typeof P.createIconBake === "function",
+    "ICON_BAKE is a resource with a factory");
+  assert(/insertResource\(ICON_BAKE, createIconBake\(\)\)/.test(main), "the composition root inserts it");
+  equal(countOf(stripComments(readSource("src/rendering/blockicons.ts")),
+    /^(?:let|var) (?:renderer|rendererReady|cache|pending)\b/gm), 0,
+    "the baker keeps no module-level renderer or cache");
+  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/ecs/ui/inventory.ts"))),
+    "the inventory system resolves it");
+
+  // 2. The ONE chunk material (a GPU object created on first use, because the pack chain must be
+  //    installed before the checker texture can be resolved).
+  assert(typeof P.CHUNK_MATERIAL?.name === "string" && typeof P.createChunkMaterial === "function",
+    "CHUNK_MATERIAL is a resource with a factory");
+  assert(/insertResource\(CHUNK_MATERIAL, createChunkMaterial\(\)\)/.test(main),
+    "the composition root inserts it");
+  const meshSrc = stripComments(readSource("src/rendering/chunkmesh.ts"));
+  equal(countOf(meshSrc, /^(?:let|var) sharedMaterial\b/gm), 0, "the material is not module state");
+  assert(/getChunkMaterial\(state: ChunkMaterialState\)/.test(meshSrc),
+    "…the getter takes the resource's state");
+  assert(/resource\(CHUNK_MATERIAL\)/.test(stripComments(readSource("src/ecs/systems/chunkstream.ts"))),
+    "chunk.stream resolves it");
+
+  // 3. The raw-input TRANSPORT counters (arrival rhythm + queue backlog). They were module state in
+  //    platform/rawinput.ts, which could not print them without importing a system.
+  const rawSrc = stripComments(readSource("src/platform/rawinput.ts"));
+  equal(countOf(rawSrc, /^(?:let|var) (?:evCount|gapMax|lastArrive|minOffset|backlogSum|backlogMax|lagAt)\b/gm),
+    0, "rawinput.ts keeps no transport counters");
+  assert(/export function startRawInput\(/.test(rawSrc) && /raw: RawTransportCounters,/.test(rawSrc),
+    "they arrive as an argument (a resource object)");
+  assert(/startRawInput\(\(dx, dy\) => input\.rawDelta\(dx, dy\), world\.resource\(INPUT_DIAGNOSTICS\)\.raw\)/.test(main),
+    "the composition root hands the device layer the resource");
+  assert(!/rawLagLine/.test(main), "…and nothing calls the deleted formatter");
+
+  // 4. The LOOK counters: private fields of player.input, printed by it once a second.
+  const diag = R.createInputDiagnostics();
+  assert(diag.raw && typeof diag.raw === "object", "INPUT_DIAGNOSTICS carries the raw transport window");
+  assert(diag.look && typeof diag.look === "object", "…and the LOOK window");
+  const inputSrc = stripComments(readSource("src/ecs/systems/input.ts"));
+  equal(countOf(inputSrc,
+    /private (?:readonly )?(?:lookAt|lookSamples|lookApplied|dropTakeover|dropGrace|dropSpike|mmSkip|mmGrace|mmSpike|keyDowns|keyRepeats|keyUps|frameSamples|framePx)\b/g),
+    0, "player.input keeps no private LOOK counter");
+  assert(/this\.diag\.look\.frameSamples/.test(inputSrc), "the per-frame meter reads the resource");
+
+  // 5. The UI mount root. uiscale.ts created the stage div and appended it to document.body at IMPORT
+  //    time — a DOM side effect of a config module, on the element the whole widget layer hangs off.
+  const uiscale = stripComments(readSource("src/ui/uiscale.ts"));
+  equal(countOf(uiscale, /document\.(?:createElement|body)/g), 0,
+    "uiscale.ts neither builds nor appends the UI stage");
+  assert(!/export const uiStage/.test(uiscale), "…and exports no element");
+  assert(/insertResource\(UI_MOUNT, createUiMount\(\)\)/.test(main),
+    "the composition root creates the mount root");
+
+  // 6. The widget tree's creation counter: module state shared by EVERY World (the gate's own second
+  //    world used to continue the first one's numbering).
+  assert(typeof W.UI_ORDER?.name === "string" && typeof W.createUiOrder === "function",
+    "UI_ORDER is a resource with a factory");
+  const widgetsSrc = stripComments(readSource("src/ecs/ui/widgets.ts"));
+  equal(countOf(widgetsSrc, /^let nextOrder\b/gm), 0, "the order counter is not module state");
+  assert(/world\.resource\(UI_ORDER\)\.next\+\+/.test(widgetsSrc), "spawnUiNode draws the order from it");
+  assert(/insertResource\(UI_ORDER, createUiOrder\(\)\)/.test(main), "the composition root inserts it");
+  assert(main.indexOf("insertResource(UI_ORDER") < main.indexOf("new Hud("),
+    "…BEFORE the first widget is spawned");
+
+  // 7. The block target outline: the FIXED lane used to own the mesh and write its transform
+  //    (`writesExternal: ["outline"]` on a sim-lane system). The hit is a component now and the render
+  //    lane paints it.
+  assert(typeof P.BLOCK_OUTLINE?.name === "string" && typeof P.createBlockOutline === "function",
+    "BLOCK_OUTLINE is a resource with a factory");
+  assert(/insertResource\(BLOCK_OUTLINE, createBlockOutline\(/.test(main),
+    "the composition root builds the mesh and registers it");
+  const intSrc = stripComments(readSource("src/ecs/systems/interaction.ts"));
+  equal(countOf(intSrc, /outline/gi), 0, "the fixed lane no longer mentions the wireframe at all");
+  assert(/writes: \[INTERACTION, TARGET_HIT\]/.test(intSrc), "…it writes the hit as component data");
+  assert(/TARGET_HIT\.active\[index\] = 1/.test(intSrc), "…including the active flag");
+  const O = load("rendering/outline.js");
+  assert(Array.isArray(O.OUTLINE_ACCESS?.writesExternal)
+    && O.OUTLINE_ACCESS.writesExternal.includes("blockOutline"), "the painter declares its target");
+  assert(Array.isArray(O.OUTLINE_ACCESS?.reads) && O.OUTLINE_ACCESS.reads.includes(C.TARGET_HIT),
+    "…and reads TARGET_HIT");
+  assert(/new BlockOutlineSystem\(world\)/.test(main), "the render lane constructs it with the world only");
 });
 
 check("the input race guards' state is a RESOURCE (and the logic did not move)", () => {
@@ -2756,6 +2917,34 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     handlers.keyup({ code: "Tab" });
     input.step();
     Object.assign(devices, { locked: true });
+
+    // 1c. a REBIND CAPTURE owns ESC. The capture handler lives in platform/bind-gesture.ts and is mounted
+    //     by main.ts AFTER this system's constructor (the gesture's device listeners are installed by
+    //     `bindKeybindDrag`), so its `stopImmediatePropagation()` can no longer take back an edge that is
+    //     already in KEY_EVENTS — the NW.js build installed that handler at IMPORT time, i.e. first. The
+    //     gate therefore has to be HERE, at event time, where `capturing()` is still armed: the capture
+    //     handler clears it synchronously, so a test in `ui.navigation` would read false by the time the ui
+    //     lane drains the log. Without it, ESC unbound the action AND walked the settings panel one level
+    //     back (the reported bug).
+    const K = load("platform/keybinds.js");
+    const edgeLog = world.resource(KEY_EVENTS);
+    const escapeDowns = () => edgeLog.edges.filter((e) => e.code === "Escape" && e.down).length;
+    const escapeBefore = escapeDowns();
+    K.endCapture();
+    handlers.keydown({ code: "Escape", repeat: false });
+    equal(escapeDowns(), escapeBefore + 1, "with no capture armed ESC IS published (the UI ladder needs it)");
+    equal(control.keys.has("Escape"), false, "…and it is still only queued at event time");
+    input.step();
+    equal(control.keys.has("Escape"), true, "…which the tick then applies");
+    handlers.keyup({ code: "Escape" });
+    input.step();
+    K.beginCapture("jump");
+    handlers.keydown({ code: "Escape", repeat: false });
+    equal(escapeDowns(), escapeBefore + 1, "while a rebind capture owns the keyboard, ESC publishes NO edge");
+    equal(control.keys.has("Escape"), false, "…and is not queued either");
+    input.step();
+    equal(control.keys.has("Escape"), false, "step() has nothing to apply for it");
+    K.endCapture();
 
     // 2. mouse look: scaled at event time, added by the tick.
     const yaw = C.VIEW.yawDelta[index];

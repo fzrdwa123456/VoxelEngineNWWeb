@@ -21,9 +21,11 @@
 // PLACEMENT IS REFUSED when the new block would overlap the entity's body box; otherwise you could
 // seal yourself inside a block.
 //
-// The outline is presentation, updated here because this is where the raycast result lives, and only
-// for the LOCAL player (otherwise two entities would fight over one wireframe). It is a pure
-// transform write, so the fixed lane is a safe place for it.
+// THE TARGET IS DATA, NOT A MESH. This system used to own the three.js wireframe (`readonly outline`)
+// and write its transform here, i.e. the FIXED lane mutated presentation state — the last place in the
+// engine where a simulation step touched a GPU object. The hit result is component data now
+// (TARGET_HIT, defined in components/Player.ts) and `block.outline` paints the mesh in the RENDER lane,
+// so the lane boundary is crossed by data and the box follows the tick that produced the raycast.
 import * as THREE from "three/webgpu";
 import {
   BODY,
@@ -34,6 +36,7 @@ import {
   PLAYER,
   POSITION,
   REACH,
+  TARGET_HIT,
   type BlockTypeId,
 } from "../components/Player";
 import { getBind } from "../../platform/keybinds";
@@ -44,12 +47,12 @@ import type { VoxelWorld } from "../../voxel/world";
 import { canControl, INPUT_STATE, LOCAL_PLAYER, UI_MODAL, VOXEL, type InputState, type UiModalState } from "../resources";
 import { entityIndex, type SystemAccess, type World } from "../World";
 
-/** Declared access. Reads POSITION (so it must follow collision, which writes it) and writes the
- *  block world plus the three.js outline — both external targets. */
+/** Declared access. Reads POSITION (so it must follow collision, which writes it) and writes the block
+ *  world — an external target — plus TARGET_HIT, the hit result the render lane draws. */
 export const INTERACTION_ACCESS: SystemAccess = {
   reads: [POSITION, ORIENTATION, CONTROL, INVENTORY, REACH, BODY],
-  writes: [INTERACTION],
-  writesExternal: ["voxelBlocks", "outline"],
+  writes: [INTERACTION, TARGET_HIT],
+  writesExternal: ["voxelBlocks"],
   // "Which key breaks/blocks" comes from the KEYMAP resource, asked on every step.
   readsExternal: ["keybinds"],
 };
@@ -67,10 +70,7 @@ const tmpDir = new THREE.Vector3();
 const dims = { halfWidth: 0, height: 0, eyeHeight: 0 };
 
 export class BlockInteractionSystem {
-  /** Wireframe box around the targeted block; main.ts adds it to the scene */
-  readonly outline: THREE.LineSegments;
-
-  /** Row of the local player — the only entity whose target this system highlights */
+  /** Row of the local player — the only entity whose target this system records */
   private readonly localIndex: number;
   private readonly voxel: VoxelWorld;
   private readonly devices: InputState;
@@ -81,15 +81,6 @@ export class BlockInteractionSystem {
     this.voxel = world.resource(VOXEL);
     this.devices = world.resource(INPUT_STATE);
     this.ui = world.resource(UI_MODAL);
-
-    const box = new THREE.BoxGeometry(1.002, 1.002, 1.002);
-    this.outline = new THREE.LineSegments(
-      new THREE.EdgesGeometry(box),
-      new THREE.LineBasicMaterial({ color: 0xffffff }), // white reads on both checker colours
-    );
-    box.dispose();
-    this.outline.visible = false;
-    this.outline.matrixAutoUpdate = false;
   }
 
   step(dt: number): void {
@@ -106,7 +97,7 @@ export class BlockInteractionSystem {
       }
       this.update(index, dt);
     }
-    if (!controlled) this.outline.visible = false;
+    if (!controlled) this.setTarget(null);
   }
 
   private update(index: number, dt: number): void {
@@ -127,7 +118,7 @@ export class BlockInteractionSystem {
       tmpDir.z,
       REACH.distance[index],
     );
-    if (index === this.localIndex) this.updateOutline(hit);
+    if (index === this.localIndex) this.setTarget(hit);
 
     let breakCooldown = INTERACTION.breakCooldown[index] - dt;
     let placeCooldown = INTERACTION.placeCooldown[index] - dt;
@@ -195,13 +186,18 @@ export class BlockInteractionSystem {
     );
   }
 
-  private updateOutline(hit: RayHit | null): void {
+  /** Record the local player's target for the render lane. `null` = nothing in reach: the flag goes to 0
+   *  and the coordinate fields are left alone, because an inactive hit is never read. */
+  private setTarget(hit: RayHit | null): void {
+    const index = this.localIndex;
+    if (index < 0 || TARGET_HIT.sparse[index] < 0) return; // no local player, or a world built without one
     if (!hit) {
-      this.outline.visible = false;
+      TARGET_HIT.active[index] = 0;
       return;
     }
-    this.outline.visible = true;
-    this.outline.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-    this.outline.updateMatrix();
+    TARGET_HIT.active[index] = 1;
+    TARGET_HIT.x[index] = hit.x;
+    TARGET_HIT.y[index] = hit.y;
+    TARGET_HIT.z[index] = hit.z;
   }
 }

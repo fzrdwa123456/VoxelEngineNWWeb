@@ -152,6 +152,23 @@ export const INVENTORY = defineRecord<InventoryC>("inventory", () => ({
  *  interaction freeze an uncontrolled player but must leave NPCs running. */
 export const PLAYER = defineComponent("player", {});
 
+/** The block this entity's ray currently hits, as DATA: `active` plus the voxel coordinate of the
+ *  highlighted block. The interaction system (FIXED lane) writes it; `block.outline`
+ *  (rendering/outline.ts, RENDER lane) draws the wireframe box from it.
+ *
+ *  It exists because the outline is a three.js object: the fixed lane used to write its transform
+ *  directly (`writesExternal: ["outline"]`), i.e. presentation state mutated from the simulation tick.
+ *  A hit result is per-entity state, so it is a component — the lane boundary is crossed by data, and
+ *  only the render lane touches the mesh. Only the LOCAL player carries it (spawnPlayer inserts it):
+ *  one wireframe for one playable view. */
+export const TARGET_HIT = defineComponent("targetHit", {
+  /** 0 = nothing targeted (the box is hidden) */
+  active: "u8",
+  x: "i32",
+  y: "i32",
+  z: "i32",
+});
+
 /** Place an entity: POSITION and PREV_POSITION MUST agree, because PREV_POSITION is the origin the
  *  next collision sweep starts from. Every spawn path and the Teleport command go through here, so
  *  the two can never drift apart. */
@@ -217,6 +234,7 @@ export function spawnPlayer(
   world.insert(entity, INTERACTION); // break/place rate limits
   world.insert(entity, INVENTORY);
   world.insert(entity, PLAYER); // marker: driven by local input, so the input freeze applies
+  world.insert(entity, TARGET_HIT); // the block its ray hits: written by interaction, drawn by block.outline
   const inventory = world.get(entity, INVENTORY)!;
   startingItems.slice(0, HOTBAR_SLOTS).forEach((type, slot) => {
     inventory.slots[slot] = { type, count: 64 };

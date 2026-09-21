@@ -151,28 +151,50 @@ export function initShell(): void {
 }
 
 // ===== The "Diagnostic log" switch (the settings panel toggle) =====
-// Why: to chase "the view is not smooth while a key is held", periodic probe lines were hung off the
-// input / frame / cursor paths (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/
-// `HOOKPROBE`). They are useful (next time this class of problem comes up, read the log), but they are
-// several lines a second and write to disk forever. So there is a switch, **on by default**; with it off
-// debug.log keeps only the real event records (BOOT / SETTINGS / LOCK / CURSOR / GEOMETRY / ERROR /
-// REJECT / KBCAP…).
+// Why: to chase "the view is not smooth while a key is held", probe lines were hung off the
+// input / frame / cursor / key-bind paths (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/
+// `MOUSE#`/`HOOKPROBE`/`KBCAP`/`RAWINPUT takeover`). They are useful (next time this class of problem
+// comes up, read the log), but several of them fire on ordinary mouse activity and write to disk forever.
+// So there is a switch, **on by default**; with it off debug.log keeps only the real event records
+// (BOOT / SETTINGS / WORLD / LOCK / CURSOR / GEOMETRY / ERROR / REJECT / DIAGLOG …).
+//
+// DIAGNOSTIC vs EVENT, the rule this table draws: a line belongs here when it exists only to be READ by
+// someone debugging (a periodic measurement, or a trace of an ordinary input that already works), and it
+// is an event record when it is the only trace of something that CHANGED state (a lock, a menu opening,
+// the sign-in to a world, an error). So `KBCAP mousedown` (one line per click of a working UI) is a
+// probe, while `LOCK request` / `ESC modal=…` / `MOUSE CAPTURE on` stay — they answer "why did the game
+// do that", which is what the log is for even with the switch off.
 //
 // The switch's **one filter point is inside logDebug** (every probe line passes through there), so adding
 // a probe only means adding its prefix to this table. Everything outside `logDebug` is unaffected:
 // `appendDebugLog` is the error/console channel and always writes.
+//
+// THE PREFIX MUST BE THE LINE'S OWN FIRST TOKEN, character for character. The table carried a stale
+// `"LOOK#"` for a long time while `player.input` actually printed `LOOK raw=…` (only `SPACE#`/`MOUSE#`
+// carry a sequence number), so with the switch OFF that one line kept reaching the disk every second —
+// the exact flood the switch exists to stop, and the only probe line that escaped it. `check:ecs` now
+// pins each emitted probe line's own prefix to this table so a rename cannot silently reopen the hole.
 let diagLogEnabled = true;
-/** The probe lines' prefixes (`SPACE#`/`MOUSE#`/`LOOK#` carry a sequence number, so match by prefix). */
+/** The probe lines' prefixes (`SPACE#`/`MOUSE#` carry a sequence number, so match by prefix). */
 const PROBE_PREFIXES = [
   "PHYS ",
   "FRAME ",
   "STALL ",
-  "LOOK#",
+  "LOOK ",
   "RAWLAG ",
   "RAWMON ",
   "HOOKPROBE ",
   "SPACE#",
   "MOUSE#",
+  // The key bind gestures: one line per mousedown / click / bind / drag release. A trace of a UI that
+  // already works — it was the loudest thing left in a log with the switch off, because a click writes it.
+  "KBCAP ",
+  // The raw-input takeover transitions ("movementX is suspended now / handed back"). Their effect is
+  // visible in LOOK/RAWLAG (`dTO` vs `app`), so this is a reading, not a state record. The two BOOT
+  // lines ("RAWINPUT listener started" / "RAWINPUT active=…") deliberately stay events: they are written
+  // once and say whether the native channel exists at all.
+  "RAWINPUT takeover",
+  "RAWINPUT hands back",
 ];
 export function isDiagLogEnabled(): boolean {
   return diagLogEnabled;

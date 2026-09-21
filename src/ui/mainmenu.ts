@@ -41,7 +41,7 @@ export class MainMenu {
     this.world = world;
 
     // The background decision (shared with main.ts's render loop). The reconciler mounts roots itself
-    // (on uiStage), so this file never touches the DOM to place itself.
+    // (on the UI_MOUNT stage), so this file never touches the DOM to place itself.
     const kind = menuBgKind();
     this.root = spawnPanel(world, null, kind === "panorama" ? "menu.backdrop" : "menu.backdropImage", {
       hidden: true,

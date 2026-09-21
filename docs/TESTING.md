@@ -59,7 +59,8 @@ relaunch: the slider must still say 60 (it used to reset to "unlimited" every la
 "unlimited", as if it had never been changed) → Key binds: click an action chip (it turns blue and shows the bare
 name), then click a keycap on the visual keyboard (the bound keycap turns blue), then hold a chip and
 DRAG it onto a keycap (a rubber band follows the cursor and the target keycap gets a white outline) —
-then bind something to a mouse button by clicking a keycap with no chip selected, unbind with Esc, and
+then bind something to a mouse button by clicking a keycap with no chip selected, unbind with Esc (the
+action clears and the panel STAYS on this page — see the P1.13 note at the end), and
 close the panel → E: the backpack opens; clicking a bag slot swaps it with the selected hotbar slot and
 the hotbar highlight moves; icons show the block texture (fetched from the bake cache in ONE write, so
 a stack move does not flash a placeholder; a first-ever bake shows the magenta/black checker until it
@@ -216,16 +217,84 @@ the main menu is the mode where the ui lane is the only lane running, which is e
 system relies on;
 (5) `debug.log` must contain no new timer noise: the only new line is `DELAY lockRetry […]`.
 
+AFTER the presentation-state tail (P1.12 — the icon baker, the chunk material, both counter blocks, the UI
+mount root, the widget order counter and the target wireframe all became resources, and `player.interaction`
+stopped writing three.js from the fixed lane; `rendering/outline.ts` + `block.outline` paint it now). Seven
+things to walk:
+(1) **the target wireframe** (`BLOCK_OUTLINE` + `block.outline`): aim at a block — the white box must sit
+exactly ON the block's faces, i.e. the same as before the change (it is placed at voxel + 0.5; a box half a
+block off means a voxel INDEX is being used as a position). Look at the sky: it must vanish the same frame.
+Open the backpack, or press ESC, then resume: it must be gone while a UI owns the mouse and back at once
+afterwards (it is written from `TARGET_HIT.active`, which the interaction system clears when the player is
+uncontrolled). A wireframe that never appears while a block is in reach means `block.outline` did not run,
+or the local player carries no `TARGET_HIT`;
+(2) **item icons** (`ICON_BAKE` + `peekBlockIcon`/`requestBlockIcon`, no more `.then` writing a widget): an
+icon that has never been baked shows the engine's checker for a FEW FRAMES and then the real 3D icon (the
+system notices the finished bake on a later frame — that is deliberate). Now the sharp case: shuffle the
+same block between two slots — the icon must appear in ONE write, with NO checker frame (a checker flash on
+a stack move means the peek missed and the slot went through the waiting path). An icon that NEVER appears
+means the bake failed or `collectFinishedBakes` did not redraw it; a checker that never stops means the
+request was never issued at all;
+(3) **the shared chunk material** (`CHUNK_MATERIAL`): the world must draw exactly as before (the same
+checker texture, the same lighting) and streaming into new chunks must not change the look — the material is
+created ONCE, on the first mesh. New chunks drawn PLAIN GREY/untextured would mean the lazy creation ran
+before the pack chain was installed;
+(4) **the two counter lines** (`InputDiagnostics.raw` + `.look`, both printed by `player.input`): `debug.log`
+must still carry one `LOOK raw=… app=…` line and one `RAWLAG ev=…/s gapMax=…ms backlogAvg=…ms
+backlogMax=…ms` line per second while playing, with plausible numbers (raw ≈ 250/s, gapMax ≈ 4 ms, app ≈
+frames with displacement). A missing `RAWLAG` line means the device layer never received the counters
+object; a `RAWLAG` that is all zeros means the listener is writing a different object than the one the
+system prints;
+(5) **the diagnostic switch still covers both**: toggle "Diagnostic log" OFF in the settings panel — BOTH
+`LOOK` and `RAWLAG` must stop (they share one printer now); turn it back on and both return;
+(6) **the UI mount root and the widget order** (`createUiMount()` + `UI_ORDER`): the UI must be laid out
+byte-for-byte as before — the menus, the HUD, the hotbar, the F3 panel in their usual places, in their usual
+child order (the reconciler appends in creation order, which is now read from the resource). A totally
+EMPTY UI means the mount root was not created/inserted; a panel whose children come out in the wrong order
+(a label drawn under its own background) means the order counter is not the one the spawns draw from — it
+would throw at the first spawn instead if the resource were missing;
+(7) `debug.log` must carry the boot `SCHEDULE render: 5 systems, 2 batches, 6 parallel pair(s)
+[(cameraView.render ~ chunk.stream ~ block.outline ~ diagnostics) | renderer.draw]` line — the new system
+must be IN the batch, and `block.outline` must not appear as its own batch (that would mean it declares a
+target the others write).
+
+AFTER the ESC-owns-the-capture fix (P1.13 — `ecs/systems/input.ts::onKeyDown` no longer publishes an
+ESCAPE edge while a rebind capture is armed, because the capture's handler in `platform/bind-gesture.ts` is
+mounted LATER than that listener and its `stopImmediatePropagation()` cannot recall an edge that is already
+in `KEY_EVENTS`; before the fix ESC unbound the action AND stepped the panel one level back):
+(1) open the key binds panel (pause menu or main menu → Settings → Key binds), click an action row so it
+turns blue and shows the bare name (that is the CAPTURE), then press ESC — the action must end up UNBOUND
+(its chip shows the action name with no key) and **the panel must STAY on the key binds page**: it must NOT
+fall back to the settings list. If the page still moves, the ESC gate is not being hit — check the boot
+order in `main.ts` (`new PlayerInputSystem` must precede `bindKeybindDrag`);
+(2) the ESC ladder still works everywhere else: with nothing capturing, ESC closes the key binds page →
+the settings list → the pause menu → and in a world opens/closes the pause menu as before. `debug.log`
+shows one `ESC modal=… settings=…` line per press; while capturing, that line must NOT appear at all for
+that press — with the diagnostic switch ON the only trace is `KBCAP bind done (code=Escape)`, and with it
+OFF that press writes nothing at all (KBCAP is a probe — see the switch section below);
+(3) bind a key after the unbind (click the same action row, press a key): it must bind normally — the gate
+is ESC-only, so no other key may be swallowed by the capture;
+(4) TAB is still BINDABLE: select an action, press TAB, then use it (the menu-level TAB default is
+cancelled while the mouse is captured but the key itself still reaches the game — see the P1.11 note).
+
 AFTER the diagnostic-log switch (the settings panel's "Diagnostic log", default ON — `settings.json`'s `diagLog`):
-the periodic probe lines (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/`HOOKPROBE`) are
-what made the "held key" investigation possible, and they are also the only thing that writes several lines
-per second forever. (1) open the settings panel (pause menu or main menu) — the toggle must read
+the probe lines (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/`HOOKPROBE`, plus the two
+that fire on ordinary activity — `KBCAP …` once per click of the key bind UI and `RAWINPUT takeover` /
+`RAWINPUT hands back` when the raw channel takes over) are
+what made the "held key" investigation possible, and they are also the only thing that keeps writing for as
+long as the app runs. (1) open the settings panel (pause menu or main menu) — the toggle must read
 "Diagnostic log: ON (probes included)"; (2) click it → the label switches to
 "Diagnostic log: OFF (events only)" and `debug.log` must
 write a `DIAGLOG probes disabled` line and then STOP getting `FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`PHYS` lines
-while everything else (BOOT/SETTINGS/LOCK/CURSOR/GEOMETRY/ERROR) keeps being written; (3) walk around and look
-around for a few seconds — no probe lines may appear (a line still arriving means its prefix is missing from
-the table in `platform/shell.ts`); (4) toggle it back on → the probes resume; (5) restart the game — the
+while everything else (BOOT/SETTINGS/WORLD/LOCK/CURSOR/ESC/GEOMETRY/ERROR) keeps being written; (3) play for
+a while with the switch OFF — click through the menus, open/close the pause menu, enter and leave a world, and
+press ESC a few times: **no probe line may appear**, `KBCAP` included (a line still arriving means its prefix
+is missing from the table in `platform/shell.ts`); (4) toggle it back on → the probes resume; (5) restart the
+game — the
 setting must persist (it is a normal field of `settings.json`, repaired by type if hand-edited), and with it
-OFF the file must contain no probe line at all from the first frame.
+OFF the file must contain no probe line at all from the first frame — while one of the first lines of that
+run reports the state it booted in:
+`DIAGLOG probes disabled at boot (settings.json diagLog=false; no probe lines in this run)`. That line is an
+EVENT (written whether the switch is off or on), and it is what makes "the switch is off" distinguishable
+from "the probes never registered" when reading a log that has no probe lines in it.
 

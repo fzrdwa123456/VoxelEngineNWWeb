@@ -8,6 +8,7 @@ import { CONTROLLER_ACCESS, PlayerControllerSystem } from "./ecs/systems/control
 import { MOVEMENT_ACCESS, PlayerMovementSystem } from "./ecs/systems/movement";
 import { COLLISION_ACCESS, CollisionSystem } from "./ecs/systems/collision";
 import { BlockInteractionSystem, INTERACTION_ACCESS } from "./ecs/systems/interaction";
+import { BlockOutlineSystem, OUTLINE_ACCESS } from "./rendering/outline";
 import { CHUNK_STREAM_ACCESS, ChunkStreamSystem } from "./ecs/systems/chunkstream";
 import { PositionSnapshotSystem, SNAPSHOT_ACCESS } from "./ecs/systems/snapshot";
 import { DiagnosticsSystem, DIAGNOSTICS_ACCESS } from "./ecs/systems/diagnostics";
@@ -17,8 +18,9 @@ import { MenuBackgroundSystem } from "./rendering/menu-background";
 import { defaultUiTheme, UI_THEME } from "./ecs/ui/theme";
 import { UI_RENDER_ACCESS, UiRenderSystem } from "./ecs/ui/system";
 import { createUiActions, UI_ACTIONS } from "./ecs/ui/actions";
+import { createUiOrder, UI_ORDER } from "./ecs/ui/widgets";
 import { createUiSources, UI_BINDING_ACCESS, UiBindingSystem, UI_SOURCES } from "./ecs/ui/bindings";
-import { CAMERA3D, CANVAS_HOST, CHUNK_MESHES, createChunkMeshCache, createMenuBackground, MENU_BACKGROUND, PERF_SAMPLER, RENDERER3D, SCENE3D, UI_MOUNT } from "./ecs/presentation";
+import { CAMERA3D, BLOCK_OUTLINE, CANVAS_HOST, CHUNK_MATERIAL, CHUNK_MESHES, createBlockOutline, createChunkMaterial, createChunkMeshCache, createIconBake, createMenuBackground, createUiMount, ICON_BAKE, MENU_BACKGROUND, PERF_SAMPLER, RENDERER3D, SCENE3D, UI_MOUNT } from "./ecs/presentation";
 import { createKeybindGesture, KEYBIND_GESTURE, UI_KEYBIND_ACCESS, UiKeybindSystem } from "./ecs/ui/keybind";
 import { spawnPickerPanel, UI_PICKER_ACCESS, UiPickerSystem } from "./ecs/ui/picker";
 import { UI_TOAST_ACCESS, UiToastSystem } from "./ecs/ui/toast";
@@ -33,10 +35,10 @@ import { MainMenu } from "./ui/mainmenu";
 import { Hud } from "./ui/hud";
 import { PointerLock } from "./platform/pointerlock";
 import { t, loadLang, getLang, onLangChange, type Lang } from "./ui/i18n";
-import { loadUIScaleMode, getUIScaleMode, onUIScaleModeChange, currentRootFontPx, uiStage } from "./ui/uiscale";
+import { loadUIScaleMode, getUIScaleMode, onUIScaleModeChange, currentRootFontPx } from "./ui/uiscale";
 import { loadFont, getFontId, onFontChange, currentFontCss } from "./ui/fonts";
 import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "./platform/shell";
-import { startRawInput, centerCursor, rawLagLine } from "./platform/rawinput";
+import { startRawInput, centerCursor } from "./platform/rawinput";
 import { installWindowGuards } from "./platform/window-guards";
 import { adoptViewport, currentViewport } from "./platform/viewport";
 import { DebugLogForwarder } from "./platform/debuglog";
@@ -93,7 +95,16 @@ loadBinds(keymap, readSettings().keybinds);
 // The "Diagnostic log" switch (settings panel): the periodic DIAGNOSTIC PROBES are on by default, and the
 // setting decides whether `logDebug` writes them. Set BEFORE anything logs a probe line, so a file with
 // the switch off never sees one.
-setDiagLogEnabled(readSettings().diagLog !== false);
+const diagLogAtBoot = readSettings().diagLog !== false;
+setDiagLogEnabled(diagLogAtBoot);
+// …and RECORD which state this run booted in. This line is an EVENT, not a probe (its prefix is not in
+// platform/shell.ts's table), so it is written either way — which is the whole point: a log with no probe
+// lines is otherwise ambiguous, "the switch is off" and "the probes never registered / stopped working"
+// look identical to whoever reads it. It is written once, here, before anything else can log a probe.
+logDebug(
+  `DIAGLOG probes ${diagLogAtBoot ? "enabled" : "disabled"} at boot ` +
+    `(settings.json diagLog=${diagLogAtBoot}${diagLogAtBoot ? "" : "; no probe lines in this run"})`,
+);
 const saveSettings = (fpsCapOverride?: number): void => {
     // Read-modify-write merge, avoids clobbering other settings (windowMode etc.)
   const s = readSettings();
@@ -237,9 +248,33 @@ world.insertResource(CAMERA3D, camera);
 world.insertResource(RENDERER3D, renderer);
 world.insertResource(PERF_SAMPLER, perf);
 world.insertResource(CANVAS_HOST, canvasHost);
-world.insertResource(UI_MOUNT, uiStage);
+world.insertResource(UI_MOUNT, createUiMount());
 world.insertResource(CHUNK_MESHES, createChunkMeshCache(chunkGroup));
 world.insertResource(MENU_BACKGROUND, createMenuBackground());
+// The item-icon baker's state: the offscreen WebGPURenderer + the two caches (ecs/presentation.ts).
+// It used to be four module-level `let`s in rendering/blockicons.ts, and the bake's completion wrote the
+// inventory's UI_IMAGE component from a promise continuation — a component write outside any lane. The
+// state is a resource now and the inventory notices a finished bake on its next run.
+world.insertResource(ICON_BAKE, createIconBake());
+// The ONE chunk material (a GPU object, created on first use because the pack chain must be installed):
+// it used to be a module-level `let` in rendering/chunkmesh.ts.
+world.insertResource(CHUNK_MATERIAL, createChunkMaterial());
+// The block target outline's mesh: built HERE because a three.js object is wiring, and registered as a
+// resource so the render-lane system that paints it resolves it instead of being handed it. The fixed
+// lane writes only the TARGET_HIT component. The geometry is a unit box 0.002 larger than a block, so the
+// wireframe sits just outside the block's faces instead of z-fighting with them.
+const outlineBox = new THREE.BoxGeometry(1.002, 1.002, 1.002);
+const outlineMesh = new THREE.LineSegments(
+  new THREE.EdgesGeometry(outlineBox),
+  new THREE.LineBasicMaterial({ color: 0xffffff }), // white reads on both checker colours
+);
+outlineBox.dispose();
+outlineMesh.visible = false;
+// matrixAutoUpdate off: block.outline positions the box and calls updateMatrix() itself (it only moves
+// when the target changes, so there is nothing for three.js to recompute per frame).
+outlineMesh.matrixAutoUpdate = false;
+scene.add(outlineMesh);
+world.insertResource(BLOCK_OUTLINE, createBlockOutline(outlineMesh));
 // The configuration resources loaded above: the bind table and the language are read on the tick by
 // systems that declare them (`readsExternal`), so they belong to the world rather than to a module.
 world.insertResource(KEYMAP, keymap);
@@ -272,6 +307,9 @@ world.insertResource(KEYBIND_GESTURE, keybindGesture);
 world.insertResource(UI_THEME, defaultUiTheme());
 world.insertResource(UI_ACTIONS, createUiActions());
 world.insertResource(UI_SOURCES, createUiSources());
+// The widget tree's creation counter (UI_TREE.order). It is inserted BEFORE the first spawn below —
+// spawnUiNode draws every order from it, and a missing resource would throw on the first widget.
+world.insertResource(UI_ORDER, createUiOrder());
 const hud = new Hud(world);
 // The F3 panel's two widget handles, published for diagnostics (which writes the text) — the HUD view
 // spawns the tree, the system owns the data written into it.
@@ -342,9 +380,11 @@ const uiKeybind = new UiKeybindSystem(world, {
 // hand-written panel kept its own cross-instance table of keycap elements to do this).
 bindKeybindDrag({ world, hitTest: (x, y) => uiRender.hitTest(x, y), gesture: keybindGesture });
 // No callback into the UI any more: the interaction system reads the entity's INVENTORY component
-// itself, so the hand you see and the hand that places a block cannot disagree.
+// itself, so the hand you see and the hand that places a block cannot disagree. It writes the local
+// player's TARGET_HIT component; `block.outline` (render lane) draws the wireframe from it — the mesh
+// was this system's field until the refactor, which is why nothing here touches the scene.
 const interaction = new BlockInteractionSystem(world);
-scene.add(interaction.outline);
+const outline = new BlockOutlineSystem(world);
 const diagnostics = new DiagnosticsSystem(world);
 // The main-menu background step (deliberately not registered in a lane — the MENU frame is its only
 // caller, see rendering/menu-background.ts).
@@ -466,6 +506,16 @@ world.addSystem({
   stage: "render",
   ...CHUNK_STREAM_ACCESS,
   run: () => chunkStream.step(),
+});
+world.addSystem({
+  // The block target wireframe: it reads the TARGET_HIT component `player.interaction` wrote in the fixed
+  // lane and moves the mesh. It touches no component the other render producers touch and writes a target
+  // of its own (`blockOutline`), so the schedule puts it in their batch — any order is correct, because
+  // the mesh is only read by the draw at the END of the lane (it is in the scene).
+  name: "block.outline",
+  stage: "render",
+  ...OUTLINE_ACCESS,
+  run: () => outline.render(),
 });
 world.addSystem({
   // The GAMEPLAY widgets' gate, FIRST in the lane: it decides whether the crosshair and the hotbar are
@@ -629,7 +679,9 @@ world.addSystem({
 // once per frame to queue it as ONE look intent — the view no longer goes through any timer (the old
 // 8 ms `setInterval` was stretched to 9-12 ms steps by key events, which is exactly "holding a key
 // turns the view unsmoothly").
-const rawInput = startRawInput((dx, dy) => input.rawDelta(dx, dy));
+// The transport counters live in the INPUT_DIAGNOSTICS resource (a system may not own module-level
+// counters, and the device layer may not import one): `player.input` prints them as RAWLAG once a second.
+const rawInput = startRawInput((dx, dy) => input.rawDelta(dx, dy), world.resource(INPUT_DIAGNOSTICS).raw);
 // **The assignment must wait for ready to settle.** In the original, startRawInput() was a synchronous
 // NAPI call, so `available` was true on the spot and this line used to be a synchronous assignment,
 // `input.rawInputActive = rawInput.available`; the Tauri port only sets it in
@@ -1111,10 +1163,8 @@ function frameProbe(): void {
     return;
   }
   if (now - frameStatAt < 1000) return;
-  // RAWLAG follows the once-per-second line as well (it used to hang off the deleted 8 ms poll, and is
-  // driven by the frame probe now).
-  const lag = rawLagLine();
-  if (lag) logDebug(lag);
+  // (The RAWLAG line is printed by `player.input` itself now, right after LOOK: the transport counters
+  // moved into INPUT_DIAGNOSTICS, so the system that owns them is the one that formats them.)
   const pf: string[] = [];
   for (let i = 0; i < framePfBuckets.length; i++) if (framePfBuckets[i] > 0) pf.push(`${i}:${framePfBuckets[i]}`);
   logDebug(

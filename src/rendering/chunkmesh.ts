@@ -22,6 +22,7 @@
 // i.e. the "missing block" look, with no resource pack required. Voxel values are already a
 // palette, so switching to blockregistry.ts lookups later is local to this file.
 import * as THREE from "three/webgpu";
+import type { ChunkMaterialState } from "../ecs/presentation";
 import { AIR, CHUNK_SIZE, type Chunk } from "../voxel/chunk";
 import type { VoxelWorld } from "../voxel/world";
 import { CHECKER_TEXTURE_URL } from "./textures";
@@ -85,19 +86,19 @@ const INITIAL_FACES = 1024;
 /** Doubling stops here; beyond it the capacity is rounded straight up to what is needed. */
 const MAX_DOUBLING_FACES = 8192;
 
-let sharedMaterial: THREE.MeshLambertMaterial | null = null;
-
-/** One material for every chunk (shared texture + nearest filtering for the pixel look) */
-export function getChunkMaterial(): THREE.MeshLambertMaterial {
-  if (sharedMaterial) return sharedMaterial;
+/** One material for every chunk (shared texture + nearest filtering for the pixel look). The material is
+ *  a GPU object, so it lives in the CHUNK_MATERIAL resource (ecs/presentation.ts) and is created on first
+ *  use — the pack chain must be installed before the checker texture can be resolved. */
+export function getChunkMaterial(state: ChunkMaterialState): THREE.MeshLambertMaterial {
+  if (state.material) return state.material;
   const texture = new THREE.TextureLoader().load(CHECKER_TEXTURE_URL);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
-  sharedMaterial = new THREE.MeshLambertMaterial({ map: texture });
-  return sharedMaterial;
+  state.material = new THREE.MeshLambertMaterial({ map: texture });
+  return state.material;
 }
 
 /** One chunk's reusable geometry. A rebuild is a single `rebuild()` call: it overwrites the existing

@@ -38,11 +38,6 @@ function modeOf(): UIScaleMode {
   return m === "small" || m === "normal" || m === "large" || m === "auto" ? m : "auto";
 }
 
-/** UI mount root: all components mount here (fixed elements inside the stage are viewport-positioned, sized by rem, no transform needed) */
-export const uiStage = document.createElement("div");
-uiStage.style.cssText = "position:fixed;inset:0;overflow:hidden;z-index:1;";
-document.body.appendChild(uiStage);
-
 /** Current effective multiplier (auto follows the window live) */
 function compute(): number {
   const fit = Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H);
@@ -88,6 +83,12 @@ export function loadUIScaleMode(scale: ScaleState, v: unknown): void {
   adoptUIScale(scale);
   if (v === "small" || v === "normal" || v === "large" || v === "auto") scale.mode = v;
 }
+
+// The UI MOUNT ROOT is not here any more. This module used to CREATE the stage div (`export const
+// uiStage`) and append it to `document.body` at IMPORT time — a DOM side effect of a config module, on
+// the one element the whole widget layer hangs off. It is world state like the canvas host, so the
+// composition root creates it (`ecs/presentation.ts::createUiMount()`) and inserts it as UI_MOUNT, and
+// the reconciler mounts its roots there.
 
 // (The resize coalescer that used to sit here — a second `window` resize listener feeding the settings
 //  panel's scale label — is GONE: the ONE listener lives in platform/viewport.ts and the label subscribes

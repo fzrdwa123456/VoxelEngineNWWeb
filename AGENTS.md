@@ -133,13 +133,23 @@ src/
 │   ├── presentation.ts      the three.js / GPU / DOM objects the WORLD owns: SCENE3D, CAMERA3D,
 │   │                        RENDERER3D (the device layer takes its canvas from `domElement`),
 │   │                        PERF_SAMPLER, CANVAS_HOST (index.html's `#app`), UI_MOUNT (the root every
-│   │                        widget is appended to) and CHUNK_MESHES (the chunk-mesh cache: parent group,
-│   │                        meshes, the "no geometry" set — `createChunkMeshCache(group)`). These used
+│   │                        widget is appended to, built by `createUiMount()` — it used to be a stage
+│   │                        div that `ui/uiscale.ts` created and appended to `document.body` at IMPORT
+│   │                        time) and CHUNK_MESHES (the chunk-mesh cache: parent group, meshes, the
+│   │                        "no geometry" set — `createChunkMeshCache(group)`). Plus the three objects
+│   │                        that used to be module-level state or a system's private field: ICON_BAKE
+│   │                        (the second, offscreen WebGPURenderer for item icons + the cache/pending
+│   │                        Maps), CHUNK_MATERIAL (the ONE material every chunk mesh shares) and
+│   │                        BLOCK_OUTLINE (the target wireframe the RENDER lane moves —
+│   │                        `createBlockOutline(mesh)`). These used
 │   │                        to be constructor ARGUMENTS; a system resolves what it uses in its own
 │   │                        constructor body instead, which gives each object one owner and makes it a
 │   │                        SEAM a test can stub (the Node gate drives the chunk stream with a plain
 │   │                        object for the group). Type-only imports of three.js, so this module stays
-│   │                        loadable in Node. It does NOT change the schedule: the conflict model is
+│   │                        loadable in Node — which is why a FACTORY takes an object the composition
+│   │                        root built (`createChunkMeshCache(group)`, `createBlockOutline(mesh)`)
+│   │                        wherever one can be built from three.js at wiring time.
+│   │                        It does NOT change the schedule: the conflict model is
 │   │                        keyed by the declared target NAMES (`camera3d`, `chunkMeshes`, …), not by
 │   │                        resource handles, so those declarations stay as they are.
 │   ├── commands.ts          the concrete commands: SetMode, Teleport, SelectSlot, SwapSlots, ShowToast,
@@ -163,7 +173,12 @@ src/
 │       │                   guarded by `isCapturing()`, maps the button to a bind ACTION and CODE,
 │       │                   publishes a button edge and takes the press/release decision — a button
 │       │                   bound to "inventory" produces ONLY an edge, because whether the bag opens
-│       │                   is ui.navigation's call). The RAW-MOUSE deltas arrive per event
+│       │                   is ui.navigation's call). A REBIND CAPTURE owns ESC and that gate is HERE,
+│       │                   inside the event: `onKeyDown` publishes no Escape edge while `isCapturing()`,
+│       │                   because the capture's own handler (`platform/bind-gesture.ts`) is installed
+│       │                   LATER than this listener and so cannot suppress an edge that is already in the
+│       │                   log — and by ui-lane time it has already cleared the capture, which is why
+│       │                   `ui.navigation` cannot test it (see ROADMAP §5.2 P1.13). The RAW-MOUSE deltas arrive per event
 │       │                   (`rawDelta`, ~4 ms: the Rust push cadence) and are APPLIED once per frame
 │       │                   (`frameLook`, called by the frame before any fixed step). There is no timer
 │       │                   in that path any more: the 8 ms poll it replaced was stretched to 9–12 ms
@@ -204,15 +219,18 @@ src/
 │       │                   loudly) rather than swept from a bogus origin (it jitters, quietly).
 │       │                   Reads BODY per entity. Owns motion.onGround and zeroes motion.vy on
 │       │                   contact; skips spectator (noclip).
-│       ├── interaction.ts  break (left) / place (right) through a voxel raycast + the target
-│       │                   outline. QUERY-DRIVEN over CONTROL+POSITION+ORIENTATION+INTERACTION+
+│       ├── interaction.ts  break (left) / place (right) through a voxel raycast, and the local
+│       │                   player's target recorded as the TARGET_HIT component. QUERY-DRIVEN over
+│       │                   CONTROL+POSITION+ORIENTATION+INTERACTION+
 │       │                   REACH+BODY, so every entity gets its own reach, body box and rate
 │       │                   limits. Polls CONTROL.keys with a dt cooldown (no event listeners),
 │       │                   refuses placement overlapping the body box, and reads the hand from
 │       │                   INVENTORY — there is no UI callback. An uncontrolled LOCAL player
 │       │                   (PLAYER marker) never edits blocks, so UI clicks cannot; NPCs keep
-│       │                   acting. The block TYPE it reads is not yet written into the world
-│       │                   (one voxel value — see ROADMAP.md §3.2).
+│       │                   acting. It touches NO three.js object: the wireframe it used to own and
+│       │                   move from this lane is `block.outline` (rendering/outline.ts) now, and the
+│       │                   two lanes exchange the hit as data. The block TYPE it reads is not yet
+│       │                   written into the world (one voxel value — see ROADMAP.md §3.2).
 │       ├── chunkstream.ts  render lane: keeps the chunks around the player generated, meshed
 │       │                   and placed at their nearest torus representation (budgeted), and
 │       │                   drains VoxelWorld.takeDirty() so block edits re-mesh immediately.
@@ -326,16 +344,33 @@ src/
 │                           spin/flip state, which IS the MENU_BACKGROUND resource; deliberately NOT
 │                           registered in a lane — a MENU frame never runs the render lane, so what it
 │                           buys is an OWNER for the state and one entry point, not a batch),
-│                           textures.ts (pack chain resolution), blockicons.ts (icon baking),
-│                           chunkmesh.ts (face-culled chunk geometry + the checker material)
+│                           textures.ts (pack chain resolution), blockicons.ts (icon baking — a pure
+│                           operation on the ICON_BAKE resource; `peekBlockIcon` is the synchronous
+│                           reader the inventory draws from, `requestBlockIcon` starts a bake and
+│                           returns at once, so no promise continuation ever writes a component),
+│                           chunkmesh.ts (face-culled chunk geometry + the checker material, which is
+│                           the CHUNK_MATERIAL resource — `getChunkMaterial(state)`),
+│                           outline.ts (the BlockOutlineSystem: the BLOCK_OUTLINE mesh positioned from
+│                           the TARGET_HIT component, in the RENDER lane — it used to be a fixed-lane
+│                           write of a three.js object)
 ├── platform/               host/browser services, produce data only: shell.ts (NW.js:
 │                           settings/logs/window — it owns settings.json, whose VALUES live in the
 │                           config resources, and it owns the DIAGNOSTIC-PROBE SWITCH: the settings
 │                           panel's "Diagnostic log" toggle, default ON, filters the probe lines
 │                           (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/
-│                           `HOOKPROBE`) inside `logDebug`, while `appendDebugLog` — the error/console
+│                           `HOOKPROBE`, plus the two that fire on ORDINARY activity and would otherwise
+│                           keep writing forever — `KBCAP …` once per click of the key bind UI, and the
+│                           `RAWINPUT takeover` / `RAWINPUT hands back` transitions, whose effect is
+│                           already visible as `dTO` vs `app` in the LOOK line) inside `logDebug`, while
+│                           `appendDebugLog` — the error/console
 │                           channel — always writes; the probe PREFIX TABLE there is the one place a
-│                           new probe has to be registered), keybinds.ts (owns the DEFAULTS + code validation and
+│                           new probe has to be registered, and the line that draws the boundary is
+│                           "does the line exist only to be READ by someone debugging (probe), or is it
+│                           the only trace of something that CHANGED state (event: LOCK/ESC/WORLD/
+│                           CURSOR/ERROR)"; the composition root also writes ONE event line at boot
+│                           saying which state the run started in — `DIAGLOG probes enabled/disabled at
+│                           boot (settings.json diagLog=…)` — because a log with no probe lines in it is
+│                           otherwise ambiguous: "off" and "the probes never registered" read the same), keybinds.ts (owns the DEFAULTS + code validation and
 │                           reads/writes the KEYMAP resource), rawinput.ts, pointerlock.ts (relock +
 │                           the cursor; it publishes NO cached "click may grab the lock" any more, and it
 │                           REFUSES to capture while the window is not in the FOREGROUND — the native
@@ -412,8 +447,9 @@ rAF game loop — ONE chain; `frame()` picks its body from `loopMode` (see setLo
           render lane:
             1. cameraView.render(alpha)            // position lerp + orientation quaternion
             2. chunk.stream                        // generate / mesh / place chunks (budgeted)
-            3. diagnostics                         // perf/PHYS log/F3 (writes the F3 TEXT widget)
-            4. renderer.draw                       // renderer.render(scene, camera)
+            3. block.outline                       // the target wireframe, from the TARGET_HIT component
+            4. diagnostics                         // perf/PHYS log/F3 (writes the F3 TEXT widget)
+            5. renderer.draw                       // renderer.render(scene, camera)
           ui lane — LAST, every frame:
             1. ui.hud                              // the GAMEPLAY gate: crosshair + hotbar only while a world runs
             2. ui.loading                          // the loading screen (visible only while one is up)
@@ -471,13 +507,17 @@ resolved order — determinism over a fake thread. `world.scheduleReport()` prin
 
 ```
 SCHEDULE fixed: 6 systems, 5 batches, 1 parallel pair(s) [player.input | (motion.snapshot ~ player.controller) | player.movement | player.collision | player.interaction]
-SCHEDULE render: 4 systems, 2 batches, 3 parallel pair(s) [(cameraView.render ~ chunk.stream ~ diagnostics) | renderer.draw]
+SCHEDULE render: 5 systems, 2 batches, 6 parallel pair(s) [(cameraView.render ~ chunk.stream ~ block.outline ~ diagnostics) | renderer.draw]
 SCHEDULE ui: 10 systems, 9 batches, 1 parallel pair(s) [(ui.hud ~ ui.bindings) | ui.loading | ui.inventory | ui.picker | ui.toast | ui.keybind | ui.navigation | ui.delays | ui.widgets]
 ```
 
 Reading those reports: the fixed lane's batch 0 is a REAL read-after-write (`player.input` writes
 the VIEW/keys the three systems after it consume), and its edge to `motion.snapshot` is a declared
-PESSIMISATION kept so the tick still drains first. `renderer.draw` must follow its two producers. The
+PESSIMISATION kept so the tick still drains first. `renderer.draw` must follow its two producers
+(`cameraView.render` writes the camera, `chunk.stream` the meshes) — while `block.outline` joins the
+producers' batch because it touches neither: it reads the TARGET_HIT COMPONENT and writes a target of
+its own, so any position among them is correct — the mesh is only read by the draw at the end of the
+lane, by which point the batch is done. The
 ui lane is a CHAIN because the conflict model is per COMPONENT, not per entity: the writers all touch
 UI_STATE/UI_TEXT on different widgets. The one REAL pair there is `ui.hud ~ ui.bindings`
 (UI_STATE vs UI_INPUT) — what a batch looks like when the components are genuinely disjoint.
@@ -596,15 +636,18 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   `DEFAULT_REACH` are spawn DEFAULTS, not state — the numbers each entity actually uses live in
   BODY / REACH.
 - **A GPU/DOM object is a RESOURCE, not an argument** (`ecs/presentation.ts`). There is one scene, one
-  camera, one renderer, one UI mount root and one chunk-mesh cache per world, and they do not die with
+  camera, one renderer, one UI mount root, one chunk-mesh cache, one item-icon baker, one chunk material
+  and one target wireframe per world, and they do not die with
   an entity: that is the definition of a resource. They used to be constructor dependencies, which made
   the objects a system writes every frame the only shared state in the process with no owner — and the
   only way to learn who used one was to read main.ts. Now the composition root creates the object,
   inserts it, and each system resolves it in its constructor body (iron rule 6); a test drives a render
-  system by inserting a stub. What is still NOT a resource and never will be: the objects a system
-  BUILDS for itself (the block outline, the menu-background panorama scene, a baked icon canvas) —
-  those die with their owner, and the DOM/GPU elements of a VIEW (an element, an SVG rubber band) are
-  their view's business. The DECLARED TARGETS (`camera3d`, `chunkMeshes`, `framebuffer`) stay in the
+  system by inserting a stub. What is still NOT a resource: per-CALL scratch an operation builds and
+  throws away (a bake's canvas, its render target and its temporary scene) and the DOM elements of a
+  VIEW (an element, the SVG rubber band) — those die with the call or belong to the view. Anything that
+  OUTLIVES the call that made it is a resource even when a system builds it lazily
+  (`MENU_BACKGROUND.scene`, `ICON_BAKE.renderer`). The DECLARED TARGETS (`camera3d`, `chunkMeshes`,
+  `framebuffer`, `blockOutline`) stay in the
   access sets: the schedule models names, not resource handles.
 - **CONFIGURATION splits the same way, by whether it is READ ON THE TICK.** A setting that a system or
   the reconciler asks for every step/frame IS world state and lives in a resource (`KEYMAP` — read by
@@ -630,7 +673,8 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   the old place.
 - The player's state is all components: POSITION, PREV_POSITION, ORIENTATION, VIEW (buffered view
   deltas), MOTION, CONTROL, BODY (half width/height/eye height), REACH, INTERACTION (break/place
-  cooldowns), INVENTORY (stacks + selected slot) and the PLAYER marker.
+  cooldowns), INVENTORY (stacks + selected slot), TARGET_HIT (the block its ray hits, so the wireframe
+  crosses lanes as DATA) and the PLAYER marker.
 - Systems never import each other. Shared device/global state is a RESOURCE
   (`world.resource(INPUT_STATE)`, `LOCAL_PLAYER`, `VOXEL`); per-entity state is a component. That
   is the whole rule — if two systems need the same thing, one of those two is where it goes.
@@ -739,7 +783,7 @@ settings check, the world, the movement modes, every menu, the key binds, the in
 `docs/TESTING.md`**, together with what a failure at each step means. Read it before saying a change
 works, and extend it when a behaviour lands.
 
-**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 54
+**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 55
 assertion groups, ends with `RESULT: OK` / `RESULT: FAILED`). It compiles the ECS plus the fixed lane
 with the same `tsc` the build uses into `node_modules/.cache/voxelengine-ecs-check` (git-ignored, so
 it writes nothing tracked; Node still resolves the real `three`), then asserts what no type-checker
@@ -785,7 +829,17 @@ can:
   batch grouping of all three lanes (the report above), a declared order holding in either registration
   order, every `dom.*` writer in the ui lane,
   `renderUi()` running the barrier + the ui lane and NOTHING else, the undeclared-dependency error,
-  and diagnostics declaring every external target it really touches.
+  and diagnostics declaring every external target it really touches;
+- **the presentation state** — that the objects the world owns are RESOURCES, that the composition root
+  inserts every one of them, that no system takes one as an argument any more, and that the LAST
+  module-level state went the same way: the icon baker's renderer and caches (ICON_BAKE — and the
+  inventory reading the bake's result from the cache instead of writing a widget from a `.then`
+  continuation), the shared chunk material (CHUNK_MATERIAL), the raw-input transport counters
+  (`InputDiagnostics.raw`) and the LOOK counters (`InputDiagnostics.look`, with `player.input` keeping
+  no private copy), the UI mount root (`createUiMount()`, no longer a stage div built at IMPORT time by
+  `ui/uiscale.ts`), the widget tree's creation counter (UI_ORDER, inserted before the first spawn) and
+  the block-outline mesh (BLOCK_OUTLINE + `block.outline`, with the fixed lane mentioning no wireframe
+  at all and writing TARGET_HIT instead).
 
 Run it after touching the ECS, a component, a command, a resource, a recipe, a stage or any system's
 access declaration. Some checks read SOURCE TEXT, so they strip comments first: a comment that
@@ -833,8 +887,6 @@ When work lands, move the entry here and delete it there.
   CHUNK_Y_COUNT = 32 * 32 * 8 = 8192 chunks. A uniform chunk allocates NO array at all (see
   voxel/chunk.ts), so real memory is only the chunks a player actually edited — but raising the
   period, or making generation non-uniform, needs eviction first.
-- `ecs/systems/interaction.ts` writes the outline transform (three.js presentation state) from
-  the FIXED lane. Deliberate: it is the same tick that produced the raycast result.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
   world. Raise RENDER_RADIUS_CHUNKS (ecs/systems/chunkstream.ts) to push it out, or reintroduce a
   `scene.fog` — those two values were previously tuned as a pair.

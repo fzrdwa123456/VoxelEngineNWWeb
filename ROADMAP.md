@@ -39,7 +39,7 @@ voxel world** and nothing else in it yet.
 | Break (LMB) / place (RMB) through a 6-block voxel raycast, with a white target outline | `src/ecs/systems/interaction.ts`, `src/voxel/raycast.ts` |
 | Three movement modes (walk / creative fly / spectator), fixed 120 Hz step + render interpolation | `src/ecs/systems/movement.ts`, `src/rendering/camera-view.ts` |
 | Pointer lock, raw mouse input fallback, keybinds, inventory UI, 3 languages, settings | `src/platform/`, `src/ui/` |
-| **Input is a scheduled system** (fixed lane, first): the DOM listeners decide every guard at EVENT time and queue a named INTENT (`key`/`look`/`motion`); `step()` writes CONTROL/VIEW/MOTION, so no gameplay component is written outside a system run and the schedule orders input against the controller/movement/collision that read it. It also OWNS the mouse-button listeners (a button bound to "inventory" publishes an edge and nothing else) and the 8 ms raw-input poll (`startRawPolling`, called once by `main.ts`) | `src/ecs/systems/input.ts` (`INPUT_ACCESS`) |
+| **Input is a scheduled system** (fixed lane, first): the DOM listeners decide every guard at EVENT time and queue a named INTENT (`key`/`look`/`motion`); `step()` writes CONTROL/VIEW/MOTION, so no gameplay component is written outside a system run and the schedule orders input against the controller/movement/collision that read it. It also OWNS the mouse-button listeners (a button bound to "inventory" publishes an edge and nothing else). The raw-input deltas arrive per event and are applied ONCE PER FRAME (`frameLook`, no timer at all — §5.2 P1.11), and their transport/LOOK counters live in the `INPUT_DIAGNOSTICS` resource, which this system also prints from (§5.2 P1.12) | `src/ecs/systems/input.ts` (`INPUT_ACCESS`), `src/platform/rawinput.ts` |
 | A **pure ECS**: generation-checked entity handles, SOA typed-array columns, cached sparse-set queries, resources, deferred commands, a three-stage schedule whose declared order is verified at boot | `src/ecs/core/`, `src/ecs/World.ts` |
 | The schedule also **derives parallelism**: systems declare access (components + external targets), `world.batchesOf(stage)` returns the groups that may run in any order, a stage whose systems touch the same thing without a declared edge throws at boot, and the grouping is logged as `SCHEDULE ...` | `src/ecs/core/schedule.ts`, `world.scheduleReport()` |
 | The player's ENTIRE state is components — position, previous position, orientation, buffered view deltas, motion, control, body box, reach, interaction cooldowns, inventory (stacks + selection) and a zero-size PLAYER marker; its DOM view reconciles from that data once per frame | `src/ecs/components/Player.ts`, `src/ui/inventory.ts` |
@@ -422,8 +422,8 @@ What is left is the two smaller buckets below.
 event-time listeners (its STATE is the INPUT_TIMING resource — §5.2 P1.8), and so does the BIND GESTURE's
 event-time half: the click shield's two arm paths, the drag's mousedown/mouseup, the wheel block and the
 key-capture handler (§5.2 P1.9) — every one of them a decision that can only be taken inside the event that
-must be cancelled; what a system BUILDS for itself — the block outline, a baked icon canvas — is its own
-object rather than a resource; the
+must be cancelled; per-CALL scratch an operation builds and throws away (a bake's canvas, its render
+target and its temporary scene) and the DOM elements of a VIEW (the rubber band's SVG); the
 config modules own the FILES while their VALUES live in resources — and
 the global style applies itself nowhere any more (`fonts`/`uiscale` publish the font pair and the root
 font size, and the RECONCILER writes them, diffed per frame); `windowMode`/`vsyncDisabled` stay
@@ -434,6 +434,12 @@ choices, not leftovers.
 The rows that used to sit here are gone: the three.js/GPU/DOM objects, `VoxelWorld` and the chunk mesh
 cache are RESOURCES (§5.2 P1.7), the input race guards' state is too (P1.8), and the window listener, the
 menu background, the diagnostics dependencies and the view's DOM listeners went the same way (P1.9).
+The LAST four rows — "the block outline and a baked icon canvas are a system's own object", "the widget
+order counter is module state", "the UI stage is mounted at import by a config module" and "the fixed lane
+writes the wireframe" — went in §5.2 P1.12: ICON_BAKE, CHUNK_MATERIAL, BLOCK_OUTLINE / `block.outline`,
+UI_ORDER, `createUiMount()` and the two counter blocks of INPUT_DIAGNOSTICS. The rule that came out of it
+is in AGENTS.md: anything that OUTLIVES the call that made it is a resource, even when the system builds
+it lazily; only per-call scratch and a view's own elements stay outside.
 
 **C. Inert leftovers** (dead code and stale comments, NOT bugs — §4): the main menu's world-type
 panel, and the unused `centerCursor` export in `platform/shell.ts` (the live one is in `platform/rawinput.ts`;
@@ -460,10 +466,10 @@ panel, and the unused `centerCursor` export in `platform/shell.ts` (the live one
 | Global sparse-set columns, not archetypes | structural changes must never move another entity's data; archetype locality is unmeasurable at 1 entity and is a benchmark-first change |
 | No multi-core executor — only COMPUTED batches | iron rule 4, and the blockers are the data model (record components are JS objects a Worker can only clone; the voxel Map is not shareable), not the schedule. The declared access sets, the boot-time dependency check and `scheduleReport()` ship; see §3.9 for the prerequisites |
 | ECS column memory is never shrunk | `grow()` doubles and `despawn` keeps the allocation, so a burst of entities permanently raises the floor. Bounded (a few 100 KB) and simpler than reference counting |
-| Camera, HUD, renderer and perf samplers stay constructor dependencies, never components | they are GPU/DOM objects with methods, and component data must be plain; a component would be a copy that has to be re-synced every frame |
+| Camera, HUD, renderer and perf samplers are RESOURCES, never components | they are GPU/DOM objects with methods, and component data must be plain; a component would be a copy that has to be re-synced every frame. Same for the UI mount root, the chunk-mesh cache, the chunk material, the icon baker and the target wireframe (§5.2 P1.7/P1.12) |
 | `VoxelWorld` stays a RESOURCE, never a component | it is ONE world, not per-entity state. It is also written from both lanes (fixed: interaction, render: chunkstream), and "one owner, nameable" is exactly what a resource buys |
-| Pointer-lock / raw-input timing stays system fields (plus the INPUT_STATE resource) | a keyboard and a lock are DEVICE state, not entity state. Moving those fields is a rule-3 job (replaying the races), not a purity job |
-| `chunkstream`'s mesh cache stays system state | GPU resources and meshes are not entity data |
+| The pointer-lock / raw-input LOGIC stays in the event-time listeners | a keyboard and a lock are DEVICE state, not entity state, and the decisions are only correct inside the event that must be cancelled (iron rule 3). Its STATE is the INPUT_TIMING resource (§5.2 P1.8), and the counters are INPUT_DIAGNOSTICS (P1.12) |
+| `chunkstream` keeps its window bookkeeping as system state | the wanted set and the last column are derived per frame; the MESH CACHE is the CHUNK_MESHES resource (§5.2 P1.7) and the material the CHUNK_MATERIAL one (P1.12) |
 | `PLAYER` is a zero-size marker (`defineComponent("player", {})`) | it asserts membership; giving it a field would invent data nothing reads |
 | No generic `Bundle`/`Prefab` type | `attachMovable`/`spawnMovable`/`spawnPlayer` ARE the composition point, and the per-system queries stay exact instead of being widened to a shared bundle. A bundle abstraction earns its place when a second kind of prefab appears (a dropped item with physics but no control frame, say) |
 | An entity missing `PREV_POSITION` is skipped by collision, not swept | the sweep needs an origin it can trust. Skipping makes the failure loud (the entity falls through the world) instead of subtle (it jitters and lags behind a stale origin). `attachMovable` attaches it, so the only way to hit this is to hand-roll an entity |
@@ -658,6 +664,71 @@ Still outstanding:
   Two findings from that instrumentation are worth keeping in mind: the LL keyboard hook has NEVER fired
   (`HOOKPROBE seen=0`, so the device-layer listeners are the only protection against the menu-key gesture),
   and the cursor sentinel needs no correction in a steady game (`cursorFix=0`).
+- **P1.12 — the tail of the presentation state, and the last lane crossing the wrong way.** `DONE` in
+  seven parts, all of them the same shape: state that belonged to ONE world was module-level or a
+  system's private field, and one of them had a lane boundary crossed by an OBJECT instead of by data.
+  (1) THE ITEM-ICON BAKE is the `ICON_BAKE` resource (presentation.ts): the second, offscreen
+  `WebGPURenderer`, its in-flight init and the cache/pending Maps were four module-level `let`s in
+  `rendering/blockicons.ts`. The functions take that state, so the baker is a pure operation on world
+  data — and the promise-shaped `getBlockIcon()` is GONE, because its `.then` continuation wrote the
+  slot's `UI_IMAGE` component from OUTSIDE any lane (a view updated between frames, deciding on its own
+  when the frame's data changed). `peekBlockIcon(bake, …)` stays the synchronous reader the inventory
+  draws from; `requestBlockIcon(bake, …)` starts a bake and returns at once; the inventory remembers
+  WHICH slots are waiting and re-paints a slot the frame the bake lands
+  (`collectFinishedBakes`), and stops waiting when a bake FAILED — otherwise the checker would either
+  stay forever or be re-requested every frame.
+  (2) THE SHARED CHUNK MATERIAL is `CHUNK_MATERIAL`: `rendering/chunkmesh.ts` had a module-level
+  `let sharedMaterial`, i.e. one GPU object per PROCESS shared by every world, created lazily because the
+  pack chain must be installed before the checker texture resolves. `getChunkMaterial(state)` takes the
+  resource.
+  (3) THE RAW-INPUT TRANSPORT COUNTERS are `InputDiagnostics.raw` (`evCount`/`gapMax`/`lastArrive`/
+  `minOffset`/`backlogSum`/`backlogMax`): they were module state in `platform/rawinput.ts`, which is why
+  the module ALSO had to own the formatting of the `RAWLAG` line. `startRawInput(onDelta, raw)` is
+  handed the resource and the input system prints both `LOOK` and `RAWLAG` from one window — the device
+  layer now keeps no state and writes no log.
+  (4) THE LOOK COUNTERS are `InputDiagnostics.look` (the eleven per-second counters plus `logAt`), so
+  `player.input` keeps no private diagnostics; `takeLookFrameMeter()` reads AND clears the resource, and
+  the fields are readable by a test, a probe and the gate.
+  (5) THE WIDGET TREE'S CREATION COUNTER is `UI_ORDER`: `nextOrder` was a module-level `let` in
+  `ecs/ui/widgets.ts`, i.e. shared by EVERY World — a second world (the gate's own) continued the first
+  one's numbering and two trees built in different worlds could not be compared. `spawnUiNode` draws
+  `UI_TREE.order` from the resource, which the composition root inserts before the first spawn.
+  (6) THE UI MOUNT ROOT is created by `createUiMount()` and inserted as `UI_MOUNT`, like the canvas host.
+  `ui/uiscale.ts` used to create the stage div and append it to `document.body` at IMPORT time — a DOM
+  side effect of a CONFIG module, on the element the whole widget layer hangs off (the P3 entry below
+  had this on its list; this is the half of it that is done).
+  (7) THE BLOCK TARGET OUTLINE crosses the lane boundary as DATA. `BlockInteractionSystem` owned a
+  `THREE.LineSegments` and set its transform in `step()`, so the FIXED lane wrote a three.js object
+  (`writesExternal: ["voxelBlocks", "outline"]` on a sim-lane system) — the last such crossing in the
+  engine. The hit is the `TARGET_HIT` component now (active + x/y/z, on the local player only) and
+  `block.outline` (`rendering/outline.ts`, RENDER lane) positions the `BLOCK_OUTLINE` mesh. The mesh is
+  built by the composition root because a three.js object is wiring. The schedule gained one render-lane
+  system and is unchanged otherwise: `block.outline` shares the producers' batch — it reads a component
+  none of them touch and writes a target of its own — while `renderer.draw` still follows the two that
+  feed the scene. Render lane: **5 systems, 2 batches, 6 parallel pairs**.
+  (Eight rows in `AGENTS.md` moved with this pass: the presentation-resource list, the
+  `interaction.ts` bullet, the `rendering/` bullet, the render-lane diagram, the SCHEDULE report, the
+  player's component list, the "a GPU/DOM object is a RESOURCE" convention and the gate's own group
+  count; the "interaction writes the outline from the fixed lane" KNOWN GAP is deleted, not reworded.)
+- **P1.13 — a rebind capture owns ESC again (a regression the P1.9 relocation introduced).** `FIXED`.
+  Reported: click an action row in the key bind panel (that arms a rebind capture), then press ESC — the
+  action is unbound (correct) AND the settings panel walks one level back (wrong). The NW.js build did
+  only the first: its capture handler was a MODULE-LEVEL `document` keydown in `ui/menu.ts`, so it was
+  registered during main.ts's import phase — BEFORE `new PlayerInputSystem(...)` — and its
+  `stopImmediatePropagation()` therefore kept the ESC out of `KEY_EVENTS` entirely, so `ui.navigation`
+  never saw it. P1.9 moved those five listeners into `platform/bind-gesture.ts`, mounted by
+  `bindKeybindDrag()` from main.ts's BODY — i.e. AFTER the input system's constructor — which inverted the
+  order and made the suppression a no-op (the edge is already in the log; a lane consumer cannot be
+  stopped). P1.11 hit the same trap for the DRAG case and fixed it in the lane (`dragging()` +
+  `cancelDrag`, with a comment in bind-gesture.ts saying exactly why), but the CAPTURE case kept relying on
+  the lost suppression. That shape does not transplant: the capture handler calls `endCapture()`
+  SYNCHRONOUSLY, so by the time the ui lane drains the log `capturing()` reads false — the only moment the
+  answer is still true is the event itself. Fix (one line, in `ecs/systems/input.ts::onKeyDown`):
+  `if (ev.code === "Escape" && isCapturing()) return;` — ESC is not published and not queued while a
+  capture is armed, so the capture handler unbinds and nothing else reacts. Only ESC is gated: every other
+  key must keep reaching the log (ui.navigation's inventory/digit branches gate on `capturing()`
+  themselves, and TAB must stay BINDABLE). `check:ecs`'s "the device handlers only QUEUE" group now asserts
+  both halves: ESC IS published with no capture armed, and publishes NOTHING while one is.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `ui/inventory.ts`. The per-entity capabilities that used to be
@@ -673,10 +744,17 @@ Still outstanding:
   writers inside the systems (movement's gravity, input's jump impulse, collision's contact zeroing)
   — that is legitimate physics, but a read-only view would make "who may write" checkable.
   TypeScript has no borrow checker, so a read-only interface type is the strongest available form.
-- **P3 — remove import-time side effects.** `ui/i18n.ts` reads the filesystem at import;
-  `ui/uiscale.ts` mounts DOM at import; `ui/menu.ts` registers six document listeners at import
-  (and their relative order is load-bearing). Convert to explicit `init*()` calls from `main.ts`.
-  Also converge `gameRoot` (currently derived twice: `platform/shell.ts` and `rendering/textures.ts`).
+- **P3 — remove import-time side effects.** `ui/i18n.ts` reads the filesystem at import. `PARTLY DONE`:
+  `ui/uiscale.ts` no longer mounts DOM at import (the UI stage is `createUiMount()` + UI_MOUNT — §5.2
+  P1.12), and `ui/menu.ts` no longer registers its six document listeners at import (they are
+  `platform/bind-gesture.ts`'s, mounted by `bindKeybindDrag()` — §5.2 P1.9). **The parenthetical that used
+  to sit here was RIGHT, and P1.13 is the bill for it**: "their relative order is load-bearing" — when
+  those listeners were installed at IMPORT time they ran before the input system's own listeners and could
+  suppress an ESC out of the edge log; mounted from main.ts's body they run after it, which silently broke
+  ESC during a rebind capture. The lesson is that a listener whose SEMANTICS depend on being first is
+  exactly as fragile as the remaining import-time read, so the fix moved the decision to the event itself
+  rather than restoring the order. Still to do: explicit `init*()` calls, and
+  `gameRoot` (currently derived twice: `platform/shell.ts` and `rendering/textures.ts`).
 - **P4 — high risk, needs in-game testing.** `ui/menu.ts`'s panel state machine and the key bind
   gesture's ARM PATHS (the click shield + capture-free drag + physical capture, which are
   click-synthesis timing, not data). The gesture's STATE and the panels' rendering are ECS now

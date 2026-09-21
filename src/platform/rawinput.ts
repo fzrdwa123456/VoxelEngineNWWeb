@@ -21,6 +21,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import type { RawTransportCounters } from "../ecs/resources";
 import { logDebug } from "./shell";
 
 export interface RawInputHandle {
@@ -63,14 +64,11 @@ let available = false;
  *                 **minimum offset is the baseline**: offset = performance.now() - payload.t, whose
  *                 running minimum ≈ the pure transport delay; the current offset minus that is "how much
  *                 longer it was held than in the smoothest case". That is a direct measurement of the
- *                 backlog in milliseconds. */
-let evCount = 0;
-let gapMax = 0;
-let lastArrive = 0;
-let minOffset = Number.POSITIVE_INFINITY;
-let backlogSum = 0;
-let backlogMax = 0;
-let lagAt = 0;
+ *                 backlog in milliseconds.
+ *
+ *  THE COUNTERS ARE A RESOURCE now (`InputDiagnostics.raw`, ecs/resources.ts): the object is handed to
+ *  `startRawInput` by the composition root, and the input system formats the line once a second — so this
+ *  module keeps no state of its own and no longer writes to the log. */
 
 /** ===== Plan B: the ESC that Rust's hook swallows =====
  *
@@ -106,26 +104,32 @@ function installEscBridge(): void {
  *  **This is no longer "accumulate into our own hands and wait for an 8ms timer to poll"**: that timer
  *  was the culprit behind "the view is not smooth while a key is held" — Chromium schedules key input
  *  tasks ahead of timer tasks, so holding a key (auto-repeat ~30/s) squeezed the 8ms sampling into
- *  9~12ms buckets and the share per frame jumped between 0/1/2/3 (measured with the `pf` probe). */
-export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInputHandle {
+ *  9~12ms buckets and the sample count per frame jumped between 0/1/2/3 (measured with the `pf` probe).
+ *
+ *  `raw` is the `InputDiagnostics.raw` counter object (a RESOURCE): this listener is its only writer and
+ *  the input system prints it once a second, so the counters have an owner and this module keeps none. */
+export function startRawInput(
+  onDelta: (dx: number, dy: number) => void,
+  raw: RawTransportCounters,
+): RawInputHandle {
   // Install the listener before starting collection: the other order loses the first few milliseconds of
   // deltas
   void listen<{ dx: number; dy: number; t?: number }>("raw-input", (event) => {
     const now = performance.now();
     const { dx, dy } = event.payload;
-    evCount++;
-    if (lastArrive > 0) {
-      const gap = now - lastArrive;
-      if (gap > gapMax) gapMax = gap;
+    raw.evCount++;
+    if (raw.lastArrive > 0) {
+      const gap = now - raw.lastArrive;
+      if (gap > raw.gapMax) raw.gapMax = gap;
     }
-    lastArrive = now;
+    raw.lastArrive = now;
     const t = event.payload.t;
     if (typeof t === "number") {
       const offset = now - t;
-      if (offset < minOffset) minOffset = offset;
-      const backlog = offset - minOffset;
-      backlogSum += backlog;
-      if (backlog > backlogMax) backlogMax = backlog;
+      if (offset < raw.minOffset) raw.minOffset = offset;
+      const backlog = offset - raw.minOffset;
+      raw.backlogSum += backlog;
+      if (backlog > raw.backlogMax) raw.backlogMax = backlog;
     }
     onDelta(dx, dy);
   });
@@ -165,27 +169,6 @@ export function startRawInput(onDelta: (dx: number, dy: number) => void): RawInp
     },
     ready,
   };
-}
-
-/** The diagnostic text of the one RAWLAG line per second (the caller = the frame probe, which writes it
- *  into debug.log); returns null before a full second has passed. This line used to be printed from the
- *  8ms poll(), and that timer has been deleted (see the note at startRawInput). */
-export function rawLagLine(): string | null {
-  const now = performance.now();
-  if (lagAt === 0) {
-    lagAt = now;
-    return null;
-  }
-  if (now - lagAt < 1000) return null;
-  const line =
-    `RAWLAG ev=${evCount}/s gapMax=${gapMax.toFixed(1)}ms ` +
-    `backlogAvg=${(evCount > 0 ? backlogSum / evCount : 0).toFixed(2)}ms backlogMax=${backlogMax.toFixed(1)}ms`;
-  lagAt = now;
-  evCount = 0;
-  gapMax = 0;
-  backlogSum = 0;
-  backlogMax = 0;
-  return line;
 }
 
 /** Diagnostics: how many WM_INPUT events arrived and how many absolute-coordinate events were dropped

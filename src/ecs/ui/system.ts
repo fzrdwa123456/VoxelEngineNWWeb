@@ -99,10 +99,10 @@ export interface UiHit {
 export class UiRenderSystem {
   private readonly theme: UiTheme;
   private readonly actions: ReadonlyMap<string, UiActionHandler>;
-  /** Where root widgets are mounted: the UI_MOUNT resource (ui/uiscale.ts's `uiStage` element in the
-   *  real game). A RESOURCE rather than a dependency (ecs/presentation.ts) — the mount root is where
-   *  every widget lives, i.e. world state, and resolving it here keeps the element out of the wiring
-   *  arguments. Assigned in the constructor body (iron rule 6). */
+  /** Where root widgets are mounted: the UI_MOUNT resource, the stage element the composition root
+   *  creates (`ecs/presentation.ts::createUiMount()`). A RESOURCE rather than a dependency — the mount
+   *  root is where every widget lives, i.e. world state, and resolving it here keeps the element out of
+   *  the wiring arguments. Assigned in the constructor body (iron rule 6). */
   private readonly mountRoot: HTMLElement;
   private readonly elements = new Map<Entity, HTMLElement>();
   private readonly entityOf = new Map<HTMLElement, Entity>();
