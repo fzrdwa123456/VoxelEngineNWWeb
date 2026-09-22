@@ -2484,16 +2484,23 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
       `${file} resolves ${token}`,
     );
   }
-  // …and the constructor signatures lost their presentation arguments.
+  // …and the constructor signatures lost their presentation arguments. The systems are constructed by the
+  // PLUGIN factories since P1.18b, so the signatures are checked against the root PLUS those files.
+  const construction = [
+    main,
+    stripComments(readSource("src/plugins/player/index.ts")),
+    stripComments(readSource("src/plugins/render/index.ts")),
+    stripComments(readSource("src/plugins/diagnostics/index.ts")),
+  ].join("\n");
   for (const [what, needle] of [
-    ["the camera view", /new CameraViewSystem\(world\)/],
-    ["the chunk stream", /new ChunkStreamSystem\(world, \{ createGeometry:/],
-    ["the device layer", /new PlayerInputSystem\(world, logDebug, inWorld, \{ capture: captureMouse/],
+    ["the camera view", /new CameraViewSystem\(w\.world\)/],
+    ["the chunk stream", /new ChunkStreamSystem\(w\.world, w\.mesh\)/],
+    ["the device layer", /new PlayerInputSystem\(w\.world, w\.log, w\.inWorld, w\.mouse\)/],
     ["the reconciler", /new UiRenderSystem\(world, \{\s*translate:/],
   ]) {
-    assert(needle.test(main), `${what} takes no presentation object any more`);
+    assert(needle.test(construction), `${what} takes no presentation object any more`);
   }
-  const diagDeps = /new DiagnosticsSystem\(([^)]*)\)/.exec(main);
+  const diagDeps = /new DiagnosticsSystem\(([^)]*)\)/.exec(readSource("src/plugins/diagnostics/index.ts"));
   assert(diagDeps !== null, "diagnostics is constructed");
   equal(diagDeps[1].trim(), "world", "diagnostics takes NOTHING but the world (a view callback and another "
     + "system's queues used to be constructor arguments — they are resources now)");
@@ -2629,7 +2636,8 @@ check("the LAST module-level state is a resource too (icons, material, counters,
     && O.OUTLINE_ACCESS.writesExternal.includes("blockOutline"), "the painter declares its target");
   assert(Array.isArray(O.OUTLINE_ACCESS?.reads) && O.OUTLINE_ACCESS.reads.includes(C.TARGET_HIT),
     "…and reads TARGET_HIT");
-  assert(/new BlockOutlineSystem\(world\)/.test(main), "the render lane constructs it with the world only");
+  assert(/new BlockOutlineSystem\(w\.world\)/.test(readSource("src/plugins/render/index.ts")),
+    "the render PLUGIN constructs it with the world only");
 });
 
 check("the input race guards' state is a RESOURCE (and the logic did not move)", () => {
@@ -3468,8 +3476,8 @@ check("the plugin system: extension points, the registry, the install and the ma
   //    leave the schedule (the manifest's veto is implemented by exactly that check).
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   const known = [...bootSrc.matchAll(/contributeSystem\("([^"]+)"/g)].map((m) => m[1]);
-  equal([...new Set(known)].sort().join(","), "diagnostics,player,render,ui,world",
-    "five of the six plugins own systems (input contributes data only), and they are the expected ones");
+  equal([...new Set(known)].sort().join(","), "diagnostics,player,render,ui",
+    "four of the six plugins own systems (world and input contribute data only), and they are the expected ones");
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }

@@ -74,9 +74,9 @@ import { installPlugins } from "../core/plugin/lifecycle";
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { worldPlugin } from "../plugins/world";
-import { playerPlugin } from "../plugins/player";
-import { renderPlugin } from "../plugins/render";
-import { diagnosticsPlugin } from "../plugins/diagnostics";
+import { createPlayerSystems, playerPlugin } from "../plugins/player";
+import { createRenderSystems, renderPlugin } from "../plugins/render";
+import { createDiagnosticsSystems, diagnosticsPlugin } from "../plugins/diagnostics";
 import { uiPlugin } from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
 
@@ -422,13 +422,16 @@ const loadingScreen = new LoadingScreen(world);
 // The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
 // so no system is handed one. See ecs/presentation.ts.
-const input = new PlayerInputSystem(world, logDebug, inWorld, { capture: captureMouse, release: releaseMouse });
-const controller = new PlayerControllerSystem(world);
-const movement = new PlayerMovementSystem(world);
-const collision = new CollisionSystem(world);
-const cameraView = new CameraViewSystem(world);
-const snapshot = new PositionSnapshotSystem(world);
-const chunkStream = new ChunkStreamSystem(world, { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial });
+const { input, snapshot, controller, movement, collision, interaction } = createPlayerSystems({
+  world,
+  log: logDebug,
+  inWorld,
+  mouse: { capture: captureMouse, release: releaseMouse },
+});
+const { chunkStream, cameraView, outline, menuBg } = createRenderSystems({
+  world,
+  mesh: { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial },
+});
 // The reconciler that owns every widget's DOM element. It mounts roots on the world's UI_MOUNT resource
 // (the same element the hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never
 // imports src/ui/.
@@ -489,12 +492,9 @@ bindKeybindDrag({
 // itself, so the hand you see and the hand that places a block cannot disagree. It writes the local
 // player's TARGET_HIT component; `block.outline` (render lane) draws the wireframe from it — the mesh
 // was this system's field until the refactor, which is why nothing here touches the scene.
-const interaction = new BlockInteractionSystem(world);
-const outline = new BlockOutlineSystem(world);
-const diagnostics = new DiagnosticsSystem(world);
+const { diagnostics } = createDiagnosticsSystems(world);
 // The main-menu background step (deliberately not registered in a lane — the MENU frame is its only
 // caller, see rendering/menu-background.ts).
-const menuBg = new MenuBackgroundSystem(world);
 
 // Inventory VIEW (toggled with E; freezes the PLAYER and releases the mouse while open). It owns NO
 // game state: the stacks and the selection are the player's INVENTORY component, and this object only
@@ -607,7 +607,7 @@ contributeSystem("render", {
   ...CAMERA_VIEW_ACCESS,
   run: (ctx) => cameraView.render(ctx.alpha),
 });
-contributeSystem("world", {
+contributeSystem("render", {
   name: "chunk.stream",
   stage: "render",
   ...CHUNK_STREAM_ACCESS,
