@@ -3476,8 +3476,10 @@ check("the plugin system: extension points, the registry, the install and the ma
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
   equal(countOf(bootSrc, /world\.addSystem\(\{/g), 0, "no registration bypasses the registry");
 
-  // 6. The layer debt is a RATCHET: closing the cross-layer imports is P1.18b's job, but the count may  //    not grow in the meantime. (plugin -> host reaches into the platform; plugin -> plugin reaches into
-  //    a sibling's data, which the dependency declarations will replace.)
+  // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
+  //    declared graph must be acyclic — otherwise the install order it implies does not exist. Reading
+  //    into `host/` is not allowed either; the handful of reads that remain are PINNED, so the debt can
+  //    shrink but never grow while P1.18b's injection half is unfinished.
   const pluginFiles = [];
   const collect = (dir) => {
     for (const e of require("node:fs").readdirSync(dir, { withFileTypes: true })) {
@@ -3489,23 +3491,46 @@ check("the plugin system: extension points, the registry, the install and the ma
   collect(path.join(ROOT, "src", "plugins"));
   /** Which plugin does a source path belong to? (…/src/plugins/<id>/…) */
   const pluginOf = (p) => (/\/src\/plugins\/([^/]+)\//.exec(p.replace(/\\/g, "/")) ?? [])[1];
+  /** What a plugin DECLARED it depends on, read from its own descriptor. */
+  const depsOf = (id) => {
+    const src = stripComments(readSource(`src/plugins/${id}/index.ts`));
+    const m = /deps:\s*\[([^\]]*)\]/.exec(src);
+    return m ? m[1].split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean) : [];
+  };
   let toHost = 0;
-  let toPlugin = 0;
+  const undeclared = [];
   for (const file of pluginFiles) {
-    const dir = path.dirname(file).replace(/\\/g, "/");
-    const ownPlugin = pluginOf(dir);
-    for (const line of readSource(path.relative(ROOT, file).replace(/\\/g, "/")).split("\n")) {
+    const rel = path.relative(ROOT, file).replace(/\\/g, "/");
+    const own = pluginOf(rel);
+    for (const line of readSource(rel).split("\n")) {
       if (!/^\s*import/.test(line)) continue;
-      if (/from "[^"]*host\//.test(line)) toHost++;
+      if (/from "[^"]*host\//.test(line)) {
+        toHost++;
+        continue;
+      }
       const spec = /from "(\.[^"]*)"/.exec(line);
       if (!spec) continue;
-      const target = path.posix.normalize(path.posix.join(dir, spec[1]));
-      const targetPlugin = pluginOf(target);
-      if (targetPlugin && targetPlugin !== ownPlugin) toPlugin++;
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(rel), spec[1]));
+      const other = pluginOf(target);
+      if (other && other !== own && !depsOf(own).includes(other)) {
+        undeclared.push(`${rel} -> ${other} (not in deps: [${depsOf(own).join(", ")}])`);
+      }
     }
   }
-  assert(toHost <= 5, `the plugin -> host import debt must not grow (now ${toHost}, pinned at 5)`);
-  assert(toPlugin <= 16, `the plugin -> plugin import debt must not grow (now ${toPlugin}, pinned at 16)`);
+  equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
+  assert(toHost <= 5, `plugin -> host reads may not grow (now ${toHost}, pinned at 5)`);
+  const unresolved = new Set(["world", "player", "render", "diagnostics", "ui", "input"]);
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const id of [...unresolved]) {
+      if (depsOf(id).every((dep) => !unresolved.has(dep))) {
+        unresolved.delete(id);
+        progressed = true;
+      }
+    }
+  }
+  equal([...unresolved].join(","), "", "the real plugin dependency graph is acyclic (an install order exists)");
 });
 
 // ===== report =====

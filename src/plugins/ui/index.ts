@@ -40,7 +40,7 @@ import {
 
 export const uiPlugin = definePlugin({
   id: "ui",
-  deps: ["player", "render"],
+  deps: ["player", "input"],
   setup(api) {
     api.contribute(SLOT_COMPONENTS, [
       UI_TREE, UI_TEXT, UI_LOOK, UI_STATE, UI_ACTION, UI_INPUT, UI_LAYOUT, UI_IMAGE, UI_TIP, UI_BIND,

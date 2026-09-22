@@ -9,6 +9,7 @@
 // that has a previous position; this system is purely a CONSUMER of it.
 import * as THREE from "three/webgpu";
 import { ORIENTATION, POSITION, PREV_POSITION } from "../../player/components";
+import { viewDirection } from "../../../shared/math/view";
 import { CAMERA3D } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VIEWPORT, type ViewportState } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
@@ -27,25 +28,6 @@ const tmpView = new THREE.Vector3();
 const tmpUp = new THREE.Vector3();
 const tmpZ = new THREE.Vector3();
 const tmpMat = new THREE.Matrix4();
-/** Scratch for viewDirection() — kept separate from tmpRight so a caller can never clobber the
- *  scratch vector render() is in the middle of using. */
-const tmpTiltRight = new THREE.Vector3();
-
-/** The view direction for an orientation basis: the horizontal heading tilted by `pitch` around
- *  `right` (= fwd × up, i.e. the local horizon).
- *  SINGLE SOURCE OF TRUTH — both the camera below and the block-interaction raycast use this, so
- *  the crosshair and what you actually see can never disagree.
- *  Takes plain vectors instead of an orientation record so the ECS can store orientation as six
- *  numbers; callers fill the scratch vectors from the ORIENTATION columns. */
-export function viewDirection(
-  fwd: THREE.Vector3,
-  up: THREE.Vector3,
-  pitch: number,
-  out: THREE.Vector3,
-): THREE.Vector3 {
-  tmpTiltRight.crossVectors(fwd, up).normalize();
-  return out.copy(fwd).applyAxisAngle(tmpTiltRight, pitch).normalize();
-}
 
 export class CameraViewSystem {
   private readonly index: number;

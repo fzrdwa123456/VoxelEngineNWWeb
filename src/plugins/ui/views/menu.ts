@@ -66,7 +66,7 @@ import {
   type KeybindGesture,
   type KeybindKeycap,
 } from "../../../data/globals/keybind-gesture";
-import type { UiHit } from "../systems/reconcile";
+import type { UiHit } from "../../../shared/types/ui";
 import { UI_THEME } from "../../../data/assets/theme";
 import {
   setUiSelected,

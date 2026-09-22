@@ -34,7 +34,7 @@ import {
 
 export const playerPlugin = definePlugin({
   id: "player",
-  deps: ["world"],
+  deps: ["world", "input"],
   setup(api) {
     api.contribute(SLOT_COMPONENTS, [
       POSITION, PREV_POSITION, ORIENTATION, VIEW, MOTION, CONTROL, BODY, REACH, INTERACTION, INVENTORY,

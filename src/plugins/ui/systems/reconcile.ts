@@ -31,6 +31,7 @@ import { NULL_ENTITY, type SystemAccess, type World } from "../../../core/world"
 import { UI_MOUNT } from "../../../data/globals/gfx";
 import { dispatchUiAction, UI_ACTIONS, type UiActionHandler } from "../../../data/globals/actions";
 import { UI_PAINT, type UiDrawn, type UiPaintState } from "../../../data/globals/paint";
+import type { UiHit } from "../../../shared/types/ui";
 import { recipeStyle, UI_THEME, type UiTheme } from "../../../data/assets/theme";
 import {
   UI_ACTION,
@@ -73,13 +74,9 @@ export interface UiRenderDeps {
  *  resource that holds the values (`ecs/ui/paint.ts`), because the caches are world data now. */
 type Drawn = UiDrawn;
 
-/** A hit-test result: the widget under a point, when it carries an action. Used by interactions that
- *  must ask "what is the cursor over" — the key bind drag being the only one today. */
-export interface UiHit {
-  readonly entity: Entity;
-  readonly action: string;
-  readonly value: string;
-}
+/** The hit-test result shape is SHARED (`shared/types/ui.ts`): the key bind drag, which asks "what is
+ *  under the cursor", lives in the INPUT plugin, and a plugin may not import a sibling for a type. */
+export type { UiHit } from "../../../shared/types/ui";
 
 export class UiRenderSystem {
   private readonly theme: UiTheme;

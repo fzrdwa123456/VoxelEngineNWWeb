@@ -877,6 +877,19 @@ Still outstanding:
   not yet its own file; and the 21 cross-layer imports are pinned by a RATCHET (≤16 plugin→plugin, ≤5
   plugin→host) rather than forbidden. **P1.18b** finishes both: move each system's construction next to
   its plugin, declare the real deps, and turn the ratchet into a direction rule.
+- **P1.18b — the layer rules are enforced, and the shared pieces moved out of the plugins.** `PARTLY DONE`.
+  `check:ecs` no longer counts debt: it now asserts that **a plugin may import a sibling only if it declared
+  it in `deps`** and that the declared graph is ACYCLIC (an import the install order cannot honour would be
+  a boot-time lie), with the five remaining reads into `host/` pinned so they can shrink but never grow.
+  Making that true required moving two things that genuinely crossed a boundary and declaring the rest
+  truthfully: the view direction became `shared/math/view.ts` (its callers are the render camera and the
+  player's block raycast — a plugin-to-plugin import for one pure function is exactly the coupling the
+  rules exist to prevent) and the UI hit-test shape became `shared/types/ui.ts` (the key bind drag in
+  `plugins/input` asks the question the UI plugin answers, and a TYPE must not drag a runtime dependency
+  with it). The six descriptors' `deps` now mirror reality (`input` and `world` first, then `player`, then
+  `ui`, then `render`, then `diagnostics`) instead of the incidental order they had. STILL OPEN: the five
+  `host/` reads should become injected services, and each system's CONSTRUCTION should move out of
+  `boot/main.ts` (it closes over the wiring: the views and the injected hooks) into the plugin that owns it.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

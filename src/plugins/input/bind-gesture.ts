@@ -21,7 +21,7 @@
 // action ids a chip/keycap carries and the hit test that finds one, injected here as callbacks.
 import type { BindAction } from "../../data/globals/binds";
 import type { KeybindGesture, RebindIntent } from "../../data/globals/keybind-gesture";
-import type { UiHit } from "../ui/systems/reconcile";
+import type { UiHit } from "../../shared/types/ui";
 
 export interface BindGestureDeviceDeps {
   /** The gesture's state (the KEYBIND_GESTURE resource; null before wiring) */

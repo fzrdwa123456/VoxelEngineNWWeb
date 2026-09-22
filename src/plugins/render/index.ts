@@ -18,7 +18,7 @@ import {
 
 export const renderPlugin = definePlugin({
   id: "render",
-  deps: ["world"],
+  deps: ["world", "player", "ui"],
   setup(api) {
     api.contribute(SLOT_RESOURCES, [
       SCENE3D, CAMERA3D, RENDERER3D, CANVAS_HOST, CHUNK_MESHES, CHUNK_MATERIAL, BLOCK_OUTLINE,

@@ -40,7 +40,7 @@ import {
   type BlockTypeId,
 } from "../components";
 import { getBind } from "../../input/keybinds";
-import { viewDirection } from "../../render/systems/camera";
+import { viewDirection } from "../../../shared/math/view";
 import { AIR, SOLID } from "../../../data/world/chunk";
 import { raycastVoxel, type RayHit } from "../../../shared/math/raycast";
 import type { VoxelWorld } from "../../../data/world/world";

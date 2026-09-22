@@ -92,13 +92,16 @@ READING THE TREE: `core/` = mechanism, `plugins/` = features (a plugin owns its 
 resources, and every plugin has an `index.ts` that DECLARES them through `definePlugin`), `host/` = the
 outside world, `data/` = values, `shared/` = pure helpers, `boot/` = assembly.
 
-WHAT THE LAYOUT DOES NOT ENFORCE YET (the P1.18b debt, counted by `check:ecs` as a ratchet): **21 imports
-still cross a layer** — 16 between plugins (`ui` -> `player` ×4 and -> `input` ×2, `render` -> `player` ×4
-and -> `ui` ×1, `player` -> `input` ×3 and -> `render` ×1, `input` -> `ui` ×1) and 5 straight into `host/`
-(`ui/views/menu.ts` -> shell + viewport, `ui/systems/inventory.ts` -> blockicons,
-`render/systems/chunk-stream.ts` -> chunkmesh, `player/systems/input.ts` -> mousecapture). Nothing forbids
-them yet; the count is pinned so it cannot grow. P1.18b closes them by making each plugin DECLARE its deps
-and by moving what is genuinely shared into `core/` or `data/`.
+THE LAYER RULES (enforced by `check:ecs` since P1.18b): a plugin may import a SIBLING only if it declared
+it in its own `deps`, and the declared graph must be ACYCLIC — otherwise the install order it implies does
+not exist. Two pieces that genuinely crossed a plugin boundary were moved rather than declared: the view
+direction (`shared/math/view.ts` — the camera and the player's raycast are its two callers) and the UI
+hit-test shape (`shared/types/ui.ts` — the key bind drag in `plugins/input` asks the question the UI plugin
+answers). FIVE reads into `host/` remain and are PINNED, so the debt can shrink but never grow:
+`ui/views/menu.ts` -> shell + viewport, `ui/systems/inventory.ts` -> blockicons,
+`render/systems/chunk-stream.ts` -> chunkmesh, `player/systems/input.ts` -> mousecapture. Turning those into
+injected services — and moving each system's CONSTRUCTION out of `boot/main.ts` and into its plugin — is the
+rest of P1.18b.
 ```
 
 Placement rule of thumb: touches the OS/browser/Tauri → `host/` (Tauri/files/logs → `host/desktop/`,
