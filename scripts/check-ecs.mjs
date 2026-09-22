@@ -1746,10 +1746,14 @@ console.log("\n--- the schedule: access declarations, batches, commutativity ---
 
 /** Rebuild every registration exactly as boot/main.ts declares it: names, stages, edges, access, owner. */
 function registrations() {
-  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
+  // A registration lives either in the root (the ones not yet moved) or in the plugin that owns it, so the
+  //  parser reads both. Same object shape in both places, which is why one regex covers them.
+  const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts"]
+    .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
+    .join("\n");
   // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
   // so the owner is captured too and a test can assert every system belongs to a plugin the manifest knows.
-  const blocks = [...source.matchAll(/(?:world\.addSystem\(|contributeSystem\("([^"]+)",\s*)\{([\s\S]*?)\n\}\);/g)]
+  const blocks = [...source.matchAll(/(?:world\.addSystem\(|contributeSystem\("([^"]+)",\s*|api\.system\()\{([\s\S]*?)\n\s*\}\);/g)]
     .map((m) => ({ owner: m[1] ?? "boot", body: m[2] }));
   if (blocks.length === 0) throw new Error("no system registration blocks found in boot/main.ts");
   const list = (text, key) => {
@@ -3456,13 +3460,15 @@ check("the plugin system: extension points, the registry, the install and the ma
     "the input plugin owns the bind table and the rebind gesture");
   assert(contribute(load("plugins/render/index.js").renderPlugin).list(S.SLOT_RESOURCES).length >= 8,
     "the render plugin owns the GPU resources");
-  assert(contribute(load("plugins/diagnostics/index.js").diagnosticsPlugin).list(S.SLOT_RESOURCES).length === 2,
+  assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
   // …and ALL SIX into ONE registry, exactly as the boot does it. A resource token claimed by two plugins
   // would make the second plugin's setup throw, and the install would then skip that plugin's SYSTEMS —
   // i.e. a duplicate here is not a cosmetic problem, it is "the UI stopped being registered".
   const together = new ExtensionRegistry();
-  for (const id of ["world", "player", "render", "diagnostics", "ui", "input"]) {
+  // diagnostics is skipped here: its setup lives in a factory that needs a real world (it CONSTRUCTS its
+  // system), so its ownership is asserted above instead.
+  for (const id of ["world", "player", "render", "ui", "input"]) {
     load(`plugins/${id}/index.js`)[`${id}Plugin`].setup({
       id,
       world: {},
@@ -3471,7 +3477,7 @@ check("the plugin system: extension points, the registry, the install and the ma
       log: () => {},
     });
   }
-  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,player,render,diagnostics,ui,input",
+  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,player,render,ui,input",
     "the six plugins contribute side by side with no duplicate resource id");
   equal(together.list(S.SLOT_COMPONENTS).length, 22, "…and 22 component schemas come from two plugins");
   equal(together.list(S.SLOT_COMMANDS).length, 6, "…and six commands from two plugins");
@@ -3481,11 +3487,13 @@ check("the plugin system: extension points, the registry, the install and the ma
   //    leave the schedule (the manifest's veto is implemented by exactly that check).
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   const known = [...bootSrc.matchAll(/contributeSystem\("([^"]+)"/g)].map((m) => m[1]);
-  equal([...new Set(known)].sort().join(","), "diagnostics,player,render,ui",
-    "four of the six plugins own systems (world and input contribute data only), and they are the expected ones");
+  equal([...new Set(known)].sort().join(","), "player,render,ui",
+    "the systems still declared in the root belong to player/render/ui (diagnostics has moved its own out)");
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
+  equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,
+    "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
   equal((declared[1].match(/Plugin/g) || []).length, 7, "…and installs all seven");
@@ -3537,9 +3545,11 @@ check("the plugin system: extension points, the registry, the install and the ma
   const contentReg = contribute(load("plugins/content-default/index.js").contentDefaultPlugin);
   equal(contentReg.list(S.SLOT_LANGUAGES).map((l) => l.id).join(","), "zh,en,ja",
     "the content plugin declares the language set (it used to be a literal in the i18n module)");
+  assert(/api\.system\(\{/.test(readSource("src/plugins/diagnostics/index.ts")),
+    "the diagnostics plugin DECLARES its system (api.system), so the root no longer knows its name/stage/access");
   assert(typeof load("plugins/content-default/index.js").contentDefaultPlugin.start === "function",
     "…and it uses the start phase to report what the pack chain delivered");
-  assert(typeof load("plugins/diagnostics/index.js").diagnosticsPlugin.start === "function",
+  assert(typeof load("plugins/diagnostics/index.js").createDiagnosticsPlugin === "function",
     "a REAL plugin uses the lifecycle (diagnostics starts and stops the perf sampler)");
   equal(load("plugins/world/index.js").worldPlugin.start ?? null, null,
     "…while start/stop stay OPTIONAL for a plugin that has nothing to tear down");

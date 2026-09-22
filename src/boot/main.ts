@@ -77,7 +77,7 @@ import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manife
 import { worldPlugin } from "../plugins/world";
 import { createPlayerSystems, playerPlugin } from "../plugins/player";
 import { createRenderSystems, renderPlugin } from "../plugins/render";
-import { createDiagnosticsSystems, diagnosticsPlugin } from "../plugins/diagnostics";
+import { createDiagnosticsPlugin } from "../plugins/diagnostics";
 import { uiPlugin } from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
 import { contentDefaultPlugin } from "../plugins/content-default";
@@ -225,7 +225,7 @@ const PLUGINS = [
   worldPlugin,
   playerPlugin,
   renderPlugin,
-  diagnosticsPlugin,
+  createDiagnosticsPlugin(world),
   uiPlugin,
   inputPlugin,
 ];
@@ -506,7 +506,6 @@ bindKeybindDrag({
 // itself, so the hand you see and the hand that places a block cannot disagree. It writes the local
 // player's TARGET_HIT component; `block.outline` (render lane) draws the wireframe from it — the mesh
 // was this system's field until the refactor, which is why nothing here touches the scene.
-const { diagnostics } = createDiagnosticsSystems(world);
 // The main-menu background step (deliberately not registered in a lane — the MENU frame is its only
 // caller, see rendering/menu-background.ts).
 
@@ -665,12 +664,6 @@ contributeSystem("ui", {
   stage: "ui",
   ...INVENTORY_VIEW_ACCESS,
   run: () => uiInventory.step(),
-});
-contributeSystem("diagnostics", {
-  name: "diagnostics",
-  stage: "render",
-  ...DIAGNOSTICS_ACCESS,
-  run: (ctx) => diagnostics.step(ctx.dt),
 });
 contributeSystem("ui", {
   // Bound widget values (a slider that shows shared state), resolved before the reconciler reads them.

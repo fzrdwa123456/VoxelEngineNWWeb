@@ -7,6 +7,8 @@
 import type { World } from "../world";
 import type { ExtensionPoint } from "../extension/point";
 import type { ExtensionRegistry } from "../extension/registry";
+import { SLOT_SYSTEMS } from "../extension/slots";
+import type { SystemDef } from "../flow/schedule";
 
 export interface PluginApi {
   /** The id of the plugin this api was created for (it is also the owner tag every contribution gets). */
@@ -17,6 +19,9 @@ export interface PluginApi {
   readonly registry: ExtensionRegistry;
   /** File contributions into a slot. Duplicate ids throw (the install catches it and disables the plugin). */
   contribute<T>(point: ExtensionPoint<T>, items: readonly T[]): void;
+  /** Declare ONE system this plugin owns. Sugar over `contribute(SLOT_SYSTEMS, [def])`, and the reason a
+   *  plugin can own its declarations without naming itself: inside its own `setup` it IS the owner. */
+  system(def: SystemDef): void;
   /** One line into debug.log, prefixed with the plugin id by the composition root. */
   log(line: string): void;
 }
@@ -33,6 +38,9 @@ export function createPluginApi(
     registry,
     contribute(point, items) {
       registry.contribute(point, id, items);
+    },
+    system(def) {
+      registry.contribute(SLOT_SYSTEMS, id, [def]);
     },
     log,
   };
