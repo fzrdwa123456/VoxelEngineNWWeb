@@ -2368,7 +2368,10 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
     assert(new RegExp(`insertResource\\(${name},`).test(main), `the composition root inserts ${name}`);
   }
   assert(/loadBinds\(keymap, readSettings\(\)\.keybinds\)/.test(main), "…seeded from settings.json");
-  assert(/loadLang\(locale, readSettings\(\)\.language\)/.test(main), "…and so is the language");
+  // The language is seeded from settings.json AND validated against the CONTENT plugin's declaration: the
+  // i18n module may not import a plugin, so the root hands the set in (see loadLang).
+  assert(/loadLang\(\s*locale,\s*readSettings\(\)\.language,\s*DEFAULT_LANGUAGES,?\s*\)/.test(main),
+    "…and so is the language (validated against the content plugin's declared set)");
 
   // The bind table IS the resource: the module seeds its DEFAULTS INTO that object (no private copy).
   const keymap = R.createKeyMap();

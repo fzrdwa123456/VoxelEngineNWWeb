@@ -62,6 +62,7 @@ import { onConfigChange } from "../core/services/bus";
 import { menuBgKind, menuBgState, MENU_BG_KIND } from "../data/assets/background";
 import { resolveAllBytes, resolveTexture } from "../data/assets/textures";
 import { preloadPacks } from "../host/desktop/packs";
+import { DEFAULT_LANGUAGES } from "../plugins/content-default";
 import { allBlockIds, blockRegistryState, BLOCK_REGISTRY, loadBlockRegistry } from "../data/assets/blockregistry";
 import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // ===== The plugin system =====
@@ -122,7 +123,11 @@ const uiScale = createScale();
 const keymap = createKeyMap();
 // The data modules RETURN their summaries and this root prints them: a `data/` file has no side effects,
 // and "the packs merged N blocks" is exactly the kind of evidence the composition root owns the sink for.
-logDebug(loadLang(locale, readSettings().language));
+// The language SET is CONTENT: it is the content plugin's declaration, not a literal in the i18n module.
+// The plugin's runtime contribution cannot drive this (the install happens after the config phase), so the
+// root passes the declaration itself — and a manifest that disables the plugin leaves the set empty, which
+// keeps the locale's own default (the boot must not depend on content being installed).
+logDebug(loadLang(locale, readSettings().language, DEFAULT_LANGUAGES));
 loadFont(font, readSettings().font);
 loadUIScaleMode(uiScale, readSettings().uiScale);
 loadBinds(keymap, readSettings().keybinds);

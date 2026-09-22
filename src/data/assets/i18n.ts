@@ -111,23 +111,27 @@ export function adoptLocale(state: LocaleState): void {
   locale = state;
 }
 
-/** Load the language from config at startup into the LOCALE resource (invalid values fall back to
- *  Chinese) and RETURN the line that says what the pack chain produced.
+/** Load the language from config at startup into the LOCALE resource (an invalid value falls back to the
+ *  resource's own default) and RETURN the line that says what the pack chain produced.
  *
- *  It does not log it: this is a DATA module, so it has no side effects — the composition root (which
- *  owns the log sink and is allowed to write to it) prints the returned summary. The three numbers are
- *  still the evidence that the chain works, and an all-zero line is still shouted out explicitly. */
-export function loadLang(state: LocaleState, l: unknown): string {
+ *  `langs` is the set the CONTENT PLUGIN declares (`plugins/content-default`, `SLOT_LANGUAGES`), handed in
+ *  by the composition root: which languages an install has is content, and this DATA module may not import
+ *  a plugin to learn it. That is why it is an argument and not a literal here any more.
+ *
+ *  It does not log: this is a DATA module, so it has no side effects — the composition root (which owns
+ *  the log sink) prints the returned summary. */
+export function loadLang(state: LocaleState, l: unknown, langs: readonly string[]): string {
   adoptLocale(state);
-  if (l === "zh" || l === "en" || l === "ja") state.lang = l;
+  if (typeof l === "string" && langs.includes(l)) state.lang = l;
   // Read the dictionaries once here: the packs are installed by now, so the build really happens.
   const s = dicts();
-  const zh = Object.keys(s.zh).length;
-  const en = Object.keys(s.en).length;
-  const ja = Object.keys(s.ja).length;
+  // One count per DECLARED language (a pack may add one): the summary reports the set actually in force.
+  const byId = s as Record<string, Dict>;
+  const counts = langs.map((id) => `${id}=${Object.keys(byId[id] ?? {}).length}`).join(" ");
+  const total = langs.reduce((n, id) => n + Object.keys(byId[id] ?? {}).length, 0);
   return (
-    `I18N dictionaries loaded (lang/*.json layered merge): zh=${zh} en=${en} ja=${ja} entries ` +
+    `I18N dictionaries loaded (lang/*.json layered merge): ${counts} entries ` +
     `(${resolveAllBytes("lang/zh.json").length} layer(s) of zh.json)` +
-    (zh + en + ja === 0 ? "  <- 0 entries! the UI will show raw keys" : "")
+    (total === 0 ? "  <- 0 entries! the UI will show raw keys" : "")
   );
 }
