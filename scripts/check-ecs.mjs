@@ -3529,8 +3529,10 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(started2.failed.map((f) => f.id).join(","), "boom", "…and the failure is reported");
   stopPlugins(inst2, started2, () => {});
   equal(events.includes("stop:boom"), false, "a plugin that never started is never stopped");
-  equal(load("plugins/ui/index.js").uiPlugin.start ?? null, null,
-    "start/stop are OPTIONAL - the six real plugins declare neither (content plugins will be their first users)");
+  assert(typeof load("plugins/diagnostics/index.js").diagnosticsPlugin.start === "function",
+    "a REAL plugin uses the lifecycle (diagnostics starts and stops the perf sampler)");
+  equal(load("plugins/world/index.js").worldPlugin.start ?? null, null,
+    "…while start/stop stay OPTIONAL for a plugin that has nothing to tear down");
 
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
   //    declared graph must be acyclic — otherwise the install order it implies does not exist. Reading

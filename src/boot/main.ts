@@ -70,7 +70,7 @@ import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // contributed under their plugin's id).
 import { ExtensionRegistry } from "../core/extension/registry";
 import { SLOT_RESOURCES, SLOT_SYSTEMS } from "../core/extension/slots";
-import { installPlugins, startPlugins } from "../core/plugin/lifecycle";
+import { installPlugins, startPlugins, stopPlugins } from "../core/plugin/lifecycle";
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { worldPlugin } from "../plugins/world";
@@ -1024,6 +1024,9 @@ const mainMenu = new MainMenu(world, {
   },
   onExit: () => {
         logDebug("MAINMENU quit");
+    // Tear-down: every plugin that STARTED gets its `stop`, in reverse install order (a plugin may depend
+    // on one installed before it). This is the quit path; a future uninstall calls the same function.
+    stopPlugins(installOutcome, startedPlugins, logDebug);
     quitApp();
   },
   getFpsCap: () => frameCap.cap,

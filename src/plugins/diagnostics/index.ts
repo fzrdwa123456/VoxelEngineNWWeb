@@ -21,4 +21,13 @@ export const diagnosticsPlugin = definePlugin({
   setup(api) {
     api.contribute(SLOT_RESOURCES, [PERF_SAMPLER, DEBUG_LOG]);
   },
+  /** The lifecycle's first real user: the perf sampler only means something once the world is assembled and
+   *  the loop is about to run, and one line at each end of the session is exactly what `start`/`stop` are
+   *  for. (It is also why the phases exist: `setup` runs while the schedule is still being assembled.) */
+  start(api) {
+    api.log("perf sampler live - the F3 panel and the PHYS/FRAME probes are fed from here");
+  },
+  stop(api) {
+    api.log("perf sampler stopping");
+  },
 });
