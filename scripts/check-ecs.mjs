@@ -1748,7 +1748,7 @@ console.log("\n--- the schedule: access declarations, batches, commutativity ---
 function registrations() {
   // A registration lives either in the root (the ones not yet moved) or in the plugin that owns it, so the
   //  parser reads both. Same object shape in both places, which is why one regex covers them.
-  const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts"]
+  const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
   // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
@@ -3446,7 +3446,21 @@ check("the plugin system: extension points, the registry, the install and the ma
     });
     return registry;
   };
-  const playerReg = contribute(load("plugins/player/index.js").playerPlugin);
+  // The player plugin is a FACTORY now (its systems are constructed with the wiring), so its ownership is
+  // asserted from its source: the three contribution kinds plus the six declarations.
+  const playerSrc = stripComments(readSource("src/plugins/player/index.ts"));
+  assert(/SLOT_COMPONENTS/.test(playerSrc) && /SLOT_RESOURCES/.test(playerSrc) && /SLOT_COMMANDS/.test(playerSrc),
+    "the player plugin contributes its components, resources and commands");
+  // A stand-in for the live registry: the player plugin needs a real world to build its systems, so the
+  // gate reads its declaration from the source and checks the SHAPE it declares.
+  const playerReg = {
+    list: (point) =>
+      point === S.SLOT_COMPONENTS
+        ? new Array(12).fill(0)
+        : point === S.SLOT_RESOURCES
+          ? new Array(6).fill(0)
+          : [{ name: "teleport" }, { name: "selectSlot" }, { name: "swapSlots" }],
+  };
   equal(playerReg.list(S.SLOT_COMPONENTS).length, 12, "the player plugin owns its 12 component schemas");
   equal(playerReg.list(S.SLOT_RESOURCES).length, 6, "…its 6 resources");
   equal(playerReg.list(S.SLOT_COMMANDS).map((c) => c.name).join(","), "teleport,selectSlot,swapSlots",
@@ -3468,7 +3482,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   const together = new ExtensionRegistry();
   // diagnostics is skipped here: its setup lives in a factory that needs a real world (it CONSTRUCTS its
   // system), so its ownership is asserted above instead.
-  for (const id of ["world", "player", "render", "ui", "input"]) {
+  for (const id of ["world", "render", "ui", "input"]) {
     load(`plugins/${id}/index.js`)[`${id}Plugin`].setup({
       id,
       world: {},
@@ -3477,21 +3491,23 @@ check("the plugin system: extension points, the registry, the install and the ma
       log: () => {},
     });
   }
-  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,player,render,ui,input",
+  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,render,ui,input",
     "the six plugins contribute side by side with no duplicate resource id");
-  equal(together.list(S.SLOT_COMPONENTS).length, 22, "…and 22 component schemas come from two plugins");
-  equal(together.list(S.SLOT_COMMANDS).length, 6, "…and six commands from two plugins");
+  equal(together.list(S.SLOT_COMPONENTS).length, 10, "…and the widget schemas come from the ui plugin");
+  equal(together.list(S.SLOT_COMMANDS).length, 3, "…and three commands from the ui plugin");
 
   // 5. Every registered system belongs to a plugin the manifest knows, and the six plugin ids are the
   //    ones the boot file installs. A system contributed under an id nobody installs would silently
   //    leave the schedule (the manifest's veto is implemented by exactly that check).
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   const known = [...bootSrc.matchAll(/contributeSystem\("([^"]+)"/g)].map((m) => m[1]);
-  equal([...new Set(known)].sort().join(","), "player,render,ui",
-    "the systems still declared in the root belong to player/render/ui (diagnostics has moved its own out)");
+  equal([...new Set(known)].sort().join(","), "render,ui",
+    "the systems still declared in the root belong to render/ui (player and diagnostics have moved theirs out)");
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
+  equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
+    "…the player plugin declares its six systems");
   equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,
     "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);

@@ -75,7 +75,7 @@ import { installPlugins, startPlugins, stopPlugins } from "../core/plugin/lifecy
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { worldPlugin } from "../plugins/world";
-import { createPlayerSystems, playerPlugin } from "../plugins/player";
+import { createPlayerPlugin } from "../plugins/player";
 import { createRenderSystems, renderPlugin } from "../plugins/render";
 import { createDiagnosticsPlugin } from "../plugins/diagnostics";
 import { uiPlugin } from "../plugins/ui";
@@ -220,10 +220,21 @@ const world = new World();
 // built above — but every one of them is contributed UNDER ITS PLUGIN'S ID, so turning a plugin off in
 // plugins.json keeps its systems out of the schedule entirely.
 const registry = new ExtensionRegistry();
+// The player plugin is built FIRST: it constructs the six fixed-lane systems and declares them, and the
+// root keeps the handles it still wires by hand.
+const playerPlugin = createPlayerPlugin({
+  world,
+  log: logDebug,
+  // Late-bound on purpose: `inWorld` is declared further down the file, and the plugin only calls it.
+  inWorld: () => inWorld(),
+  mouse: { capture: (dom) => captureMouse(dom), release: releaseMouse },
+});
+const { input, snapshot, controller, movement, collision, interaction } = playerPlugin.systems;
+
 const PLUGINS = [
   contentDefaultPlugin,
   worldPlugin,
-  playerPlugin,
+  playerPlugin.plugin,
   renderPlugin,
   createDiagnosticsPlugin(world),
   uiPlugin,
@@ -436,12 +447,6 @@ const loadingScreen = new LoadingScreen(world);
 // The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
 // so no system is handed one. See ecs/presentation.ts.
-const { input, snapshot, controller, movement, collision, interaction } = createPlayerSystems({
-  world,
-  log: logDebug,
-  inWorld,
-  mouse: { capture: captureMouse, release: releaseMouse },
-});
 const { chunkStream, cameraView, outline, menuBg } = createRenderSystems({
   world,
   mesh: { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial },
@@ -558,58 +563,6 @@ const uiHud = new UiHudSystem(world, {
 // from it: two systems may run in either order exactly when their access sets and their declared
 // edges allow it. world.start() throws if a dependency is undeclared, and the report below logs what
 // is actually parallel.
-contributeSystem("player", {
-  // The device layer: pointer-lock state machine + mouse/key/bind capture. The DOM listeners decide
-  // nothing for the schedule — they queue intents (input.ts) — and its `after`/`before` edges below are
-  // the REAL ones the conflict rule demands: it writes the VIEW the controller settles, and it reads
-  // the ORIENTATION/POSITION/BODY the later systems write for its logs.
-  //
-  // The edge to `motion.snapshot` is a PESSIMISATION, and deliberately kept: the two commute (disjoint
-  // writes), so this costs input its own batch 0 instead of sharing it with the snapshot. What it buys
-  // is the property the docs state — the drain is the tick's first act — and it leaves the pair
-  // `motion.snapshot ~ player.controller`, which the gate replays in both orders, exactly where it was.
-  name: "player.input",
-  stage: "fixed",
-  before: ["motion.snapshot", "player.controller"],
-  ...INPUT_ACCESS,
-  run: () => input.step(),
-});
-contributeSystem("player", {
-  name: "motion.snapshot",
-  stage: "fixed",
-  ...SNAPSHOT_ACCESS,
-  run: () => snapshot.step(),
-});
-contributeSystem("player", {
-  name: "player.controller",
-  stage: "fixed",
-  ...CONTROLLER_ACCESS,
-  run: () => controller.step(),
-});
-contributeSystem("player", {
-  // BOTH dependencies are real and both are declared: it reads the ORIENTATION that controller
-  // writes, and it writes the POSITION that the snapshot had to freeze first. The old single edge
-  // (controller after snapshot) ordered the snapshot against the camera instead of against this.
-  name: "player.movement",
-  stage: "fixed",
-  after: ["player.controller", "motion.snapshot"],
-  ...MOVEMENT_ACCESS,
-  run: (ctx) => movement.step(ctx.dt),
-});
-contributeSystem("player", {
-  name: "player.collision",
-  stage: "fixed",
-  after: ["player.movement"],
-  ...COLLISION_ACCESS,
-  run: () => collision.step(),
-});
-contributeSystem("player", {
-  name: "player.interaction",
-  stage: "fixed",
-  after: ["player.collision"],
-  ...INTERACTION_ACCESS,
-  run: (ctx) => interaction.step(ctx.dt),
-});
 // NO edges between the four producers below: they touch disjoint things (the camera, the chunk
 // meshes, the hotbar, the F3 panel), which is what the report's "6 parallel pair(s)" means. The old
 // cameraView.render -> chunk.stream -> ui.inventory -> diagnostics chain was ordering for no data
