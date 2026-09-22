@@ -77,7 +77,7 @@ grouping as a real change (it means a system's access moved). `logs\debug.log`'s
 with `modal=<bool>` — that is the UI_MODAL resource the freeze gate reads, next to the individual
 container flags it came from.
 
-AFTER the presentation objects became resources (`ecs/presentation.ts`, §5.2 P1.7: the scene, the
+AFTER the presentation objects became resources (`host/browser/presentation.ts`, §5.2 P1.7: the scene, the
 camera, the renderer, the frame sampler, the canvas host, the UI mount root and the chunk-mesh cache —
 a system resolves what it uses instead of being handed it). Nothing should LOOK different, so what is
 worth walking is the four places a wiring mistake would show up: the camera still follows the player
@@ -147,15 +147,15 @@ figure present (the F3 text is written by `diagnostics` now, from the F3_PANEL r
 means the resource was not published, a panel that never hides means the picker stopped toggling it).
 
 AFTER the view/listener sweep and the input-side fixes (P1.9/P1.11 — the inventory reconcile became a system,
-the window-level listeners moved into `platform/window-guards.ts`, the key bind gesture's device half moved
-into `platform/bind-gesture.ts`, and the input intent queue became a resource). Six things to walk:
-(1) **backpack / hotbar** (`ecs/ui/inventory.ts` is the system now, `ui/inventory.ts` only spawns):
+the window-level listeners moved into `host/browser/window-guards.ts`, the key bind gesture's device half moved
+into `plugins/input/bind-gesture.ts`, and the input intent queue became a resource). Six things to walk:
+(1) **backpack / hotbar** (`plugins/ui/systems/inventory.ts` is the system now, `plugins/ui/views/inventory.ts` only spawns):
 icons, counts, tooltips, the selected highlight, clicking a bag slot to swap, and a first-ever block icon
 showing the checker before it bakes — an EMPTY hotbar means `INVENTORY_WIDGETS` was not published, a hotbar
 that never updates means the reconcile did not move with the view;
-(2) **window guards** (`platform/window-guards.ts`): ESC still opens/closes the pause menu, right-click
+(2) **window guards** (`host/browser/window-guards.ts`): ESC still opens/closes the pause menu, right-click
 places a block instead of raising a menu, and SPACE does not scroll a list while a menu is open;
-(3) **the bind gesture** (`platform/bind-gesture.ts`): drag a chip onto a keycap (rubber band follows, the
+(3) **the bind gesture** (`plugins/input/bind-gesture.ts`): drag a chip onto a keycap (rubber band follows, the
 target lights up), release over empty space is a no-op, the click shield stops the synthetic click from
 re-triggering whatever is under the cursor, the wheel is blocked during the drag, and **ESC during a drag
 cancels the drag and must NOT step a menu level back** (that decision belongs to `ui.navigation`, the one
@@ -171,7 +171,7 @@ the main menu, and if a frame ever survives, tighten the re-assert burst in `win
 non-zero `seen` would mean the low-level keyboard hook finally started working (see AGENTS.md's known gaps)
 and the cursor race could be reconsidered.
 
-AFTER the DELEGATED UI events (P1.11 follow-up — `ecs/ui/system.ts` used to attach SIX listeners to every
+AFTER the DELEGATED UI events (P1.11 follow-up — `plugins/ui/systems/reconcile.ts` used to attach SIX listeners to every
 widget at mount time; it now attaches ONE per event type to the UI MOUNT ROOT and finds the widget by walking
 up from `ev.target`; hover is an ancestor-chain diff over the bubbling `mouseover`). Nothing should look
 different — that is the point — so walk the paths where the resolution could differ:
@@ -199,7 +199,7 @@ highlighted or pressed;
 the pause menu onto the HUD — still does nothing.
 
 AFTER the DELAYED INTENTS became data (P1.11 follow-up — `DELAYED_INTENTS` + `ui.delays`; four `setTimeout`s
-are gone from `platform/pointerlock.ts`, `platform/window-guards.ts` and the composition root). The mechanism
+are gone from `host/browser/pointerlock.ts`, `host/browser/window-guards.ts` and the composition root). The mechanism
 changed from "a timer fires on its own" to "the ui lane applies whatever deadline has passed", so the things
 worth walking are the ones that depend on WHEN it happens:
 (1) **close the backpack** (E twice): the mouse must be captured again at once (`LOCK request [inventory E]`
@@ -219,7 +219,7 @@ system relies on;
 
 AFTER the presentation-state tail (P1.12 — the icon baker, the chunk material, both counter blocks, the UI
 mount root, the widget order counter and the target wireframe all became resources, and `player.interaction`
-stopped writing three.js from the fixed lane; `rendering/outline.ts` + `block.outline` paint it now). Seven
+stopped writing three.js from the fixed lane; `plugins/render/systems/outline.ts` + `block.outline` paint it now). Seven
 things to walk:
 (1) **the target wireframe** (`BLOCK_OUTLINE` + `block.outline`): aim at a block — the white box must sit
 exactly ON the block's faces, i.e. the same as before the change (it is placed at voxel + 0.5; a box half a
@@ -258,8 +258,8 @@ would throw at the first spawn instead if the resource were missing;
 must be IN the batch, and `block.outline` must not appear as its own batch (that would mean it declares a
 target the others write).
 
-AFTER the ESC-owns-the-capture fix (P1.13 — `ecs/systems/input.ts::onKeyDown` no longer publishes an
-ESCAPE edge while a rebind capture is armed, because the capture's handler in `platform/bind-gesture.ts` is
+AFTER the ESC-owns-the-capture fix (P1.13 — `plugins/player/systems/input.ts::onKeyDown` no longer publishes an
+ESCAPE edge while a rebind capture is armed, because the capture's handler in `plugins/input/bind-gesture.ts` is
 mounted LATER than that listener and its `stopImmediatePropagation()` cannot recall an edge that is already
 in `KEY_EVENTS`; before the fix ESC unbound the action AND stepped the panel one level back):
 (1) open the key binds panel (pause menu or main menu → Settings → Key binds), click an action row so it
@@ -278,7 +278,7 @@ is ESC-only, so no other key may be swallowed by the capture;
 cancelled while the mouse is captured but the key itself still reaches the game — see the P1.11 note).
 
 AFTER the data/behaviour pass (P1.14 — the view paint caches, the host state, the asset caches, the rebind
-capture, the frame loop's state and the two boot/entry drivers all became world data; `ecs/boot.ts` walks a
+capture, the frame loop's state and the two boot/entry drivers all became world data; `core/flow/boot.ts` walks a
 stage LIST and `ui.keybind` applies queued rebind decisions). NOTHING should look different — that is the
 point — so walk the paths where the split could have broken something:
 (1) **the startup, in order**: launch and watch the loading screen. It must appear with a bar and a stage
@@ -320,7 +320,7 @@ write a `DIAGLOG probes disabled` line and then STOP getting `FRAME`/`LOOK`/`RAW
 while everything else (BOOT/SETTINGS/WORLD/LOCK/CURSOR/ESC/GEOMETRY/ERROR) keeps being written; (3) play for
 a while with the switch OFF — click through the menus, open/close the pause menu, enter and leave a world, and
 press ESC a few times: **no probe line may appear**, `KBCAP` included (a line still arriving means its prefix
-is missing from the table in `platform/shell.ts`); (4) toggle it back on → the probes resume; (5) restart the
+is missing from the table in `host/desktop/shell.ts`); (4) toggle it back on → the probes resume; (5) restart the
 game — the
 setting must persist (it is a normal field of `settings.json`, repaired by type if hand-edited), and with it
 OFF the file must contain no probe line at all from the first frame — while one of the first lines of that

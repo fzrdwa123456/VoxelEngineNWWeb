@@ -11,413 +11,171 @@ load-bearing.
 
 ## What this is
 
-VoxelEngineNWWeb — a Minecraft-style first-person sandbox on NW.js (Chromium + Node in one
-process) with a three.js WebGPU renderer, packaged as a portable Windows directory.
+VoxelEngine — a Minecraft-style first-person voxel sandbox on **Tauri v2** (a Rust shell + WebView2;
+**there is no NW.js and no Node in the process any more** — `docs/PORT-TAURI.md` is the port's record),
+with a three.js WebGPU renderer, packaged as a portable Windows directory. This checkout is the Tauri
+port of `VoxelEngineNWWeb`; the NW.js original lives in its own checkout and is not touched from here.
 
-**Current world state: a flat, EDITABLE voxel world exists; real terrain does not.** `src/voxel/`
+The code is organized as a **microkernel + plugins** tree (`core/` mechanism, `plugins/` features,
+`host/` the outside world) with a **data-oriented (DOD)** programming model (columns, hot/cold split,
+zero allocation on the hot path, structure changes only at a barrier). Both are written out in
+`docs/ARCHITECTURE.md`, and the two sections right after the directory map below are the short version.
+
+**Current world state: a flat, EDITABLE voxel world exists; real terrain does not.** `src/data/world/`
 is a chunk system (32³ chunks) whose generator fills every chunk with the engine's built-in
-magenta/black checker block. `ecs/systems/collision.ts` resolves the player AABB against it (you
-land, walk, jump) and `ecs/systems/interaction.ts` breaks and places blocks with the mouse.
+magenta/black checker block. `plugins/player/systems/collision.ts` resolves the player AABB against it (you
+land, walk, jump) and `plugins/player/systems/interaction.ts` breaks and places blocks with the mouse.
 Topology is deliberate: **X/Z is a TORUS** (`WORLD_CHUNKS_X/Z`), and **Y is bounded but split in
 two** — `[WORLD_MIN_Y, TERRAIN_TOP_Y)` is ground, `[TERRAIN_TOP_Y, WORLD_MAX_Y)` is writable
 BUILD SPACE, and below WORLD_MIN_Y everything is bedrock. There is no stone/grass/biome content
 and only ONE block type, and the planet/LOD systems are still gone. `generateChunk()` in
-`voxel/world.ts` is the ONE place to replace when real terrain arrives — nothing else in the
+`data/world/world.ts` is the ONE place to replace when real terrain arrives — nothing else in the
 engine knows what a block "is".
 
 ## Directory map — what goes where
 
 ```
 src/
-├── main.ts                 composition root: provision the World's resources, construct the
-│                           systems, register them (with explicit after/before constraints),
-│                           wire UI callbacks. It ALSO owns the frame loop — ONE rAF chain for the
-│                           process, started once at the bottom of the file, whose BODY the loop mode
-│                           picks (`frame()`: "game" = fixed-step accumulator + FPS-cap gate +
-│                           `world.render`; "menu" = the menu background + `world.renderUi()`;
-│                           "load" = a LOADING SCREEN is up, i.e. the ui lane alone). That block at the
-│                           bottom is also the BOOT DRIVER (reveal the window, check the settings,
-│                           initialise the GPU, announcing each stage on the loading screen first) and
-│                           `enterWorld()` is the WORLD DRIVER (build the spawn window behind that same
-│                           screen) — see "Boot" below.
-│                           `setLoopMode("load" | "game" | "menu")` is a pure
-│                           mode write — there is no second chain to start or stop and nothing to
-│                           cancel. It holds no game logic and reads no component column, and it keeps
-│                           NO listener of its own: the ones whose default action must be cancelled
-│                           inside the event (pointerlockchange log, ESC/contextmenu preventDefault,
-│                           the Space shield) are `platform/window-guards.ts`, the ONE resize listener
-│                           is `platform/viewport.ts`, and everything else is a queued device intent
-│                           or a command.
-│                           It has NO `setInterval` and no second "is it running" flag.
-├── blockregistry.ts        block data registry (merges blocks.json across packs). NOTE: the
-│                           voxel mesher does NOT consult it yet — see voxel/ below.
-├── voxel/                  the block world. No three.js, no ECS, no behaviour:
-│   ├── chunk.ts            32³ chunk storage. A uniformly filled chunk holds ONE value and
-│   │                       allocates no array until it is first written — that is what makes the
-│   │                       tall build space free; isUniform also drives the mesher's fast paths
-│   ├── world.ts            VoxelWorld: chunk map, torus wrap in X/Z, a SPLIT Y range (ground
-│   │                       below TERRAIN_TOP_Y, writable build space above, bedrock below
-│   │                       WORLD_MIN_Y), getBlock/isSolid/setBlock/topSolidY, the dirty-chunk
-│   │                       set (takeDirty) and `generateChunk()` — THE terrain entry point
-│   └── raycast.ts          Amanatides & Woo voxel DDA -> first solid block + its face normal
-├── ecs/
-│   ├── core/                the ECS itself: no game knowledge, no three.js, no DOM
-│   │   ├── entity.ts        generation-checked handles (`index << 8 | generation`) + the slot
-│   │   │                    allocator. A stale handle is DETECTABLE, not silently reused.
-│   │   ├── component.ts     defineComponent (SOA: one typed array per field) / defineRecord
-│   │   │                    (one plain record per entity) + the dense/sparse membership lists
-│   │   ├── query.ts         cached sparse-set intersection. refresh() once per step; the result
-│   │   │                    is then stable, because structure only changes at a barrier
-│   │   ├── store.ts         entities + component columns + the query cache + structuralVersion
-│   │   ├── schedule.ts      the three stages, named systems, after/before resolution + verification,
-│   │   │                    declared access sets, the derived batches, the dependency rule and the
-│   │   │                    runtime barrier check. The scheduling half of parallelism.
-│   │   ├── commands.ts      CommandType/defineCommand + the deferred queue
-│   │   └── resource.ts      Resource<T> handles (typed tokens, not string keys)
-│   ├── World.ts             the façade and the ONE import path: spawn/despawn/insert/remove/has/
-│   │                        get/query, insertResource/resource, addSystem, commands, start,
-│   │                        stepFixed/render/renderUi. Re-exports the core types.
-│   ├── components/          component DEFINITIONS (pure data + spawn helpers). Player.ts defines
-│   │                        them all: POSITION/PREV_POSITION/ORIENTATION/VIEW/BODY/REACH/
-│   │                        INTERACTION/PLAYER (SOA) and MOTION/CONTROL/INVENTORY (records).
-│   │                        10 of the 11 are ENTITY-AGNOSTIC; only PLAYER and spawnPlayer() are
-│   │                        player-specific. Spawn helpers: attachMovable() declares what a
-│   │                        physical body needs, spawnMovable() makes an NPC/prop, spawnPlayer()
-│   │                        adds the locally driven parts, placeEntity() moves POSITION and
-│   │                        PREV_POSITION together. HUMANOID_BODY / DEFAULT_REACH are spawn
-│   │                        DEFAULTS, not state. No three.js, no registry import.
-│   ├── resources.ts         the world-scoped singletons: LOCAL_PLAYER (an entity handle), VOXEL,
-│   │                        INPUT_STATE (pointer-lock/device state) and INPUT_TIMING (the state the
-│   │                        input race guards keep: which mousemove is the synthetic lock-instant one,
-│   │                        whether the unlock was OURS, the grace deadline, the offscreen cache and the
-│   │                        F3 SPACE/MOUSE counters — the fields, not the logic), UI_MODAL (which modal UI
-│   │                        surfaces are open AND which settings sub-page is up: mainMenu / menu /
-│   │                        inventory / settings / gen — the sub-page is navigation DATA, not a view
-│   │                        field), FPS_CAP (the frame-rate cap AND its domain: read by the loop's
-│   │                        frame gate every frame, printed by diagnostics, persisted as a setting;
-│   │                        CAP_MIN/CAP_MAX/CAP_STEP live here because `sanitizeFrameCap` clamps and
-│   │                        snaps into them — `fpsCap: 1` loads as 30, `300` as 0/unlimited — so the
-│   │                        stored value is always one the slider can express),
-│   │                        and the three the UI systems own: KEY_EVENTS (key AND mouse-button EDGES
-│   │                        published by the device layer — the world's one event log, a
-│   │                        READ-ONCE-PER-CONSUMER channel: each consumer holds its own KeyEdgeReader
-│   │                        cursor, so ui.picker and ui.navigation both see every edge exactly once),
-│   │                        PICKER_STATE (the F3+F4 picker's open/sel/held keys) and TOAST (the HUD
-│   │                        message + its wall-clock deadline, armed by the ShowToast command).
-│   │                        Plus DELAYED_INTENTS: the "do this in a moment" queue — a LIST of
-│   │                        `{ at, kind: relock|cursor|lockRetry, arg }` deadlines on the SAME wall clock,
-│   │                        applied once per frame by `ui.delays`. It is the toast's shape because
-│   │                        four `setTimeout`s used to own that question (see ecs/systems/delays.ts).
-│   │                        Plus LOADING_STATE: the LOADING SCREEN (active, progress, the stage's
-│   │                        i18n key, and the settings check's outcome as a key + a list of names).
-│   │                        The drivers publish it through SetLoadingStage; `ui.loading` paints it —
-│   │                        the screen is data, and main.ts builds no element. Its i18n KEYS are
-│   │                        `loading.*` (a pack-visible rename: a pack overriding `boot.*` must
-│   │                        move them).
-│   │                        A scroll position is deliberately NOT a resource (or a component): a
-│   │                        scrollable list starts at the top on every visit and otherwise belongs to
-│   │                        the browser — see ecs/ui/system.ts.
-│   │                        And the CONFIGURATION that is read on the tick: LOCALE (the language in
-│   │                        force — the reconciler re-derives every widget's text from it every
-│   │                        frame), FONT and UI_SCALE (which font pair / scale mode is applied), and
-│   │                        KEYMAP (action -> bind code, asked by movement/interaction/input every
-│   │                        step). ui/i18n.ts, ui/fonts.ts, ui/uiscale.ts and platform/keybinds.ts own
-│   │                        the FILES and read/write these objects; every reader declares them
-│   │                        (`readsExternal`). Assets are NOT here: the dictionaries, the block
-│   │                        registry and the background kind are loaded once from the packs and never
-│   │                        change, so they are constants (the menu background kind is memoised because
-│   │                        the menu frame asks for it every frame).
-│   │                        Also the predicates the gameplay gate reads:
-│   │                        canControl(devices, ui), isModalUi, isMenuUi. A neutral file so no
-│   │                        system imports another and voxel/ stays ECS-free.
-│   ├── presentation.ts      the three.js / GPU / DOM objects the WORLD owns: SCENE3D, CAMERA3D,
-│   │                        RENDERER3D (the device layer takes its canvas from `domElement`),
-│   │                        PERF_SAMPLER, CANVAS_HOST (index.html's `#app`), UI_MOUNT (the root every
-│   │                        widget is appended to, built by `createUiMount()` — it used to be a stage
-│   │                        div that `ui/uiscale.ts` created and appended to `document.body` at IMPORT
-│   │                        time) and CHUNK_MESHES (the chunk-mesh cache: parent group, meshes, the
-│   │                        "no geometry" set — `createChunkMeshCache(group)`). Plus the three objects
-│   │                        that used to be module-level state or a system's private field: ICON_BAKE
-│   │                        (the second, offscreen WebGPURenderer for item icons + the cache/pending
-│   │                        Maps), CHUNK_MATERIAL (the ONE material every chunk mesh shares) and
-│   │                        BLOCK_OUTLINE (the target wireframe the RENDER lane moves —
-│   │                        `createBlockOutline(mesh)`). These used
-│   │                        to be constructor ARGUMENTS; a system resolves what it uses in its own
-│   │                        constructor body instead, which gives each object one owner and makes it a
-│   │                        SEAM a test can stub (the Node gate drives the chunk stream with a plain
-│   │                        object for the group). Type-only imports of three.js, so this module stays
-│   │                        loadable in Node — which is why a FACTORY takes an object the composition
-│   │                        root built (`createChunkMeshCache(group)`, `createBlockOutline(mesh)`)
-│   │                        wherever one can be built from three.js at wiring time.
-│   │                        It does NOT change the schedule: the conflict model is
-│   │                        keyed by the declared target NAMES (`camera3d`, `chunkMeshes`, …), not by
-│   │                        resource handles, so those declarations stay as they are.
-│   ├── commands.ts          the concrete commands: SetMode, Teleport, SelectSlot, SwapSlots, ShowToast,
-│   │                        SetLoadingStage (a partial stage update for the loading screen) and
-│   │                        SetFpsCap (the one setting that is also world state — the frame gate reads
-│   │                        the resource every frame, so a UI callback may not assign it).
-│   │                        The ONLY way non-system code (UI, DOM handlers, main.ts) may change state.
-│   └── systems/             all behavior:
-│       ├── input.ts        pointer-lock state machine + mouse/key/bind capture. Fixed lane, FIRST:
-│       │                   its `step()` drains the intents the DOM listeners queued (a key, a scaled
-│       │                   view delta, a jump/fly value) into the CONTROL keys, the VIEW deltas and
-│       │                   MOTION — so no gameplay component is written outside a system run, and the
-│       │                   schedule can order it against the controller/movement/collision that read
-│       │                   it. The listeners still decide everything at EVENT time (IMPORTANT:
-│       │                   RACE-SENSITIVE, rule 3), and INPUT_STATE stays event-time too: the lock
-│       │                   state machine must react synchronously to a pointerlockchange. It does NOT
-│       │                   carry a cached "a click may grab the lock" flag — that was a second copy of
-│       │                   `!isModalUi(UI_MODAL)`, so the canvas-click handler and the raw-input
-│       │                   takeover test ask UI_MODAL at the moment of the question. It owns
-│       │                   the MOUSE-BUTTON listeners as well as the keyboard ones (mousedown is
-│       │                   guarded by `isCapturing()`, maps the button to a bind ACTION and CODE,
-│       │                   publishes a button edge and takes the press/release decision — a button
-│       │                   bound to "inventory" produces ONLY an edge, because whether the bag opens
-│       │                   is ui.navigation's call). A REBIND CAPTURE owns ESC and that gate is HERE,
-│       │                   inside the event: `onKeyDown` publishes no Escape edge while `isCapturing()`,
-│       │                   because the capture's own handler (`platform/bind-gesture.ts`) is installed
-│       │                   LATER than this listener and so cannot suppress an edge that is already in the
-│       │                   log — and by ui-lane time it has already cleared the capture, which is why
-│       │                   `ui.navigation` cannot test it (see ROADMAP §5.2 P1.13). The RAW-MOUSE deltas arrive per event
-│       │                   (`rawDelta`, ~4 ms: the Rust push cadence) and are APPLIED once per frame
-│       │                   (`frameLook`, called by the frame before any fixed step). There is no timer
-│       │                   in that path any more: the 8 ms poll it replaced was stretched to 9–12 ms
-│       │                   whenever a key was held (Chromium runs input tasks before timer tasks), so
-│       │                   the number of look samples per frame jumped between 0 and 3 and the view
-│       │                   juddered — measured with the `FRAME … pf=[…]` probe. Its race-guard FIELDS are
-│       │                   the INPUT_TIMING resource
-│       │                   (which mousemove is the synthetic one, whether the unlock was ours, the
-│       │                   grace deadline, the offscreen cache, the F3 counters) — the LOGIC and its
-│       │                   order stay in the listeners, untouched. The queued intents are deliberately
-│       │                   NOT a resource: nothing outside may see a half-applied frame. The only system
-│       │                   with DOM listeners, so it resolves its
-│       │                   data in the constructor rather than at start(). A click may capture the mouse
-│       │                   only while a WORLD runs (`inWorld` is injected): the loading screen owns no
-│       │                   modal flag, so the UI_MODAL guard alone let a click there engage the native
-│       │                   capture before a world existed — and the entry then re-locked on top of it.
-│       │                   The companion rule lives in main.ts: a WINDOW GEOMETRY change is a device
-│       │                   signal (Rust's `win-geometry` on Resized/Moved/DPI) treated like losing the
-│       │                   window — hand the mouse back, pause if playing — because dragging a border
-│       │                   keeps the window FOCUSED (no blur) while the capture's ClipCursor rectangle
-│       │                   goes stale (see ROADMAP §5.2 P1.10).
-│       ├── controller.ts   drains the VIEW deltas → yaw + pitch clamp (pitch is clamped to
-│       │                   ±89.4° in EVERY mode; there is no wrap past the zenith). While the
-│       │                   player is UNCONTROLLABLE it DROPS the buffer instead of holding it:
-│       │                   holding it replayed the last fraction of a tick's mouse movement the
-│       │                   moment ESC/the backpack gave control back, which read as "the view
-│       │                   slides by a few degrees after closing the UI"
-│       ├── movement.ts     mode-dependent locomotion over every entity matching
-│       │                   CONTROL+POSITION+ORIENTATION+MOTION (query-driven). Integrates the
-│       │                   tick PROVISIONALLY — collision re-integrates and resolves it.
-│       ├── snapshot.ts     fixed lane, after player.input: PREV_POSITION := POSITION for every entity
-│       │                   carrying both. It feeds the render interpolation AND the collision sweep
-│       │                   origin, and it is query-driven because a local-player-only write silently
-│       │                   broke collision for every other entity (see the file header).
-│       ├── collision.ts    AABB vs the voxel grid, one axis at a time, sub-stepped. Runs AFTER
-│       │                   movement in the fixed lane, sweeping from PREV_POSITION — which is part
-│       │                   of its QUERY, so an entity without one is not swept at all (it falls,
-│       │                   loudly) rather than swept from a bogus origin (it jitters, quietly).
-│       │                   Reads BODY per entity. Owns motion.onGround and zeroes motion.vy on
-│       │                   contact; skips spectator (noclip).
-│       ├── interaction.ts  break (left) / place (right) through a voxel raycast, and the local
-│       │                   player's target recorded as the TARGET_HIT component. QUERY-DRIVEN over
-│       │                   CONTROL+POSITION+ORIENTATION+INTERACTION+
-│       │                   REACH+BODY, so every entity gets its own reach, body box and rate
-│       │                   limits. Polls CONTROL.keys with a dt cooldown (no event listeners),
-│       │                   refuses placement overlapping the body box, and reads the hand from
-│       │                   INVENTORY — there is no UI callback. An uncontrolled LOCAL player
-│       │                   (PLAYER marker) never edits blocks, so UI clicks cannot; NPCs keep
-│       │                   acting. It touches NO three.js object: the wireframe it used to own and
-│       │                   move from this lane is `block.outline` (rendering/outline.ts) now, and the
-│       │                   two lanes exchange the hit as data. The block TYPE it reads is not yet
-│       │                   written into the world (one voxel value — see ROADMAP.md §3.2).
-│       ├── chunkstream.ts  render lane: keeps the chunks around the player generated, meshed
-│       │                   and placed at their nearest torus representation (budgeted), and
-│       │                   drains VoxelWorld.takeDirty() so block edits re-mesh immediately.
-│       │                   It also owns the WARM-UP a world entry drives: `warmUp` builds a whole
-│       │                   window at once behind the loading screen, and `needsWarmUp` answers
-│       │                   "is there anything left to build here" (false = enter at once).
-│       │                   The MESH CACHE (the parent group, the meshes, the "no geometry" set) is the
-│       │                   CHUNK_MESHES resource, not a private field; the system keeps only the
-│       │                   window bookkeeping (the wanted set and the last column it was built for).
-│       └── diagnostics.ts  render lane: perf window, the PHYS log line, the input queues'
-│                           incremental forwarding, the GPU timestamp read; it WRITES THE F3 TEXT
-│                           WIDGET (not the DOM) and refreshes the F3 panel
-│       └── delays.ts       ui lane, after ui.navigation: the DELAYED INTENTS (ecs/resources.ts::
-│                           DELAYED_INTENTS) — whatever WALL-CLOCK deadline has passed is applied here
-│                           through injected effects. It is the shape the toast uses (data, not a
-│                           timer), and it exists because four `setTimeout`s used to be the only way
-│                           to say "in a moment": closing the backpack relocking the mouse, the lock
-│                           manager's 1300 ms retry, and the cursor re-asserts at 0/120 ms (focus
-│                           regained) and 0/32/80 ms (the menu/Apps key — the layer that wins the
-│                           cursor-flash race, so it is the one place a missed deadline is visible)
-│   ├── ui/                  the UI WIDGET layer — "UI is data" (see ECS conventions):
-│   │   ├── theme.ts         UI_THEME: every colour token, plus recipeStyle(), the ONE style table
-│   │   │                    (recipe + state -> style string), plus the global stylesheet an inline
-│   │   │                    style cannot express. DOM-free, pure.
-│   │   ├── widgets.ts       the widget components (UI_TREE/UI_TEXT/UI_LOOK/UI_STATE/UI_ACTION/
-│   │   │                    UI_INPUT/UI_LAYOUT/UI_IMAGE/UI_TIP/UI_BIND) and the PREFABS that make
-│   │   │                    them reusable: panel/label/button/grid-key/slider/list + the setters.
-│   │   ├── actions.ts       UI_ACTIONS: the action TABLE (id -> handler) as a resource. A clickable
-│   │   │                    widget carries an id; the reconciler dispatches, and knows nothing
-│   │   │                    about what a "settings panel" is.
-│   │   ├── hud.ts           UiHudSystem: the GAMEPLAY gate, first in the lane. The crosshair and the
-│   │   │                    hotbar are spawned VISIBLE and nothing wrote their flag, so they showed at
-│   │   │                    the main menu, on the loading screen and OVER the pause menu (hotbar z-31 >
-│   │   │                    that menu's root z-30), with clickable slots. `inWorld()` owns them now.
-│   │   ├── loading.ts       UiLoadingSystem: the LOADING SCREEN (the startup, and a world entry), and
-│   │   │                    the only reason a `load` frame has a body. It reads LOADING_STATE and
-│   │   │                    writes its widgets: the stage line as a key, the percentage raw, one
-│   │   │                    `active` boolean per bar segment, the settings check's label + name list.
-│   │   │                    Registered before the other widget-data writers: it writes the same
-│   │   │                    components, so the conflict rule needs an order.
-│   │   ├── bindings.ts      UI_SOURCES (id -> a getter) + UiBindingSystem: a widget that declares
-│   │   │                    UI_BIND takes its VALUE from shared state every frame instead of holding
-│   │   │                    a private copy. Two settings panels showing one setting cannot drift.
-│   │   ├── picker.ts        UiPickerSystem + spawnPickerPanel: the F3+F4 game-mode picker. It consumes
-│   │   │                    the key EDGES the device layer publishes (a held-key set cannot say "F3
-│   │   │                    went down just now"), owns PICKER_STATE, toggles the F3 debug panel through
-│   │   │                    that panel's own UI_STATE, and changes the mode through the injected
-│   │   │                    SetMode command. The panel and the chord are GAMEPLAY UI, gated on
-│   │   │                    `inWorld()`: outside a world it only consumes the edges (see hud.ts).
-│   │   ├── toast.ts         UiToastSystem: the HUD message. The text is an i18n KEY and the deadline is
-│   │   │                    a WALL-CLOCK time in the TOAST resource (the ui lane runs with dt = 0 while
-│   │   │                    the menu pumps it, so a dt counter would never expire there) — armed by the
-│   │   │                    ShowToast command, applied and taken down by this system. A view owning a
-│   │   │                    setTimeout was the reason a toast could not outlive its caller.
-│   │   ├── keybind.ts       UiKeybindSystem + KEYBIND_GESTURE/KEYBIND_PANELS: the bind panels are
-│   │   │                    DERIVED data (chip labels/selection, keycap legends/bound state) written
-│   │   │                    every frame from the bind table, so two panel instances cannot desync; the
-│   │   │                    drag's state (which chip, which keycap, the live pointer, the click shield)
-│   │   │                    is data too. The ARM PATHS stay in ui/menu.ts (click-synthesis timing), and
-│   │   │                    the rubber band is a WIDGET: this system writes its geometry (UI_LAYOUT) and
-│   │   │                    its shown flag from the gesture + the POINTER resource, and the reconciler
-│   │   │                    paints it — the view owns no element and no mousemove listener any more.
-│   │   ├── navigation.ts    UiNavigationSystem + stepBackSettings(): which MODAL SURFACE is up, as
-│   │   │                    data. It drains the same key/button EDGES through its own reader and
-│   │   │                    takes the decisions the ESC if-chain used to take over five views'
-│   │   │                    private fields: ESC steps the sub-page ladder (`gen` -> false, the
-│   │   │                    settings LIST -> null, any other sub-page -> the list) and only then
-│   │   │                    closes the container, the inventory key and its mouse bind toggle the
-│   │   │                    bag, and it is the ONE PAINTER of the modal widget trees (a surface's
-│   │   │                    `show()` is a data write; nothing else turns UI_MODAL into UI_STATE). The
-│   │   │                    pointer-lock EFFECTS arrive as injected callbacks, so the module stays
-│   │   │                    DOM-free, and the two actions that only mean something IN a world (ESC
-│   │   │                    opens the pause menu, the inventory key opens the backpack) are gated on
-│   │   │                    `inWorld()` — a loading screen is exactly the state where neither may fire.
-│   │   │                    Registered BEFORE ui.widgets and after the other widget-data writers.
-│   │   │                    A declared `after` is honoured in EITHER registration order (the batcher
-│   │   │                    resolves its adjacency — see ROADMAP §3.9); the trees it paints are injected
-│   │   │                    through a getter because the menus are wired after the Schedule is built.
-│   │   └── system.ts        UiRenderSystem: reconciles every widget's element once per frame
-│   │                        (mount / unmount / update) and is the ONLY code that creates, styles or
-│   │                        listens to one. It also applies the GLOBAL STYLE to the document
-│   │                        root — the font pair and the root font size, read from the FONT / UI_SCALE
-│   │                        resources (injected as `currentFontCss()` / `currentRootFontPx()`) and
-│   │                        written only when they change, which is why a resize needs no callback.
-│   │                        The EVENTS ARE DELEGATED to the mount root: ONE listener per type for the
-│   │                        whole tree (it used to attach six to every widget at mount time, each a
-│   │                        closure over an entity), and the widget an event belongs to is found by
-│   │                        walking up from `ev.target` — the same walk `hitTest` makes. Hover is an
-│   │                        ancestor-chain DIFF over the bubbling `mouseover` (mouseenter/mouseleave do
-│   │                        NOT bubble): the widgets above the new target are compared with the ones
-│   │                        the previous event left, and the difference is the enter/leave set, so a
-│   │                        parent and a child can still be hovered at once.
-│   │                        It is POINTER-ONLY: a keyboard-generated `click` (TAB then ENTER/SPACE, or a
-│   │                        programmatic `.click()`) carries `detail === 0` and is dropped, because the
-│   │                        UI is mouse-driven — a real press/release carries the click COUNT. The
-│   │                        focus ring and a focused slider's arrow keys are NOT filtered (only `click`
-│   │                        is), so if the keyboard should not reach the UI at all, that is a separate
-│   │                        `tabIndex` decision.
-│   │                        It owns hover/press state, the marquee
-│   │                        for text that does not fit, the "back to the TOP" edge of every role the
-│   │                        theme lists as scrollable (an EDGE, not a stored position: a list starts
-│   │                        at the top whenever its PANEL — or any ancestor — becomes visible, and
-│   │                        while it stays up the position is the browser's), and the hit test the
-│   │                        key bind drag asks ("which widget is under this point"). In the ui STAGE.
-├── rendering/              anything drawn: camera-view.ts (the CameraViewSystem: interpolation from
-│                           PREV_POSITION -> POSITION plus the orientation quaternion, written into the
-│                           world's CAMERA3D resource, and the
-│                           shared viewDirection() the block raycast uses — a CONSUMER of the
-│                           snapshot, never its writer),
-│                           menu-background.ts (the MenuBackgroundSystem: the main menu's panorama +
-│                           spin/flip state, which IS the MENU_BACKGROUND resource; deliberately NOT
-│                           registered in a lane — a MENU frame never runs the render lane, so what it
-│                           buys is an OWNER for the state and one entry point, not a batch),
-│                           textures.ts (pack chain resolution), blockicons.ts (icon baking — a pure
-│                           operation on the ICON_BAKE resource; `peekBlockIcon` is the synchronous
-│                           reader the inventory draws from, `requestBlockIcon` starts a bake and
-│                           returns at once, so no promise continuation ever writes a component),
-│                           chunkmesh.ts (face-culled chunk geometry + the checker material, which is
-│                           the CHUNK_MATERIAL resource — `getChunkMaterial(state)`),
-│                           outline.ts (the BlockOutlineSystem: the BLOCK_OUTLINE mesh positioned from
-│                           the TARGET_HIT component, in the RENDER lane — it used to be a fixed-lane
-│                           write of a three.js object)
-├── platform/               host/browser services, produce data only: shell.ts (NW.js:
-│                           settings/logs/window — it owns settings.json, whose VALUES live in the
-│                           config resources, and it owns the DIAGNOSTIC-PROBE SWITCH: the settings
-│                           panel's "Diagnostic log" toggle, default ON, filters the probe lines
-│                           (`FRAME`/`LOOK`/`RAWLAG`/`RAWMON`/`STALL`/`PHYS`/`SPACE#`/`MOUSE#`/
-│                           `HOOKPROBE`, plus the two that fire on ORDINARY activity and would otherwise
-│                           keep writing forever — `KBCAP …` once per click of the key bind UI, and the
-│                           `RAWINPUT takeover` / `RAWINPUT hands back` transitions, whose effect is
-│                           already visible as `dTO` vs `app` in the LOOK line) inside `logDebug`, while
-│                           `appendDebugLog` — the error/console
-│                           channel — always writes; the probe PREFIX TABLE there is the one place a
-│                           new probe has to be registered, and the line that draws the boundary is
-│                           "does the line exist only to be READ by someone debugging (probe), or is it
-│                           the only trace of something that CHANGED state (event: LOCK/ESC/WORLD/
-│                           CURSOR/ERROR)"; the composition root also writes ONE event line at boot
-│                           saying which state the run started in — `DIAGLOG probes enabled/disabled at
-│                           boot (settings.json diagLog=…)` — because a log with no probe lines in it is
-│                           otherwise ambiguous: "off" and "the probes never registered" read the same), keybinds.ts (owns the DEFAULTS + code validation and
-│                           reads/writes the KEYMAP resource), rawinput.ts, pointerlock.ts (relock +
-│                           the cursor; it publishes NO cached "click may grab the lock" any more, and it
-│                           REFUSES to capture while the window is not in the FOREGROUND — the native
-│                           ClipCursor path has no such check of its own, unlike the browser's
-│                           requestPointerLock, so the gate is explicit; the Rust emitter adds a
-│                           system-level net that tears a background capture down and emits `capture-lost`,
-│                           which the frontend handles exactly like a blur),
-│                           debuglog.ts, perf.ts, window-guards.ts (the listeners whose default action
-│                           must be cancelled INSIDE the event: the pointerlockchange log, the ESC and
-│                           contextmenu preventDefaults, the Space shield, and the menu/Apps-key cursor
-│                           re-assert), bind-gesture.ts (the bind gesture's five DEVICE listeners: the
-│                           one-shot click shield, the merged mouseup = shield fallback + drag end, the
-│                           wheel block, the key capture and the drag's mousedown — its STATE is
-│                           KEYBIND_GESTURE, its panels are `ui.keybind`, and only this event-time half
-│                           stays in `ui/menu.ts`'s arm paths), viewport.ts (the ONE `window` resize
-│                           listener; it only PUBLISHES the VIEWPORT resource)
-└── ui/                     DOM interfaces. `loading.ts` (the loading screen's tree: the startup AND
-                            a world entry), `hud.ts`, `menu.ts` (pause menu + shared settings panel, key
-                            binds included), `mainmenu.ts` and `inventory.ts` build their widget trees
-                            during wiring and afterwards only write component data: no
-                            createElement, no style string, no CSS-as-state, no colour literal, and no
-                            visibility field of their own — `show()`/`hide()` write `UI_MODAL`, which
-                            `ecs/ui/navigation.ts` turns back into widget visibility. The F3+F4
-                            picker and the key bind gesture's state are systems/resources in `ecs/` now.
-                            What remains here is the WIRING (which widget goes where, which
-                            action id a button carries), the arm paths of the bind gesture, and the
-                            views' component writes. The one named exception is the key bind DRAG RUBBER
-                            BAND (an SVG overlay in `menu.ts`, drawn on request from the keybind system).
-                            The config modules are VALUES ONLY: `i18n` answers from the LOCALE resource,
-                            `fonts`/`uiscale` publish the font css pair and the root font size
-                            (`currentFontCss()` / `currentRootFontPx()`), `background` answers from the
-                            pack chain (memoised) — and the RECONCILER is what applies the global style.
-                            Every modal surface PUBLISHES its
-                            visibility into UI_MODAL instead of making gameplay ask six container
-                            booleans whether a UI is up.
-packs/                      official example mod + resource pack (copy into game/)
-launcher/, rawinput/        native sources (C launchers, Rust input plugin)
-scripts/                    build chain (`npm run build`): tsc && vite build → rearrange.mjs →
-                            gcc launcher/launcher.c (launcher.exe). get-nw.mjs is a SEPARATE
-                            `npm run get-nw` step, not part of build; build:cursor/build:winctl
-                            are separate too. dump.tmp.mjs is a leftover.
-app/                        NW.js manifest source (rearrange.mjs copies it to game/core/)
+├── core/                  the microkernel: mechanism only (no game vocabulary)
+│   ├── data/                the DOD substrate: entity.ts (handles), component.ts (defineComponent ->
+│   │                        SOA columns / defineRecord -> cold records), query.ts (cached sparse-set
+│   │                        intersection), store.ts (columns + structuralVersion), resource.ts
+│   │                        (Resource<T> tokens)
+│   ├── flow/                the execution model: schedule.ts (three stages, after/before resolution,
+│   │                        declared access, derived batches), boot.ts (the BOOT_FLOW walker)
+│   ├── effect/              command-queue.ts (deferred writes, applied at a barrier) + commands.ts
+│   ├── services/            platform-free services: bus.ts (the configuration change bus), perf.ts (the
+│   │                        FPS/GPU sampler), settings-diff.ts (the pure settings repair)
+│   ├── extension/           THE PLUGIN SYSTEM's core half: point.ts (defineExtensionPoint — a typed
+│   │                        slot), slots.ts (SLOT_SYSTEMS / COMPONENTS / RESOURCES / COMMANDS),
+│   │                        registry.ts (who contributed what; a duplicate id THROWS)
+│   ├── plugin/              the plugin HOST: descriptor.ts (definePlugin), api.ts (the narrow door a
+│   │                        plugin is handed), lifecycle.ts (dep order, the manifest's veto, failure
+│   │                        isolation), errors.ts (one log line per thrown plugin)
+│   └── world.ts             the façade and the ONE import path: spawn/insert/query/resource/addSystem/
+│                            stepFixed/render/renderUi
+├── plugins/               everything that is a FEATURE (each one owns its data)
+│   ├── player/              components.ts (POSITION…TARGET_HIT + the spawn helpers)
+│   │   └── systems/         input, snapshot, controller, movement, collision, interaction (fixed lane)
+│   ├── render/              systems/: camera, chunk-stream, outline, menu-background, diagnostics
+│   ├── ui/                  components.ts (the widget components + prefabs)
+│   │   ├── systems/         reconcile (the ONE DOM writer), hud, loading, inventory, bindings, picker,
+│   │   │                    toast, keybind, navigation, delays
+│   │   └── views/           the wiring that spawns the trees and registers action ids (menu, mainmenu,
+│   │                        inventory, hud, loading)
+│   └── input/               keybinds.ts (the bind table, its validation and the settings file) +
+│                            bind-gesture.ts (the rebind gesture's EVENT-TIME half)
+├── host/                  the boundary: the only place with side effects
+│   ├── desktop/             shell.ts (Tauri: settings/logs/window/vsync), packs.ts (the pack-chain
+│   │                        preload), debuglog.ts (the diagnostic-queue forwarder)
+│   └── browser/             viewport.ts, rawinput.ts, pointerlock.ts, mousecapture.ts, window-guards.ts,
+│                            presentation.ts (the GPU/DOM factories), chunkmesh.ts (the mesher),
+│                            blockicons.ts (the icon baker)
+├── data/                  values only: no listeners, no DOM, no GPU, no timers, no module-level behaviour
+│   ├── globals/             the resource SHAPES + every shared table: resources.ts, gfx.ts, paint.ts,
+│   │                        actions.ts, sources.ts, keybind-gesture.ts, shell.ts, fonts.ts, uiscale.ts,
+│   │                        binds.ts, keylayout.ts, faces.ts, probes.ts, boot.ts
+│   ├── assets/              read once from the pack chain, then never written: theme.ts (UI_THEME +
+│   │                        recipeStyle), i18n.ts (I18N_STRINGS + t()), blockregistry.ts
+│   │                        (BLOCK_REGISTRY), textures.ts (the pack chain), background.ts (MENU_BG_KIND)
+│   └── world/               the voxel data: chunk.ts, world.ts
+├── shared/                types and pure helpers with no state: math/raycast.ts (the voxel DDA)
+├── boot/                  the composition root: main.ts creates the World, reads the plugin MANIFEST,
+│                            installs the plugins into the registry and registers the systems from what
+│                            they contributed, inserts every resource, owns the ONE rAF chain and the
+│                            boot/world-entry stage lists, and wires the views; manifest.ts is the
+│                            manifest's parser/reader (its shape is in manifest-types.ts, which the gate
+│                            imports)
+└── vite-env.d.ts          the bundler's type shim
+
+READING THE TREE: `core/` = mechanism, `plugins/` = features (a plugin owns its own components and
+resources, and every plugin has an `index.ts` that DECLARES them through `definePlugin`), `host/` = the
+outside world, `data/` = values, `shared/` = pure helpers, `boot/` = assembly.
+
+WHAT THE LAYOUT DOES NOT ENFORCE YET (the P1.18b debt, counted by `check:ecs` as a ratchet): **21 imports
+still cross a layer** — 16 between plugins (`ui` -> `player` ×4 and -> `input` ×2, `render` -> `player` ×4
+and -> `ui` ×1, `player` -> `input` ×3 and -> `render` ×1, `input` -> `ui` ×1) and 5 straight into `host/`
+(`ui/views/menu.ts` -> shell + viewport, `ui/systems/inventory.ts` -> blockicons,
+`render/systems/chunk-stream.ts` -> chunkmesh, `player/systems/input.ts` -> mousecapture). Nothing forbids
+them yet; the count is pinned so it cannot grow. P1.18b closes them by making each plugin DECLARE its deps
+and by moving what is genuinely shared into `core/` or `data/`.
 ```
 
-Placement rule of thumb: touches the OS/browser/NW.js → `platform/`; touches three.js/pixels →
-`rendering/`; mutates entity data per tick → `ecs/systems/`; entity state itself →
-`ecs/components/`; visible DOM → `ui/`.
+Placement rule of thumb: touches the OS/browser/Tauri → `host/` (Tauri/files/logs → `host/desktop/`,
+DOM/GPU/device events → `host/browser/`); mutates entity data per tick → the owning plugin's `systems/`;
+entity state itself → the owning plugin's `components.ts`; a value that is merely STORED (a table, a
+constant, a resource's shape) → `data/`; a pure helper with no state → `shared/`; visible DOM → only
+`plugins/ui/systems/reconcile.ts` touches the document (a view spawns widget trees and registers action
+ids, it does not write styles).
+
+## Architecture — microkernel + plugins
+
+The name of this architecture is **microkernel (+ plugin) architecture**: a core that only knows
+MECHANISM, and features that are contributed into it. `plugins/` is a layout today; the registry that
+makes it a real plugin system is `ROADMAP.md` §P1.18.
+
+**The three layers, and who may see whom.**
+
+| Layer | Owns | May import | Must never |
+|---|---|---|---|
+| `core/` | the mechanism: entities/columns/queries, the stage schedule, the command queue, the resource tokens, the World façade, the platform-free services | `core/` + `shared/` | any game vocabulary (block/player/menu/i18n), `plugins/`, `host/`, `boot/` |
+| `plugins/*` | a FEATURE **and the data it owns** (its components, its resource shapes, its tables) | `core/` + `shared/` + its own folder + `data/` | another plugin's internals; `host/` directly (a device/DOM/GPU need goes through an injected service) |
+| `host/` | the outside world: Tauri, files, logs, DOM, GPU, device events | `core/` + `shared/` | `plugins/` (the host does not know what a plugin is) |
+| `data/` | values only: resource shapes + every shared table + the pack-chain assets + the voxel data | `core/` + `shared/` | side effects, listeners, module-level mutable state |
+| `shared/` | types and pure helpers | nothing | everything else |
+| `boot/` | the composition root: read the manifest, install, start, own the ONE rAF chain | everything | — |
+
+**Why a plugin owns its data.** The point of a plugin is that it can be installed AND removed, so
+`components/` is deliberately NOT a top-level folder any more: a plugin's components and constants live
+in its own `components.ts` / `data.ts`. Only a value genuinely shared across plugins belongs in `data/`.
+
+**The extension points (the mechanism, since P1.18).** The core declares named slots in
+`core/extension/slots.ts` — `SLOT_SYSTEMS`, `SLOT_COMPONENTS`, `SLOT_RESOURCES`, `SLOT_COMMANDS` — and a
+plugin contributes into them from its own `plugins/<id>/index.ts` with `definePlugin({ id, deps, setup })`.
+`ExtensionRegistry` files each contribution under the plugin id and THROWS on a duplicate id;
+`installPlugins` (core/plugin/lifecycle.ts) orders the plugins by their declared `deps`, lets the manifest
+veto one, and DISABLES (with a logged reason) any plugin whose `setup` throws — the boot always continues.
+The manifest is `plugins.json`, read out of the PACK CHAIN like any other content file, and a plugin it
+turns off contributes nothing (its systems never reach the schedule). More slots are planned (views,
+settings, blocks, languages, uiActions); the UI's existing action/source tables are the working prototype.
+
+**What is NOT enforced yet.** Nothing checks the import direction today: 21 imports still cross a layer (the
+count and the list are in the directory map above), and the systems' CONSTRUCTION still happens in
+`boot/main.ts` (it closes over the wiring: the views, the injected hooks) — so a plugin owns its
+registrations and its data, but not yet its own file. Closing both is P1.18b: each plugin declares `deps`,
+its declaration moves next to its systems, and the gate grows an assertion that fails on an undeclared
+cross-plugin import or any `plugins/**` -> `host/**` import. Until then the debt is a RATCHET in
+`check:ecs` (the counts may not grow).
+
+## Programming model — DOD (data-oriented design)
+
+DOD is why the data LOOKS the way it does. Six rules, all of them already load-bearing:
+
+1. **Columns, not objects.** A component whose fields are touched as math per tick is a
+   `defineComponent` — one typed array per field (`POSITION.x[row]`). State that is low-frequency or
+   holds a `Map`/array is a `defineRecord` — one plain object per entity. The choice is made by HOW IT
+   IS READ, not by what it "represents".
+2. **Resolve once, scan many.** A query is cached and pre-resolved; a system iterates
+   `world.query(...).indices` (rows) in a plain `for` loop over contiguous memory. Nothing in a hot loop
+   builds an entity object, a closure or an intermediate array.
+3. **Zero allocation on the hot path.** A rebuild overwrites its typed arrays in place; a chunk mesh
+   keeps ONE geometry whose capacity only grows; per-system temporaries belong to scratch state, not to
+   the call. Allocation in `step()` is a bug, not a style choice.
+4. **Structure changes only at a BARRIER.** `spawn`/`despawn`/`insert`/`remove` happen during wiring or
+   inside a command — never inside a system. The scheduler compares `structuralVersion` around every
+   system and throws if one moved it. Every write from outside a system is a COMMAND.
+5. **"Parallel" is a computed property, not a claim.** Systems declare `reads`/`writes` (and
+   `readsExternal`/`writesExternal`); the schedule derives batches of systems that share no data and are
+   ordered by no edge. Inside a batch the order does not matter — and `check:ecs` proves it by replaying
+   the fixed lane in both registration orders.
+6. **Data is the program.** Tables, tuning constants, resource shapes and content (blocks, languages,
+   menu layouts) are DATA; the code reads them. `data/` and each plugin's own `data.ts` exist to make
+   that literal — which is also what makes a resource pack a first-class feature.
+
+DOD is NOT functional programming: state is mutated in place on purpose, and the order of systems is
+load-bearing (the one thing a purely functional pipeline would not need). What it shares with FP is the
+discipline that survives: one owner per value, no cached derivation of another's state, and behaviour
+that is a function of data rather than a second copy of it.
 
 ## The three lanes (how the loop runs)
 
@@ -576,7 +334,7 @@ still owns exactly one, and the gate asserts it.
 own field and silently falls back when it cannot (`loadLang` ignores a language outside zh/en/ja,
 `sanitizeFrameCap` turns a hand-edited `fpsCap: 1` into 30, `loadBinds` drops a code it does not know).
 That is right at LOAD time, but it left the file saying one thing while the game used another — the bad
-value survived on disk, unreported, and every launch guessed again. `platform/shell.ts`'s
+value survived on disk, unreported, and every launch guessed again. `host/desktop/shell.ts`'s
 `diffSettings(raw, inForce)` is a PURE comparison that repairs by rewriting each unusable value with the
 one in force, reporting a keybind per ACTION and KEEPING keys the engine does not know (an older build
 must not trim a newer file). `inForce` doubles as the schema. An UNREADABLE file is different: it is
@@ -603,7 +361,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
    - RECORD components (`world.get(e, CONTROL)`) return an object whose **identity is stable** for
      as long as the component is attached, so caching it for the system's lifetime is correct.
      `insert` throws on duplicates and on dead entities — enforcement, not a suggestion.
-3. **The pointer-lock/input race code in ecs/systems/input.ts is timing-sensitive**
+3. **The pointer-lock/input race code in plugins/player/systems/input.ts is timing-sensitive**
    (skipFirstMove, lockGraceUntil, raw-input takeover arbitration, spike guards). It encodes
    real Chromium/Windows races. Do not simplify or reorder without replaying them. The DOM listeners
    still take every one of those decisions at EVENT time and only QUEUE the result; `step()` (fixed
@@ -637,7 +395,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   BODY / REACH.
 - **"What did I write last" is DATA too.** A reconciler or a widget-data system needs one thing that is not
   game state: the value it painted last frame, so it can skip an unchanged write. Those caches are resources
-  now, not private fields: `UI_PAINT` (ecs/ui/paint.ts) holds the reconciler's ELEMENT TABLES, the per-widget
+  now, not private fields: `UI_PAINT` (logic/ui/paint.ts) holds the reconciler's ELEMENT TABLES, the per-widget
   drawn cache, the hover/press sets, the applied global style, and the diff caches of `ui.loading`,
   `ui.toast`, `ui.hud`, `ui.keybind`, `ui.inventory`, `ui.navigation` and `ui.bindings`; the same treatment
   applies outside the UI (`INPUT_INTENTS.frameDx/Dy`, `CHUNK_MESHES.wantedKeys/lastPcx/lastPcz`,
@@ -645,17 +403,18 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   publishScheduled`, `INPUT_STATE.appliedCursor`). A cache is never read to ANSWER a question — every value
   it mirrors is re-derived from its owner every frame — so losing one costs a repaint, never a wrong answer.
   The classes keep thin accessors onto the resource, which is why the use sites read the same as before.
-- **The host, the assets and the loop are data as well.** `SHELL_STATE` (platform/shell.ts) is the shell's
-  own bookkeeping — the settings snapshot, the log-flush deadline, the diagnostic-probe switch and the
+- **The host, the assets and the loop are data as well.** `SHELL_STATE` (data/globals/shell.ts) is the shell's
+  own bookkeeping — the settings snapshot, the queued log lines, the log-flush deadline, the diagnostic-probe
+  switch and the
   foreground flag — created by that module at import time (a log line can be written before the World
   exists) and inserted by the composition root; `I18N_STRINGS`, `BLOCK_REGISTRY` and `MENU_BG_KIND` are the
   pack chain's asset caches, same pattern. `LOOP_STATE` (the mode, both accumulators, the canvas size last
   applied, the geometry-suppression deadline) and `FRAME_PROBE` (the frame probe's counters) are the one
   frame loop's state; the loop BODY stays in `main.ts` — a rAF callback is not a lane — but it now reads and
-  writes world data. `BOOT_FLOW` + `ecs/boot.ts` do the same for the two drivers: the stages (progress, i18n
+  writes world data. `BOOT_FLOW` + `core/flow/boot.ts` do the same for the two drivers: the stages (progress, i18n
   key, work) are a DATA list declared by the composition root and `runBootFlow` is the only logic — announce
   a stage, yield one macrotask so the browser paints it, then run its work.
-- **A GPU/DOM object is a RESOURCE, not an argument** (`ecs/presentation.ts`). There is one scene, one
+- **A GPU/DOM object is a RESOURCE, not an argument** (`host/browser/presentation.ts`). There is one scene, one
   camera, one renderer, one UI mount root, one chunk-mesh cache, one item-icon baker, one chunk material
   and one target wireframe per world, and they do not die with
   an entity: that is the definition of a resource. They used to be constructor dependencies, which made
@@ -675,7 +434,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   it every frame; `FONT`/`UI_SCALE`; `FPS_CAP`). A setting read only when its panel opens, or written
   only when it changes, is plain configuration and stays in its module (`windowMode`, `vsyncDisabled`,
   the settings FILE itself). Either way the config module owns the file and the validation, and the
-  resource is the single owner of the value in force. `background.ts` and `blockregistry.ts` are
+  resource is the single owner of the value in force. `background.ts` and `data/assets/blockregistry.ts` are
   neither: they derive their answer from the PACK CHAIN, which never changes after boot, so they are
   assets — the menu background kind is memoised because the menu frame asks for it every frame.
 - **Never keep a CACHED DERIVATION of another resource's state.** `INPUT_STATE` used to carry
@@ -699,7 +458,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   (`world.resource(INPUT_STATE)`, `LOCAL_PLAYER`, `VOXEL`); per-entity state is a component. That
   is the whole rule — if two systems need the same thing, one of those two is where it goes.
 - **A system declares what it touches, in its own module** (`SNAPSHOT_ACCESS`, `MOVEMENT_ACCESS`,
-  ... in `ecs/systems/*.ts`, spread into the registration in `main.ts`). Options: `reads`,
+  ... in `logic/fixed/*.ts`, spread into the registration in `main.ts`). Options: `reads`,
   `writes` (components), `readsExternal`, `writesExternal` (free-form target names for the DOM, the
   GPU, a three.js object). Forgetting a declaration is the one mistake the schedule cannot catch:
   its model of the system is only as good as the declaration. Declaring too much costs a fake
@@ -729,7 +488,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
 - **The UI is DATA, and `ui.navigation` is the one place that turns it into visibility.** A surface
   does not own its own visibility any more: `Menu.show/hide`, `MainMenu.show/hide` and the inventory
   toggle write the `UI_MODAL` resource (a `world.resource(UI_MODAL)` write, so a *view* never touches
-  the DOM to hide itself), and `ecs/ui/navigation.ts` is the ONE painter — it maps that state onto the
+  the DOM to hide itself), and `plugins/ui/systems/navigation.ts` is the ONE painter — it maps that state onto the
   modal widget trees' `UI_STATE` every frame. Which settings sub-page is up is data too
   (`UI_MODAL.settings`), and one shared mapping (`stepBackSettings`) answers "what is one level back"
   for ESC, both menus' `goBack()` and every Back button; it used to exist twice and the copies
@@ -760,7 +519,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   neither an entity nor a system owns may stay in a view (the reconciler's hover/press bits, the
   DOM elements themselves); a VISIBILITY flag may not — "is the backpack open" is
   `UI_MODAL.inventory`, painted by `ui.navigation` — and neither may a scroll position
-  (see `ecs/ui/system.ts`).
+  (see `plugins/ui/systems/reconcile.ts`).
 - Flat files until a module needs a second file; then a folder + a `create()` factory, and
   registration stays explicit.
 - A DOM writer belongs in the `ui` STAGE, never in `render` — that lane stops with the game loop,
@@ -792,7 +551,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   the icon cache) and draws the baked icon in ONE write, and only falls back to the engine's
   magenta/black checker when the bake genuinely has not happened yet. The hand-written view got away
   with `placeholder; then icon` because it wrote the DOM twice inside one task — do not copy that
-  shape into a widget surface. (`rendering/blockicons.ts` exports `clampIconSize`/`iconCacheKey` so
+  shape into a widget surface. (`host/browser/blockicons.ts` exports `clampIconSize`/`iconCacheKey` so
   the peek and the bake cannot disagree about what a cache entry is called.)
 
 ## Testing
@@ -857,7 +616,7 @@ can:
   continuation), the shared chunk material (CHUNK_MATERIAL), the raw-input transport counters
   (`InputDiagnostics.raw`) and the LOOK counters (`InputDiagnostics.look`, with `player.input` keeping
   no private copy), the UI mount root (`createUiMount()`, no longer a stage div built at IMPORT time by
-  `ui/uiscale.ts`), the widget tree's creation counter (UI_ORDER, inserted before the first spawn) and
+  `data/globals/uiscale.ts`), the widget tree's creation counter (UI_ORDER, inserted before the first spawn) and
   the block-outline mesh (BLOCK_OUTLINE + `block.outline`, with the fixed lane mentioning no wireframe
   at all and writing TARGET_HIT instead).
 
@@ -865,15 +624,15 @@ Run it after touching the ECS, a component, a command, a resource, a recipe, a s
 access declaration. Some checks read SOURCE TEXT, so they strip comments first: a comment that
 documents what a migration removed must not fail the migration.
 
-For one-off experiments, `ecs/core/` is pure logic (no three.js, no DOM) and can be verified
+For one-off experiments, `logic/engine/` is pure logic (no three.js, no DOM) and can be verified
 standalone. The recipe that works in this repo — TS 7 needs `--ignoreConfig`, and the emitted
 CommonJS needs a `{"type":"commonjs"}` package.json in its output directory because the repo root is
 `"type":"module"`:
 
 ```
-node ./node_modules/typescript/bin/tsc src/ecs/core/entity.ts src/ecs/core/component.ts \
-  src/ecs/core/query.ts src/ecs/core/store.ts src/ecs/core/schedule.ts src/ecs/core/commands.ts \
-  src/ecs/core/resource.ts src/ecs/World.ts --ignoreConfig --outDir .tmp/ecstest --rootDir src \
+node ./node_modules/typescript/bin/tsc src/core/data/entity.ts src/core/data/component.ts \
+  src/core/data/query.ts src/core/data/store.ts src/core/flow/schedule.ts src/core/effect/commands.ts \
+  src/core/data/resource.ts src/core/world.ts --ignoreConfig --outDir .tmp/ecstest --rootDir src \
   --module commonjs --target es2022 --strict --skipLibCheck --types node \
   --lib es2022,dom,dom.iterable
 ```
@@ -881,8 +640,8 @@ node ./node_modules/typescript/bin/tsc src/ecs/core/entity.ts src/ecs/core/compo
 then `require()` the output from a throwaway `.cjs` and assert. Delete `.tmp` when done. Keep `.tmp`
 OUTSIDE `node_modules` and inside the repo, or `require("three/webgpu")` will not resolve.
 
-That trick reaches further than `ecs/core/`: `components/Player.ts`, `commands.ts`,
-`systems/snapshot.ts`, `systems/collision.ts` and `voxel/world.ts` also import no three.js, and the
+That trick reaches further than `logic/engine/`: `components/Player.ts`, `commands.ts`,
+`systems/snapshot.ts`, `systems/collision.ts` and `data/world/world.ts` also import no three.js, and the
 VOXEL resource is only ever used through `isSolid()`. So the whole fixed lane can be REPLAYED in
 Node — register the snapshot + collision systems on a real `VoxelWorld`, integrate a fake gravity
 step between them, and assert where an entity lands. Wrapping the voxel in an object that counts
@@ -896,23 +655,23 @@ When work lands, move the entry here and delete it there.
 
 ## Known gaps (do not "fix" without asking)
 
-- The voxel world has NO content: `generateChunk()` (voxel/world.ts) fills every chunk with a
+- The voxel world has NO content: `generateChunk()` (data/world/world.ts) fills every chunk with a
   single block — no heightmap, biomes or ores. Breaking and placing DO work, but there is only
   ONE block type: placement always writes SOLID. `interaction.ts` reads the selected slot's type
   from INVENTORY (so the selection is real component data and the UI cannot disagree with it), but
   there is no per-value material or voxel palette to write it into yet. The mesher draws the
-  built-in checker texture (CHECKER_TEXTURE_URL) instead of consulting blockregistry.ts, so mod
+  built-in checker texture (CHECKER_TEXTURE_URL) instead of consulting data/assets/blockregistry.ts, so mod
   blocks appear in the hotbar and not in the world.
 - Chunk data is never evicted: the map can hold up to WORLD_CHUNKS_X * WORLD_CHUNKS_Z *
   CHUNK_Y_COUNT = 32 * 32 * 8 = 8192 chunks. A uniform chunk allocates NO array at all (see
-  voxel/chunk.ts), so real memory is only the chunks a player actually edited — but raising the
+  data/world/chunk.ts), so real memory is only the chunks a player actually edited — but raising the
   period, or making generation non-uniform, needs eviction first.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
-  world. Raise RENDER_RADIUS_CHUNKS (ecs/systems/chunkstream.ts) to push it out, or reintroduce a
+  world. Raise RENDER_RADIUS_CHUNKS (logic/fixed/chunkstream.ts) to push it out, or reintroduce a
   `scene.fog` — those two values were previously tuned as a pair.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
-  `VoxelWorld.topSolidY()`, used by ecs/systems/diagnostics.ts and the F3 panel.
+  `VoxelWorld.topSolidY()`, used by logic/fixed/diagnostics.ts and the F3 panel.
 - The torus is drawn by placing each chunk at its nearest representation, which is perfectly
   seamless while the world is uniform. Real terrain will need ghost meshes near the seam (or a
   much larger WORLD_CHUNKS period), otherwise the wrap will visibly snap.
@@ -920,10 +679,10 @@ When work lands, move the entry here and delete it there.
   "restore" or "fix" them: the main menu's world-type panel (`mainmenu.ts` gen panel plus the
   i18n keys main.genTitle/genSuperflat/genNoise; main.ts's `onStartSingle` logs `mode` and then
   discards it), and comments mentioning BlockWorld or the REMOVED chunk system (the new chunk
-  system in voxel/ is unrelated). The hand-built loading overlay that used to sit here is GONE: it was
+  system in data/world/ is unrelated). The hand-built loading overlay that used to sit here is GONE: it was
   replaced by the loading screen (`ui/loading.ts` + `LOADING_STATE`), and a world-entry preload belongs in
   that resource, not in an element built by the composition root.
-- `ui/menu.ts` was rewritten around an explicit binding-interaction state machine (click
+- `plugins/ui/views/menu.ts` was rewritten around an explicit binding-interaction state machine (click
   shield + capture-free drag + physical capture, all documented at the top of the file).
   Still the densest file — the two shield-arm paths and the Esc-during-drag branch are
   load-bearing click-synthesis handling. Do not merge the arm paths. The GESTURE'S STATE is
@@ -940,7 +699,7 @@ When work lands, move the entry here and delete it there.
   suppressed has to be done in the page or in a window procedure — do not build on the hook.
 - **The menu/Apps key's one-frame cursor flash is a RACE we win, not a call we cancel.** Chromium treats that
   key (and Shift+F10) as "show a context menu" and REVEALS the system cursor for it; the reveal happens
-  outside the page (WebView2/Windows), so `preventDefault` cannot stop it. `platform/window-guards.ts`
+  outside the page (WebView2/Windows), so `preventDefault` cannot stop it. `host/browser/window-guards.ts`
   therefore cancels the gesture on BOTH `keydown` and `keyup` and then RE-ASSERTS the hidden cursor
   immediately (plus rAF and 0/32/80 ms), so the momentary reveal is never painted; the Rust cursor sentinel
   polls every tick (≈4 ms) as the net. WebView2's own context menus are disabled and the window procedure

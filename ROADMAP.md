@@ -32,21 +32,21 @@ voxel world** and nothing else in it yet.
 
 | Works today | Where |
 |---|---|
-| 32³ chunks, generated on demand, meshed face-culled, streamed around the player | `src/voxel/`, `src/rendering/chunkmesh.ts`, `src/ecs/systems/chunkstream.ts` |
-| X/Z is a **torus** (period 32 chunks = 1024 blocks), seamless via nearest-representation drawing | `src/voxel/world.ts` (`nearestWrap`) |
-| Y is **split**: `[0,128)` ground, `[128,256)` writable build space, bedrock below 0 | `src/voxel/world.ts` |
-| AABB collision, sub-stepped per axis; player lands, walks, jumps | `src/ecs/systems/collision.ts` |
-| Break (LMB) / place (RMB) through a 6-block voxel raycast, with a white target outline | `src/ecs/systems/interaction.ts`, `src/voxel/raycast.ts` |
-| Three movement modes (walk / creative fly / spectator), fixed 120 Hz step + render interpolation | `src/ecs/systems/movement.ts`, `src/rendering/camera-view.ts` |
-| Pointer lock, raw mouse input fallback, keybinds, inventory UI, 3 languages, settings | `src/platform/`, `src/ui/` |
-| **Input is a scheduled system** (fixed lane, first): the DOM listeners decide every guard at EVENT time and queue a named INTENT (`key`/`look`/`motion`); `step()` writes CONTROL/VIEW/MOTION, so no gameplay component is written outside a system run and the schedule orders input against the controller/movement/collision that read it. It also OWNS the mouse-button listeners (a button bound to "inventory" publishes an edge and nothing else). The raw-input deltas arrive per event and are applied ONCE PER FRAME (`frameLook`, no timer at all — §5.2 P1.11), and their transport/LOOK counters live in the `INPUT_DIAGNOSTICS` resource, which this system also prints from (§5.2 P1.12) | `src/ecs/systems/input.ts` (`INPUT_ACCESS`), `src/platform/rawinput.ts` |
-| A **pure ECS**: generation-checked entity handles, SOA typed-array columns, cached sparse-set queries, resources, deferred commands, a three-stage schedule whose declared order is verified at boot | `src/ecs/core/`, `src/ecs/World.ts` |
-| The schedule also **derives parallelism**: systems declare access (components + external targets), `world.batchesOf(stage)` returns the groups that may run in any order, a stage whose systems touch the same thing without a declared edge throws at boot, and the grouping is logged as `SCHEDULE ...` | `src/ecs/core/schedule.ts`, `world.scheduleReport()` |
-| The player's ENTIRE state is components — position, previous position, orientation, buffered view deltas, motion, control, body box, reach, interaction cooldowns, inventory (stacks + selection) and a zero-size PLAYER marker; its DOM view reconciles from that data once per frame | `src/ecs/components/Player.ts`, `src/ui/inventory.ts` |
-| **UI modality is EXPLICIT**: every modal surface publishes its visibility into the `UI_MODAL` resource, and one gate (`canControl(devices, ui)`) takes the input away from the local player (its body keeps being simulated) — instead of six container booleans OR'd at five call sites. Which settings sub-page is up is the same resource (`UI_MODAL.settings`/`gen`), so no view keeps a visibility field of its own | `ecs/resources.ts`, `ui/menu.ts`, `ui/mainmenu.ts`, `ui/inventory.ts` |
-| **UI NAVIGATION is a system, not a branch**: `ui.navigation` reads the same key/button EDGES (ESC, the inventory key, a mouse button bound to "inventory") and turns `UI_MODAL` into widget visibility — the ONE painter of the modal trees. ESC walks the sub-page ladder one rung at a time through a single shared mapping (`stepBackSettings`, which the Back buttons and both `goBack()`s also call), and the pointer-lock effects (unlock on open, relock on close) are edge-triggered from the state | `src/ecs/ui/navigation.ts` |
-| A **UI WIDGET layer**: widgets are entities (`UI_TREE`/`UI_TEXT`/`UI_LOOK`/`UI_STATE`), prefabs (`spawnPanel`/`spawnLabel`) are the reuse unit, one system reconciles their DOM, and every colour/space/size is a `UI_THEME` token | `src/ecs/ui/`, `ui/hud.ts`, `ui/menu.ts` |
-| The UI's **behaviour** is scheduled too, not just its data: the F3+F4 picker (`ui.picker`, driven by key EDGES the device layer publishes), the HUD toast (`ui.toast`, a wall-clock deadline in a resource, armed by the `ShowToast` command), the key bind panels + drag gesture (`ui.keybind`, panels derived every frame, gesture state in `KEYBIND_GESTURE`) and the modal navigation (`ui.navigation`) — the old `ui/gamemode.ts` class is gone, and the ESC if-chain that lived in `main.ts` is gone with it | `src/ecs/ui/picker.ts`, `toast.ts`, `keybind.ts`, `navigation.ts` |
+| 32³ chunks, generated on demand, meshed face-culled, streamed around the player | `src/data/world/`, `src/host/browser/chunkmesh.ts`, `src/plugins/render/systems/chunk-stream.ts` |
+| X/Z is a **torus** (period 32 chunks = 1024 blocks), seamless via nearest-representation drawing | `src/data/world/world.ts` (`nearestWrap`) |
+| Y is **split**: `[0,128)` ground, `[128,256)` writable build space, bedrock below 0 | `src/data/world/world.ts` |
+| AABB collision, sub-stepped per axis; player lands, walks, jumps | `src/plugins/player/systems/collision.ts` |
+| Break (LMB) / place (RMB) through a 6-block voxel raycast, with a white target outline | `src/plugins/player/systems/interaction.ts`, `src/shared/math/raycast.ts` |
+| Three movement modes (walk / creative fly / spectator), fixed 120 Hz step + render interpolation | `src/plugins/player/systems/movement.ts`, `src/plugins/render/systems/camera.ts` |
+| Pointer lock, raw mouse input fallback, keybinds, inventory UI, 3 languages, settings | `src/logic/host/window/`, `src/logic/host/dom/` |
+| **Input is a scheduled system** (fixed lane, first): the DOM listeners decide every guard at EVENT time and queue a named INTENT (`key`/`look`/`motion`); `step()` writes CONTROL/VIEW/MOTION, so no gameplay component is written outside a system run and the schedule orders input against the controller/movement/collision that read it. It also OWNS the mouse-button listeners (a button bound to "inventory" publishes an edge and nothing else). The raw-input deltas arrive per event and are applied ONCE PER FRAME (`frameLook`, no timer at all — §5.2 P1.11), and their transport/LOOK counters live in the `INPUT_DIAGNOSTICS` resource, which this system also prints from (§5.2 P1.12) | `src/plugins/player/systems/input.ts` (`INPUT_ACCESS`), `src/host/browser/rawinput.ts` |
+| A **pure ECS**: generation-checked entity handles, SOA typed-array columns, cached sparse-set queries, resources, deferred commands, a three-stage schedule whose declared order is verified at boot | `src/logic/engine/`, `src/core/world.ts` |
+| The schedule also **derives parallelism**: systems declare access (components + external targets), `world.batchesOf(stage)` returns the groups that may run in any order, a stage whose systems touch the same thing without a declared edge throws at boot, and the grouping is logged as `SCHEDULE ...` | `src/core/flow/schedule.ts`, `world.scheduleReport()` |
+| The player's ENTIRE state is components — position, previous position, orientation, buffered view deltas, motion, control, body box, reach, interaction cooldowns, inventory (stacks + selection) and a zero-size PLAYER marker; its DOM view reconciles from that data once per frame | `src/plugins/player/components.ts`, `src/plugins/ui/views/inventory.ts` |
+| **UI modality is EXPLICIT**: every modal surface publishes its visibility into the `UI_MODAL` resource, and one gate (`canControl(devices, ui)`) takes the input away from the local player (its body keeps being simulated) — instead of six container booleans OR'd at five call sites. Which settings sub-page is up is the same resource (`UI_MODAL.settings`/`gen`), so no view keeps a visibility field of its own | `data/globals/resources.ts`, `plugins/ui/views/menu.ts`, `ui/mainmenu.ts`, `plugins/ui/views/inventory.ts` |
+| **UI NAVIGATION is a system, not a branch**: `ui.navigation` reads the same key/button EDGES (ESC, the inventory key, a mouse button bound to "inventory") and turns `UI_MODAL` into widget visibility — the ONE painter of the modal trees. ESC walks the sub-page ladder one rung at a time through a single shared mapping (`stepBackSettings`, which the Back buttons and both `goBack()`s also call), and the pointer-lock effects (unlock on open, relock on close) are edge-triggered from the state | `src/plugins/ui/systems/navigation.ts` |
+| A **UI WIDGET layer**: widgets are entities (`UI_TREE`/`UI_TEXT`/`UI_LOOK`/`UI_STATE`), prefabs (`spawnPanel`/`spawnLabel`) are the reuse unit, one system reconciles their DOM, and every colour/space/size is a `UI_THEME` token | `src/logic/ui/`, `ui/hud.ts`, `plugins/ui/views/menu.ts` |
+| The UI's **behaviour** is scheduled too, not just its data: the F3+F4 picker (`ui.picker`, driven by key EDGES the device layer publishes), the HUD toast (`ui.toast`, a wall-clock deadline in a resource, armed by the `ShowToast` command), the key bind panels + drag gesture (`ui.keybind`, panels derived every frame, gesture state in `KEYBIND_GESTURE`) and the modal navigation (`ui.navigation`) — the old `ui/gamemode.ts` class is gone, and the ESC if-chain that lived in `main.ts` is gone with it | `src/plugins/ui/systems/picker.ts`, `toast.ts`, `keybind.ts`, `navigation.ts` |
 | One-command build with a greppable verdict | `scripts/build-all.mjs` (`RESULT: OK / INCOMPLETE / FAILED`) |
 
 **What it is NOT:** there is no terrain generator, no second block type, no saving, no entities
@@ -61,10 +61,10 @@ orientation assumptions the next one depends on.
 
 | Stage | Status | What | Entry point / note |
 |---|---|---|---|
-| **P0 ground** | `DONE` | flat world, chunks, collision, edit | `generateChunk()` in `src/voxel/world.ts` |
+| **P0 ground** | `DONE` | flat world, chunks, collision, edit | `generateChunk()` in `src/data/world/world.ts` |
 | **P1 terrain** | `TODO` | replace the uniform fill with a real (noise) generator | **`generateChunk()` is the ONLY place that knows what a block is.** Everything else asks `isSolid()`. Start here. |
-| **P2 floating origin** | `TODO` | split coordinates into `int cell + float local`, render camera-relative, update by **delta only** | Must land **before** anything writes absolute world coordinates. The absolute-position writes are now funneled into ONE place — the `Teleport` command (`src/ecs/commands.ts`) — which is exactly where the cell/local split goes. Reference technique: [big_space](https://docs.rs/big_space/0.6.0/i686-unknown-linux-gnu/big_space/) |
-| **P3 radial gravity** | `TODO` | `ORIENTATION.up` = local surface normal instead of the constant `(0,1,0)` | ⚠️ **Known blocker**: `src/ecs/systems/controller.ts` sums view deltas and applies them once per tick **because** `up` is constant. With a changing `up`, "sum then apply" ≠ "apply each". That optimisation must change in the same commit. |
+| **P2 floating origin** | `TODO` | split coordinates into `int cell + float local`, render camera-relative, update by **delta only** | Must land **before** anything writes absolute world coordinates. The absolute-position writes are now funneled into ONE place — the `Teleport` command (`src/core/effect/commands.ts`) — which is exactly where the cell/local split goes. Reference technique: [big_space](https://docs.rs/big_space/0.6.0/i686-unknown-linux-gnu/big_space/) |
+| **P3 radial gravity** | `TODO` | `ORIENTATION.up` = local surface normal instead of the constant `(0,1,0)` | ⚠️ **Known blocker**: `src/plugins/player/systems/controller.ts` sums view deltas and applies them once per tick **because** `up` is constant. With a changing `up`, "sum then apply" ≠ "apply each". That optimisation must change in the same commit. |
 | **P4 sphere + LOD** | `TODO` | cube-sphere quadtree; near = real voxels, far = heightmap | Do the sphere **after** P3; do LOD after the sphere looks right without it. |
 | **P5 space layer** | `TODO` | several bodies, orbits, nested reference frames | Only possible once P2 exists. |
 | **P6 seamless** | `TODO` | atmosphere, LOD hand-off, ships | Last. |
@@ -77,19 +77,19 @@ or building a sphere before there is any terrain to put on it.
 # 3. GAPS in what already exists
 
 ## 3.1 Terrain and content
-- **GAP** `generateChunk()` (`src/voxel/world.ts`) fills each chunk with ONE value. No heightmap,
+- **GAP** `generateChunk()` (`src/data/world/world.ts`) fills each chunk with ONE value. No heightmap,
   no biomes, no ores, no caves. `TERRAIN_TOP_Y = 128` is a constant, not a function of x/z.
 - **GAP** There is no decoration/population pass (trees, structures) and no place to hook one.
 
 ## 3.2 Blocks
-- **GAP** Exactly one block type (`SOLID = 1` in `src/voxel/chunk.ts`). Placement always writes
+- **GAP** Exactly one block type (`SOLID = 1` in `src/data/world/chunk.ts`). Placement always writes
   `SOLID`, so **which hotbar slot is selected does not matter yet** — `interaction.ts` reads the
   selected stack's type straight from the INVENTORY component (no UI callback, no mirrored copy),
   but there is nowhere to write it. Making selection meaningful = palette values in the voxel data
   + per-value material/UV selection in `chunkmesh.ts` + `isSolid()` accepting any non-AIR value.
 - **GAP** The mesher draws the engine's built-in checker texture (`CHECKER_TEXTURE_URL`) and **never
-  consults `src/blockregistry.ts`**. So mod blocks appear in the inventory and not in the world.
-- **GAP** `BlockDef.hasMissingTexture` is written but **read by nobody** (`src/blockregistry.ts`).
+  consults `src/data/assets/blockregistry.ts`**. So mod blocks appear in the inventory and not in the world.
+- **GAP** `BlockDef.hasMissingTexture` is written but **read by nobody** (`src/data/assets/blockregistry.ts`).
 - **GAP** Breaking is instant: no hardness, no progress, no drops, no sound, no particles.
 
 ## 3.3 World storage
@@ -137,16 +137,16 @@ or building a sphere before there is any terrain to put on it.
 - **GAP** No crafting, no containers, no item stacks beyond a display count. Nothing moves items
   between slots except the backpack click, and nothing can pick an item up.
 - **DONE — the widget layer covers EVERY surface.** `ui/hud.ts` (crosshair, F3 panel, toast),
-  `ecs/ui/picker.ts` (the F3+F4 picker — it stopped being a view when it became a system),
-  `ecs/ui/toast.ts`, `ui/menu.ts` (pause menu + the shared settings panel, the
-  visual keyboard and the key bind gesture included), `ui/mainmenu.ts` and `ui/inventory.ts` all write
+  `plugins/ui/systems/picker.ts` (the F3+F4 picker — it stopped being a view when it became a system),
+  `plugins/ui/systems/toast.ts`, `plugins/ui/views/menu.ts` (pause menu + the shared settings panel, the
+  visual keyboard and the key bind gesture included), `ui/mainmenu.ts` and `plugins/ui/views/inventory.ts` all write
   component data now. Measured before → after, per file: `menu.ts` 45 → 0 colour literals, 60 → 0
   inline style writes, 60 → 2 `appendChild` (both the drag rubber band's SVG); `mainmenu.ts` 21 → 0 and
   47 → 0; `inventory.ts` 13 → 0 and 17 → 0. The invariants that replaced the hand-written ones are
   asserted by `npm run check:ecs` for every migrated surface: no colour literal, no element built by
   hand, no inline style string, no `display` as state.
   The two prefabs the migration needed are the ones that were missing: a CLICKABLE widget
-  (`UI_ACTION` + the `UI_ACTIONS` dispatch table in `ecs/ui/actions.ts`) and a fixed-capacity list
+  (`UI_ACTION` + the `UI_ACTIONS` dispatch table in `logic/ui/actions.ts`) and a fixed-capacity list
   (`spawnList`). It also needed four primitives that no earlier surface did: a range slider
   (`UI_INPUT`), a per-widget layout string for the 104-key keyboard (`UI_LAYOUT`), an image slot with
   a data tint (`UI_IMAGE`) and a native tooltip (`UI_TIP`).
@@ -163,7 +163,7 @@ or building a sphere before there is any terrain to put on it.
   the magenta/black checker, which reads as "no icon yet" instead of as an item. A future startup
   warm-up (bake every registry block once) would make the placeholder essentially unreachable; it is
   deliberately NOT done yet.
-- **GAP** The i18n DICTIONARY IS NOT SHIPPED. `ui/i18n.ts` says the build packs `src/assets/lang` into
+- **GAP** The i18n DICTIONARY IS NOT SHIPPED. `data/assets/i18n.ts` says the build packs `src/assets/lang` into
   `default.zip`, and `packs/*` carries 77 keys in three languages — but `src/assets` does not exist and
   `rearrange.mjs` produces no `default.zip`, so with no resource pack installed `t()` falls back to the
   KEY and the UI renders `menu.resume`. The mechanism (layered merge, en fallback, 0 used-but-undefined
@@ -171,7 +171,7 @@ or building a sphere before there is any terrain to put on it.
 - **DONE** No surface reads its own visibility back out of `style.display` any more, and none keeps a
   visibility field of its own: a panel is a widget's `hidden` flag, "which modal surface is up" is
   `UI_MODAL.mainMenu/menu/inventory` and "which sub-panel is up" is `UI_MODAL.settings`/`gen`.
-  `ecs/ui/navigation.ts` is the ONE painter of those flags, and the ESC ladder asks the DATA
+  `plugins/ui/systems/navigation.ts` is the ONE painter of those flags, and the ESC ladder asks the DATA
   (`stepBackSettings`) instead of parsing CSS or calling a view method — that read is what made
   "first ESC after resuming from settings does nothing" possible in the first place.
   LESSON, because the first rewrite of this repeated the same class of bug: the ladder existed TWICE
@@ -207,7 +207,7 @@ or building a sphere before there is any terrain to put on it.
   gate EVERY frame (so world state) and written by the settings panel, yet never persisted — and
   because the slider initialises from `getFpsCap() || CAP_MAX`, a relaunch silently showed
   "unlimited" as if the value had never been set. It is now the `FPS_CAP` RESOURCE
-  (`ecs/resources.ts`), with a sanitising factory (a hand-edited settings.json cannot produce a NaN
+  (`data/globals/resources.ts`), with a sanitising factory (a hand-edited settings.json cannot produce a NaN
   or negative budget); `main.ts` loads it at boot, the gate and `diagnostics` read it from the World,
   and `onFpsCap` writes it back through `saveSettings()` — now through the `SetFpsCap` COMMAND, since
   assigning a resource from a UI callback was the last world value changed outside a system run. That
@@ -222,7 +222,7 @@ or building a sphere before there is any terrain to put on it.
   hand-edited `fpsCap: 1` loaded as 1 while the slider sat at 30 (it snapped the value into its own
   range) and the label said "1 FPS", and the first drag replaced the 1 silently. A stored value the
   widget cannot express is not a legal value: `CAP_MIN/CAP_MAX/CAP_STEP` now live in
-  `ecs/resources.ts` (the panel imports them instead of restating them) and `sanitizeFrameCap` clamps
+  `data/globals/resources.ts` (the panel imports them instead of restating them) and `sanitizeFrameCap` clamps
   AND snaps into them — `1 -> 30`, `300 -> 0` (the slider's TOP means unlimited), `59 -> 60` — so the
   invariant "the label and the slider always show the same thing" holds by construction. `check:ecs`
   sweeps inputs through `snapToRange` with that domain and asserts it is a no-op.
@@ -260,7 +260,7 @@ or building a sphere before there is any terrain to put on it.
   the loading screen is widget data and the render lane cannot run before `renderer.init()`; and (b)
   the per-stage yield is a `setTimeout` MACROTASK, not a second `requestAnimationFrame` chain — the
   process still owns exactly one, which `check:ecs` asserts. The screen is `LOADING_STATE` (a resource)
-  + `ui/loading.ts` (the tree) + `ecs/ui/loading.ts` (`ui.loading`, the painter, first in the ui lane):
+  + `ui/loading.ts` (the tree) + `plugins/ui/systems/loading.ts` (`ui.loading`, the painter, first in the ui lane):
   main.ts builds no element, which is why the hand-built "loading overlay" that had been left in the
   file as a remnant is finally gone. `chunkStream.warmUp` rides the same stages and meshes the WHOLE
   spawn window before the menu appears, so the world no longer streams in over the first seconds and
@@ -292,7 +292,7 @@ or building a sphere before there is any terrain to put on it.
 - **DONE — the vocabulary is `load`/`loading` everywhere.** The mode was renamed first (`"boot"` →
   `"load"`, because it serves world entry too); the SCREEN's own names followed: `BOOT_STATE` →
   `LOADING_STATE`, `SetBootStage` → `SetLoadingStage`, `ui.boot` → `ui.loading`,
-  `ui/boot.ts`/`ecs/ui/boot.ts` → `.../loading.ts`, the `boot.*` theme recipes → `loading.*`, and
+  `ui/boot.ts`/`logic/ui/boot.ts` → `.../loading.ts`, the `boot.*` theme recipes → `loading.*`, and
   the seven i18n KEYS → `loading.*`. **The key rename is the one PACK-VISIBLE part**: a resource pack
   that overrode `boot.*` in its `lang/*.json` no longer matches and silently falls back to the engine's
   text (dictionaries merge across the pack chain by key, and `t()` falls back English → key), so a pack
@@ -316,7 +316,7 @@ or building a sphere before there is any terrain to put on it.
   already ignored a value it could not use and fell back (`loadLang` outside zh/en/ja,
   `sanitizeFrameCap` for `fpsCap: 1`, `loadBinds` for an unknown code) — right at LOAD time, but it
   left the FILE disagreeing with the value in force, unreported, forever (the previous entry's
-  `fpsCap` bug was one instance of it). `platform/shell.ts` now has `readSettingsChecked()` (which
+  `fpsCap` bug was one instance of it). `host/desktop/shell.ts` now has `readSettingsChecked()` (which
   tells "no file yet" from "unusable file"), `diffSettings(raw, inForce)` — a PURE comparison that
   repairs each unusable value with the one in force, per ACTION for a keybind, KEEPING keys the engine
   does not know — and `backupSettingsFile()`. A file that cannot be parsed is copied to
@@ -325,7 +325,7 @@ or building a sphere before there is any terrain to put on it.
   what makes it testable by hand. `inForce` doubles as the schema; `check:ecs` asserts the repair
   rules and the wiring.
 
-## 3.9 ECS core (`src/ecs/core/`)
+## 3.9 ECS core (`src/logic/engine/`)
 Everything here is a **deliberate omission with a trigger**, not an oversight — each one is
 unused machinery today, and unused machinery is what makes a codebase unreadable.
 - **GAP** No **change detection** (`Changed<T>`). The store tracks `structuralVersion` only, so a
@@ -400,8 +400,8 @@ Written down because "is everything ECS now?" is a question that deserves a list
 feeling. Method: summed `(Get-Content <file>).Count` over `src/**/*.ts` (every line, blank ones
 included; `Get-ChildItem -Recurse -File -Include *.ts -Path src`). `main.ts` holds **0
 `addEventListener`, 1 `requestAnimationFrame`, 0 `setInterval`** — the window guards
-(`platform/window-guards.ts`, 6 listeners), the ONE resize listener (`platform/viewport.ts`) and the bind
-gesture's five (`platform/bind-gesture.ts`) are device-layer modules now (they used to be the composition
+(`host/browser/window-guards.ts`, 6 listeners), the ONE resize listener (`host/browser/viewport.ts`) and the bind
+gesture's five (`plugins/input/bind-gesture.ts`) are device-layer modules now (they used to be the composition
 root's), and the RECONCILER owns six listeners on the UI MOUNT ROOT rather than six per widget (delegated,
 §5.2 P1.11). The process has **0 `setInterval`**: the last one was the 8 ms raw-mouse poll, removed in
 P1.11; what is left is four `setTimeout`s (the boot macrotask yield, the log flush, the drag's click-shield
@@ -447,7 +447,7 @@ exist to drive the three lanes; exactly one system writes the DOM; and the file/
 somewhere. Every one of those is now stateless — it either publishes data or walks a data-declared flow.
 
 **C. Inert leftovers** (dead code and stale comments, NOT bugs — §4): the main menu's world-type
-panel, and the unused `centerCursor` export in `platform/shell.ts` (the live one is in `platform/rawinput.ts`;
+panel, and the unused `centerCursor` export in `host/desktop/shell.ts` (the live one is in `host/browser/rawinput.ts`;
 `wasMaximizedBeforeFullscreen` left this list when the fullscreen path stopped needing it).
 (The hand-built loading overlay used to be on this list; the startup screen replaced it, §3.8.)
 
@@ -494,18 +494,18 @@ Still outstanding:
 
 | Name | Problem | Risk |
 |---|---|---|
-| ~~`applyCursor()` (`platform/pointerlock.ts`)~~ | ~~also writes `input.clickLockAllowed` — a hidden second effect~~ **RESOLVED**: it only sets the cursor now | — |
+| ~~`applyCursor()` (`host/browser/pointerlock.ts`)~~ | ~~also writes `input.clickLockAllowed` — a hidden second effect~~ **RESOLVED**: it only sets the cursor now | — |
 | ~~`clickLockAllowed`~~ | ~~really means "no UI is open", not "clicking may grab the lock"~~ **RESOLVED**: the field is gone; the readers ask `isModalUi(UI_MODAL)` | — |
 | `freeMouseActive` | the cursor is HIDDEN in that mode; it means "Chromium cancelled the lock and the window is partly offscreen" | ⚠️ rule 3 |
 | `rawTakeoverActive` (`input.ts`) | a **log de-duplication flag**, not the takeover state; the state is computed on demand | low |
 | `MODE_NAMES` (`components/Player.ts`) | `walk → "Survival Mode"`; used by exactly one log line, while the UI uses i18n `mode.*` | low |
 | `mode` | three unrelated meanings: `MoveMode`, `WindowMode`, `MenuBgMode` | low |
-| `World` vs `VoxelWorld` | the ECS and the block world; the ECS holds it as the `VOXEL` resource, while `voxel/world.ts` keeps its own name | low |
+| `World` vs `VoxelWorld` | the ECS and the block world; the ECS holds it as the `VOXEL` resource, while `data/world/world.ts` keeps its own name | low |
 | `WORLD_MAX_Y` | the **writable limit** (256), not the visible top (128) | low |
 | `SKIN` (`collision.ts`) | the contact epsilon — "skin" also means mesh skinning | low |
 | `empty` (`chunkstream.ts`) | chunks that produced **no geometry**, which includes fully enclosed solid ones | low |
 | `enterWithLoading()` / `genPanel` / `WorldGenMode` | name promises loading / world generation that do not exist | low, but see §4 |
-| `BUILTIN_NAME = "default.zip"` (`textures.ts`) | a **live code path** looking for a pack the build no longer produces; same fiction in `blockregistry.ts` and `i18n.ts` comments | medium |
+| `BUILTIN_NAME = "default.zip"` (`textures.ts`) | a **live code path** looking for a pack the build no longer produces; same fiction in `data/assets/blockregistry.ts` and `i18n.ts` comments | medium |
 
 ## 5.2 Make the implicit explicit (ranked; `AGENTS.md` iron rules still hold)
 - **P0 — guard rails first.** `PARTLY DONE`: `scripts/check-ecs.mjs` (`npm run check:ecs`) is now the
@@ -563,16 +563,16 @@ Still outstanding:
   `CHUNK_MESHES` (the chunk-mesh cache: parent group, meshes and the "no geometry" set, built by
   `createChunkMeshCache(group)`) used to arrive as CONSTRUCTOR ARGUMENTS — the only shared state in the
   process with no owner, and the reason a system could not be constructed by a test. They are world state,
-  so the composition root INSERTS them (`ecs/presentation.ts`) and each system resolves what it uses in its
+  so the composition root INSERTS them (`host/browser/presentation.ts`) and each system resolves what it uses in its
   constructor body. The access declarations still name the objects as external targets (`camera3d`,
   `chunkMeshes`, `framebuffer`) — the schedule models those NAMES, not the resource handles — so no
   ordering changed. What it bought: the chunk stream keeps no private mesh cache, `diagnostics` takes NO
   constructor arguments (its sampler, renderer, voxel world, log sink and F3 panel are all resources), the
   device layer takes its canvas from `RENDERER3D.domElement` (the element the pointer is locked to IS the
   element the GPU draws into), and `check:ecs` asserts both halves: the root inserts every one of them and
-  no system is handed one any more. `Type-only` three.js imports keep `ecs/presentation.ts` loadable in
+  no system is handed one any more. `Type-only` three.js imports keep `host/browser/presentation.ts` loadable in
   Node.
-- **P1.8 — the input race guards' STATE became a resource.** `INPUT_TIMING` (ecs/resources.ts) holds which
+- **P1.8 — the input race guards' STATE became a resource.** `INPUT_TIMING` (data/globals/resources.ts) holds which
   mousemove is the synthetic lock-instant one, whether the unlock was ours, the grace deadline, the
   offscreen cache and the F3 SPACE/MOUSE counters — the fields, NOT the logic. That split is the whole
   point: iron rule 3's decisions stay in the DOM listeners at event time (`skipFirstMove`,
@@ -581,17 +581,17 @@ Still outstanding:
   grace window and read it back) and let the gate assert that `pointerlock` publishes nothing into the
   resource and that `input.ts` no longer owns a second copy of any of it.
 - **P1.9 — the last non-ECS edges: window, menu background, diagnostics, the view's listeners.** `DONE` in
-  five parts. (1) `platform/viewport.ts` owns the ONE `window` resize listener and only PUBLISHES the
+  five parts. (1) `host/browser/viewport.ts` owns the ONE `window` resize listener and only PUBLISHES the
   `VIEWPORT` resource; `cameraView.render` reconciles the projection from it and the FRAME (main.ts's
   `applyViewportSize`, its first act, before the mode body) reconciles `renderer.setSize` — the composition
   root's listener (which reached into a camera and the GPU device) and
-  ui/uiscale.ts's second one (which only fed the settings label) are both gone.
+  data/globals/uiscale.ts's second one (which only fed the settings label) are both gone.
   THE FRAME, NOT THE DRAW, and that is a fixed bug rather than a preference: the first version applied the
   size inside `renderer.draw`, which a MENU frame and a LOAD frame never run (they pump the ui lane alone),
   so resizing at the main menu left the panorama's canvas at its old pixel size and the background stopped
   scaling until a world was entered. The canvas follows the window in EVERY mode, applied only when the
   size changed and only once `renderer.init()` has run. (2) The main-menu panorama
-  is `rendering/menu-background.ts`: a system object whose state is the `MENU_BACKGROUND` resource, instead
+  is `plugins/render/systems/menu-background.ts`: a system object whose state is the `MENU_BACKGROUND` resource, instead
   of four module-level `let`s and a free function in main.ts. It is deliberately NOT registered in a lane —
   the schedule has no run conditions and a MENU frame never runs the render lane — so what it buys is an
   OWNER for the state and one entry point, not a batch. (3) `diagnostics` takes NO constructor arguments:
@@ -601,7 +601,7 @@ Still outstanding:
   also fixed a real bug: with no gate at all, 1..9 selected slots at the main menu, on the loading screen
   and behind the pause menu. (5) The key bind drag's rubber band is a WIDGET (`kb.line`) whose UI_LAYOUT
   string `ui.keybind` rewrites per frame; the pointer position is the `POINTER` resource, published by the
-  device layer that already handles mousemove, so `ui/menu.ts` creates no element and the drag's two mouseup
+  device layer that already handles mousemove, so `plugins/ui/views/menu.ts` creates no element and the drag's two mouseup
   listeners became one. The gesture's event-time half stays exactly where it was — see §3.10 B.
 - **P1.10 — a window GEOMETRY change is a device signal, and the capture is foreground-gated.** Two
   reported bugs, one shape. (a) Dragging the window's border while a world was LOADING let the entry lock
@@ -620,7 +620,7 @@ Still outstanding:
   (`win::capture_foreground_check`, two consecutive ticks with a foreign foreground → release + restore the
   cursor + emit `capture-lost`, which the frontend handles exactly like a blur).
 - **P1.11 — the last of the UI/device edges, plus the input-cadence bug.** `DONE` in six parts.
-  (1) THE RECONCILER'S EVENTS ARE DELEGATED: `ecs/ui/system.ts` used to attach SIX listeners to every
+  (1) THE RECONCILER'S EVENTS ARE DELEGATED: `plugins/ui/systems/reconcile.ts` used to attach SIX listeners to every
   widget at mount time (six closures each, none of them enumerable from outside); it now attaches one per
   event type to the UI MOUNT ROOT and finds the widget by walking up from `ev.target` — the same walk
   `hitTest` already did. `click`/`input`/`mousedown`/`mouseup` bubble, so they delegate as they are; hover
@@ -674,7 +674,7 @@ Still outstanding:
   system's private field, and one of them had a lane boundary crossed by an OBJECT instead of by data.
   (1) THE ITEM-ICON BAKE is the `ICON_BAKE` resource (presentation.ts): the second, offscreen
   `WebGPURenderer`, its in-flight init and the cache/pending Maps were four module-level `let`s in
-  `rendering/blockicons.ts`. The functions take that state, so the baker is a pure operation on world
+  `host/browser/blockicons.ts`. The functions take that state, so the baker is a pure operation on world
   data — and the promise-shaped `getBlockIcon()` is GONE, because its `.then` continuation wrote the
   slot's `UI_IMAGE` component from OUTSIDE any lane (a view updated between frames, deciding on its own
   when the frame's data changed). `peekBlockIcon(bake, …)` stays the synchronous reader the inventory
@@ -682,12 +682,12 @@ Still outstanding:
   WHICH slots are waiting and re-paints a slot the frame the bake lands
   (`collectFinishedBakes`), and stops waiting when a bake FAILED — otherwise the checker would either
   stay forever or be re-requested every frame.
-  (2) THE SHARED CHUNK MATERIAL is `CHUNK_MATERIAL`: `rendering/chunkmesh.ts` had a module-level
+  (2) THE SHARED CHUNK MATERIAL is `CHUNK_MATERIAL`: `host/browser/chunkmesh.ts` had a module-level
   `let sharedMaterial`, i.e. one GPU object per PROCESS shared by every world, created lazily because the
   pack chain must be installed before the checker texture resolves. `getChunkMaterial(state)` takes the
   resource.
   (3) THE RAW-INPUT TRANSPORT COUNTERS are `InputDiagnostics.raw` (`evCount`/`gapMax`/`lastArrive`/
-  `minOffset`/`backlogSum`/`backlogMax`): they were module state in `platform/rawinput.ts`, which is why
+  `minOffset`/`backlogSum`/`backlogMax`): they were module state in `host/browser/rawinput.ts`, which is why
   the module ALSO had to own the formatting of the `RAWLAG` line. `startRawInput(onDelta, raw)` is
   handed the resource and the input system prints both `LOOK` and `RAWLAG` from one window — the device
   layer now keeps no state and writes no log.
@@ -695,18 +695,18 @@ Still outstanding:
   `player.input` keeps no private diagnostics; `takeLookFrameMeter()` reads AND clears the resource, and
   the fields are readable by a test, a probe and the gate.
   (5) THE WIDGET TREE'S CREATION COUNTER is `UI_ORDER`: `nextOrder` was a module-level `let` in
-  `ecs/ui/widgets.ts`, i.e. shared by EVERY World — a second world (the gate's own) continued the first
+  `plugins/ui/components.ts`, i.e. shared by EVERY World — a second world (the gate's own) continued the first
   one's numbering and two trees built in different worlds could not be compared. `spawnUiNode` draws
   `UI_TREE.order` from the resource, which the composition root inserts before the first spawn.
   (6) THE UI MOUNT ROOT is created by `createUiMount()` and inserted as `UI_MOUNT`, like the canvas host.
-  `ui/uiscale.ts` used to create the stage div and append it to `document.body` at IMPORT time — a DOM
+  `data/globals/uiscale.ts` used to create the stage div and append it to `document.body` at IMPORT time — a DOM
   side effect of a CONFIG module, on the element the whole widget layer hangs off (the P3 entry below
   had this on its list; this is the half of it that is done).
   (7) THE BLOCK TARGET OUTLINE crosses the lane boundary as DATA. `BlockInteractionSystem` owned a
   `THREE.LineSegments` and set its transform in `step()`, so the FIXED lane wrote a three.js object
   (`writesExternal: ["voxelBlocks", "outline"]` on a sim-lane system) — the last such crossing in the
   engine. The hit is the `TARGET_HIT` component now (active + x/y/z, on the local player only) and
-  `block.outline` (`rendering/outline.ts`, RENDER lane) positions the `BLOCK_OUTLINE` mesh. The mesh is
+  `block.outline` (`plugins/render/systems/outline.ts`, RENDER lane) positions the `BLOCK_OUTLINE` mesh. The mesh is
   built by the composition root because a three.js object is wiring. The schedule gained one render-lane
   system and is unchanged otherwise: `block.outline` shares the producers' batch — it reads a component
   none of them touch and writes a target of its own — while `renderer.draw` still follows the two that
@@ -718,17 +718,17 @@ Still outstanding:
 - **P1.13 — a rebind capture owns ESC again (a regression the P1.9 relocation introduced).** `FIXED`.
   Reported: click an action row in the key bind panel (that arms a rebind capture), then press ESC — the
   action is unbound (correct) AND the settings panel walks one level back (wrong). The NW.js build did
-  only the first: its capture handler was a MODULE-LEVEL `document` keydown in `ui/menu.ts`, so it was
+  only the first: its capture handler was a MODULE-LEVEL `document` keydown in `plugins/ui/views/menu.ts`, so it was
   registered during main.ts's import phase — BEFORE `new PlayerInputSystem(...)` — and its
   `stopImmediatePropagation()` therefore kept the ESC out of `KEY_EVENTS` entirely, so `ui.navigation`
-  never saw it. P1.9 moved those five listeners into `platform/bind-gesture.ts`, mounted by
+  never saw it. P1.9 moved those five listeners into `plugins/input/bind-gesture.ts`, mounted by
   `bindKeybindDrag()` from main.ts's BODY — i.e. AFTER the input system's constructor — which inverted the
   order and made the suppression a no-op (the edge is already in the log; a lane consumer cannot be
   stopped). P1.11 hit the same trap for the DRAG case and fixed it in the lane (`dragging()` +
   `cancelDrag`, with a comment in bind-gesture.ts saying exactly why), but the CAPTURE case kept relying on
   the lost suppression. That shape does not transplant: the capture handler calls `endCapture()`
   SYNCHRONOUSLY, so by the time the ui lane drains the log `capturing()` reads false — the only moment the
-  answer is still true is the event itself. Fix (one line, in `ecs/systems/input.ts::onKeyDown`):
+  answer is still true is the event itself. Fix (one line, in `plugins/player/systems/input.ts::onKeyDown`):
   `if (ev.code === "Escape" && isCapturing()) return;` — ESC is not published and not queued while a
   capture is armed, so the capture handler unbinds and nothing else reacts. Only ESC is gated: every other
   key must keep reaching the log (ui.navigation's inventory/digit branches gate on `capturing()`
@@ -737,7 +737,7 @@ Still outstanding:
 - **P1.14 — the data/behaviour split finished: view paint state, host state, assets, the loop and the boot
   flow.** `DONE`. The rule this pass applied is not "ECS-ify everything" but "state in the world, logic in a
   system or a walker, adapters hold neither":
-  (1) `UI_PAINT` (new, `ecs/ui/paint.ts`) is the UI layer's "what did I paint last" data: the reconciler's
+  (1) `UI_PAINT` (new, `logic/ui/paint.ts`) is the UI layer's "what did I paint last" data: the reconciler's
   ELEMENT TABLES and per-widget drawn cache, the hover/press sets, the applied global style, and the diff
   caches of `ui.loading` / `ui.toast` / `ui.hud` / `ui.keybind` / `ui.inventory` / `ui.navigation` /
   `ui.bindings`. They were private fields of eight classes — state inside behaviour, resettable nowhere.
@@ -747,49 +747,163 @@ Still outstanding:
   `PICKER_STATE.outsideWorld`, `VIEWPORT.appliedAspect/listenerInstalled/publishScheduled` and
   `INPUT_STATE.appliedCursor` (which emptied `PointerLock`'s last private field).
   (3) The HOST state is a resource: `SHELL_STATE` (settings snapshot, log-flush deadline, diagnostic switch,
-  foreground flag) — created by `platform/shell.ts` at import time, because a log line can be written before
+  foreground flag) — created by `host/desktop/shell.ts` at import time, because a log line can be written before
   the World exists, and inserted by the composition root. The ASSET caches went the same way: `I18N_STRINGS`
   (the built dictionaries), `BLOCK_REGISTRY` and `MENU_BG_KIND` (the pack chain's background memo).
   (4) The REBIND CAPTURE is data + a queue: `KEYBIND_GESTURE.capturing` replaces the module-level
-  `let capturing` in `platform/keybinds.ts` (which now only holds a pointer to the resource), and the device
+  `let capturing` in `plugins/input/keybinds.ts` (which now only holds a pointer to the resource), and the device
   listeners no longer write the bind table — they publish a `RebindIntent` (`bindCapture` / `bindDrag`) that
   `ui.keybind` applies in the lane, with the `KBCAP bind done` line moving with it.
   (5) The frame LOOP's state is `LOOP_STATE` (mode, both accumulators, the canvas size last applied, the
   geometry-suppression deadline) and the FRAME probe's dozen counters are `FRAME_PROBE` — the loop BODY stays
   the composition root's (a rAF callback is not a lane), but it now reads world data.
-  (6) The BOOT / WORLD-ENTRY flows are `BOOT_FLOW` + a stage list (`ecs/boot.ts`): the stages (progress, i18n
+  (6) The BOOT / WORLD-ENTRY flows are `BOOT_FLOW` + a stage list (`core/flow/boot.ts`): the stages (progress, i18n
   key, the work) are declared by the composition root as DATA, the settings check's outcome is a field of the
   flow, and the only logic left is `runBootFlow` — announce a stage, yield one macrotask so the browser paints
   it, then run its work. `check:ecs` pins all of it (its own group) and now counts **56** assertion groups.
   What is still outside is exactly the irreducible adapter layer: listeners that must `preventDefault` in the
   event, the rAF callback that drives the lanes, the ONE DOM writer, and file/pack I/O.
+- **P1.15 — the source tree is now three folders that say what they are: `components/`, `data/`,
+  `logic/`.** `DONE`. Nothing but paths changed — every file was moved with `git mv` (history intact) and
+  every import was rewritten mechanically, so the behaviour is exactly what P1.14 left. The point is that
+  a reader (human or model) can answer "is this data or behaviour?" from the PATH: `components/` = what an
+  entity or a widget can CARRY (schemas + spawn helpers), `data/` = state (`globals/` the one-per-world
+  resources, `assets/` what the pack chain produced, `world/` the voxel data), `logic/` = behaviour
+  (`engine/` the DOD engine, `fixed|render|ui/` the three lanes, `host/` the only place with side effects:
+  window / input / gpu / dom). It replaced a layout where DATA lived in eleven files across six
+  directories (`ecs/resources.ts`, `ecs/presentation.ts`, `ecs/boot.ts`, `ecs/components/`,
+  `ecs/ui/{widgets,theme,paint,actions,bindings,keybind}.ts`, `platform/shell.ts`, `ui/{i18n,background}.ts`,
+  `blockregistry.ts`) and BEHAVIOUR in four places (`ecs/systems/`, `ecs/ui/`,
+  `rendering/{camera-view,outline,menu-background}.ts`, and `renderer.draw` inlined in `main.ts`), with
+  `src/ui/` and `src/ecs/ui/` meaning different things under one name. Three files were SPLIT rather than
+  moved, because they genuinely held both halves: `bindings.ts` -> `data/globals/sources.ts` (the source
+  table) + `plugins/ui/systems/bindings.ts` (the resolver), `keybind.ts` -> `data/globals/keybind-gesture.ts` (the
+  gesture resource, the queued rebind intents, the panel registry) + `plugins/ui/systems/keybind.ts` (the system),
+  and the boot flow -> `core/flow/boot.ts` (whose stage lists are declared by the composition root).
+  What deliberately did NOT change: the engine, the lanes, the access declarations, the schedule. Known
+  overlaps left in place (both documented in AGENTS.md): `host/browser/presentation.ts` holds the GPU/DOM
+  resource TOKENS next to the factories that build those objects, `core/flow/boot.ts` holds the flow
+  token next to the walker, and `data/assets/{i18n,background,textures,blockregistry}.ts` hold their
+  read-once cache next to the accessor that reads it. `check:ecs` keeps all 56 groups green (its `SOURCES`
+  list and ~230 path references were repointed) and the docs' prose paths were repointed with them.
+- **P1.16 — the last DATA inside `logic/` moved to `data/`, and the last BEHAVIOUR inside `data/` moved to
+  `logic/`.** `DONE`. P1.15 got the folders right but left two kinds of stragglers, both found by reading
+  every file in `logic/host/` and every module-level `let`/`Set` under `data/`:
+  (a) **seven constant tables that lived in behaviour files** — the bind action ids + `DEFS` + the bind
+  panel's rows and the ~50-entry keycap display-name map (`plugins/input/keybinds.ts`), the visual
+  keyboard's four grid tables (`plugins/ui/views/menu.ts`) and the cube's six faces (`host/browser/chunkmesh.ts`)
+  — are now `data/globals/binds.ts`, `data/globals/keylayout.ts` and `data/globals/faces.ts`. The display
+  names were also a per-CALL literal (`codeDisplayName` rebuilt a 50-entry object on every keycap every
+  frame); as a table it is built once. The modules that ACT on them did not move: validation, the conflict
+  policy, the settings file, the mesher and the view stay in `logic/`.
+  (b) **the configuration change notification was behaviour living in data modules** —
+  `uiscale.ts`/`fonts.ts`/`i18n.ts` each kept a `Set<() => void>` plus an `on*Change()` and fired it from
+  their setter, and `keybinds.ts` kept a fourth copy. The registry is now ONE bus,
+  `core/services/bus.ts` (`onConfigChange(kind, cb)` / `notifyConfigChange(kind)` for
+  `lang|font|uiScale|binds`), subscribed by the composition root (persistence) and by the settings panel
+  (the few labels composed from a VALUE, which no i18n key can re-derive). The data modules now own the
+  VALUE and nothing else — which is what their own headers always claimed.
+  (b2) **the last seven "data in a behaviour file" stragglers** followed: the diagnostic-probe prefix
+  table (`host/desktop/shell.ts` -> `data/globals/probes.ts`), the face corner UVs and the two chunk
+  geometry capacities, the icon bake's view size and size clamp (`chunkmesh.ts`/`blockicons.ts` ->
+  `data/globals/faces.ts` + `gfx.ts`), the log batch thresholds (-> `data/globals/shell.ts`), the four
+  UI action/source IDS (-> `data/globals/actions.ts` + `sources.ts`), the pack-list capacity (->
+  `data/globals/paint.ts`) and the mouse-button mapping, which was an if-chain, plus the bind-code
+  pattern (-> `data/globals/binds.ts`, as `MOUSE_BUTTONS` + `BIND_CODE_PATTERN`). After this `logic/host/`
+  holds module-level state in exactly 13 places and every one of them is deliberate: 6 event-subscriber
+  registries (behaviour, correctly in logic), 3 POINTERS to a resource and 4 one-shot wiring flags. There
+  is no constant TABLE left in it, and the probe switch's assertion in `check:ecs` now reads the table's
+  new file while still pinning the filter point to `shell.ts`.
+  (c) `SHELL_STATE` also took the LOG QUEUE (`pending`), the other half of the batching whose deadline
+  (`flushTimer`) was already there.
+  What deliberately did NOT move, and why: `viewport.ts`'s `state` and `keybinds.ts`'s `table` are POINTERS
+  to a resource (moving them to `data/` would make data a mutable cache of logic — the pattern AGENTS.md
+  bans); the one-shot wiring flags (`menu.ts`'s `dragDeps`/`keybindActionsReady`/`fpsSourceReady`,
+  `rawinput.ts`'s `available`), the engine's component-id counter and the encapsulated sampler/forwarder
+  counters (`perf.ts`, `debuglog.ts`) are mechanism state inside a behaviour object, not domain data; and
+  the pure functions over data (`raycast.ts`, the `VoxelWorld` methods, `recipeStyle`, `t()`) are the data
+  model's own accessors, not lane behaviour. `check:ecs` stays at **56** groups (its `SOURCES` list gained
+  the four new modules) because nothing it pins changed meaning.
+- **P1.17 — the tree is a microkernel + plugins + DOD layout: `core/`, `plugins/`, `host/`, `data/`,
+  `shared/`, `boot/`.** `DONE`. P1.15/P1.16 had got data and behaviour into separate FOLDERS; what was
+  still missing was the layer that says WHO MAY SEE WHOM. The tree is now: `core/` = the mechanism with no
+  game vocabulary (`data/` = the DOD substrate: entity handles, `defineComponent` SOA columns,
+  `defineRecord` cold records, the cached query, the column store with `structuralVersion`, `Resource<T>`
+  tokens; `flow/` = the three stages, after/before resolution, declared access, the derived batches;
+  `effect/` = the command queue that applies at a barrier; `services/` = the platform-free helpers — the
+  config bus, the perf sampler, the settings repair; `world.ts` = the façade) — `plugins/` = every FEATURE,
+  and each one now OWNS its data (`player/` = the components + the fixed lane's six systems, `render/` =
+  camera/chunk-stream/outline/menu-background/diagnostics, `ui/` = the widget components + the ten ui-lane
+  systems + `views/` = the wiring that spawns the trees, `input/` = the bind table and the rebind gesture's
+  event-time half) — `host/` = the only place with side effects (`desktop/` = Tauri/window/log/packs,
+  `browser/` = viewport, raw input, pointer lock, mouse capture, window guards, the GPU factories, the
+  mesher, the icon baker) — `data/` = values (the resource shapes + every shared table, the pack-chain
+  assets, the voxel data) — `shared/` = types and pure helpers (the voxel DDA moved here) — `boot/` =
+  `main.ts`, the composition root and the ONE loop.
+  What the layer decides from now on is where a NEW file goes (and `components/` is gone as a top-level
+  folder — **data follows the feature that owns it**, which is what makes a plugin installable AND
+  removable). What it does NOT decide yet: **21 imports still cross a layer** (16 between plugins and 5
+  straight into `host/` — the exact list is in AGENTS.md), and nothing forbids them. The move itself was
+  mechanical: 56 files, 256 import
+  specifiers recomputed in ONE pass over a snapshot. (The first attempt did almost nothing — `path.posix.relative`
+  cannot resolve Windows paths, so every specifier round-tripped to itself and was skipped, and the three it
+  did rewrite had to be repaired by hand; the fix was `path.relative`.) `check:ecs` keeps all **56** groups
+  green after ~230 of its own path references and four `path.join` source reads were repointed. What this
+  round did NOT do: the systems are still registered BY HAND in `boot/main.ts` (21 `addSystem` + 40
+  `insertResource`), so the plugin layer is a LAYOUT, not yet a registry. The extension points, the
+  descriptors, the plugin manifest AND the dependency declarations that close those 21 imports are the next
+  round (P1.18) — they are what make "add a feature = add a plugin folder + one manifest line" true.
+- **P1.18 — the plugin system is REAL: extension points, the registry, the install, the manifest.**
+  `DONE` (the second half is P1.18b). The tree in `plugins/` stopped being decoration:
+  `core/extension/{point,slots,registry}.ts` (four slots — systems/components/resources/commands; a typed
+  `defineExtensionPoint<T>`; an `ExtensionRegistry` that files each contribution under its plugin id and
+  THROWS on a duplicate), `core/plugin/{descriptor,api,lifecycle,errors}.ts` (`definePlugin({ id, deps,
+  setup })`, the narrow `PluginApi` a plugin is handed, `installPlugins` = dependency topological sort +
+  the manifest's veto + failure isolation, and one log line per thrown plugin), `boot/manifest.ts` (+
+  `manifest-types.ts`) reading `plugins.json` OUT OF THE PACK CHAIN like any other content file, and SIX
+  plugins with an `index.ts` that declares what each one owns (`world`, `player`, `render`, `diagnostics`,
+  `ui`, `input`). `boot/main.ts` now registers every one of its 21 systems through
+  `contributeSystem("<plugin id>", {...})` and the schedule is fed from `registry.list(SLOT_SYSTEMS)`, so
+  **a plugin the manifest disables contributes no systems at all** — the cheapest honest form of
+  pluggable: a subsystem nobody wants costs nothing and cannot break the boot. It also makes the
+  registration loud where it used to be silent: two plugins claiming one system/resource name is a boot
+  error naming both owners, and `REGISTRY …` / `PLUGIN installed n/m` lines in debug.log say who brought
+  what. `check:ecs` grew its seventh-from-last group to drive all of it — the registry's duplicate rule,
+  the install's ordering/veto/isolation, the manifest's parse/override/fallback, every plugin's declared
+  counts, AND all six plugins into ONE registry (a duplicate token there would disable a plugin and take
+  its systems with it, so it is asserted rather than assumed) — **57 groups** green. NOT done, and
+  deliberately not pretended: the systems are still CONSTRUCTED in `boot/main.ts` (their closures capture
+  the wiring: the views, the injected hooks), so a plugin owns its declarations and its registrations but
+  not yet its own file; and the 21 cross-layer imports are pinned by a RATCHET (≤16 plugin→plugin, ≤5
+  plugin→host) rather than forbidden. **P1.18b** finishes both: move each system's construction next to
+  its plugin, declare the real deps, and turn the ratchet into a direction rule.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
-  in `main.ts`, `ui/gamemode.ts` or `ui/inventory.ts`. The per-entity capabilities that used to be
+  in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
   constants or system fields are components now too (BODY, REACH, INTERACTION), so "only one entity
   can edit blocks" is no longer baked into the code. `input.ts` was the last module writing a gameplay
   component from outside a system run: its DOM listeners now take the same decisions at the same
   moment and merely QUEUE them (`InputIntent`), and its `step()` — the fixed lane's first system —
   writes CONTROL/VIEW/MOTION with a declared access set. What it still writes at event time is the
   DEVICE state (`INPUT_STATE` — the pointer-lock state machine has to react synchronously to a
-  `pointerlockchange`), and it is now the ONLY writer of that resource (`platform/pointerlock.ts` no
+  `pointerlockchange`), and it is now the ONLY writer of that resource (`host/browser/pointerlock.ts` no
   longer publishes a cached permission into it). Still outstanding:
   `MOTION.vy` has three
   writers inside the systems (movement's gravity, input's jump impulse, collision's contact zeroing)
   — that is legitimate physics, but a read-only view would make "who may write" checkable.
   TypeScript has no borrow checker, so a read-only interface type is the strongest available form.
-- **P3 — remove import-time side effects.** `ui/i18n.ts` reads the filesystem at import. `PARTLY DONE`:
-  `ui/uiscale.ts` no longer mounts DOM at import (the UI stage is `createUiMount()` + UI_MOUNT — §5.2
-  P1.12), and `ui/menu.ts` no longer registers its six document listeners at import (they are
-  `platform/bind-gesture.ts`'s, mounted by `bindKeybindDrag()` — §5.2 P1.9). **The parenthetical that used
+- **P3 — remove import-time side effects.** `data/assets/i18n.ts` reads the filesystem at import. `PARTLY DONE`:
+  `data/globals/uiscale.ts` no longer mounts DOM at import (the UI stage is `createUiMount()` + UI_MOUNT — §5.2
+  P1.12), and `plugins/ui/views/menu.ts` no longer registers its six document listeners at import (they are
+  `plugins/input/bind-gesture.ts`'s, mounted by `bindKeybindDrag()` — §5.2 P1.9). **The parenthetical that used
   to sit here was RIGHT, and P1.13 is the bill for it**: "their relative order is load-bearing" — when
   those listeners were installed at IMPORT time they ran before the input system's own listeners and could
   suppress an ESC out of the edge log; mounted from main.ts's body they run after it, which silently broke
   ESC during a rebind capture. The lesson is that a listener whose SEMANTICS depend on being first is
   exactly as fragile as the remaining import-time read, so the fix moved the decision to the event itself
   rather than restoring the order. Still to do: explicit `init*()` calls, and
-  `gameRoot` (currently derived twice: `platform/shell.ts` and `rendering/textures.ts`).
-- **P4 — high risk, needs in-game testing.** `ui/menu.ts`'s panel state machine and the key bind
+  `gameRoot` (currently derived twice: `host/desktop/shell.ts` and `data/assets/textures.ts`).
+- **P4 — high risk, needs in-game testing.** `plugins/ui/views/menu.ts`'s panel state machine and the key bind
   gesture's ARM PATHS (the click shield + capture-free drag + physical capture, which are
   click-synthesis timing, not data). The gesture's STATE and the panels' rendering are ECS now
   (`KEYBIND_GESTURE` + `ui.keybind`), so what remains there is the event-time half plus the rubber
@@ -803,15 +917,15 @@ Verified still present; each is a trap for the next reader:
 
 | Where | Says | Reality |
 |---|---|---|
-| `rendering/textures.ts:1-2,13`, `blockregistry.ts:32`, `ui/i18n.ts:2-4` | a built-in `default.zip` / `defaultmod.zip` | `scripts/rearrange.mjs` produces neither, and none exists in the tree |
+| `data/assets/textures.ts:1-2,13`, `data/assets/blockregistry.ts:32`, `data/assets/i18n.ts:2-4` | a built-in `default.zip` / `defaultmod.zip` | `scripts/rearrange.mjs` produces neither, and none exists in the tree |
 | `main.ts` (the `navTrees` comment) | an `after` naming a system registered later "would silently drop the edge" | nothing is silent: the schedule resolves names at `start()`, and `Schedule.batch()` THROWS (`"X" must run before "Y" but was batched no earlier`, a message that also misnames an `after` as "before"). The rule it is trying to state is "register a system before anything that points at it" — see §3.9 for the minimal reproduction |
 | `packs/*/lang/*.json` `bind.hint` | "select a button, then click a key" | while capturing, a keycap mousedown is consumed and the click swallowed — the only exit is Esc |
-| Dead code | `platform/shell.ts`'s `centerCursor` export is never imported (the live one is in `platform/rawinput.ts`) | — |
+| Dead code | `host/desktop/shell.ts`'s `centerCursor` export is never imported (the live one is in `host/browser/rawinput.ts`) | — |
 
 (Four rows left this table across P1.7-P1.11: the raw-input header no longer claims the takeover rule is
-"discarded when locked", `platform/pointerlock.ts` no longer claims every `relock()` comes from direct user
+"discarded when locked", `host/browser/pointerlock.ts` no longer claims every `relock()` comes from direct user
 interaction (the focus-regained and world-entry paths are documented), the `winctl.exe`/`unTopmost` story is
-gone with the kiosk path, `ui/inventory.ts`'s never-called `refreshIcons()` went with the view rewrite, and
+gone with the kiosk path, `plugins/ui/views/inventory.ts`'s never-called `refreshIcons()` went with the view rewrite, and
 `wasMaximizedBeforeFullscreen` is no longer even declared.)
 
 ---
@@ -833,7 +947,7 @@ gone with the kiosk path, `ui/inventory.ts`'s never-called `refreshIcons()` went
    means).
    `grep SCHEDULE game\logs\debug.log` also prints the batch grouping the schedule derived (a changed
    grouping means a system's access moved — read it, do not shrug at it). After ANY touch of
-   `ecs/systems/input.ts`, the part no assertion can cover is the feel: mouse look must not stutter or
+   `plugins/player/systems/input.ts`, the part no assertion can cover is the feel: mouse look must not stutter or
    snap after a click/Esc (the lock grace + skipFirstMove races), Space must still jump and double-tap
    must still toggle fly, and closing the backpack must not launch the player.
 5. **For pure logic, write a throwaway assertion script** — this works well and is how the voxel
@@ -844,13 +958,13 @@ gone with the kiosk path, `ui/inventory.ts`'s never-called `refreshIcons()` went
      --types node --lib es2022,dom,dom.iterable
    # then a .cjs file that requires the output and asserts; delete .tmp afterwards
    ```
-   For `src/ecs/core/` add `src\ecs\World.ts` to the file list, point `--outDir` at its own folder,
+   For `src/logic/engine/` add `src\ecs\World.ts` to the file list, point `--outDir` at its own folder,
    and drop a `{"type":"commonjs"}` package.json in that folder — the repo root is
    `"type":"module"`, so without it Node refuses `require()` on the emitted `.js`. The full command
    is in `AGENTS.md` §Testing.
    `--ignoreConfig` is required (TypeScript 7 errors without it when files are named on the command
-   line), and `src/voxel/*` deliberately has **no three.js and no ECS imports**, which is what makes
-   this possible. `src/rendering/chunkmesh.ts` can be tested the same way because Node resolves the
-   real `three`; `src/ecs/core/*` imports no three.js at all, on purpose.
+   line), and `src/data/world/*` deliberately has **no three.js and no ECS imports**, which is what makes
+   this possible. `src/host/browser/chunkmesh.ts` can be tested the same way because Node resolves the
+   real `three`; `src/logic/engine/*` imports no three.js at all, on purpose.
 6. Reminder: `rearrange.mjs` **clears** `game\mods` and `game\resourcepacks` on every build. Re-copy
    `packs\*` before testing anything that involves blocks, language or the menu background.

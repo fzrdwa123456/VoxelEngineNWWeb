@@ -25,59 +25,93 @@ const OUT = path.join(ROOT, "node_modules", ".cache", "voxelengine-ecs-check");
 
 /** Sources to compile. tsc follows their imports, so this list is "the ECS plus the fixed lane". */
 const SOURCES = [
-  "src/ecs/World.ts",
-  "src/ecs/components/Player.ts",
-  "src/ecs/commands.ts",
+  "src/core/world.ts",
+  "src/plugins/player/components.ts",
+  "src/core/effect/commands.ts",
   // The boot / world-entry FLOW: the stage list is data and `runBootFlow` is the only logic (its deps are
   // injected, so it needs no DOM and no World).
-  "src/ecs/boot.ts",
-  "src/ecs/resources.ts",
-  "src/ecs/systems/snapshot.ts",
-  "src/ecs/systems/controller.ts",
-  "src/ecs/systems/movement.ts",
-  "src/ecs/systems/collision.ts",
-  "src/ecs/systems/interaction.ts",
+  "src/core/flow/boot.ts",
+  // ===== The plugin system (P1.18): extension points, the registry, the install lifecycle, the manifest
+  // and the six plugin declarations. All of them are import-safe (no DOM, no Tauri), which is what lets
+  // this gate drive them directly.
+  "src/core/extension/point.ts",
+  "src/core/extension/slots.ts",
+  "src/core/extension/registry.ts",
+  "src/core/plugin/descriptor.ts",
+  "src/core/plugin/api.ts",
+  "src/core/plugin/lifecycle.ts",
+  "src/core/plugin/errors.ts",
+  "src/boot/manifest.ts",
+  "src/boot/manifest-types.ts",
+  "src/plugins/world/index.ts",
+  "src/plugins/player/index.ts",
+  "src/plugins/render/index.ts",
+  "src/plugins/diagnostics/index.ts",
+  "src/plugins/ui/index.ts",
+  "src/plugins/input/index.ts",
+  "src/data/globals/resources.ts",
+  // The bind DATA (action ids, defaults, panel rows, keycap display names) and the cube's face table: the
+  // modules that act on them are in logic/ (keybinds.ts, chunkmesh.ts).
+  "src/data/globals/binds.ts",
+  "src/data/globals/keylayout.ts",
+  "src/data/globals/faces.ts",
+  // The diagnostic-probe prefix table (the switch and its filter stay in host/desktop/shell.ts).
+  "src/data/globals/probes.ts",
+  // The configuration change bus: the notification half of a config value is behaviour (logic/host), the
+  // value itself is data.
+  "src/core/services/bus.ts",
+  "src/plugins/player/systems/snapshot.ts",
+  "src/plugins/player/systems/controller.ts",
+  "src/plugins/player/systems/movement.ts",
+  "src/plugins/player/systems/collision.ts",
+  "src/plugins/player/systems/interaction.ts",
   // The input system: import-safe in Node (its only host dependency, platform/keybinds.ts, has no
   // imports at all, and the DOM is touched from the constructor's listeners, never at import time).
-  "src/ecs/systems/input.ts",
-  "src/ecs/systems/chunkstream.ts",
-  "src/ecs/systems/diagnostics.ts",
+  "src/plugins/player/systems/input.ts",
+  "src/plugins/render/systems/chunk-stream.ts",
+  "src/plugins/render/systems/diagnostics.ts",
   // The delayed intents (relock / lock retry / cursor re-assert): the ui-lane system that applies
   // whatever wall-clock deadline has passed. It owns no timer and touches no DOM itself.
-  "src/ecs/systems/delays.ts",
+  "src/plugins/ui/systems/delays.ts",
   // The widget layer: pure data + one pure style function + the action table + the reconciler. None of
   // them touches the DOM at import time, which is what lets this gate load them.
-  "src/ecs/ui/theme.ts",
-  "src/ecs/ui/widgets.ts",
-  "src/ecs/ui/actions.ts",
-  "src/ecs/ui/bindings.ts",
-  "src/ecs/ui/system.ts",
+  "src/data/assets/theme.ts",
+  "src/plugins/ui/components.ts",
+  "src/data/globals/actions.ts",
+  // The presentation TOKENS + state shapes are pure data (gfx.ts); the factories that build those objects
+  // are the boundary's (host/browser/presentation.ts). A check that needs either loads both.
+  "src/data/globals/gfx.ts",
+  "src/host/browser/presentation.ts",
+  // The boot flow's DATA (the walker lives in core/flow/boot.ts).
+  "src/data/globals/boot.ts",
+  "src/plugins/ui/systems/bindings.ts",
+  "src/plugins/ui/systems/reconcile.ts",
   // The three UI systems that own state the views used to keep privately: the F3+F4 picker (key edges
   // -> PICKER_STATE -> a SetMode command), the HUD toast (a wall-clock deadline in a resource), and the
   // key bind panels + drag gesture (KEYBIND_GESTURE as data, the panels derived every frame).
-  "src/ecs/ui/picker.ts",
-  "src/ecs/ui/toast.ts",
-  "src/ecs/ui/loading.ts",
-  "src/ecs/ui/hud.ts",
+  "src/plugins/ui/systems/picker.ts",
+  "src/plugins/ui/systems/toast.ts",
+  "src/plugins/ui/systems/loading.ts",
+  "src/plugins/ui/systems/hud.ts",
   // The inventory reconcile (a system now — it used to be `Inventory.sync()`, a method on the view, which
   // is why this file was not compiled here before). It imports the icon baker + the block registry, both
   // of which are import-safe in Node (the WebGPU renderer they use is created lazily on the first bake).
-  "src/ecs/ui/inventory.ts",
-  "src/ecs/ui/keybind.ts",
-  "src/ecs/ui/navigation.ts",
-  "src/rendering/camera-view.ts",
+  "src/plugins/ui/systems/inventory.ts",
+  "src/plugins/ui/systems/keybind.ts",
+  "src/plugins/ui/systems/navigation.ts",
+  "src/plugins/render/systems/camera.ts",
   // The block target outline: a render-lane system that reads the TARGET_HIT component and moves a
   // three.js mesh. Import-safe in Node — it imports three.js for TYPES only and the mesh arrives as the
   // BLOCK_OUTLINE resource, which the check inserts as a stub.
-  "src/rendering/outline.ts",
+  "src/plugins/render/systems/outline.ts",
   // Import-safe in Node: the settings repair is a PURE comparison and lives in its own
   // dependency-free module (the Tauri shell it belongs to imports @tauri-apps/api, which Node's
   // CJS require cannot load) — which is exactly what the boot check asserts here.
-  "src/platform/settings-diff.ts",
+  "src/core/services/settings-diff.ts",
   // Import-safe in Node: no DOM at import time, and the WebGPU renderer is created lazily on the first
   // bake —so the icon cache's synchronous reader can be asserted here.
-  "src/rendering/blockicons.ts",
-  "src/voxel/world.ts",
+  "src/host/browser/blockicons.ts",
+  "src/data/world/world.ts",
 ];
 
 let passed = 0;
@@ -157,13 +191,19 @@ try {
 
 const require = createRequire(import.meta.url);
 const load = (rel) => require(path.join(OUT, rel));
-const { World } = load("ecs/World.js");
-const { Schedule } = load("ecs/core/schedule.js");
-const { entityIndex } = load("ecs/core/entity.js");
-const C = load("ecs/components/Player.js");
-const { defineComponent, defineRecord } = load("ecs/core/component.js");
-const { defineResource } = load("ecs/core/resource.js");
-const { defineCommand } = load("ecs/core/commands.js");
+/** The presentation TOKENS + state shapes live in data/globals/gfx.ts (pure data) and the factories that
+ *  build those objects in host/browser/presentation.ts (the boundary); a check that needs either wants both. */
+const loadPresentation = () => ({
+  ...load("data/globals/gfx.js"),
+  ...load("host/browser/presentation.js"),
+});
+const { World } = load("core/world.js");
+const { Schedule } = load("core/flow/schedule.js");
+const { entityIndex } = load("core/data/entity.js");
+const C = load("plugins/player/components.js");
+const { defineComponent, defineRecord } = load("core/data/component.js");
+const { defineResource } = load("core/data/resource.js");
+const { defineCommand } = load("core/effect/command-queue.js");
 const {
   canControl,
   createLoadingState,
@@ -183,9 +223,9 @@ const {
   TOAST,
   UI_MODAL,
   VOXEL,
-} = load("ecs/resources.js");
-const { SelectSlot, SetLoadingStage, SetMode, ShowToast, SwapSlots, Teleport } = load("ecs/commands.js");
-const { TERRAIN_TOP_Y, VoxelWorld } = load("voxel/world.js");
+} = load("data/globals/resources.js");
+const { SelectSlot, SetLoadingStage, SetMode, ShowToast, SwapSlots, Teleport } = load("core/effect/commands.js");
+const { TERRAIN_TOP_Y, VoxelWorld } = load("data/world/world.js");
 
 // ===== 1. core: handles, storage, queries =====
 console.log("\n--- entities, component storage and queries ---");
@@ -328,8 +368,8 @@ world.insertResource(LOCAL_PLAYER, localPlayer);
 
 // The fixed lane the physics checks replay: snapshot -> test gravity -> collision. Access is
 // declared on the TEST system too, because an undeclared system is invisible to the conflict rule.
-const { PositionSnapshotSystem, SNAPSHOT_ACCESS } = load("ecs/systems/snapshot.js");
-const { CollisionSystem, COLLISION_ACCESS } = load("ecs/systems/collision.js");
+const { PositionSnapshotSystem, SNAPSHOT_ACCESS } = load("plugins/player/systems/snapshot.js");
+const { CollisionSystem, COLLISION_ACCESS } = load("plugins/player/systems/collision.js");
 const snapshot = new PositionSnapshotSystem(world);
 const collision = new CollisionSystem(world);
 const falling = [];
@@ -532,8 +572,8 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // still built has none: `needsWarmUp` is what keeps that from being a one-frame flash of the screen.
   // Driven on a stub voxel whose chunks are all AIR (getChunk -> null), so no mesh is ever built and
   // the mesher's material — which needs a DOM — is never touched.
-  const { ChunkStreamSystem } = load("ecs/systems/chunkstream.js");
-  const P = load("ecs/presentation.js");
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const P = loadPresentation();
   const streamWorld = new World();
   streamWorld.insertResource(VOXEL, {
     ensureChunk() {},
@@ -566,7 +606,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
   equal(stream.needsWarmUp(1, 3), false, "…so a re-entry into THIS window shows no screen");
   assert(stream.needsWarmUp(900, 900), "a window somewhere else still needs one");
   // (read directly: the section's `readSource`/`stripComments` helpers are defined further down)
-  const mainSrc = require("node:fs").readFileSync(path.join(ROOT, "src", "main.ts"), "utf8");
+  const mainSrc = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
   assert(
     /needsWarmUp\(SPAWN\.x, SPAWN\.z\)/.test(mainSrc),
     "…and the entry driver asks exactly that question, about the position it is entering",
@@ -583,22 +623,22 @@ const countOf = (s, re) => (s.match(re) || []).length;
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 check("the theme is the ONLY place a colour literal lives", () => {
-  const theme = readSource("src/ecs/ui/theme.ts");
+  const theme = readSource("src/data/assets/theme.ts");
   assert(countOf(theme, /#[0-9a-fA-F]{3,8}\b/g) > 0, "the theme defines the colours");
   for (const rel of [
-    "src/ecs/ui/widgets.ts",
-    "src/ecs/ui/actions.ts",
-    "src/ecs/ui/system.ts",
+    "src/plugins/ui/components.ts",
+    "src/data/globals/actions.ts",
+    "src/plugins/ui/systems/reconcile.ts",
     // …and every MIGRATED surface, which is what makes the rule worth having: the menus used to carry
     // 45 + 21 literals between them.
-    "src/ui/hud.ts",
-    "src/ui/menu.ts",
-    "src/ui/mainmenu.ts",
+    "src/plugins/ui/views/hud.ts",
+    "src/plugins/ui/views/menu.ts",
+    "src/plugins/ui/views/mainmenu.ts",
     // …and the three UI systems the surfaces migrated INTO: a colour literal there would be just as
     // wrong as one in a view (they write widget data; the theme owns every colour).
-    "src/ecs/ui/picker.ts",
-    "src/ecs/ui/toast.ts",
-    "src/ecs/ui/keybind.ts",
+    "src/plugins/ui/systems/picker.ts",
+    "src/plugins/ui/systems/toast.ts",
+    "src/plugins/ui/systems/keybind.ts",
   ]) {
     equal(
       countOf(stripComments(readSource(rel)), /#[0-9a-fA-F]{3,8}\b|rgba?\(/g),
@@ -607,11 +647,11 @@ check("the theme is the ONLY place a colour literal lives", () => {
     );
   }
   // and the composition root must actually register it, or the reconciler throws at boot
-  assert(/insertResource\(UI_THEME/.test(readSource("src/main.ts")), "main.ts registers UI_THEME");
+  assert(/insertResource\(UI_THEME/.test(readSource("src/boot/main.ts")), "main.ts registers UI_THEME");
 });
 
 check("every recipe resolves to a style, and state changes it", () => {
-  const { recipeStyle, defaultUiTheme } = load("ecs/ui/theme.js");
+  const { recipeStyle, defaultUiTheme } = load("data/assets/theme.js");
   const theme = defaultUiTheme();
   const recipes = [
     "text.label",
@@ -709,17 +749,17 @@ check("every recipe resolves to a style, and state changes it", () => {
 // second World claiming UI_TREE would throw (see the one-World rule above).
 const widgetWorld = new World();
 /** The widget layer, for every check in this section (the prefabs, the components, the setters) */
-const W = load("ecs/ui/widgets.js");
+const W = load("plugins/ui/components.js");
 // The tree's creation counter is a RESOURCE now (it used to be a module-level `let`, i.e. shared by every
 // World): it has to be inserted before the first spawn, exactly as main.ts does.
 widgetWorld.insertResource(W.UI_ORDER, W.createUiOrder());
 // …and so is the UI layer's PAINT state (element tables + the per-surface "last written" caches), which
 // the reconciler and the widget-data systems resolve in their constructors.
-const PAINT = load("ecs/ui/paint.js");
+const PAINT = load("data/globals/paint.js");
 widgetWorld.insertResource(PAINT.UI_PAINT, PAINT.createUiPaint(C.INVENTORY_SLOTS));
 
 check("widget prefabs build the tree the reconciler expects", () => {
-  const W = load("ecs/ui/widgets.js");
+  const W = load("plugins/ui/components.js");
   const uiWorld = widgetWorld;
   const panel = W.spawnPanel(uiWorld, null, "picker.panel", { hidden: true });
   const row = W.spawnPanel(uiWorld, panel, "picker.row");
@@ -752,11 +792,11 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   // used, and for a <button> that means falling back to the browser's own face —which is how every
   // button and choice in the menus turned light grey (white) until the pointer touched it. This runs
   // the real system against a minimal DOM stub and asserts the two halves of the rule.
-  const W = load("ecs/ui/widgets.js");
-  const { UiRenderSystem } = load("ecs/ui/system.js");
-  const { defaultUiTheme, UI_THEME } = load("ecs/ui/theme.js");
-  const { createUiActions, onUiAction, UI_ACTIONS } = load("ecs/ui/actions.js");
-  const P = load("ecs/presentation.js");
+  const W = load("plugins/ui/components.js");
+  const { UiRenderSystem } = load("plugins/ui/systems/reconcile.js");
+  const { defaultUiTheme, UI_THEME } = load("data/assets/theme.js");
+  const { createUiActions, onUiAction, UI_ACTIONS } = load("data/globals/actions.js");
+  const P = loadPresentation();
 
   const made = [];
   const mkEl = (tag = "div") => {
@@ -1062,7 +1102,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   }
 
   // …and the SOURCE says the same thing: every listener is on the mount root, none on a widget.
-  const reconcilerSrc = stripComments(readSource("src/ecs/ui/system.ts"));
+  const reconcilerSrc = stripComments(readSource("src/plugins/ui/systems/reconcile.ts"));
   equal(
     countOf(reconcilerSrc, /element\.addEventListener|addEventListener\("mouseenter"|addEventListener\("mouseleave"/g),
     0,
@@ -1080,8 +1120,8 @@ check("a delayed intent is DATA with a deadline, applied by a system — never a
   // regained focus (0/120 ms) or after the menu/Apps key (0/32/80 ms). Each was a timer owned by whichever
   // module wanted it. The DEADLINE is a resource now, which is what makes the timing assertable at all —
   // the gate drives the clock instead of sleeping through it.
-  const R = load("ecs/resources.js");
-  const { DelaySystem, DELAYS_ACCESS } = load("ecs/systems/delays.js");
+  const R = load("data/globals/resources.js");
+  const { DelaySystem, DELAYS_ACCESS } = load("plugins/ui/systems/delays.js");
 
   let now = 1000;
   const queue = R.createDelayedIntents(() => now);
@@ -1153,9 +1193,9 @@ check("a delayed intent is DATA with a deadline, applied by a system — never a
   // for: a `setTimeout` returning anywhere on this path puts "when does this happen" back outside the
   // world, where the schedule cannot see it and a paused game still runs it.
   for (const rel of [
-    "src/platform/pointerlock.ts",
-    "src/platform/window-guards.ts",
-    "src/ecs/systems/delays.ts",
+    "src/host/browser/pointerlock.ts",
+    "src/host/browser/window-guards.ts",
+    "src/plugins/ui/systems/delays.ts",
   ]) {
     equal(countOf(stripComments(readSource(rel)), /setTimeout|setInterval/g), 0, `${rel} still owns a timer`);
   }
@@ -1165,8 +1205,8 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   // The inventory draws the icon IMMEDIATELY when it is already baked; that is what keeps a stack move
   // from painting one frame of the placeholder. It can only do that if the cache is readable without a
   // promise —and only correctly if the peek builds the same key the bake wrote.
-  const icons = load("rendering/blockicons.js");
-  const P = load("ecs/presentation.js");
+  const icons = load("host/browser/blockicons.js");
+  const P = loadPresentation();
   // The bake's state is a RESOURCE (ecs/presentation.ts::ICON_BAKE): the two readers operate on it, so
   // they can be driven here with no GPU and no browser — the renderer is created on the first real bake.
   const bake = P.createIconBake();
@@ -1179,14 +1219,14 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   equal(icons.peekBlockIcon(bake, "stone", 40), null, "an unbaked icon peeks as null");
   equal(icons.peekBlockIcon(bake, "stone", 1000), null, "…and a clamped request misses too");
   // The two must not be able to drift apart.
-  const source = readSource("src/rendering/blockicons.ts");
+  const source = readSource("src/host/browser/blockicons.ts");
   assert(/iconCacheKey\(type, size\)/.test(source), "the bake keys through iconCacheKey");
   assert(/cache\.get\(iconCacheKey\(type, sizePx\)\)/.test(source), "peekBlockIcon reads that same key");
   // Item 1 of the presentation-state pass: the bake's completion may NOT write a component. It used to
   // backfill the slot's UI_IMAGE from a `.then` continuation, i.e. a component write with no lane around
   // it (and a frame could be painted from it at any point). The system asks for the bake and reads the
   // cache on its next run instead.
-  const invSource = stripComments(readSource("src/ecs/ui/inventory.ts"));
+  const invSource = stripComments(readSource("src/plugins/ui/systems/inventory.ts"));
   assert(!/\.then\(/.test(invSource), "the inventory draws the icon from the cache, not from a promise");
   assert(/requestBlockIcon\(/.test(invSource), "…and asks for a bake when the cache misses");
   assert(!/getBlockIcon/.test(invSource), "the promise-shaped reader is gone, not merely unused");
@@ -1196,13 +1236,14 @@ check("a bound widget takes its value from its source, not from whoever built it
   // The main menu and the pause menu each build a settings panel, so each used to hold its OWN copy of
   // the frame cap; the two drifted apart and neither was guaranteed to match the value in force. A
   // binding makes the shared state the only owner. This runs the real resolver, no DOM involved.
-  const W = load("ecs/ui/widgets.js");
-  const B = load("ecs/ui/bindings.js");
+  const W = load("plugins/ui/components.js");
+  const B = load("plugins/ui/systems/bindings.js");
+  const S = load("data/globals/sources.js");
   const world = widgetWorld;
-  const sources = B.createUiSources();
-  world.insertResource(B.UI_SOURCES, sources);
+  const sources = S.createUiSources();
+  world.insertResource(S.UI_SOURCES, sources);
   let cap = 0;
-  B.onUiSource(sources, "fpsCap", () => (cap === 0 ? 240 : cap));
+  S.onUiSource(sources, "fpsCap", () => (cap === 0 ? 240 : cap));
 
   const slider = W.spawnSlider(
     world,
@@ -1263,7 +1304,7 @@ check("a bound widget takes its value from its source, not from whoever built it
 
 check("the migrated surfaces carry no styling and no DOM of their own", () => {
   // The HUD surface, where even a language subscription is gone (its text is all keys).
-  for (const rel of ["src/ui/hud.ts"]) {
+  for (const rel of ["src/plugins/ui/views/hud.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /style\.cssText|document\.createElement/g), 0, `${rel} still builds DOM`);
@@ -1271,7 +1312,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   }
   // The UI SYSTEMS the views migrated into: no DOM, no styling, and —the point of the migration —no
   // `document.addEventListener` (only the device layer listens) and no private timer for "how long".
-  for (const rel of ["src/ecs/ui/picker.ts", "src/ecs/ui/toast.ts", "src/ecs/ui/keybind.ts", "src/ecs/systems/delays.ts"]) {
+  for (const rel of ["src/plugins/ui/systems/picker.ts", "src/plugins/ui/systems/toast.ts", "src/plugins/ui/systems/keybind.ts", "src/plugins/ui/systems/delays.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b|rgba?\(/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /document\.|createElement|style\.cssText/g), 0, `${rel} still touches the DOM`);
@@ -1281,7 +1322,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   // The menus and the settings panel. `onLangChange` is ALLOWED here: a label composed from a VALUE
   // ("FPS 60", "1.25x") cannot be a key, so those few still have to be re-pushed on a language switch.
   // Everything a key can express is re-derived by the reconciler instead.
-  for (const rel of ["src/ui/menu.ts", "src/ui/mainmenu.ts", "src/ui/inventory.ts"]) {
+  for (const rel of ["src/plugins/ui/views/menu.ts", "src/plugins/ui/views/mainmenu.ts", "src/plugins/ui/views/inventory.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /document\.createElement\(/g), 0, `${rel} still creates an element by hand`);
     equal(countOf(code, /style\.cssText/g), 0, `${rel} still writes an inline style string`);
@@ -1296,15 +1337,15 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
     );
   }
   // …and they compose the prefabs instead
-  assert(/spawnPanel\(/.test(readSource("src/ui/hud.ts")), "hud composes panels");
-  assert(/spawnLabel\(/.test(readSource("src/ecs/ui/picker.ts")), "the picker composes its own labels");
-  assert(/setUiVisible\(/.test(readSource("src/ecs/ui/picker.ts")), "…and shows/hides them as data");
-  assert(/spawnButton\(/.test(readSource("src/ui/menu.ts")), "the settings panel composes buttons");
-  assert(/spawnGridKey\(/.test(readSource("src/ui/menu.ts")), "the visual keyboard composes keycaps");
-  assert(/onUiAction\(/.test(readSource("src/ui/mainmenu.ts")), "the main menu dispatches actions");
-  assert(/spawnButton\(/.test(readSource("src/ui/inventory.ts")), "the inventory VIEW composes slot buttons");
-  assert(/setUiImage\(/.test(readSource("src/ecs/ui/inventory.ts")), "…and the SYSTEM fills icon slots as data");
-  equal(countOf(stripComments(readSource("src/ui/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
+  assert(/spawnPanel\(/.test(readSource("src/plugins/ui/views/hud.ts")), "hud composes panels");
+  assert(/spawnLabel\(/.test(readSource("src/plugins/ui/systems/picker.ts")), "the picker composes its own labels");
+  assert(/setUiVisible\(/.test(readSource("src/plugins/ui/systems/picker.ts")), "…and shows/hides them as data");
+  assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the settings panel composes buttons");
+  assert(/spawnGridKey\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the visual keyboard composes keycaps");
+  assert(/onUiAction\(/.test(readSource("src/plugins/ui/views/mainmenu.ts")), "the main menu dispatches actions");
+  assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/inventory.ts")), "the inventory VIEW composes slot buttons");
+  assert(/setUiImage\(/.test(readSource("src/plugins/ui/systems/inventory.ts")), "…and the SYSTEM fills icon slots as data");
+  equal(countOf(stripComments(readSource("src/plugins/ui/views/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
     "the view writes no widget data any more (that is the system's job)");
 });
 
@@ -1312,7 +1353,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
 
 check("the F3+F4 picker is a system: key edges in, widget data and a mode change out", () => {
   // It used to be a class in ui/gamemode.ts with its own document listeners and private fields.
-  const P = load("ecs/ui/picker.js");
+  const P = load("plugins/ui/systems/picker.js");
   const world = widgetWorld;
   world.insertResource(PICKER_STATE, createPickerState());
   world.insertResource(KEY_EVENTS, createKeyEventLog());
@@ -1414,7 +1455,7 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   // PAUSE menu — where the hotbar's z-index (31) is above that menu's whole root (30), so it drew on top
   // of the panel — with its slots still clickable (a menu click could select a slot, a SetMode-free but
   // still component-writing command). `ui.hud` owns that flag and derives it from `inWorld()`.
-  const H = load("ecs/ui/hud.js");
+  const H = load("plugins/ui/systems/hud.js");
   const world = widgetWorld;
   const crosshair = W.spawnPanel(world, null, "hud.crosshair"); // spawned visible, like the real ones
   const hotbar = W.spawnPanel(world, null, "inv.hotbar");
@@ -1439,20 +1480,20 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
 
   // The system is registered in the ui lane with a declared access set, ahead of every other writer —
   // "what may the lane show at all" comes first — and the composition root hands it the two roots.
-  const main = stripComments(readSource("src/main.ts"));
+  const main = stripComments(readSource("src/boot/main.ts"));
   assert(/name: "ui\.hud"/.test(main), "the composition root registers ui.hud");
   assert(/crosshair: hud\.crosshairEntity/.test(main), "…with the crosshair root");
   assert(/hotbar: inv\.hotbarEntity/.test(main), "…and the hotbar root");
   assert(/inWorld,/.test(main), "…gated on the one definition of \"a world is running\"");
   // The toast is deliberately NOT part of this: a main-menu message is a documented case.
-  assert(!/toast/.test(stripComments(readSource("src/ecs/ui/hud.ts"))), "ui.hud leaves the toast alone");
+  assert(!/toast/.test(stripComments(readSource("src/plugins/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");
 });
 
 check("ESC walks the sub-page ladder one rung at a time, and its top rung is not a no-op", () => {
   // The reported bug: on the settings LIST, ESC wrote "settings" over "settings" (a no-op), and from a
   // sub-page it wrote null (skipping the list). The ladder is ONE function now (stepBackSettings), shared
   // by ESC, both menus' goBack() and the settings Back buttons.
-  const N = load("ecs/ui/navigation.js");
+  const N = load("plugins/ui/systems/navigation.js");
   const world = widgetWorld;
   world.insertResource(UI_MODAL, createUiModalState());
   // The hotbar keys select a slot on the LOCAL player (ui.navigation owns them now, not the inventory
@@ -1563,7 +1604,7 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
   // undefined and refuse everything, which is the same class of miss as the screen that was never
   // activated: the system is only as good as what the wiring hands it).
   assert(
-    /inWorld,/.test(stripComments(readSource("src/main.ts"))),
+    /inWorld,/.test(stripComments(readSource("src/boot/main.ts"))),
     "main.ts injects \"is a world running\" into ui.navigation",
   );
 });
@@ -1571,7 +1612,7 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
 check("the toast is a system: a command arms a wall-clock deadline, the ui lane applies it", () => {
   // `showToast()` used to write two widgets and arm a setTimeout inside the view; the message now
   // outlives its caller, which is what lets the MAIN MENU show one (nothing there reconciles a DOM write).
-  const T = load("ecs/ui/toast.js");
+  const T = load("plugins/ui/systems/toast.js");
   const world = widgetWorld;
   world.insertResource(TOAST, createToastState());
   const panel = W.spawnPanel(world, null, "hud.toast", { hidden: true });
@@ -1609,10 +1650,11 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   // The panels used to own copies of the bind table and an imperative renderAllPanels() fan-out —which
   // is exactly how one instance ended up stuck while the other refreshed. Now the DATA is derived every
   // frame from one source, and the drag only publishes what it is doing.
-  const K = load("ecs/ui/keybind.js");
+  const K = load("plugins/ui/systems/keybind.js");
+  const G = load("data/globals/keybind-gesture.js");
   const world = widgetWorld;
-  const gesture = K.createKeybindGesture();
-  world.insertResource(K.KEYBIND_GESTURE, gesture);
+  const gesture = G.createKeybindGesture();
+  world.insertResource(G.KEYBIND_GESTURE, gesture);
 
   /** One panel INSTANCE, as the pause menu and the main menu each build one. */
   const makePanel = () => {
@@ -1632,9 +1674,9 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   };
   const a = makePanel();
   const b = makePanel();
-  K.clearKeybindPanels();
-  K.registerKeybindPanel(a.spec);
-  K.registerKeybindPanel(b.spec);
+  G.clearKeybindPanels();
+  G.registerKeybindPanel(a.spec);
+  G.registerKeybindPanel(b.spec);
 
   const bound = new Set(["KeyW"]);
   let capturing = null;
@@ -1642,7 +1684,7 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   // (shown), and the reconciler paints it. `keycapAt` is the view's hit test, injected.
   const line = W.spawnLayoutBox(world, null, "kb.line", "left:0;top:0;width:0;");
   W.setUiVisible(world, line, false);
-  const R = load("ecs/resources.js");
+  const R = load("data/globals/resources.js");
   const pointer = R.createPointer();
   world.insertResource(R.POINTER, pointer);
   const keycapUnder = new Map([["100,200", a.key]]);
@@ -1690,54 +1732,58 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   system.step();
   equal(world.get(line, W.UI_STATE).hidden, true, "letting go hides the line");
   equal(world.get(a.key, W.UI_STATE).selected, false, "…and clears the highlight");
-  K.clearKeybindPanels();
+  G.clearKeybindPanels();
 });
 
 // ===== 6. the schedule: declared access, batches, commutativity =====
 console.log("\n--- the schedule: access declarations, batches, commutativity ---");
 
-/** Rebuild every registration exactly as main.ts declares it: names, stages, edges, access. */
+/** Rebuild every registration exactly as boot/main.ts declares it: names, stages, edges, access, owner. */
 function registrations() {
-  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "main.ts"), "utf8");
-  const blocks = [...source.matchAll(/world\.addSystem\(\{([\s\S]*?)\n\}\);/g)].map((m) => m[1]);
-  if (blocks.length === 0) throw new Error("no addSystem blocks found in main.ts");
+  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
+  // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
+  // so the owner is captured too and a test can assert every system belongs to a plugin the manifest knows.
+  const blocks = [...source.matchAll(/(?:world\.addSystem\(|contributeSystem\("([^"]+)",\s*)\{([\s\S]*?)\n\}\);/g)]
+    .map((m) => ({ owner: m[1] ?? "boot", body: m[2] }));
+  if (blocks.length === 0) throw new Error("no system registration blocks found in boot/main.ts");
   const list = (text, key) => {
     const m = new RegExp(`${key}:\\s*\\[([^\\]]*)\\]`).exec(text);
     if (!m) return undefined;
     return m[1].split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
   };
   const ACCESS = {
-    SNAPSHOT_ACCESS: load("ecs/systems/snapshot.js").SNAPSHOT_ACCESS,
-    CONTROLLER_ACCESS: load("ecs/systems/controller.js").CONTROLLER_ACCESS,
-    MOVEMENT_ACCESS: load("ecs/systems/movement.js").MOVEMENT_ACCESS,
-    COLLISION_ACCESS: load("ecs/systems/collision.js").COLLISION_ACCESS,
-    INTERACTION_ACCESS: load("ecs/systems/interaction.js").INTERACTION_ACCESS,
-    INPUT_ACCESS: load("ecs/systems/input.js").INPUT_ACCESS,
-    CHUNK_STREAM_ACCESS: load("ecs/systems/chunkstream.js").CHUNK_STREAM_ACCESS,
-    DIAGNOSTICS_ACCESS: load("ecs/systems/diagnostics.js").DIAGNOSTICS_ACCESS,
-    CAMERA_VIEW_ACCESS: load("rendering/camera-view.js").CAMERA_VIEW_ACCESS,
-    OUTLINE_ACCESS: load("rendering/outline.js").OUTLINE_ACCESS,
+    SNAPSHOT_ACCESS: load("plugins/player/systems/snapshot.js").SNAPSHOT_ACCESS,
+    CONTROLLER_ACCESS: load("plugins/player/systems/controller.js").CONTROLLER_ACCESS,
+    MOVEMENT_ACCESS: load("plugins/player/systems/movement.js").MOVEMENT_ACCESS,
+    COLLISION_ACCESS: load("plugins/player/systems/collision.js").COLLISION_ACCESS,
+    INTERACTION_ACCESS: load("plugins/player/systems/interaction.js").INTERACTION_ACCESS,
+    INPUT_ACCESS: load("plugins/player/systems/input.js").INPUT_ACCESS,
+    CHUNK_STREAM_ACCESS: load("plugins/render/systems/chunk-stream.js").CHUNK_STREAM_ACCESS,
+    DIAGNOSTICS_ACCESS: load("plugins/render/systems/diagnostics.js").DIAGNOSTICS_ACCESS,
+    CAMERA_VIEW_ACCESS: load("plugins/render/systems/camera.js").CAMERA_VIEW_ACCESS,
+    OUTLINE_ACCESS: load("plugins/render/systems/outline.js").OUTLINE_ACCESS,
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
     // The inventory reconcile is a SYSTEM now (ecs/ui/inventory.ts), so its declared access is loaded like
     // every other one. It used to be a method on the VIEW, which the gate could only read as source text
     // (the view imports the renderer and is not compiled here).
-    INVENTORY_VIEW_ACCESS: load("ecs/ui/inventory.js").INVENTORY_VIEW_ACCESS,
-    UI_RENDER_ACCESS: load("ecs/ui/system.js").UI_RENDER_ACCESS,
-    UI_BINDING_ACCESS: load("ecs/ui/bindings.js").UI_BINDING_ACCESS,
-    UI_LOADING_ACCESS: load("ecs/ui/loading.js").UI_LOADING_ACCESS,
-    UI_HUD_ACCESS: load("ecs/ui/hud.js").UI_HUD_ACCESS,
-    UI_PICKER_ACCESS: load("ecs/ui/picker.js").UI_PICKER_ACCESS,
-    UI_TOAST_ACCESS: load("ecs/ui/toast.js").UI_TOAST_ACCESS,
-    UI_KEYBIND_ACCESS: load("ecs/ui/keybind.js").UI_KEYBIND_ACCESS,
-    UI_NAVIGATION_ACCESS: load("ecs/ui/navigation.js").UI_NAVIGATION_ACCESS,
-    DELAYS_ACCESS: load("ecs/systems/delays.js").DELAYS_ACCESS,
+    INVENTORY_VIEW_ACCESS: load("plugins/ui/systems/inventory.js").INVENTORY_VIEW_ACCESS,
+    UI_RENDER_ACCESS: load("plugins/ui/systems/reconcile.js").UI_RENDER_ACCESS,
+    UI_BINDING_ACCESS: load("plugins/ui/systems/bindings.js").UI_BINDING_ACCESS,
+    UI_LOADING_ACCESS: load("plugins/ui/systems/loading.js").UI_LOADING_ACCESS,
+    UI_HUD_ACCESS: load("plugins/ui/systems/hud.js").UI_HUD_ACCESS,
+    UI_PICKER_ACCESS: load("plugins/ui/systems/picker.js").UI_PICKER_ACCESS,
+    UI_TOAST_ACCESS: load("plugins/ui/systems/toast.js").UI_TOAST_ACCESS,
+    UI_KEYBIND_ACCESS: load("plugins/ui/systems/keybind.js").UI_KEYBIND_ACCESS,
+    UI_NAVIGATION_ACCESS: load("plugins/ui/systems/navigation.js").UI_NAVIGATION_ACCESS,
+    DELAYS_ACCESS: load("plugins/ui/systems/delays.js").DELAYS_ACCESS,
   };
-  return blocks.map((block) => {
+  return blocks.map(({ owner, body: block }) => {
     const accessName = /\.\.\.([A-Z_]+_ACCESS)/.exec(block)?.[1];
     if (accessName && !ACCESS[accessName]) throw new Error(`unknown access constant ${accessName}`);
     return {
+      owner,
       name: /name:\s*"([^"]+)"/.exec(block)[1],
       stage: /stage:\s*"([^"]+)"/.exec(block)[1],
       after: list(block, "after"),
@@ -1846,7 +1892,7 @@ check("diagnostics declares every external target it actually touches", () => {
   // A system's declaration IS the scheduler's model of it, so a missing target is the one mistake the
   // conflict rule structurally cannot catch. This one used to claim only `perfSampler` while it also
   // read the input queues, the block world and the GPU timestamp, and wrote the debug log.
-  const { DIAGNOSTICS_ACCESS } = load("ecs/systems/diagnostics.js");
+  const { DIAGNOSTICS_ACCESS } = load("plugins/render/systems/diagnostics.js");
   for (const target of ["inputDiagnosticQueues", "voxelBlocks", "gpuTimestamps"]) {
     assert(DIAGNOSTICS_ACCESS.readsExternal.includes(target), `readsExternal declares "${target}"`);
   }
@@ -1862,7 +1908,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // It used to be a closure variable in main.ts: read by the frame gate every frame (so it is world
   // state), and written by the settings panel —but never persisted, so it silently reset to
   // "unlimited" on every launch while the slider still SHOWED "unlimited", as if it had never changed.
-  const R = load("ecs/resources.js");
+  const R = load("data/globals/resources.js");
   equal(R.createFrameCap().cap, 0, "no value means unlimited");
   equal(R.createFrameCap(60).cap, 60, "a real cap survives");
   equal(R.createFrameCap(59.6).cap, 60, "…rounded");
@@ -1885,7 +1931,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // THE INVARIANT the label and the slider rely on: whatever goes in, what comes out is exactly what
   // the slider shows for it — `snapToRange` with the slider's own domain must be a NO-OP.
   const range = { min: R.CAP_MIN, max: R.CAP_MAX, step: R.CAP_STEP };
-  const { snapToRange } = load("ecs/ui/widgets.js");
+  const { snapToRange } = load("plugins/ui/components.js");
   for (const input of [-10, 0, 0.4, 1, 29, 30, 31, 32, 58, 59, 60, 61, 119, 120, 238, 239, 240, 241, 300, 1e6,
     Number.NaN, Number.POSITIVE_INFINITY, -Number.POSITIVE_INFINITY]) {
     const cap = R.sanitizeFrameCap(input);
@@ -1894,7 +1940,7 @@ check("the frame cap is world state AND a persisted setting", () => {
     assert(cap === 0 || (cap >= R.CAP_MIN && cap < R.CAP_MAX), `a stored cap is in the domain or unlimited (${input} -> ${cap})`);
   }
   // …and the DOMAIN is declared ONCE: the settings panel IMPORTS it instead of restating the numbers.
-  const menuCapSrc = stripComments(readSource("src/ui/menu.ts"));
+  const menuCapSrc = stripComments(readSource("src/plugins/ui/views/menu.ts"));
   equal(countOf(menuCapSrc, /const CAP_MIN\s*=|const CAP_MAX\s*=/g), 0, "the panel does not restate the cap domain");
   assert(/min:\s*CAP_MIN[\s\S]{0,120}max:\s*CAP_MAX[\s\S]{0,120}step:\s*CAP_STEP/.test(menuCapSrc),
     "…it uses the resource's constants for the slider's whole domain");
@@ -1903,7 +1949,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // world state and cannot be assigned by a UI callback), and it sanitises exactly like the loader.
   const capWorld = new World();
   capWorld.insertResource(R.FPS_CAP, R.createFrameCap(0));
-  const { SetFpsCap } = load("ecs/commands.js");
+  const { SetFpsCap } = load("core/effect/commands.js");
   capWorld.commands.send(SetFpsCap, { cap: 90 });
   equal(capWorld.resource(R.FPS_CAP).cap, 0, "the command is deferred: nothing changes before a barrier");
   capWorld.commands.flush();
@@ -1915,7 +1961,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   capWorld.commands.flush();
   equal(capWorld.resource(R.FPS_CAP).cap, 0, "…and a NaN from a slider cannot brick the frame gate");
 
-  const main = stripComments(readSource("src/main.ts"));
+  const main = stripComments(readSource("src/boot/main.ts"));
   assert(/insertResource\(FPS_CAP/.test(main), "the composition root provides the resource");
   assert(/createFrameCap\(Number\(readSettings\(\)\.fpsCap/.test(main), "…loading it at boot");
   assert(/s\.fpsCap\s*=/.test(main), "…and writing it back");
@@ -1928,14 +1974,14 @@ check("the frame cap is world state AND a persisted setting", () => {
   // barrier: the drag handler must hand it the value it just sent. Re-reading the resource printed the
   // PREVIOUS drag step, and nothing else refreshes the label — the reported "the FPS number is not
   // accurate while sliding".
-  const menuSrc = stripComments(readSource("src/ui/menu.ts"));
+  const menuSrc = stripComments(readSource("src/plugins/ui/views/menu.ts"));
   assert(/renderCap\(cap\)/.test(menuSrc), "the cap label is handed the value the drag just sent");
   assert(/const renderCap = \(justSet\?: number\)/.test(menuSrc), "…and reads the resource only when it has none");
   equal(countOf(main, /\blet fpsCap\b|\bfpsCap = cap\b/g), 0, "no closure variable left behind");
   // The gate reads the resource, and diagnostics reads it too —from the World, not from a callback.
   assert(/frameCap\.cap > 0/.test(main), "the frame gate reads the resource");
   assert(
-    /world\.resource\(FPS_CAP\)/.test(readSource("src/ecs/systems/diagnostics.ts")),
+    /world\.resource\(FPS_CAP\)/.test(readSource("src/plugins/render/systems/diagnostics.ts")),
     "diagnostics reads the resource",
   );
 });
@@ -1946,7 +1992,7 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   // ui pump and the panorama became exactly one caller each (setLoopMode). NOW there is nothing to start
   // or stop at all: ONE chain runs for the process lifetime, `setLoopMode` only writes the mode, and the
   // frame body dispatches on it — so a mode transition cannot half-stop a loop.
-  const main = stripComments(readSource("src/main.ts"));
+  const main = stripComments(readSource("src/boot/main.ts"));
   equal(countOf(main, /function stopLoop|function startLoop/g), 0, "no stopLoop/startLoop pair");
   equal(countOf(main, /\btimerId\b|\bstarted\b/g), 0, "no dead timer handle, no second running flag");
   equal(countOf(main, /function startUiPump|function stopUiPump|function startMenuBgLoop|function stopMenuBgLoop/g), 0,
@@ -1985,9 +2031,9 @@ check("the startup screen is DATA: a command moves LOADING_STATE, `ui.loading` p
   // the reconciler paints it. main.ts therefore publishes the stage into a resource (through a
   // command, like every other outside write) and `ui.loading` turns it into widget data, which is also
   // what keeps the loading text translatable and the bar free of per-frame style strings.
-  const B = load("ecs/ui/loading.js");
-  const { LoadingScreen } = load("ui/loading.js");
-  const { LOADING_SEGMENTS } = load("ecs/resources.js");
+  const B = load("plugins/ui/systems/loading.js");
+  const { LoadingScreen } = load("plugins/ui/views/loading.js");
+  const { LOADING_SEGMENTS } = load("data/globals/resources.js");
   const world = widgetWorld;
   world.insertResource(LOADING_STATE, createLoadingState());
   const screen = new LoadingScreen(world);
@@ -2040,7 +2086,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   // The window used to be revealed AFTER `await renderer.init()`, so the GPU handshake, the spawn
   // window's generation and the first ~100 frames of chunk meshing all happened behind a hidden
   // window — the startup was a black rectangle for as long as it took. The order below is the feature.
-  const main = stripComments(readSource("src/main.ts"));
+  const main = stripComments(readSource("src/boot/main.ts"));
   // The two drivers, extracted by name: EVERY assertion about "the screen is activated" / "the world is
   // built here" has to be scoped to ONE of them, because an unscoped `indexOf` finds whichever comes
   // first in the FILE, which is not the one being talked about.
@@ -2081,7 +2127,7 @@ check("the startup reveals the window behind the screen, and entering a world re
     bootBody.indexOf("active: true") < bootBody.indexOf("runBootFlow(bootFlow"),
     "…before the flow is started, so the first visible frame is the screen",
   );
-  const walker = stripComments(readSource("src/ecs/boot.ts"));
+  const walker = stripComments(readSource("src/core/flow/boot.ts"));
   assert(
     walker.indexOf("deps.announce(stage)") < walker.indexOf("await stage.run()"),
     "…and the walker announces every stage before it runs that stage's work",
@@ -2138,7 +2184,7 @@ check("the startup reveals the window behind the screen, and entering a world re
 check("the settings FILE is checked at boot, repaired and written back", () => {
   // Each config module already ignores a value it cannot use and falls back — which silently left the
   // FILE disagreeing with the value in force, unreported, forever. The boot check compares the two.
-  const { diffSettings } = load("platform/settings-diff.js");
+  const { diffSettings } = load("core/services/settings-diff.js");
   const inForce = {
     language: "en",
     font: "pixel",
@@ -2174,7 +2220,7 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   equal(empty.fixed.length + empty.unknown.length, 0, "an ABSENT key is not a fault (a first run)");
 
   // …and the composition root actually runs it, before anything it could disagree with is used.
-  const main = stripComments(readSource("src/main.ts"));
+  const main = stripComments(readSource("src/boot/main.ts"));
   assert(/readSettingsChecked\(\)/.test(main), "the boot check uses the read that can report a fault");
   assert(/diffSettings\(checked\.settings, inForce\)/.test(main), "…compares the file with the values in force");
   assert(/writeSettings\(report\.merged\)/.test(main), "…and writes the repaired file back");
@@ -2198,7 +2244,9 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   // ON) and it filters in `logDebug` — the ONE place every probe line passes through — so the event lines
   // (BOOT / SETTINGS / WORLD / LOCK / CURSOR / ESC / ERROR …) are never affected, and a new probe only has
   // to be added to the prefix table.
-  const shell = stripComments(readSource("src/platform/shell.ts"));
+  const shell = stripComments(readSource("src/host/desktop/shell.ts"));
+  // The prefix TABLE is DATA now (`data/globals/probes.ts`); the switch and the one filter point stay here.
+  const probes = stripComments(readSource("src/data/globals/probes.ts"));
   assert(/export function setDiagLogEnabled/.test(shell) && /export function isDiagLogEnabled/.test(shell),
     "the switch is a getter/setter pair on the log sink");
   assert(/if \(!state\.diagLogEnabled && isProbeLine\(line\)\) return;/.test(shell),
@@ -2212,30 +2260,30 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   // below is a real emitter: the file, a regex matching the literal the code formats, and the prefix the
   // table must therefore contain.
   for (const [file, literal, prefix] of [
-    ["src/ecs/systems/input.ts", /`LOOK raw=/, "LOOK "],
-    ["src/ecs/systems/input.ts", /`RAWLAG ev=/, "RAWLAG "],
-    ["src/ecs/systems/input.ts", /`SPACE#/, "SPACE#"],
-    ["src/ecs/systems/input.ts", /`MOUSE#/, "MOUSE#"],
-    ["src/ecs/systems/diagnostics.ts", /`PHYS mode=/, "PHYS "],
-    ["src/main.ts", /`FRAME n=/, "FRAME "],
-    ["src/main.ts", /`STALL gap=/, "STALL "],
+    ["src/plugins/player/systems/input.ts", /`LOOK raw=/, "LOOK "],
+    ["src/plugins/player/systems/input.ts", /`RAWLAG ev=/, "RAWLAG "],
+    ["src/plugins/player/systems/input.ts", /`SPACE#/, "SPACE#"],
+    ["src/plugins/player/systems/input.ts", /`MOUSE#/, "MOUSE#"],
+    ["src/plugins/render/systems/diagnostics.ts", /`PHYS mode=/, "PHYS "],
+    ["src/boot/main.ts", /`FRAME n=/, "FRAME "],
+    ["src/boot/main.ts", /`STALL gap=/, "STALL "],
     ["src-tauri/src/rawinput.rs", /"RAWMON emits=\{/, "RAWMON "],
     ["src-tauri/src/rawinput.rs", /"HOOKPROBE seen=\{/, "HOOKPROBE "],
     // The key bind gestures fire on ordinary clicks, so they are probes too (a click must not write a
     // line into a log whose switch is off).
-    ["src/platform/bind-gesture.ts", /`KBCAP mousedown/, "KBCAP "],
-    ["src/ui/menu.ts", /`KBCAP click interactive button/, "KBCAP "],
-    ["src/ecs/systems/input.ts", /"RAWINPUT takeover \(movementX suspended\)"/, "RAWINPUT takeover"],
-    ["src/ecs/systems/input.ts", /"RAWINPUT hands back to movementX"/, "RAWINPUT hands back"],
+    ["src/plugins/input/bind-gesture.ts", /`KBCAP mousedown/, "KBCAP "],
+    ["src/plugins/ui/views/menu.ts", /`KBCAP click interactive button/, "KBCAP "],
+    ["src/plugins/player/systems/input.ts", /"RAWINPUT takeover \(movementX suspended\)"/, "RAWINPUT takeover"],
+    ["src/plugins/player/systems/input.ts", /"RAWINPUT hands back to movementX"/, "RAWINPUT hands back"],
   ]) {
     assert(literal.test(readSource(file)), `${file} still emits the ${prefix.trim()} probe as expected`);
-    assert(shell.includes(`"${prefix}"`), `the filter table covers the ${prefix.trim()} probe the code emits`);
+    assert(probes.includes(`"${prefix}"`), `the filter table covers the ${prefix.trim()} probe the code emits`);
   }
   // …while the two BOOT lines that start with the same word stay EVENT records: a bare "RAWINPUT "
   // prefix would swallow them, and with the switch off they are the only trace of whether the native
   // channel came up at all.
-  assert(!shell.includes('"RAWINPUT "'), "the table does not gate the BOOT RAWINPUT lines by a bare prefix");
-  const main = stripComments(readSource("src/main.ts"));
+  assert(!probes.includes('"RAWINPUT "'), "the table does not gate the BOOT RAWINPUT lines by a bare prefix");
+  const main = stripComments(readSource("src/boot/main.ts"));
   assert(
     /const diagLogAtBoot = readSettings\(\)\.diagLog !== false;/.test(main) &&
       /setDiagLogEnabled\(diagLogAtBoot\);/.test(main),
@@ -2246,8 +2294,8 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   // probe table): with the switch off, a log with no probe lines is otherwise ambiguous — "off" and "the
   // probes never registered" look exactly the same to whoever reads it.
   assert(/`DIAGLOG probes [^`]*at boot/.test(main), "the composition root records the switch's boot state");
-  assert(!shell.includes('"DIAGLOG '), "…as an event line: its prefix is not in the probe table");
-  const menu = stripComments(readSource("src/ui/menu.ts"));
+  assert(!probes.includes('"DIAGLOG '), "…as an event line: its prefix is not in the probe table");
+  const menu = stripComments(readSource("src/plugins/ui/views/menu.ts"));
   assert(/settings\.diagLogOn/.test(menu) && /settings\.diagLogOff/.test(menu),
     "the shared settings panel renders it as a two-state toggle");
   // The label has to exist in every shipped dictionary, or the button would show the raw key.
@@ -2302,8 +2350,8 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   //     every tick and the language every frame — so it lives in resources with declared readers;
   //   * INPUT_STATE carried a cached `clickLockAllowed`, i.e. a second copy of what UI_MODAL already
   //     answers. A stale copy there let a click capture the mouse behind an open menu.
-  const R = load("ecs/resources.js");
-  const main = stripComments(readSource("src/main.ts"));
+  const R = load("data/globals/resources.js");
+  const main = stripComments(readSource("src/boot/main.ts"));
   for (const [name, make] of [
     ["LOCALE", R.createLocale],
     ["FONT", R.createFont],
@@ -2318,7 +2366,7 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
 
   // The bind table IS the resource: the module seeds its DEFAULTS INTO that object (no private copy).
   const keymap = R.createKeyMap();
-  const K = load("platform/keybinds.js");
+  const K = load("plugins/input/keybinds.js");
   K.adoptKeyMap(keymap);
   equal(keymap.codes.get("jump"), "Space", "adopting seeds the defaults into the resource");
   equal(K.getBind("jump"), "Space", "…and the module answers from it");
@@ -2333,31 +2381,31 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   equal(K.getBind("jump"), "Space", "a fresh KEYMAP restores the defaults");
 
   // No module keeps a private copy of the value any more (a pointer to the resource, not a mirror).
-  const keybindsSrc = stripComments(readSource("src/platform/keybinds.ts"));
+  const keybindsSrc = stripComments(readSource("src/plugins/input/keybinds.ts"));
   assert(/let table: KeyMapState \| null/.test(keybindsSrc), "keybinds.ts holds the resource object");
   equal(countOf(keybindsSrc, /const binds = new Map/g), 0, "…and its private Map is gone");
   for (const [file, needle] of [
-    ["src/ui/i18n.ts", /let locale: LocaleState \| null/],
-    ["src/ui/fonts.ts", /let state: FontState \| null/],
-    ["src/ui/uiscale.ts", /let state: ScaleState \| null/],
+    ["src/data/assets/i18n.ts", /let locale: LocaleState \| null/],
+    ["src/data/globals/fonts.ts", /let state: FontState \| null/],
+    ["src/data/globals/uiscale.ts", /let state: ScaleState \| null/],
   ]) {
     assert(needle.test(stripComments(readSource(file))), `${file} reads the config resource`);
   }
   // …and the readers DECLARE it, or the schedule's model of them is a lie.
-  assert(/readsExternal: \["keybinds"\]/.test(stripComments(readSource("src/ecs/systems/movement.ts"))),
+  assert(/readsExternal: \["keybinds"\]/.test(stripComments(readSource("src/plugins/player/systems/movement.ts"))),
     "movement declares the bind-table read");
-  assert(/"locale"/.test(stripComments(readSource("src/ecs/ui/system.ts"))),
+  assert(/"locale"/.test(stripComments(readSource("src/plugins/ui/systems/reconcile.ts"))),
     "the reconciler declares the language read");
 
   // The GLOBAL STYLE (the font pair + the root font size) is the reconciler's to apply, not the config
   // modules'. They used to fire `applyFont()` / `applyUIScale()` themselves: a DOM write from outside
   // any system, past no barrier, and — for the root font size — repeated unconditionally on every resize.
   // The values live with the resources; the write is HERE, diffed against what was last applied.
-  const renderSrc = stripComments(readSource("src/ecs/ui/system.ts"));
-  const fontsSrc = stripComments(readSource("src/ui/fonts.ts"));
-  const scaleSrc = stripComments(readSource("src/ui/uiscale.ts"));
-  const bootSrc = stripComments(readSource("src/main.ts"));
-  for (const [file, src] of [["src/ui/fonts.ts", fontsSrc], ["src/ui/uiscale.ts", scaleSrc]]) {
+  const renderSrc = stripComments(readSource("src/plugins/ui/systems/reconcile.ts"));
+  const fontsSrc = stripComments(readSource("src/data/globals/fonts.ts"));
+  const scaleSrc = stripComments(readSource("src/data/globals/uiscale.ts"));
+  const bootSrc = stripComments(readSource("src/boot/main.ts"));
+  for (const [file, src] of [["src/data/globals/fonts.ts", fontsSrc], ["src/data/globals/uiscale.ts", scaleSrc]]) {
     // The mount root uiStage is this module's own business (the reconciler is HANDED it). What it may
     // not do any more is apply the DOCUMENT ROOT's style — that is the reconciler's one DOM write.
     equal(countOf(src, /documentElement|style\.(?:setProperty|fontSize)/g), 0,
@@ -2376,11 +2424,11 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   equal(countOf(bootSrc, /applyFont\(|applyUIScale\(/g), 0, "the composition root applies neither by hand");
 
   // The cached click permission is gone from all three places that used to move it around.
-  equal(countOf(stripComments(readSource("src/ecs/resources.ts")), /clickLockAllowed/g), 0,
+  equal(countOf(stripComments(readSource("src/data/globals/resources.ts")), /clickLockAllowed/g), 0,
     "INPUT_STATE has no click-permission field");
-  assert(/isModalUi\(this\.ui\)/.test(stripComments(readSource("src/ecs/systems/input.ts"))),
+  assert(/isModalUi\(this\.ui\)/.test(stripComments(readSource("src/plugins/player/systems/input.ts"))),
     "the input system derives it from UI_MODAL at the moment of the question");
-  equal(countOf(stripComments(readSource("src/platform/pointerlock.ts")), /clickLockAllowed/g), 0,
+  equal(countOf(stripComments(readSource("src/host/browser/pointerlock.ts")), /clickLockAllowed/g), 0,
     "pointerlock.ts no longer publishes it");
 
   // Assets are DATA with an owner: the dictionaries, the block registry and the pack chain's background
@@ -2403,8 +2451,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // process with no owner. They are world state, so the world holds them and each system resolves what
   // it uses (ecs/presentation.ts). Both halves are asserted: the root inserts every one, and none of
   // them is handed to a system any more — that second half is the regression this group exists for.
-  const P = load("ecs/presentation.js");
-  const main = stripComments(readSource("src/main.ts"));
+  const P = loadPresentation();
+  const main = stripComments(readSource("src/boot/main.ts"));
   for (const name of [
     "SCENE3D",
     "CAMERA3D",
@@ -2419,12 +2467,12 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   }
   // The consumers resolve them from the World — the shape every other resource uses.
   for (const [file, token] of [
-    ["src/rendering/camera-view.ts", "CAMERA3D"],
-    ["src/ecs/systems/chunkstream.ts", "CHUNK_MESHES"],
-    ["src/ecs/systems/diagnostics.ts", "PERF_SAMPLER"],
-    ["src/ecs/systems/diagnostics.ts", "RENDERER3D"],
-    ["src/ecs/systems/input.ts", "RENDERER3D"],
-    ["src/ecs/ui/system.ts", "UI_MOUNT"],
+    ["src/plugins/render/systems/camera.ts", "CAMERA3D"],
+    ["src/plugins/render/systems/chunk-stream.ts", "CHUNK_MESHES"],
+    ["src/plugins/render/systems/diagnostics.ts", "PERF_SAMPLER"],
+    ["src/plugins/render/systems/diagnostics.ts", "RENDERER3D"],
+    ["src/plugins/player/systems/input.ts", "RENDERER3D"],
+    ["src/plugins/ui/systems/reconcile.ts", "UI_MOUNT"],
   ]) {
     assert(
       new RegExp(`resource\\(${token}\\)`).test(stripComments(readSource(file))),
@@ -2463,7 +2511,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // version could drop the focus gate; the NATIVE capture (ClipCursor) does not look at the foreground at
   // all, so an AUTOMATIC relock — the world entry is the one — would capture the mouse while the user is in
   // another app. Three places, and the gate pins all three.
-  const pointerlockSrc = stripComments(readSource("src/platform/pointerlock.ts"));
+  const pointerlockSrc = stripComments(readSource("src/host/browser/pointerlock.ts"));
   assert(/focused: \(\) => boolean/.test(pointerlockSrc), "the lock manager takes a foreground predicate");
   assert(/if \(!this\.deps\.focused\(\)\)/.test(pointerlockSrc), "…and refuses to capture without it");
   assert(/focused: winFocused/.test(main), "…which the composition root ships from the shell");
@@ -2474,13 +2522,13 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");
   // A2: the chunk-mesh cache is the resource, not a private field of the streaming system.
-  const stream = stripComments(readSource("src/ecs/systems/chunkstream.ts"));
+  const stream = stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"));
   equal(countOf(stream, /private readonly meshes|private readonly empty|this\.meshes|this\.empty\b/g), 0,
     "chunkstream keeps no private mesh cache");
   assert(/createChunkMeshCache\(/.test(main), "the cache is created by the composition root");
   // …and the module stays importable in Node: no three.js at RUNTIME. It is typed against it, which is
   // what makes the gate above possible (no GPU, no DOM).
-  const presentation = stripComments(readSource("src/ecs/presentation.ts"));
+  const presentation = stripComments(readSource("src/host/browser/presentation.ts"));
   assert(/import type \* as THREE/.test(presentation), "presentation.ts types against three.js");
   equal(countOf(presentation, /^import (?!type)[^\n]*three\/webgpu/gm), 0,
     "…with a TYPE-ONLY import (a runtime one would break the Node gate)");
@@ -2490,9 +2538,9 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   // The tail of the presentation-state pass. Six things were still module state or still crossed a lane
   // boundary the wrong way, and each of them is asserted here the same way: the facts live in a RESOURCE,
   // the composition root creates it, and the module that used to own it keeps NO copy.
-  const P = load("ecs/presentation.js");
-  const R = load("ecs/resources.js");
-  const main = stripComments(readSource("src/main.ts"));
+  const P = loadPresentation();
+  const R = load("data/globals/resources.js");
+  const main = stripComments(readSource("src/boot/main.ts"));
 
   // 1. The item-icon bake: a second offscreen WebGPU renderer + its two caches. The bake's COMPLETION
   //    used to write the inventory's UI_IMAGE from a `.then` continuation (a component write with no lane
@@ -2500,10 +2548,10 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   assert(typeof P.ICON_BAKE?.name === "string" && typeof P.createIconBake === "function",
     "ICON_BAKE is a resource with a factory");
   assert(/insertResource\(ICON_BAKE, createIconBake\(\)\)/.test(main), "the composition root inserts it");
-  equal(countOf(stripComments(readSource("src/rendering/blockicons.ts")),
+  equal(countOf(stripComments(readSource("src/host/browser/blockicons.ts")),
     /^(?:let|var) (?:renderer|rendererReady|cache|pending)\b/gm), 0,
     "the baker keeps no module-level renderer or cache");
-  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/ecs/ui/inventory.ts"))),
+  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/plugins/ui/systems/inventory.ts"))),
     "the inventory system resolves it");
 
   // 2. The ONE chunk material (a GPU object created on first use, because the pack chain must be
@@ -2512,16 +2560,16 @@ check("the LAST module-level state is a resource too (icons, material, counters,
     "CHUNK_MATERIAL is a resource with a factory");
   assert(/insertResource\(CHUNK_MATERIAL, createChunkMaterial\(\)\)/.test(main),
     "the composition root inserts it");
-  const meshSrc = stripComments(readSource("src/rendering/chunkmesh.ts"));
+  const meshSrc = stripComments(readSource("src/host/browser/chunkmesh.ts"));
   equal(countOf(meshSrc, /^(?:let|var) sharedMaterial\b/gm), 0, "the material is not module state");
   assert(/getChunkMaterial\(state: ChunkMaterialState\)/.test(meshSrc),
     "…the getter takes the resource's state");
-  assert(/resource\(CHUNK_MATERIAL\)/.test(stripComments(readSource("src/ecs/systems/chunkstream.ts"))),
+  assert(/resource\(CHUNK_MATERIAL\)/.test(stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"))),
     "chunk.stream resolves it");
 
   // 3. The raw-input TRANSPORT counters (arrival rhythm + queue backlog). They were module state in
   //    platform/rawinput.ts, which could not print them without importing a system.
-  const rawSrc = stripComments(readSource("src/platform/rawinput.ts"));
+  const rawSrc = stripComments(readSource("src/host/browser/rawinput.ts"));
   equal(countOf(rawSrc, /^(?:let|var) (?:evCount|gapMax|lastArrive|minOffset|backlogSum|backlogMax|lagAt)\b/gm),
     0, "rawinput.ts keeps no transport counters");
   assert(/export function startRawInput\(/.test(rawSrc) && /raw: RawTransportCounters,/.test(rawSrc),
@@ -2534,7 +2582,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   const diag = R.createInputDiagnostics();
   assert(diag.raw && typeof diag.raw === "object", "INPUT_DIAGNOSTICS carries the raw transport window");
   assert(diag.look && typeof diag.look === "object", "…and the LOOK window");
-  const inputSrc = stripComments(readSource("src/ecs/systems/input.ts"));
+  const inputSrc = stripComments(readSource("src/plugins/player/systems/input.ts"));
   equal(countOf(inputSrc,
     /private (?:readonly )?(?:lookAt|lookSamples|lookApplied|dropTakeover|dropGrace|dropSpike|mmSkip|mmGrace|mmSpike|keyDowns|keyRepeats|keyUps|frameSamples|framePx)\b/g),
     0, "player.input keeps no private LOOK counter");
@@ -2542,7 +2590,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
 
   // 5. The UI mount root. uiscale.ts created the stage div and appended it to document.body at IMPORT
   //    time — a DOM side effect of a config module, on the element the whole widget layer hangs off.
-  const uiscale = stripComments(readSource("src/ui/uiscale.ts"));
+  const uiscale = stripComments(readSource("src/data/globals/uiscale.ts"));
   equal(countOf(uiscale, /document\.(?:createElement|body)/g), 0,
     "uiscale.ts neither builds nor appends the UI stage");
   assert(!/export const uiStage/.test(uiscale), "…and exports no element");
@@ -2553,7 +2601,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   //    world used to continue the first one's numbering).
   assert(typeof W.UI_ORDER?.name === "string" && typeof W.createUiOrder === "function",
     "UI_ORDER is a resource with a factory");
-  const widgetsSrc = stripComments(readSource("src/ecs/ui/widgets.ts"));
+  const widgetsSrc = stripComments(readSource("src/plugins/ui/components.ts"));
   equal(countOf(widgetsSrc, /^let nextOrder\b/gm), 0, "the order counter is not module state");
   assert(/world\.resource\(UI_ORDER\)\.next\+\+/.test(widgetsSrc), "spawnUiNode draws the order from it");
   assert(/insertResource\(UI_ORDER, createUiOrder\(\)\)/.test(main), "the composition root inserts it");
@@ -2567,11 +2615,11 @@ check("the LAST module-level state is a resource too (icons, material, counters,
     "BLOCK_OUTLINE is a resource with a factory");
   assert(/insertResource\(BLOCK_OUTLINE, createBlockOutline\(/.test(main),
     "the composition root builds the mesh and registers it");
-  const intSrc = stripComments(readSource("src/ecs/systems/interaction.ts"));
+  const intSrc = stripComments(readSource("src/plugins/player/systems/interaction.ts"));
   equal(countOf(intSrc, /outline/gi), 0, "the fixed lane no longer mentions the wireframe at all");
   assert(/writes: \[INTERACTION, TARGET_HIT\]/.test(intSrc), "…it writes the hit as component data");
   assert(/TARGET_HIT\.active\[index\] = 1/.test(intSrc), "…including the active flag");
-  const O = load("rendering/outline.js");
+  const O = load("plugins/render/systems/outline.js");
   assert(Array.isArray(O.OUTLINE_ACCESS?.writesExternal)
     && O.OUTLINE_ACCESS.writesExternal.includes("blockOutline"), "the painter declares its target");
   assert(Array.isArray(O.OUTLINE_ACCESS?.reads) && O.OUTLINE_ACCESS.reads.includes(C.TARGET_HIT),
@@ -2584,7 +2632,7 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
   // is that the STATE is visible — a test and a log can see why a mousemove was swallowed — never that
   // the logic is different. So this group asserts where the facts live, and the behavior check further
   // down asserts that arming the grace window shows up in the resource.
-  const R = load("ecs/resources.js");
+  const R = load("data/globals/resources.js");
   assert(typeof R.INPUT_TIMING?.name === "string", "INPUT_TIMING is a resource token");
   assert(typeof R.createInputTiming === "function", "…with a factory");
   const timing = R.createInputTiming();
@@ -2602,7 +2650,7 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
   ]) {
     assert(field in timing, `the timing resource carries ${field}`);
   }
-  const src = stripComments(readSource("src/ecs/systems/input.ts"));
+  const src = stripComments(readSource("src/plugins/player/systems/input.ts"));
   equal(
     countOf(
       src,
@@ -2624,11 +2672,11 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
   equal(countOf(src, /private pending: InputIntent\[\]/g), 0, "the old private queue field is gone");
   assert(/queue\.length = 0/.test(src), "…and the tick still drains it in place (no allocation, no reordering)");
   assert(/writesExternal: \[[^\]]*"inputTiming"/.test(src), "…and the access declaration names it");
-  assert(/insertResource\(INPUT_TIMING,/.test(stripComments(readSource("src/main.ts"))),
+  assert(/insertResource\(INPUT_TIMING,/.test(stripComments(readSource("src/boot/main.ts"))),
     "the composition root inserts it");
 });
 
-check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ecs", "ui", "inventory.ts"), "utf8");
+check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "plugins", "ui", "systems", "inventory.ts"), "utf8");
   const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
   assert(/reads:\s*\[INVENTORY\]/.test(block), "reads INVENTORY");
   // It writes WIDGET DATA now, not DOM: that is what makes it conflict with the reconciler and what
@@ -2638,7 +2686,7 @@ check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {
   }
   assert(!/dom\./.test(block), "writes no DOM target of its own any more");
   // …and main.ts must declare the order the conflict demands, or the schedule throws at boot.
-  const main = require("node:fs").readFileSync(path.join(ROOT, "src", "main.ts"), "utf8");
+  const main = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
   assert(
     /name:\s*"ui\.widgets"[\s\S]{0,300}after:\s*\["ui\.inventory"/.test(main),
     "main.ts orders ui.widgets after ui.inventory",
@@ -2763,7 +2811,7 @@ check("the UI modality gate: one predicate, two reasons", () => {
 });
 
 check("a modal UI drops the PLAYER's input but keeps its physics (the gate is per entity)", () => {
-  const { PlayerMovementSystem, MOVEMENT_ACCESS } = load("ecs/systems/movement.js");
+  const { PlayerMovementSystem, MOVEMENT_ACCESS } = load("plugins/player/systems/movement.js");
   const mover = new PlayerMovementSystem(world);
   const schedule = new Schedule();
   schedule.add({ name: "check.movement", stage: "fixed", ...MOVEMENT_ACCESS, run: (ctx) => mover.step(ctx.dt) });
@@ -2775,7 +2823,7 @@ check("a modal UI drops the PLAYER's input but keeps its physics (the gate is pe
   const devices = world.resource(INPUT_STATE);
   const ui = world.resource(UI_MODAL);
   const control = world.get(player, C.CONTROL);
-  const forwardKey = load("platform/keybinds.js").getBind("forward");
+  const forwardKey = load("plugins/input/keybinds.js").getBind("forward");
   const run = (ticks) => {
     for (let i = 0; i < ticks; i++) schedule.run("fixed", { world, dt: 1 / 120, alpha: 0, tick: i + 1 });
   };
@@ -2854,7 +2902,7 @@ check("player.input is a scheduled system with a declared access set", () => {
 check("the device handlers only QUEUE; step() is what writes the components", () => {
   // The hand-off is the whole point of the migration: the decisions (which key, which delta, which jump
   // branch, every race guard) still happen at event time; the writes moved into the system run.
-  const { PlayerInputSystem } = load("ecs/systems/input.js");
+  const { PlayerInputSystem } = load("plugins/player/systems/input.js");
   const devices = world.resource(INPUT_STATE);
   const ui = world.resource(UI_MODAL);
   const index = entityIndex(localPlayer);
@@ -2877,7 +2925,7 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
   };
   // The race guards' state is the INPUT_TIMING resource now (A3), so the check seeds it and restores it:
   // leaving a grace window armed here would swallow the next check's mousemove.
-  const R = load("ecs/resources.js");
+  const R = load("data/globals/resources.js");
   world.insertResource(R.INPUT_TIMING, R.createInputTiming());
   const timing = world.resource(R.INPUT_TIMING);
   // …and the three other resources the device layer resolves: the SPACE/MOUSE diagnostic log, the pending
@@ -2899,7 +2947,7 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
   try {
     // The device layer takes its canvas from the RENDERER3D resource (that element IS the renderer's
     // `domElement`), so the stub renderer is what makes this stub canvas reach it.
-    world.insertResource(load("ecs/presentation.js").RENDERER3D, { domElement: dom });
+    world.insertResource(loadPresentation().RENDERER3D, { domElement: dom });
     const input = new PlayerInputSystem(world, () => {});
     for (const type of ["click"]) {
       assert(typeof domListeners[type] === "function", `the canvas listens for ${type} (lock grab)`);
@@ -2953,10 +3001,10 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     //     handler clears it synchronously, so a test in `ui.navigation` would read false by the time the ui
     //     lane drains the log. Without it, ESC unbound the action AND walked the settings panel one level
     //     back (the reported bug).
-    const K = load("platform/keybinds.js");
+    const K = load("plugins/input/keybinds.js");
     // The capture STATE is the gesture resource now (platform/keybinds only holds a pointer to it), so the
     // harness hands it one — exactly as the composition root does during wiring.
-    K.adoptKeybindGesture(load("ecs/ui/keybind.js").createKeybindGesture());
+    K.adoptKeybindGesture(load("data/globals/keybind-gesture.js").createKeybindGesture());
     const edgeLog = world.resource(KEY_EVENTS);
     const escapeDowns = () => edgeLog.edges.filter((e) => e.code === "Escape" && e.down).length;
     const escapeBefore = escapeDowns();
@@ -3051,7 +3099,7 @@ check("losing control DROPS the buffered view deltas instead of replaying them",
   // The reported bug this pins: move the mouse, press ESC (or E), stop moving, close the UI —the view
   // slid by a few degrees. Cause: the deltas of the last fraction of a tick were left in VIEW while
   // this system was frozen and were applied in one go when control came back.
-  const { PlayerControllerSystem } = load("ecs/systems/controller.js");
+  const { PlayerControllerSystem } = load("plugins/player/systems/controller.js");
   const controller = new PlayerControllerSystem(world);
   const devices = world.resource(INPUT_STATE);
   const ui = world.resource(UI_MODAL);
@@ -3147,28 +3195,28 @@ check("the snapshot/controller pair commutes (real systems, both registration or
   const instances = {
     snapshot,
     collision,
-    controller: new (load("ecs/systems/controller.js").PlayerControllerSystem)(world),
-    movement: new (load("ecs/systems/movement.js").PlayerMovementSystem)(world),
+    controller: new (load("plugins/player/systems/controller.js").PlayerControllerSystem)(world),
+    movement: new (load("plugins/player/systems/movement.js").PlayerMovementSystem)(world),
   };
   const meta = {
     snapshot: {
       name: "motion.snapshot",
-      access: load("ecs/systems/snapshot.js").SNAPSHOT_ACCESS,
+      access: load("plugins/player/systems/snapshot.js").SNAPSHOT_ACCESS,
       after: undefined,
     },
     controller: {
       name: "player.controller",
-      access: load("ecs/systems/controller.js").CONTROLLER_ACCESS,
+      access: load("plugins/player/systems/controller.js").CONTROLLER_ACCESS,
       after: undefined,
     },
     movement: {
       name: "player.movement",
-      access: load("ecs/systems/movement.js").MOVEMENT_ACCESS,
+      access: load("plugins/player/systems/movement.js").MOVEMENT_ACCESS,
       after: ["motion.snapshot", "player.controller"],
     },
     collision: {
       name: "player.collision",
-      access: load("ecs/systems/collision.js").COLLISION_ACCESS,
+      access: load("plugins/player/systems/collision.js").COLLISION_ACCESS,
       after: ["player.movement"],
     },
   };
@@ -3240,15 +3288,15 @@ check("the view paint state, the host state and the loop's own state are RESOURC
   // host module's own bookkeeping, the assets the pack chain produced, the frame loop's state and the one
   // frame probe. All of it was module-level `let`s or private fields; all of it is data in the world now,
   // with the same single writer as before.
-  const R = load("ecs/resources.js");
-  const P = load("ecs/ui/paint.js");
-  const B = load("ecs/boot.js");
-  const main = stripComments(readSource("src/main.ts"));
+  const R = load("data/globals/resources.js");
+  const P = load("data/globals/paint.js");
+  const B = load("core/flow/boot.js");
+  const main = stripComments(readSource("src/boot/main.ts"));
   for (const [token, mod] of [
     ["UI_PAINT", P],
     ["LOOP_STATE", R],
     ["FRAME_PROBE", R],
-    ["BOOT_FLOW", B],
+    ["BOOT_FLOW", load("data/globals/boot.js")],
   ]) {
     assert(typeof mod[token]?.name === "string", `${token} is a resource token`);
     assert(new RegExp(`insertResource\\(${token},`).test(main), `the composition root inserts ${token}`);
@@ -3256,10 +3304,10 @@ check("the view paint state, the host state and the loop's own state are RESOURC
   // The three ASSET caches and the HOST state live in modules the gate cannot load (they reach the Tauri
   // API through the platform layer), so their tokens and the root's inserts are asserted from source text.
   for (const [token, file] of [
-    ["SHELL_STATE", "src/platform/shell.ts"],
-    ["I18N_STRINGS", "src/ui/i18n.ts"],
-    ["MENU_BG_KIND", "src/ui/background.ts"],
-    ["BLOCK_REGISTRY", "src/blockregistry.ts"],
+    ["SHELL_STATE", "src/data/globals/shell.ts"],
+    ["I18N_STRINGS", "src/data/assets/i18n.ts"],
+    ["MENU_BG_KIND", "src/data/assets/background.ts"],
+    ["BLOCK_REGISTRY", "src/data/assets/blockregistry.ts"],
   ]) {
     assert(new RegExp(`export const ${token}: Resource<`).test(readSource(file)), `${token} is a resource token`);
     assert(new RegExp(`insertResource\\(${token},`).test(main), `the composition root inserts ${token}`);
@@ -3269,29 +3317,195 @@ check("the view paint state, the host state and the loop's own state are RESOURC
   const movedFields =
     /^\s+private (?:readonly )?(?:shown|shownKey|shownRaw|shownPercent|filled|shownNote|shownNoteKey|shownNoteVisible|hovered|lineShown|drawnSelected|outsideWorld|inventoryOpen|menuOpen|lastCursor|rawFrameDx|rawFrameDy|wanted|lastPcx|lastPcz|applied|appliedAspect|stylesheetInjected|appliedFontUi|appliedFontMono|appliedRootFontPx|reported|flushTimer|diagLogEnabled|windowFocused|installed|scheduled|cached|loaded|snapshot)\s*[:=]/gm;
   for (const rel of [
-    "src/ecs/ui/system.ts", "src/ecs/ui/loading.ts", "src/ecs/ui/toast.ts", "src/ecs/ui/hud.ts",
-    "src/ecs/ui/keybind.ts", "src/ecs/ui/inventory.ts", "src/ecs/ui/navigation.ts", "src/ecs/ui/bindings.ts",
-    "src/ecs/systems/input.ts", "src/ecs/systems/chunkstream.ts", "src/ecs/systems/delays.ts",
-    "src/rendering/camera-view.ts", "src/platform/pointerlock.ts", "src/platform/keybinds.ts",
-    "src/platform/shell.ts", "src/platform/viewport.ts", "src/blockregistry.ts", "src/ui/i18n.ts",
-    "src/ui/background.ts",
+    "src/plugins/ui/systems/reconcile.ts", "src/plugins/ui/systems/loading.ts", "src/plugins/ui/systems/toast.ts", "src/plugins/ui/systems/hud.ts",
+    "src/plugins/ui/systems/keybind.ts", "src/plugins/ui/systems/inventory.ts", "src/plugins/ui/systems/navigation.ts", "src/plugins/ui/systems/bindings.ts",
+    "src/plugins/player/systems/input.ts", "src/plugins/render/systems/chunk-stream.ts", "src/plugins/ui/systems/delays.ts",
+    "src/plugins/render/systems/camera.ts", "src/host/browser/pointerlock.ts", "src/plugins/input/keybinds.ts",
+    "src/host/desktop/shell.ts", "src/host/browser/viewport.ts", "src/data/assets/blockregistry.ts", "src/data/assets/i18n.ts",
+    "src/data/assets/background.ts",
   ]) {
     equal(countOf(stripComments(readSource(rel)), movedFields), 0, `${rel} keeps no moved-out private field`);
   }
-  // The rebind capture is DATA (the gesture resource) and its decisions are a QUEUE the ui lane applies,
-  // so the device listener no longer writes the bind table and the module holds no capture state.
-  const kb = stripComments(readSource("src/ecs/ui/keybind.ts"));
-  assert(/capturing: BindAction \| null/.test(kb), "the rebind capture is gesture data");
-  assert(/rebinds: RebindIntent\[\]/.test(kb), "…and the device decisions are a queue");
+  // The rebind capture is DATA (the gesture resource, data/globals/keybind-gesture.ts) and its decisions
+  // are a QUEUE the ui lane applies, so the device listeners no longer write the bind table and the
+  // platform module holds no capture state.
+  const kb = stripComments(readSource("src/plugins/ui/systems/keybind.ts"));
+  const gestureData = stripComments(readSource("src/data/globals/keybind-gesture.ts"));
+  assert(/capturing: BindAction \| null/.test(gestureData), "the rebind capture is gesture data");
+  assert(/rebinds: RebindIntent\[\]/.test(gestureData), "…and the device decisions are a queue");
   assert(/private applyRebinds\(\)/.test(kb), "…applied by the ui.keybind system");
-  equal(countOf(stripComments(readSource("src/platform/keybinds.ts")), /^let capturing\b/gm), 0,
-    "platform/keybinds.ts keeps no capture state (it holds a pointer to the resource)");
+  equal(countOf(stripComments(readSource("src/plugins/input/keybinds.ts")), /^let capturing\b/gm), 0,
+    "the keybinds module keeps no capture state (it holds a pointer to the resource)");
   // The boot/entry walks are DATA: the stage lists are declared by the composition root and the only
   // logic is the walker, which announces a stage before running its work.
   assert(/const BOOT_STAGES: readonly BootStage\[\]/.test(main), "the startup flow is a stage list");
   assert(/const stages: readonly BootStage\[\]/.test(main), "…and so is the world entry's");
-  const walker = stripComments(readSource("src/ecs/boot.ts"));
+  const walker = stripComments(readSource("src/core/flow/boot.ts"));
   assert(/export async function runBootFlow\(/.test(walker), "the walk itself lives in ecs/boot.ts");
+});
+
+check("the plugin system: extension points, the registry, the install and the manifest (P1.18)", () => {
+  const P = load("core/extension/point.js");
+  const S = load("core/extension/slots.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  const { definePlugin } = load("core/plugin/descriptor.js");
+  const { installPlugins } = load("core/plugin/lifecycle.js");
+  const M = load("boot/manifest.js");
+
+  // 1. The registry files contributions per (point, owner) and REFUSES a duplicate id: two plugins
+  //    claiming one system name is a wiring bug, and "whoever registered last wins" is not a policy.
+  const registry = new ExtensionRegistry();
+  registry.contribute(S.SLOT_SYSTEMS, "player", [{ name: "player.input" }]);
+  registry.contribute(S.SLOT_SYSTEMS, "ui", [{ name: "ui.hud" }]);
+  equal(registry.list(S.SLOT_SYSTEMS).length, 2, "both contributions are filed");
+  equal(registry.ownerOf(S.SLOT_SYSTEMS, "player.input"), "player", "an id knows its owner");
+  equal(registry.owners(S.SLOT_SYSTEMS).join(","), "player,ui", "…and the owners are listed in order");
+  let duplicate = null;
+  try {
+    registry.contribute(S.SLOT_SYSTEMS, "render", [{ name: "player.input" }]);
+  } catch (error) {
+    duplicate = String(error.message);
+  }
+  assert(duplicate !== null && duplicate.includes("already contributed by \"player\""),
+    "a duplicate id across two owners THROWS (and names both)");
+  assert(registry.report()[0].includes("systems: 2 from [player, ui]"), "the report names the point and its owners");
+
+  // 2. The install: deps decide the order, a missing dep and a cycle are SKIPPED (never thrown), a
+  //    throwing `setup` disables ONLY that plugin, and the manifest can veto one before it runs.
+  const ran = [];
+  const mk = (id, deps, body) => definePlugin({ id, deps, setup: () => { ran.push(id); if (body) body(); } });
+  const plugins = [
+    mk("ui", ["player"]),
+    mk("player", ["world"]),
+    mk("world", []),
+    mk("broken", [], () => { throw new Error("boom"); }),
+    mk("orphan", ["nowhere"]),
+    mk("cyclic-a", ["cyclic-b"]),
+    mk("cyclic-b", ["cyclic-a"]),
+  ];
+  const outcome = installPlugins(plugins, { world: {}, registry: new ExtensionRegistry(), log: () => {}, enabled: (id) => id !== "ui" });
+  equal(ran.join(","), "world,broken,player",
+    "deps run in order (world before player), the vetoed ui never runs, the cycle never runs");
+  equal(outcome.installed.join(","), "world,player", "the throwing plugin is NOT installed");
+  equal(outcome.disabled.map((d) => d.id).join(","), "broken", "…it is reported as disabled, with its error");
+  assert(outcome.disabled[0].error.includes("boom"), "the error text survives into the report");
+  equal(outcome.skipped.map((s) => s.id).sort().join(","), "cyclic-a,cyclic-b,orphan", "a missing dep and a cycle are skipped");
+  assert(outcome.skipped.find((s) => s.id === "orphan").reason.includes("nowhere"), "…with the dependency named");
+  equal(outcome.has("player"), true, "has() answers for the composition root");
+  equal(outcome.has("ui"), false, "…including the manifest's veto");
+
+  // 3. The manifest is DATA the pack chain can override, and it can never break the boot.
+  equal(M.DEFAULT_PLUGINS.join(","), "world,player,render,diagnostics,ui,input", "the built-in plugin list");
+  equal(M.isEnabled(M.defaultManifest(), "ui"), true, "an unmentioned plugin follows the default list");
+  const off = M.parseManifest({ plugins: [{ id: "diagnostics", enabled: false }] });
+  equal(M.isEnabled(off, "diagnostics"), false, "an explicit false disables it");
+  equal(M.isEnabled(off, "ui"), true, "…and every other plugin keeps the default");
+  equal(M.parseManifest({ plugins: ["render"] }).plugins[0].enabled, true, "a bare id string means enabled");
+  equal(M.parseManifest({ nope: 1 }), null, "no plugins array = unusable");
+  equal(M.parseManifest("not an object"), null, "a non-object = unusable");
+  const layers = [new TextEncoder().encode("{ broken"), new TextEncoder().encode('{"plugins":[{"id":"ui","enabled":false}]}')];
+  const read = M.readManifest(layers, () => {});
+  equal(read.source, "pack layer 2/2", "the manifest is read from the pack chain, highest layer first");
+  equal(M.isEnabled(read.manifest, "ui"), false, "…and it wins over the default");
+  equal(M.readManifest([], () => {}).source, "built-in", "no file at all = the built-in list");
+  equal(M.unknownPlugins(M.parseManifest({ plugins: ["ui", "nope"] }), ["ui"]).join(","), "nope", "unknown ids are reported");
+  equal(M.MANIFEST_FILE, "plugins.json", "the file name the pack chain is searched for");
+
+  // 4. Every plugin's DECLARATIONS are real: its setup runs with a stub api and files its components,
+  //    resources and commands into the registry. This is what proves the plugin folders are not decoration.
+  const contribute = (mod) => {
+    const registry = new ExtensionRegistry();
+    mod.setup({
+      id: "test",
+      world: {},
+      registry,
+      contribute: (point, items) => registry.contribute(point, "test", items),
+      log: () => {},
+    });
+    return registry;
+  };
+  const playerReg = contribute(load("plugins/player/index.js").playerPlugin);
+  equal(playerReg.list(S.SLOT_COMPONENTS).length, 12, "the player plugin owns its 12 component schemas");
+  equal(playerReg.list(S.SLOT_RESOURCES).length, 6, "…its 6 resources");
+  equal(playerReg.list(S.SLOT_COMMANDS).map((c) => c.name).join(","), "teleport,selectSlot,swapSlots",
+    "…and the commands that may move it");
+  const uiReg = contribute(load("plugins/ui/index.js").uiPlugin);
+  equal(uiReg.list(S.SLOT_COMPONENTS).length, 10, "the ui plugin owns the widget components");
+  assert(uiReg.list(S.SLOT_RESOURCES).some((r) => r.name === "uiMount"), "…and the UI mount root it draws into");
+  equal(contribute(load("plugins/world/index.js").worldPlugin).list(S.SLOT_RESOURCES)[0].name, "voxel",
+    "the world plugin owns the voxel resource");
+  equal(contribute(load("plugins/input/index.js").inputPlugin).list(S.SLOT_RESOURCES).length, 2,
+    "the input plugin owns the bind table and the rebind gesture");
+  assert(contribute(load("plugins/render/index.js").renderPlugin).list(S.SLOT_RESOURCES).length >= 8,
+    "the render plugin owns the GPU resources");
+  assert(contribute(load("plugins/diagnostics/index.js").diagnosticsPlugin).list(S.SLOT_RESOURCES).length === 2,
+    "the diagnostics plugin owns the perf sampler and the log forwarder");
+  // …and ALL SIX into ONE registry, exactly as the boot does it. A resource token claimed by two plugins
+  // would make the second plugin's setup throw, and the install would then skip that plugin's SYSTEMS —
+  // i.e. a duplicate here is not a cosmetic problem, it is "the UI stopped being registered".
+  const together = new ExtensionRegistry();
+  for (const id of ["world", "player", "render", "diagnostics", "ui", "input"]) {
+    load(`plugins/${id}/index.js`)[`${id}Plugin`].setup({
+      id,
+      world: {},
+      registry: together,
+      contribute: (point, items) => together.contribute(point, id, items),
+      log: () => {},
+    });
+  }
+  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,player,render,diagnostics,ui,input",
+    "the six plugins contribute side by side with no duplicate resource id");
+  equal(together.list(S.SLOT_COMPONENTS).length, 22, "…and 22 component schemas come from two plugins");
+  equal(together.list(S.SLOT_COMMANDS).length, 6, "…and six commands from two plugins");
+
+  // 5. Every registered system belongs to a plugin the manifest knows, and the six plugin ids are the
+  //    ones the boot file installs. A system contributed under an id nobody installs would silently
+  //    leave the schedule (the manifest's veto is implemented by exactly that check).
+  const bootSrc = stripComments(readSource("src/boot/main.ts"));
+  const known = [...bootSrc.matchAll(/contributeSystem\("([^"]+)"/g)].map((m) => m[1]);
+  equal([...new Set(known)].sort().join(","), "diagnostics,player,render,ui,world",
+    "five of the six plugins own systems (input contributes data only), and they are the expected ones");
+  for (const id of new Set(known)) {
+    assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
+  }
+  const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
+  assert(declared !== null, "the composition root declares its plugin list");
+  equal((declared[1].match(/Plugin/g) || []).length, 6, "…and installs all six");
+  assert(/installPlugins\(PLUGINS, \{/.test(bootSrc), "…through installPlugins, not by hand");
+  assert(/registry\.list\(SLOT_SYSTEMS\)\) world\.addSystem\(def\)/.test(bootSrc),
+    "the schedule is fed from the registry, so a disabled plugin contributes nothing");
+  equal(countOf(bootSrc, /world\.addSystem\(\{/g), 0, "no registration bypasses the registry");
+
+  // 6. The layer debt is a RATCHET: closing the cross-layer imports is P1.18b's job, but the count may  //    not grow in the meantime. (plugin -> host reaches into the platform; plugin -> plugin reaches into
+  //    a sibling's data, which the dependency declarations will replace.)
+  const pluginFiles = [];
+  const collect = (dir) => {
+    for (const e of require("node:fs").readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) collect(p);
+      else if (e.name.endsWith(".ts")) pluginFiles.push(p);
+    }
+  };
+  collect(path.join(ROOT, "src", "plugins"));
+  /** Which plugin does a source path belong to? (…/src/plugins/<id>/…) */
+  const pluginOf = (p) => (/\/src\/plugins\/([^/]+)\//.exec(p.replace(/\\/g, "/")) ?? [])[1];
+  let toHost = 0;
+  let toPlugin = 0;
+  for (const file of pluginFiles) {
+    const dir = path.dirname(file).replace(/\\/g, "/");
+    const ownPlugin = pluginOf(dir);
+    for (const line of readSource(path.relative(ROOT, file).replace(/\\/g, "/")).split("\n")) {
+      if (!/^\s*import/.test(line)) continue;
+      if (/from "[^"]*host\//.test(line)) toHost++;
+      const spec = /from "(\.[^"]*)"/.exec(line);
+      if (!spec) continue;
+      const target = path.posix.normalize(path.posix.join(dir, spec[1]));
+      const targetPlugin = pluginOf(target);
+      if (targetPlugin && targetPlugin !== ownPlugin) toPlugin++;
+    }
+  }
+  assert(toHost <= 5, `the plugin -> host import debt must not grow (now ${toHost}, pinned at 5)`);
+  assert(toPlugin <= 16, `the plugin -> plugin import debt must not grow (now ${toPlugin}, pinned at 16)`);
 });
 
 // ===== report =====

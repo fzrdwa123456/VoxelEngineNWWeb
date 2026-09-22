@@ -3,9 +3,11 @@
 VoxelEngine 的 **Tauri v2** 版。前端（TypeScript + three.js WebGPU + 手写 ECS）与原
 `VoxelEngineNWWeb` 一致，**壳从 NW.js 换成了 Tauri**（Windows 上是 WebView2）。
 
-> 逐文件的移植对照在 **[docs/PORT-TAURI.md](docs/PORT-TAURI.md)**。
-> 游戏本身的玩法、世界模型、ECS 约定、资源包格式见 `AGENTS.md` / `ROADMAP.md` / `docs/TESTING.md`
-> —— 那几个文件是从原项目带过来的，除了 `platform/` 那一层，其余描述依然成立。
+> 逐文件的移植对照在 **[docs/PORT-TAURI.md](docs/PORT-TAURI.md)**；
+> **架构与编程思想的正式说明在 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+> （微内核插件化架构 + DOD：层次与职责、依赖方向、扩展点、六条 DOD 规则、现状欠账）。
+> 改代码前要读的规则、当前目录表与铁律在 `AGENTS.md`；计划与欠账在 `ROADMAP.md`；
+> 手测清单在 `docs/TESTING.md`。
 
 ## 怎么跑
 

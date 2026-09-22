@@ -59,7 +59,7 @@ Events (Rust -> front end):
 ## 3. Files on the Rust side
 
 ```
-src-tauri/src/main.rs      entry point (release carries no console, matching the original launcher.c -mwindows)
+src-tauri/src/boot/main.rs      entry point (release carries no console, matching the original launcher.c -mwindows)
 src-tauri/src/lib.rs       the command bus + Builder + focus-event forwarding
 src-tauri/src/game.rs      game root / settings.json / logs / the vsync switch / WebView2 arguments
 src-tauri/src/packs.rs     resource-pack and mod scanning (lists directories and reads bytes only, no normalisation)
