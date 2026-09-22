@@ -190,3 +190,33 @@ load 帧：只跑 ui lane（loading 是 widget 数据）
 **厂商样板**（不是理论）：微内核/插件宿主 —— VS Code（扩展宿主）、Eclipse/OSGi、Kibana、Grafana、
 JupyterLab（插件 + 服务令牌）；前端页面里的分支 —— 微前端（SAP Luigi、Spotify Backstage、
 Zalando Mosaic、Module Federation）；要真隔离 —— Wasm/WASI 宿主（Shopify Functions、Extism）。
+
+
+---
+
+## 9. 当前进度快照（微内核/插件化改造，目标轮次 1–11）
+
+这一节是"现在到哪儿了"的**实测**记录，不是计划；计划与欠账在 `ROADMAP.md`（P1.18b / P1.19 / P1.20）。
+
+**已经成立**
+
+| 项 | 证据 |
+|---|---|
+| 七个插件：`content-default`、`world`、`player`、`render`、`diagnostics`、`ui`、`input` | 启动日志 `PLUGIN installed 7/7`；清单（`plugins.json`，从资源包链读取）可单独关掉任意一个 |
+| 扩展点 + 注册表 | `SLOT_SYSTEMS / COMPONENTS / RESOURCES / COMMANDS / LANGUAGES`；重复 id 会抛错并点名双方 |
+| 依赖方向被**强制执行** | 门禁：跨插件 import 必须有声明的 `deps`、声明图必须无环、**插件读 `host/` = 0**（原来的 5 处改成了注入的服务：鼠标捕获、图标烘焙、网格工厂、日志出口、视口与窗口模式订阅） |
+| 声明归插件 | `api.system({...})`：`diagnostics`（1）与 `player`（6）的系统名/阶段/边/访问集合已搬进各自插件；门禁的注册解析器同时读根与插件文件 |
+| 构造归插件 | 11/21 个系统由插件工厂构造（`createPlayerSystems` / `createRenderSystems` / `createDiagnosticsPlugin` / `createPlayerPlugin`） |
+| 生命周期三阶段 | `setup`（只贡献）→ `startPlugins`（`world.start()` 之后）→ `stopPlugins`（退出时逆序，只对启动过的插件）；`diagnostics` 是第一个真用户，`content-default` 用 `start` 报告内容 |
+| 内容变成插件 | 语言集合由 `content-default` 声明（`DEFAULT_LANGUAGES`），`i18n` 不再写死清单，而是由装配根把集合传进 `loadLang` |
+| DOD 底座 | 列存、查询缓存、原地覆写、屏障、批次推导、访问声明；门禁 **57 组断言全过** |
+
+**还没做（以及为什么没硬做）**
+
+1. **剩下 14 处声明**（`render` 4、`ui` 10）：模板已经立住（`player`/`diagnostics` 就是样例），`ui` 的 10 个还需要把**视图构造**一起搬（它们围绕 hud、loading 屏、背包面板这些由根创建的视图实体）。
+2. **`World` + 插件安装提前到配置/内容阶段之前**：这一轮**实测发现**的阻塞点——`loadLang` 与方块注册表都在安装之前执行（loading 屏自己的文案与起始快捷栏要用它们），所以"插件贡献"目前**还不能驱动**配置加载；现在传的是内容插件的**声明常量**。要真做到，必须改启动时序。
+3. **资源包热重载**：本质是"重跑内容阶段"，依赖第 2 条的形状。
+4. **屏障处重排（`reconfigure()`）**：运行中增删系统的唯一安全时机；这是"热插拔"的最后一块。
+5. **真游戏内容**（与架构无关）：真实地形、按体素值选方块材质、区块淘汰、世界边缘的雾。
+
+**明确不做**：能力令牌 / 权限授权（L3）。理由见 §7：模组目前是纯数据，没有"陌生人的代码"要防；而 JS 没有执行边界时，权限只是纸糊的。
