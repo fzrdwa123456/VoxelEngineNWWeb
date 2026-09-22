@@ -3570,6 +3570,23 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(load("plugins/world/index.js").worldPlugin.start ?? null, null,
     "…while start/stop stay OPTIONAL for a plugin that has nothing to tear down");
 
+  // 6b. THE BOOT ORDER, which no type-checker can see: a plugin factory CONSTRUCTS its systems and a system
+  //     resolves its resources in the constructor, so the install block must sit AFTER the resource table and
+  //     BEFORE the first registration. It was broken for two commits (the factories were built above the
+  //     inserts and would have thrown on the first frame) — the app boots, so only a boot would have shown it.
+  const bootLines = readSource("src/boot/main.ts").split("\n");
+  const lineOf = (needle) => bootLines.findIndex((l) => l.includes(needle)) + 1;
+  const lastInsert = bootLines.reduce(
+    (n, l, i) => (l.includes("insertResource(") && !l.trim().startsWith("//") ? i + 1 : n),
+    0,
+  );
+  const installLine = lineOf("const installOutcome = installPlugins(");
+  const firstRegistration = lineOf('contributeSystem("');
+  assert(lastInsert < installLine,
+    `the plugin install runs AFTER the whole resource table (insert ${lastInsert} < install ${installLine})`);
+  assert(installLine < firstRegistration,
+    `…and BEFORE the first registration (install ${installLine} < registration ${firstRegistration})`);
+
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
   //    declared graph must be acyclic — otherwise the install order it implies does not exist. Reading
   //    into `host/` is not allowed either; the handful of reads that remain are PINNED, so the debt can

@@ -213,57 +213,6 @@ const dbgFwd = new DebugLogForwarder();
 // after/before constraints below), and world.start() verifies those before the loops run.
 const world = new World();
 
-// ===== Plugins: the registry, the manifest, the install =====
-// `plugins/` is the LAYOUT; this is what makes it a plugin system. Each plugin declares what it OWNS into
-// the registry, and the manifest (read from the pack chain like any other content file) decides which
-// plugins this run installs. The SYSTEM definitions still live in this file — they close over the wiring
-// built above — but every one of them is contributed UNDER ITS PLUGIN'S ID, so turning a plugin off in
-// plugins.json keeps its systems out of the schedule entirely.
-const registry = new ExtensionRegistry();
-// The player plugin is built FIRST: it constructs the six fixed-lane systems and declares them, and the
-// root keeps the handles it still wires by hand.
-const playerPlugin = createPlayerPlugin({
-  world,
-  log: logDebug,
-  // Late-bound on purpose: `inWorld` is declared further down the file, and the plugin only calls it.
-  inWorld: () => inWorld(),
-  mouse: { capture: (dom) => captureMouse(dom), release: releaseMouse },
-});
-const { input, snapshot, controller, movement, collision, interaction } = playerPlugin.systems;
-
-const PLUGINS = [
-  contentDefaultPlugin,
-  worldPlugin,
-  playerPlugin.plugin,
-  renderPlugin,
-  createDiagnosticsPlugin(world),
-  uiPlugin,
-  inputPlugin,
-];
-const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
-const manifest = manifestRead.manifest;
-const unknownPluginIds = unknownPlugins(manifest, PLUGINS.map((p) => p.id));
-if (unknownPluginIds.length > 0) {
-  logDebug(`${MANIFEST_FILE}: unknown plugin id(s) ignored: [${unknownPluginIds.join(", ")}]`);
-}
-// The manifest line comes FIRST so the log reads in the order the decisions were made: which list was
-// used, then what installing it did, then who ended up owning what.
-logDebug(
-  `PLUGINS manifest from ${manifestRead.source}: ` +
-    `[${manifest.plugins.map((p) => `${p.id}${p.enabled ? "" : "=off"}`).join(", ")}]`,
-);
-const installOutcome = installPlugins(PLUGINS, {
-  world,
-  registry,
-  log: logDebug,
-  enabled: (id) => isEnabled(manifest, id),
-});
-for (const line of registry.report()) logDebug(`REGISTRY ${line}`);
-/** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
-const contributeSystem = (owner: string, def: SystemDef): void => {
-  if (!installOutcome.has(owner)) return;
-  registry.contribute(SLOT_SYSTEMS, owner, [def]);
-};
 // Spawn resting on the generated world: WORLD_SURFACE_Y is the first air layer above the fill,
 // so feet start exactly on the surface. One constant shared with the world-entry Teleport below,
 // so the initial spawn and the re-entry position can never drift apart.
@@ -567,6 +516,60 @@ const uiHud = new UiHudSystem(world, {
 // meshes, the hotbar, the F3 panel), which is what the report's "6 parallel pair(s)" means. The old
 // cameraView.render -> chunk.stream -> ui.inventory -> diagnostics chain was ordering for no data
 // reason at all, and it was hiding that parallelism.
+// ===== Plugins: the registry, the manifest, the install =====
+// (This block sits HERE — after every resource is inserted and before the first registration — because a
+//  plugin factory CONSTRUCTS its systems and a system resolves its resources in the constructor. Moving it
+//  above the resource table is a boot-order bug that no gate can catch: it throws on the first frame.)
+// `plugins/` is the LAYOUT; this is what makes it a plugin system. Each plugin declares what it OWNS into
+// the registry, and the manifest (read from the pack chain like any other content file) decides which
+// plugins this run installs. The SYSTEM definitions still live in this file — they close over the wiring
+// built above — but every one of them is contributed UNDER ITS PLUGIN'S ID, so turning a plugin off in
+// plugins.json keeps its systems out of the schedule entirely.
+const registry = new ExtensionRegistry();
+// The player plugin is built FIRST: it constructs the six fixed-lane systems and declares them, and the
+// root keeps the handles it still wires by hand.
+const playerPlugin = createPlayerPlugin({
+  world,
+  log: logDebug,
+  // Late-bound on purpose: `inWorld` is declared further down the file, and the plugin only calls it.
+  inWorld: () => inWorld(),
+  mouse: { capture: (dom) => captureMouse(dom), release: releaseMouse },
+});
+const { input, snapshot, controller, movement, collision, interaction } = playerPlugin.systems;
+
+const PLUGINS = [
+  contentDefaultPlugin,
+  worldPlugin,
+  playerPlugin.plugin,
+  renderPlugin,
+  createDiagnosticsPlugin(world),
+  uiPlugin,
+  inputPlugin,
+];
+const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
+const manifest = manifestRead.manifest;
+const unknownPluginIds = unknownPlugins(manifest, PLUGINS.map((p) => p.id));
+if (unknownPluginIds.length > 0) {
+  logDebug(`${MANIFEST_FILE}: unknown plugin id(s) ignored: [${unknownPluginIds.join(", ")}]`);
+}
+// The manifest line comes FIRST so the log reads in the order the decisions were made: which list was
+// used, then what installing it did, then who ended up owning what.
+logDebug(
+  `PLUGINS manifest from ${manifestRead.source}: ` +
+    `[${manifest.plugins.map((p) => `${p.id}${p.enabled ? "" : "=off"}`).join(", ")}]`,
+);
+const installOutcome = installPlugins(PLUGINS, {
+  world,
+  registry,
+  log: logDebug,
+  enabled: (id) => isEnabled(manifest, id),
+});
+for (const line of registry.report()) logDebug(`REGISTRY ${line}`);
+/** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
+const contributeSystem = (owner: string, def: SystemDef): void => {
+  if (!installOutcome.has(owner)) return;
+  registry.contribute(SLOT_SYSTEMS, owner, [def]);
+};
 contributeSystem("render", {
   name: "cameraView.render",
   stage: "render",
