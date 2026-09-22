@@ -2487,7 +2487,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // …and the constructor signatures lost their presentation arguments.
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(world\)/],
-    ["the chunk stream", /new ChunkStreamSystem\(world\)/],
+    ["the chunk stream", /new ChunkStreamSystem\(world, \{ createGeometry:/],
     ["the device layer", /new PlayerInputSystem\(world, logDebug, inWorld, \{ capture: captureMouse/],
     ["the reconciler", /new UiRenderSystem\(world, \{\s*translate:/],
   ]) {
@@ -3523,7 +3523,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
-  assert(toHost <= 3, `plugin -> host reads may not grow (now ${toHost}, pinned at 3)`);
+  assert(toHost <= 2, `plugin -> host reads may not grow (now ${toHost}, pinned at 2)`);
   const unresolved = new Set(["world", "player", "render", "diagnostics", "ui", "input"]);
   let progressed = true;
   while (progressed) {

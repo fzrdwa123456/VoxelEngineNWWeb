@@ -26,7 +26,6 @@ import {
   wrapChunkZ,
   type VoxelWorld,
 } from "../../../data/world/world";
-import { ChunkGeometry, getChunkMaterial } from "../../../host/browser/chunkmesh";
 import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
@@ -55,6 +54,31 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, 1],
   [0, 0, -1],
 ];
+
+/** The chunk mesher, INJECTED rather than imported (the layer rule in check:ecs): a chunk geometry owns
+ *  three.js buffers and the material is a GPU object, so the PLATFORM builds them and the composition root
+ *  hands the factory in. The geometry's type comes from the data side (`ChunkMeshEntry`), which is what
+ *  keeps this file free of a host import. */
+export interface ChunkMeshFactory {
+  createGeometry(): ChunkMeshEntry["geom"];
+  getMaterial(state: ChunkMaterialState): THREE.Material;
+}
+/** Default so a drive-by test — and the Node gate, which drives `prime`/`needsWarmUp` on a stub voxel —
+ *  can construct this system without a GPU: a geometry that is never drawn and a material that never
+ *  renders. The composition root always injects the real factory. */
+const NO_MESH: ChunkMeshFactory = {
+  // `rebuild` must RETURN the face count (the caller decides emptiness by `> 0`): a stub world is all air,
+  // so it returns 0 — a no-op that returned undefined would look like "a mesh was built" and the gate's
+  // "an all-air world builds no mesh" assertion would fail for the wrong reason.
+  createGeometry: () =>
+    ({
+      geometry: new THREE.BufferGeometry(),
+      faces: 0,
+      rebuild: () => 0,
+      dispose: () => {},
+    }) as unknown as ChunkMeshEntry["geom"],
+  getMaterial: () => new THREE.MeshBasicMaterial(),
+};
 
 export class ChunkStreamSystem {
   /** The world's chunk-mesh cache (ecs/presentation.ts): the parent group every mesh is added to, the
@@ -93,7 +117,11 @@ export class ChunkStreamSystem {
     this.cache.lastPcz = v;
   }
 
-  constructor(private readonly world: World) {
+  constructor(
+    private readonly world: World,
+    /** The platform's mesher (see ChunkMeshFactory). */
+    private readonly mesh: ChunkMeshFactory = NO_MESH,
+  ) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
     this.cache = world.resource(CHUNK_MESHES);
@@ -256,14 +284,14 @@ export class ChunkStreamSystem {
     // Boundary faces are culled against neighbouring chunks, so those must exist first
     for (const [dx, dy, dz] of NEIGHBOURS) this.voxel.ensureChunk(cx + dx, cy + dy, cz + dz);
 
-    const geom = new ChunkGeometry();
+    const geom = this.mesh.createGeometry();
     if (geom.rebuild(this.voxel, cx, cy, cz) === 0) {
       geom.dispose();
       this.cache.empty.add(key);
       return;
     }
 
-    const mesh = new THREE.Mesh(geom.geometry, getChunkMaterial(this.material));
+    const mesh = new THREE.Mesh(geom.geometry, this.mesh.getMaterial(this.material));
     mesh.matrixAutoUpdate = false;
     const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz };
     this.cache.group.add(mesh);

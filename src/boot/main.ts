@@ -51,6 +51,7 @@ import { installWindowGuards } from "../host/browser/window-guards";
 // the injected dependencies of the two systems that need them (input capture, icon baking).
 import { captureMouse, releaseMouse } from "../host/browser/mousecapture";
 import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../host/browser/blockicons";
+import { ChunkGeometry, getChunkMaterial } from "../host/browser/chunkmesh";
 import { adoptViewport, currentViewport } from "../host/browser/viewport";
 import { DebugLogForwarder } from "../host/desktop/debuglog";
 import { PerfSampler } from "../core/services/perf";
@@ -427,7 +428,7 @@ const movement = new PlayerMovementSystem(world);
 const collision = new CollisionSystem(world);
 const cameraView = new CameraViewSystem(world);
 const snapshot = new PositionSnapshotSystem(world);
-const chunkStream = new ChunkStreamSystem(world);
+const chunkStream = new ChunkStreamSystem(world, { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial });
 // The reconciler that owns every widget's DOM element. It mounts roots on the world's UI_MOUNT resource
 // (the same element the hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never
 // imports src/ui/.
