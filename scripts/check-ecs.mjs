@@ -1228,7 +1228,12 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   // cache on its next run instead.
   const invSource = stripComments(readSource("src/plugins/ui/systems/inventory.ts"));
   assert(!/\.then\(/.test(invSource), "the inventory draws the icon from the cache, not from a promise");
-  assert(/requestBlockIcon\(/.test(invSource), "…and asks for a bake when the cache misses");
+  // Since P1.18b the icon baker is INJECTED (a plugin may not import `host/`), so the check is
+  // two-sided: the system asks through its IconSource, and the composition root hands it the real one.
+  // A missing wire would not crash — it would silently ship placeholder icons — so it is asserted.
+  assert(/this\.icons\.request\(/.test(invSource), "…and asks for a bake when the cache misses");
+  assert(/request: requestBlockIcon/.test(stripComments(readSource("src/boot/main.ts"))),
+    "…with the real baker wired in by the composition root");
   assert(!/getBlockIcon/.test(invSource), "the promise-shaped reader is gone, not merely unused");
 });
 
@@ -2483,7 +2488,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(world\)/],
     ["the chunk stream", /new ChunkStreamSystem\(world\)/],
-    ["the device layer", /new PlayerInputSystem\(world, logDebug, inWorld\)/],
+    ["the device layer", /new PlayerInputSystem\(world, logDebug, inWorld, \{ capture: captureMouse/],
     ["the reconciler", /new UiRenderSystem\(world, \{\s*translate:/],
   ]) {
     assert(needle.test(main), `${what} takes no presentation object any more`);
@@ -3518,7 +3523,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
-  assert(toHost <= 5, `plugin -> host reads may not grow (now ${toHost}, pinned at 5)`);
+  assert(toHost <= 3, `plugin -> host reads may not grow (now ${toHost}, pinned at 3)`);
   const unresolved = new Set(["world", "player", "render", "diagnostics", "ui", "input"]);
   let progressed = true;
   while (progressed) {

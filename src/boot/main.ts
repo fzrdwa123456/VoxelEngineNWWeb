@@ -47,6 +47,10 @@ import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDi
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput, centerCursor } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
+// The platform halves the PLUGINS are not allowed to import: the composition root hands them in as
+// the injected dependencies of the two systems that need them (input capture, icon baking).
+import { captureMouse, releaseMouse } from "../host/browser/mousecapture";
+import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../host/browser/blockicons";
 import { adoptViewport, currentViewport } from "../host/browser/viewport";
 import { DebugLogForwarder } from "../host/desktop/debuglog";
 import { PerfSampler } from "../core/services/perf";
@@ -417,7 +421,7 @@ const loadingScreen = new LoadingScreen(world);
 // The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
 // so no system is handed one. See ecs/presentation.ts.
-const input = new PlayerInputSystem(world, logDebug, inWorld);
+const input = new PlayerInputSystem(world, logDebug, inWorld, { capture: captureMouse, release: releaseMouse });
 const controller = new PlayerControllerSystem(world);
 const movement = new PlayerMovementSystem(world);
 const collision = new CollisionSystem(world);
@@ -511,7 +515,7 @@ const inv = new Inventory(world, player);
 // The handles the reconcile writes into (the view only spawns them): `ui.inventory` reads the component
 // and writes these widgets, which is why the view is no longer called once per frame.
 world.insertResource(INVENTORY_WIDGETS, inv.widgets);
-const uiInventory = new UiInventorySystem(world);
+const uiInventory = new UiInventorySystem(world, { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon });
 // The GAMEPLAY widgets' visibility: the crosshair and the hotbar exist in every mode (they were spawned
 // visible and nothing wrote their flag), so one system owns that flag and derives it from "is a world
 // running". It needs the hotbar, which is why it is built here rather than with the other UI systems.

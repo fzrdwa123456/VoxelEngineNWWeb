@@ -38,7 +38,15 @@
 // So lock() no longer calls requestPointerLock: it engages the native capture and keeps its own
 // bookkeeping in step (a native capture has no pointerlockchange to wait for). **It falls back** to
 // the browser path only when raw input is unavailable.
-import { captureMouse, releaseMouse } from "../../../host/browser/mousecapture";
+/** The native mouse-capture pair, INJECTED rather than imported: a plugin may not reach into `host/`
+ *  (the layer rule enforced by check:ecs), and engaging/dropping the native capture is a platform
+ *  operation. The composition root hands in `host/browser/mousecapture`'s pair. */
+export interface MouseCapture {
+  capture(dom: HTMLElement): Promise<void>;
+  release(): void;
+}
+/** Default so a drive-by test can construct this system without a platform. */
+const NO_MOUSE: MouseCapture = { capture: async () => {}, release: () => {} };
 import { buttonToAction, buttonToCode, getBind, isCapturing } from "../../input/keybinds";
 import {
   BODY,
@@ -186,6 +194,8 @@ export class PlayerInputSystem {
      *  user was still mid-interaction with the window. Defaults to true so a drive-by test behaves as
      *  before. */
     private readonly inWorld: () => boolean = () => true,
+    /** The native capture pair (see MouseCapture): resolved here, never imported from `host/`. */
+    private readonly mouse: MouseCapture = NO_MOUSE,
   ) {
     const player = this.world.resource(LOCAL_PLAYER);
     this.state = this.world.resource(INPUT_STATE);
@@ -569,7 +579,7 @@ export class PlayerInputSystem {
     if (!this.state.rawInputActive) {
       return this.dom.requestPointerLock() as Promise<void> | undefined;
     }
-    const pending = captureMouse(this.dom);
+    const pending = this.mouse.capture(this.dom);
     // Record only on success: on failure the front end falls back to requestPointerLock, and
     // pointerlockchange is what covers that path.
     pending.then(() => this.onCaptured()).catch(() => {});
@@ -594,7 +604,7 @@ export class PlayerInputSystem {
     if (this.state.locked) this.log("MOUSE CAPTURE off (native ClipCursor released)");
     this.state.locked = false;
     this.state.freeMouseActive = false;
-    releaseMouse();
+    this.mouse.release();
   }
 
   /** Bind-code injection from non-keyboard event sources (mouse buttons etc.): press */

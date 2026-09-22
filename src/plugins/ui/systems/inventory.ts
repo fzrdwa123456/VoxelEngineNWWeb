@@ -13,7 +13,16 @@
 // system declares `writes: [UI_IMAGE, UI_STATE, UI_TEXT, UI_TIP]` and `ui.widgets` reads those same
 // components, so the schedule REFUSES to start unless the edge between them is declared (main.ts
 // declares `after: ["ui.inventory"]`).
-import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../../../host/browser/blockicons";
+/** The icon baker, INJECTED rather than imported: a plugin may not reach into `host/` (the layer rule
+ *  enforced by check:ecs). The SHAPES it works on are data (`IconBakeState` lives in data/globals/gfx.ts);
+ *  what is injected is the platform's implementation. The default draws placeholders only, so a test can
+ *  construct this system without a GPU. */
+export interface IconSource {
+  key(type: string, sizePx: number): string;
+  peek(bake: IconBakeState, type: string, sizePx: number): string | null;
+  request(bake: IconBakeState, type: string, sizePx: number): void;
+}
+const NO_ICONS: IconSource = { key: (t, s) => `${t}@${s}`, peek: () => null, request: () => {} };
 import { CHECKER_TEXTURE_URL } from "../../../data/assets/textures";
 import { getBlockDef } from "../../../data/assets/blockregistry";
 import { INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../../player/components";
@@ -68,7 +77,11 @@ export class UiInventorySystem {
     this.paint.drawnSelected = v;
   }
 
-  constructor(private readonly world: World) {
+  constructor(
+    private readonly world: World,
+    /** The icon source (see IconSource): the platform hands its baker in. */
+    private readonly icons: IconSource = NO_ICONS,
+  ) {
     this.inv = world.get(world.resource(LOCAL_PLAYER), INVENTORY)!;
     this.widgets = world.resource(INVENTORY_WIDGETS);
     this.bake = world.resource(ICON_BAKE);
@@ -118,12 +131,12 @@ export class UiInventorySystem {
     // An icon that is ALREADY baked is written straight away, in ONE write: no placeholder state ever
     // reaches a frame (see the method above). Only a first-time bake has to wait, and it says so with the
     // engine's checker rather than with a solid colour that reads as a real item.
-    const baked = peekBlockIcon(this.bake, item.type, ICON_SIZE);
+    const baked = this.icons.peek(this.bake, item.type, ICON_SIZE);
     setUiImage(this.world, widgets.icons[i], baked ?? CHECKER_TEXTURE_URL, false);
     setUiTip(this.world, widgets.slots[i], def?.label ?? item.type); // Tooltip shows the block name
     setUiText(this.world, widgets.counts[i], item.count > 1 ? `${item.count}` : "", true);
     this.waiting[i] = baked ? 0 : 1;
-    if (!baked) requestBlockIcon(this.bake, item.type, ICON_SIZE);
+    if (!baked) this.icons.request(this.bake, item.type, ICON_SIZE);
   }
 
   /** Do the bakes asked for on an earlier frame have a result? A slot whose icon HAS landed is marked
@@ -142,7 +155,7 @@ export class UiInventorySystem {
         this.waiting[i] = 0;
         continue;
       }
-      const key = iconCacheKey(item.type, ICON_SIZE);
+      const key = this.icons.key(item.type, ICON_SIZE);
       if (bake.cache.has(key)) {
         this.waiting[i] = 0;
         this.drawn[i] = "\u0000"; // no real signature equals this: the diff below redraws the slot
