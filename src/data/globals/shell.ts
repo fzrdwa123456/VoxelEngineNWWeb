@@ -11,6 +11,9 @@
 import { defineResource, type Resource } from "../../core/world";
 
 /** What Rust's `preload_shell` returns (the field names match serde's camelCase one for one) */
+/** The window mode a setting may ask for (the values `settings.json` may hold). */
+export type WindowMode = "windowed" | "fullscreen";
+
 export interface ShellSnapshot {
   gameRoot: string;
   dev: boolean;

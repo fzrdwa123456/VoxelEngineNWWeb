@@ -287,7 +287,9 @@ export function setGpuVsyncDisabled(disabled: boolean): boolean {
 }
 
 // ===== Window mode: windowed / fullscreen =====
-export type WindowMode = "windowed" | "fullscreen";
+// The window mode is a VALUE (data/globals/shell.ts); re-exported so no call site changes.
+import type { WindowMode } from "../../data/globals/shell";
+export type { WindowMode } from "../../data/globals/shell";
 
 const modeListeners = new Set<() => void>();
 

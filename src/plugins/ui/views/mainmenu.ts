@@ -80,6 +80,9 @@ export class MainMenu {
     onUiAction(actions, "main.genBack", () => this.showGen(false));
 
     this.panels = buildSettingsPanel(world, this.root, "main", {
+      log: cb.log,
+      onViewportChange: cb.onViewportChange,
+      onWindowModeChange: cb.onWindowModeChange,
       getFpsCap: cb.getFpsCap,
       onFpsCap: cb.onFpsCap,
       isGpuVsyncDisabled: cb.isGpuVsyncDisabled,

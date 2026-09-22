@@ -45,11 +45,10 @@
 // decisions that can only be taken inside the event that must be cancelled (see the contract above).
 import { t, getLang, setLang } from "../../../data/assets/i18n";
 import { getUIScaleMode, setUIScaleMode, getCurrentScale } from "../../../data/globals/uiscale";
-import { onViewportChange } from "../../../host/browser/viewport";
 import { installBindGestureHandlers } from "../../input/bind-gesture";
 import { getFontId, setFontId } from "../../../data/globals/fonts";
 import { listPacks } from "../../../data/assets/textures";
-import { onWindowModeChange, type WindowMode, logDebug } from "../../../host/desktop/shell";
+import type { WindowMode } from "../../../data/globals/shell";
 import { getBind, setBind, beginCapture, endCapture, getCapturing, codeDisplayName, buttonToCode } from "../../input/keybinds";
 import { KB_ACTIONS, type BindAction } from "../../../data/globals/binds";
 import { KB_ROWS, TOWER_GRID, NUM_GRID, MOUSE_GRID } from "../../../data/globals/keylayout";
@@ -94,6 +93,8 @@ import {
  *  over here AND inserted as that resource, so the listeners below and the system that applies them see
  *  the same data. Set once during wiring, because the gesture outlives any one panel. */
 export interface KeybindDragDeps {
+  /** The platform's log sink, INJECTED (a plugin may not import `host/`). */
+  log: (line: string) => void;
   readonly world: World;
   readonly hitTest: (x: number, y: number) => UiHit | null;
   readonly gesture: KeybindGesture;
@@ -117,7 +118,7 @@ export function bindKeybindDrag(deps: KeybindDragDeps): void {
     hitTest: (x, y) => deps.hitTest(x, y),
     armShield: armSuppressNextClick,
     buttonToCode: (button) => buttonToCode(button),
-    log: logDebug,
+    log: deps.log,
   });
 }
 
@@ -177,13 +178,13 @@ export function keycapAtPoint(x: number, y: number): Entity | null {
  *  ESC — the ONE decision-maker for that key (see its Escape branch). The device listener in
  *  platform/bind-gesture.ts only neutralizes keyboard defaults while a drag is live; deciding there too is
  *  what made ESC both cancel the drag AND walk up a menu level once the registration order changed. */
-export function cancelKeybindDrag(reason: string): void {
+export function cancelKeybindDrag(reason: string, log: (line: string) => void): void {
   const g = gestureState();
   if (!g?.drag) return;
   g.drag = null;
   g.hover = null;
   endCapture();
-  logDebug(`KBCAP drag cancelled (${reason})`);
+  log(`KBCAP drag cancelled (${reason})`);
 }
 
 /** The KEYCAP under a point, if any. Only a widget whose action IS a keycap counts: a drag released
@@ -213,12 +214,12 @@ function keycapAt(x: number, y: number): { entity: Entity; code: string } | null
  *  collide on the id. */
 let keybindActionsReady = false;
 
-function registerKeybindActions(actions: Map<string, UiActionHandler>): void {
+function registerKeybindActions(actions: Map<string, UiActionHandler>, log: (line: string) => void): void {
   if (keybindActionsReady) return;
   keybindActionsReady = true;
   onUiAction(actions, ACTION_KEYBIND_CHIP, (value) => {
     const action = value as BindAction; // the chip's value IS a BindAction (see the spawn loop)
-    logDebug(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
+    log(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
     if (getCapturing() === action) endCapture();
     else beginCapture(action);
   });
@@ -227,7 +228,7 @@ function registerKeybindActions(actions: Map<string, UiActionHandler>): void {
     if (!selected) return; // Clicking the keyboard with no action selected is a no-op
     setBind(selected, code);
     endCapture();
-    logDebug(`KBCAP keycap bind done (${code})`);
+    log(`KBCAP keycap bind done (${code})`);
   });
 }
 
@@ -264,6 +265,11 @@ export interface SettingsCallbacks {
   onToggleDiagLog: (on: boolean) => boolean;
   getWindowMode: () => WindowMode;
   onSetWindowMode: (mode: WindowMode) => void;
+  /** The platform's log sink and the two config subscriptions, INJECTED: a plugin may not import
+   *  `host/` (the layer rule in check:ecs). */
+  log: (line: string) => void;
+  onViewportChange: (cb: () => void) => void;
+  onWindowModeChange: (cb: () => void) => void;
 }
 
 // Pause menu callbacks: the settings panel's six items + resume / back to main menu
@@ -319,7 +325,7 @@ export function buildSettingsPanel(
   opts: SettingsCallbacks & { onBack: () => void },
 ): SettingsPanels {
   const actions = world.resource(UI_ACTIONS);
-  registerKeybindActions(actions);
+  registerKeybindActions(actions, opts.log);
 
   const panels: Record<SettingsPanelId, Entity> = {
     settings: spawnPanel(world, root, "settings.panel", { hidden: true }),
@@ -442,7 +448,7 @@ export function buildSettingsPanel(
   const renderPacks = (): void => {
     const packs = listPacks();
     if (packs.length > PACK_LIST_CAPACITY) {
-      logDebug(`PACKS ${packs.length} installed, only ${PACK_LIST_CAPACITY} rows exist (fixed capacity)`);
+      opts.log(`PACKS ${packs.length} installed, only ${PACK_LIST_CAPACITY} rows exist (fixed capacity)`);
     }
     setUiVisible(world, packEmpty, packs.length === 0);
     packCells.forEach((cell, i) => {
@@ -621,9 +627,9 @@ export function buildSettingsPanel(
     // back here would print the previous drag step (see renderCap).
     renderCap(cap);
   });
-  onViewportChange(renderScaleLabel);
+  opts.onViewportChange(renderScaleLabel);
   onConfigChange("uiScale", renderChoices);
-  onWindowModeChange(renderChoices);
+  opts.onWindowModeChange(renderChoices);
   onConfigChange("font", renderChoices);
   onConfigChange("lang", () => {
     // Static text is a key and needs nothing, and the KEY BIND panel needs nothing either: ui.keybind
@@ -694,6 +700,9 @@ export class Menu {
     });
 
     this.panels = buildSettingsPanel(world, this.root, "pause", {
+      log: cb.log,
+      onViewportChange: cb.onViewportChange,
+      onWindowModeChange: cb.onWindowModeChange,
       getFpsCap: cb.getFpsCap,
       onFpsCap: cb.onFpsCap,
       isGpuVsyncDisabled: cb.isGpuVsyncDisabled,

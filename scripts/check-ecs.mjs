@@ -3523,7 +3523,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
-  assert(toHost <= 2, `plugin -> host reads may not grow (now ${toHost}, pinned at 2)`);
+  equal(toHost, 0, `no plugin reads host/ any more (now ${toHost}) — that is what the injected services are for`);
   const unresolved = new Set(["world", "player", "render", "diagnostics", "ui", "input"]);
   let progressed = true;
   while (progressed) {

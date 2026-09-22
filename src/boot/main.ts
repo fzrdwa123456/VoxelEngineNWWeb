@@ -52,7 +52,7 @@ import { installWindowGuards } from "../host/browser/window-guards";
 import { captureMouse, releaseMouse } from "../host/browser/mousecapture";
 import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../host/browser/blockicons";
 import { ChunkGeometry, getChunkMaterial } from "../host/browser/chunkmesh";
-import { adoptViewport, currentViewport } from "../host/browser/viewport";
+import { adoptViewport, currentViewport, onViewportChange } from "../host/browser/viewport";
 import { DebugLogForwarder } from "../host/desktop/debuglog";
 import { PerfSampler } from "../core/services/perf";
 import { loadBinds, getBind, getBindsAll, getCapturing, isCapturing, buttonToAction, buttonToCode, setBind, endCapture, adoptKeybindGesture } from "../plugins/input/keybinds";
@@ -483,7 +483,8 @@ const uiKeybind = new UiKeybindSystem(world, {
 });
 // The key bind drag asks the UI SYSTEM what is under the cursor: only it owns the elements (the
 // hand-written panel kept its own cross-instance table of keycap elements to do this).
-bindKeybindDrag({ world, hitTest: (x, y) => uiRender.hitTest(x, y), gesture: keybindGesture });
+bindKeybindDrag({
+  log: logDebug, world, hitTest: (x, y) => uiRender.hitTest(x, y), gesture: keybindGesture });
 // No callback into the UI any more: the interaction system reads the entity's INVENTORY component
 // itself, so the hand you see and the hand that places a block cannot disagree. It writes the local
 // player's TARGET_HIT component; `block.outline` (render lane) draws the wireframe from it — the mesh
@@ -713,7 +714,7 @@ const navigation = new UiNavigationSystem(world, {
   // A key bind DRAG owns ESC while it is live: this system (the ONE decision-maker for ESC) cancels it
   // instead of stepping back through the ladder.
   dragging: () => keybindGesture.drag !== null,
-  cancelDrag: (reason) => cancelKeybindDrag(reason),
+  cancelDrag: (reason) => cancelKeybindDrag(reason, logDebug),
   // Native capture: does NOT go through `document.exitPointerLock` (see platform/mousecapture.ts)
   exitPointerLock: () => input.releaseCapture(),
   centerCursor,
@@ -885,6 +886,10 @@ const onSetWindowMode = (mode: WindowMode): void => {
 };
 
 const menu = new Menu(world, {
+  // The three platform capabilities a view may not import itself (see SettingsCallbacks).
+  log: logDebug,
+  onViewportChange,
+  onWindowModeChange,
   // The pause menu PUBLISHES its navigation state into UI_MODAL itself, and ui.navigation paints it —
   // so no call site has to remember to say so, and a sub-panel needs no flag of its own.
   onResume: () => {
@@ -999,6 +1004,9 @@ async function enterWorld(mode: string): Promise<void> {
 
 // Main menu: singleplayer picks a world type then enters; multiplayer placeholder; settings/exit
 const mainMenu = new MainMenu(world, {
+  log: logDebug,
+  onViewportChange,
+  onWindowModeChange,
   // Same contract as the pause menu: the surface publishes, ui.navigation paints.
   onStartSingle: (mode) => {
     // The world is BUILT here now (see enterWorld): nothing about it is done at startup any more, so
