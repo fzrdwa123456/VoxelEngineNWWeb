@@ -49,6 +49,7 @@ const SOURCES = [
   "src/plugins/diagnostics/index.ts",
   "src/plugins/ui/index.ts",
   "src/plugins/input/index.ts",
+  "src/plugins/content-default/index.ts",
   "src/data/globals/resources.ts",
   // The bind DATA (action ids, defaults, panel rows, keycap display names) and the cube's face table: the
   // modules that act on them are in logic/ (keybinds.ts, chunkmesh.ts).
@@ -3408,7 +3409,8 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(outcome.has("ui"), false, "…including the manifest's veto");
 
   // 3. The manifest is DATA the pack chain can override, and it can never break the boot.
-  equal(M.DEFAULT_PLUGINS.join(","), "world,player,render,diagnostics,ui,input", "the built-in plugin list");
+  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,input",
+    "the built-in plugin list (the content plugin comes first: it declares what the install HAS)");
   equal(M.isEnabled(M.defaultManifest(), "ui"), true, "an unmentioned plugin follows the default list");
   const off = M.parseManifest({ plugins: [{ id: "diagnostics", enabled: false }] });
   equal(M.isEnabled(off, "diagnostics"), false, "an explicit false disables it");
@@ -3483,7 +3485,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   }
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
-  equal((declared[1].match(/Plugin/g) || []).length, 6, "…and installs all six");
+  equal((declared[1].match(/Plugin/g) || []).length, 7, "…and installs all seven");
   assert(/installPlugins\(PLUGINS, \{/.test(bootSrc), "…through installPlugins, not by hand");
   assert(/registry\.list\(SLOT_SYSTEMS\)\) world\.addSystem\(def\)/.test(bootSrc),
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
@@ -3529,6 +3531,11 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(started2.failed.map((f) => f.id).join(","), "boom", "…and the failure is reported");
   stopPlugins(inst2, started2, () => {});
   equal(events.includes("stop:boom"), false, "a plugin that never started is never stopped");
+  const contentReg = contribute(load("plugins/content-default/index.js").contentDefaultPlugin);
+  equal(contentReg.list(S.SLOT_LANGUAGES).map((l) => l.id).join(","), "zh,en,ja",
+    "the content plugin declares the language set (it used to be a literal in the i18n module)");
+  assert(typeof load("plugins/content-default/index.js").contentDefaultPlugin.start === "function",
+    "…and it uses the start phase to report what the pack chain delivered");
   assert(typeof load("plugins/diagnostics/index.js").diagnosticsPlugin.start === "function",
     "a REAL plugin uses the lifecycle (diagnostics starts and stops the perf sampler)");
   equal(load("plugins/world/index.js").worldPlugin.start ?? null, null,
@@ -3577,7 +3584,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
   equal(toHost, 0, `no plugin reads host/ any more (now ${toHost}) — that is what the injected services are for`);
-  const unresolved = new Set(["world", "player", "render", "diagnostics", "ui", "input"]);
+  const unresolved = new Set(["content-default", "world", "player", "render", "diagnostics", "ui", "input"]);
   let progressed = true;
   while (progressed) {
     progressed = false;

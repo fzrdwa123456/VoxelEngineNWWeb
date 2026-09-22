@@ -18,7 +18,15 @@ export type { PluginManifest, PluginManifestEntry } from "./manifest-types";
 export const MANIFEST_FILE = "plugins.json";
 
 /** The plugins this engine installs when nothing says otherwise. */
-export const DEFAULT_PLUGINS: readonly string[] = ["world", "player", "render", "diagnostics", "ui", "input"];
+export const DEFAULT_PLUGINS: readonly string[] = [
+  "content-default",
+  "world",
+  "player",
+  "render",
+  "diagnostics",
+  "ui",
+  "input",
+];
 
 export function defaultManifest(): PluginManifest {
   return { plugins: DEFAULT_PLUGINS.map((id) => ({ id, enabled: true })) };

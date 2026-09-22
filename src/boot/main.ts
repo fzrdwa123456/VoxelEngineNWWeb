@@ -79,6 +79,7 @@ import { createRenderSystems, renderPlugin } from "../plugins/render";
 import { createDiagnosticsSystems, diagnosticsPlugin } from "../plugins/diagnostics";
 import { uiPlugin } from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
+import { contentDefaultPlugin } from "../plugins/content-default";
 
 // Pixel font (Fusion Pixel, OFL open source): proportional font for general UI, monospace for F3/count panels
 import "@fontsource/fusion-pixel-12px-proportional-sc";
@@ -214,7 +215,15 @@ const world = new World();
 // built above — but every one of them is contributed UNDER ITS PLUGIN'S ID, so turning a plugin off in
 // plugins.json keeps its systems out of the schedule entirely.
 const registry = new ExtensionRegistry();
-const PLUGINS = [worldPlugin, playerPlugin, renderPlugin, diagnosticsPlugin, uiPlugin, inputPlugin];
+const PLUGINS = [
+  contentDefaultPlugin,
+  worldPlugin,
+  playerPlugin,
+  renderPlugin,
+  diagnosticsPlugin,
+  uiPlugin,
+  inputPlugin,
+];
 const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
 const manifest = manifestRead.manifest;
 const unknownPluginIds = unknownPlugins(manifest, PLUGINS.map((p) => p.id));

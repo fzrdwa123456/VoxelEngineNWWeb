@@ -16,10 +16,13 @@ interface Entry {
   readonly value: unknown;
 }
 
-/** The id a contributed value is filed under: systems/components/resources all carry a `name`. */
+/** The id a contributed value is filed under: systems/components/resources carry a `name`, a content
+ *  declaration (a language, an item) carries an `id`. Both are ids; one of them must be there. */
 function idOf(value: unknown): string {
-  const name = (value as { name?: unknown }).name;
-  return typeof name === "string" && name !== "" ? name : "(anonymous)";
+  const v = value as { name?: unknown; id?: unknown };
+  if (typeof v.name === "string" && v.name !== "") return v.name;
+  if (typeof v.id === "string" && v.id !== "") return v.id;
+  return "(anonymous)";
 }
 
 export class ExtensionRegistry {

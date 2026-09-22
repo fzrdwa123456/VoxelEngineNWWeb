@@ -904,6 +904,21 @@ Still outstanding:
   resident (so a plugin could be re-started), and the barrier-safe `reconfigure()` that a hot add/remove of
   systems needs (a structural change may only happen at a barrier). The five construction sites that remain
   in `boot/main.ts` are the ten ui systems (they are built around the view entities the root creates).
+- **P1.20 — content is a plugin: `plugins/content-default/`.** `PARTLY DONE`. The engine's built-in content
+  is no longer a literal in the code: the LANGUAGE set (`zh`, `en`, `ja`) is declared by the content plugin
+  through the new `SLOT_LANGUAGES` extension point, and `plugins.json` can turn the whole plugin off — the
+  engine still boots, it simply has no declared language set of its own. It is also the first plugin to use
+  the `start` phase for its real purpose (reporting what the pack chain actually delivered), which is what
+  that phase was added for. `ExtensionRegistry` learned the other id spelling while this landed (a system
+  carries a `name`, a content declaration carries an `id`), and the gate asserts the contributed set
+  instead of the contributed counts.
+  WHAT BLOCKS THE REST, measured rather than guessed: the locale is LOADED (`loadLang`) and the block
+  registry is BUILT long before the plugins install, because the loading screen's own text and the
+  starting hotbar need them. So a contributed language set cannot yet DRIVE `loadLang`, and blocks cannot
+  move the same way. Closing that means moving the install above the config/content phase — a boot-sequence
+  change (the `World` has to exist earlier, and the plugin contributions become an input to the config
+  loaders instead of a consumer of them). That is the next slice; hot reload of the pack chain comes after
+  it, because a reload is "re-run the content phase", which needs the same shape.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

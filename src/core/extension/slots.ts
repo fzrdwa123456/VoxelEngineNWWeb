@@ -21,5 +21,9 @@ export const SLOT_COMPONENTS = defineExtensionPoint<{ readonly name: string }>("
 /** Resource TOKENS a plugin owns (the shapes live in `data/globals/`; a plugin may also bring its own). */
 export const SLOT_RESOURCES = defineExtensionPoint<Resource<unknown>>("resources");
 
+/** The LANGUAGES a content plugin brings. The engine validates a language against this set instead of
+ *  against a list baked into the code (see plugins/content-default). */
+export const SLOT_LANGUAGES = defineExtensionPoint<{ readonly id: string }>("languages");
+
 /** Command types a plugin owns. */
 export const SLOT_COMMANDS = defineExtensionPoint<{ readonly name: string }>("commands");
