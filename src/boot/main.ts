@@ -70,7 +70,7 @@ import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // contributed under their plugin's id).
 import { ExtensionRegistry } from "../core/extension/registry";
 import { SLOT_RESOURCES, SLOT_SYSTEMS } from "../core/extension/slots";
-import { installPlugins } from "../core/plugin/lifecycle";
+import { installPlugins, startPlugins } from "../core/plugin/lifecycle";
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { worldPlugin } from "../plugins/world";
@@ -1055,6 +1055,14 @@ for (const def of registry.list(SLOT_SYSTEMS)) world.addSystem(def);
 
 world.start();
 for (const line of world.scheduleReport()) logDebug(line);
+// START phase (P1.19): `setup` may only CONTRIBUTE — the schedule and the resource table are still being
+// assembled while it runs. The world is started now, so a plugin that asked for a `start` hook is told the
+// assembly is done (and one whose `start` throws is disabled without taking the boot down). `stopPlugins`
+// is the mirror image, wired for the quit path and for a future uninstall.
+const startedPlugins = startPlugins(installOutcome, logDebug);
+if (startedPlugins.failed.length > 0) {
+  logDebug(`PLUGIN start failures: [${startedPlugins.failed.map((f) => `${f.id}: ${f.error}`).join("; ")}]`);
+}
 // NOTE: the spawn window (chunkStream.prime + warmUp) is generated and MESHED by the boot driver at
 // the bottom of this file, not here: it is one of the startup stages the loading screen covers, and
 // doing it before `showWindow()` was half of why the startup looked like a hang.

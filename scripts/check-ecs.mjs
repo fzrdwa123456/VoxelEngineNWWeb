@@ -3489,6 +3489,49 @@ check("the plugin system: extension points, the registry, the install and the ma
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
   equal(countOf(bootSrc, /world\.addSystem\(\{/g), 0, "no registration bypasses the registry");
 
+  // 5b. THE LIFECYCLE (P1.19): `setup` contributes, `start` runs once the world is assembled, `stop` is
+  //     its mirror image in REVERSE order, and a plugin that failed to start is never stopped.
+  const { startPlugins, stopPlugins } = load("core/plugin/lifecycle.js");
+  const events = [];
+  const lifecyclePlugin = (id, deps) =>
+    definePlugin({
+      id,
+      deps,
+      setup: () => events.push(`setup:${id}`),
+      start: () => events.push(`start:${id}`),
+      stop: () => events.push(`stop:${id}`),
+    });
+  const inst = installPlugins(
+    [lifecyclePlugin("a", []), lifecyclePlugin("b", ["a"]), lifecyclePlugin("c", ["b"])],
+    { world: {}, registry: new ExtensionRegistry(), log: () => {} },
+  );
+  const started = startPlugins(inst, () => {});
+  equal(started.ids.join(","), "a,b,c", "start runs in install order");
+  assert(inst.apiOf("b") !== null, "a plugin's start sees the same api its setup had");
+  const stopped = stopPlugins(inst, started, () => {});
+  equal(stopped.ids.join(","), "c,b,a", "stop runs in REVERSE order");
+  equal(events.filter((e) => e.startsWith("start")).length, 3, "every start fired exactly once");
+  const boom = definePlugin({
+    id: "boom",
+    setup: () => {},
+    start: () => {
+      throw new Error("nope");
+    },
+    stop: () => events.push("stop:boom"),
+  });
+  const inst2 = installPlugins([lifecyclePlugin("a", []), boom], {
+    world: {},
+    registry: new ExtensionRegistry(),
+    log: () => {},
+  });
+  const started2 = startPlugins(inst2, () => {});
+  equal(started2.ids.join(","), "a", "a throwing start is not counted as started");
+  equal(started2.failed.map((f) => f.id).join(","), "boom", "…and the failure is reported");
+  stopPlugins(inst2, started2, () => {});
+  equal(events.includes("stop:boom"), false, "a plugin that never started is never stopped");
+  equal(load("plugins/ui/index.js").uiPlugin.start ?? null, null,
+    "start/stop are OPTIONAL - the six real plugins declare neither (content plugins will be their first users)");
+
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
   //    declared graph must be acyclic — otherwise the install order it implies does not exist. Reading
   //    into `host/` is not allowed either; the handful of reads that remain are PINNED, so the debt can

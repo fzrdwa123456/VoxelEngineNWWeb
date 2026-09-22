@@ -11,7 +11,7 @@
 // re-resolving the schedule at runtime (a hot add/remove has to happen at a barrier — see ROADMAP §P1.19).
 import type { World } from "../world";
 import type { ExtensionRegistry } from "../extension/registry";
-import { createPluginApi } from "./api";
+import { createPluginApi, type PluginApi } from "./api";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -27,8 +27,12 @@ export interface InstallOutcome {
   readonly installed: readonly string[];
   readonly skipped: readonly { readonly id: string; readonly reason: string }[];
   readonly disabled: readonly { readonly id: string; readonly error: string }[];
+  /** The plugins that were installed, in install order — what `startPlugins`/`stopPlugins` walk. */
+  readonly plugins: readonly Plugin[];
   /** Was this plugin installed? The composition root asks before registering a plugin's systems. */
   has(id: string): boolean;
+  /** The api a plugin was installed with (so `start` sees the same door `setup` did). */
+  apiOf(id: string): PluginApi | null;
 }
 
 /** Kahn's algorithm over `deps`. Unknown deps and cycles are returned as reasons, never thrown. */
@@ -82,15 +86,20 @@ export function installPlugins(plugins: readonly Plugin[], options: InstallOptio
   const { ordered, skipped } = order(plugins, log);
   const installed: string[] = [];
   const disabled: { id: string; error: string }[] = [];
+  const installedPlugins: Plugin[] = [];
+  const apis = new Map<string, PluginApi>();
 
   for (const plugin of ordered) {
     if (enabled && !enabled(plugin.id)) {
       log(`PLUGIN ${plugin.id} disabled by the manifest — not installed`);
       continue;
     }
+    const api = createPluginApi(plugin.id, world, registry, (line) => log(`[${plugin.id}] ${line}`));
     try {
-      plugin.setup(createPluginApi(plugin.id, world, registry, (line) => log(`[${plugin.id}] ${line}`)));
+      plugin.setup(api);
       installed.push(plugin.id);
+      installedPlugins.push(plugin);
+      apis.set(plugin.id, api);
     } catch (error) {
       disabled.push({ id: plugin.id, error: describeError(error) });
       log(`PLUGIN ${plugin.id} FAILED and is disabled: ${describeError(error)}`);
@@ -101,6 +110,66 @@ export function installPlugins(plugins: readonly Plugin[], options: InstallOptio
     installed,
     skipped,
     disabled,
+    plugins: installedPlugins,
     has: (id: string) => installed.includes(id),
+    apiOf: (id: string) => apis.get(id) ?? null,
   };
+}
+
+/** What `startPlugins`/`stopPlugins` did, for the boot log and for the gate. */
+export interface LifecycleOutcome {
+  readonly ids: readonly string[];
+  readonly failed: readonly { readonly id: string; readonly error: string }[];
+}
+
+/** Run every installed plugin's OPTIONAL `start`, in install order, AFTER `world.start()`.
+ *
+ *  Why it is a separate phase: `setup` may only CONTRIBUTE (the schedule and the resource table are still
+ *  being assembled), while `start` may LOOK at the finished world. A plugin whose `start` throws is
+ *  disabled — and it is then NOT stopped later, because it never started. */
+export function startPlugins(outcome: InstallOutcome, log: (line: string) => void): LifecycleOutcome {
+  const ids: string[] = [];
+  const failed: { id: string; error: string }[] = [];
+  for (const plugin of outcome.plugins) {
+    if (!plugin.start) continue;
+    const api = outcome.apiOf(plugin.id);
+    if (!api) continue;
+    try {
+      plugin.start(api);
+      ids.push(plugin.id);
+    } catch (error) {
+      failed.push({ id: plugin.id, error: describeError(error) });
+      log(`PLUGIN ${plugin.id} start FAILED and is disabled: ${describeError(error)}`);
+    }
+  }
+  if (ids.length > 0 || failed.length > 0) {
+    log(`PLUGIN started ${ids.length}: [${ids.join(", ")}]`);
+  }
+  return { ids, failed };
+}
+
+/** Run `stop` for everything that STARTED, in REVERSE order (a plugin may depend on one installed before
+ *  it, so it must be torn down first). Called when the app quits, and — once hot-plugging lands — when a
+ *  plugin is uninstalled. */
+export function stopPlugins(
+  outcome: InstallOutcome,
+  started: LifecycleOutcome,
+  log: (line: string) => void,
+): LifecycleOutcome {
+  const ids: string[] = [];
+  const failed: { id: string; error: string }[] = [];
+  for (const plugin of [...outcome.plugins].reverse()) {
+    if (!started.ids.includes(plugin.id) || !plugin.stop) continue;
+    const api = outcome.apiOf(plugin.id);
+    if (!api) continue;
+    try {
+      plugin.stop(api);
+      ids.push(plugin.id);
+    } catch (error) {
+      failed.push({ id: plugin.id, error: describeError(error) });
+      log(`PLUGIN ${plugin.id} stop FAILED: ${describeError(error)}`);
+    }
+  }
+  if (ids.length > 0) log(`PLUGIN stopped ${ids.length}: [${ids.join(", ")}]`);
+  return { ids, failed };
 }

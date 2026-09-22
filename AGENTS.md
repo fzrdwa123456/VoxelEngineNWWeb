@@ -139,7 +139,12 @@ plugin contributes into them from its own `plugins/<id>/index.ts` with `definePl
 `installPlugins` (core/plugin/lifecycle.ts) orders the plugins by their declared `deps`, lets the manifest
 veto one, and DISABLES (with a logged reason) any plugin whose `setup` throws — the boot always continues.
 The manifest is `plugins.json`, read out of the PACK CHAIN like any other content file, and a plugin it
-turns off contributes nothing (its systems never reach the schedule). More slots are planned (views,
+turns off contributes nothing (its systems never reach the schedule). **The lifecycle is three phases:**
+`setup` (contribute — the schedule and the resource table are still being assembled), then
+`startPlugins(outcome, log)` AFTER `world.start()` for the plugins that declared a `start`, then
+`stopPlugins(outcome, started, log)` in REVERSE order when the app quits (or, once hot-plugging lands, when a
+plugin is uninstalled). A plugin that fails at any phase is DISABLED with a logged reason, and one that never
+started is never stopped. More slots are planned (views,
 settings, blocks, languages, uiActions); the UI's existing action/source tables are the working prototype.
 
 **What is NOT enforced yet.** Nothing checks the import direction today: 21 imports still cross a layer (the

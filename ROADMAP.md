@@ -890,6 +890,20 @@ Still outstanding:
   `ui`, then `render`, then `diagnostics`) instead of the incidental order they had. STILL OPEN: the five
   `host/` reads should become injected services, and each system's CONSTRUCTION should move out of
   `boot/main.ts` (it closes over the wiring: the views and the injected hooks) into the plugin that owns it.
+- **P1.19 — the plugin LIFECYCLE: install, start, stop.** `PARTLY DONE` (the mechanism; the first real user
+  arrives with the content plugin). `core/plugin` grew the two optional hooks a plugin may declare:
+  `start` runs in install order AFTER `world.start()` — the moment `setup` may not assume, because
+  `setup` runs while the schedule and the resource table are still being assembled, while `start` may
+  inspect the finished world — and `stop` runs in REVERSE install order (a plugin may depend on one
+  installed before it, so it must be torn down first), which is what the quit path and a future uninstall
+  will call. `installPlugins` now also hands back the installed plugins and their apis, so `start`/`stop`
+  see the same door `setup` did. Failure isolation covers the new phases: a throwing `start` disables that
+  plugin and is reported, and a plugin that never started is never stopped. `check:ecs` drives all of it in
+  Node (start order, reverse stop order, the throwing start, and that `start`/`stop` really are optional —
+  none of the six plugins uses them yet, and the gate says so out loud). STILL OPEN: making the plugins
+  resident (so a plugin could be re-started), and the barrier-safe `reconfigure()` that a hot add/remove of
+  systems needs (a structural change may only happen at a barrier). The five construction sites that remain
+  in `boot/main.ts` are the ten ui systems (they are built around the view entities the root creates).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
