@@ -145,6 +145,14 @@ turns off contributes nothing (its systems never reach the schedule). **The life
 `stopPlugins(outcome, started, log)` in REVERSE order when the app quits (or, once hot-plugging lands, when a
 plugin is uninstalled). A plugin that fails at any phase is DISABLED with a logged reason, and one that never
 started is never stopped. More slots are planned (views,
+
+**Which plugins are OPTIONAL today.** `plugins.json` (read from the pack chain) toggles the ids the code
+declares: a disabled plugin contributes nothing, so its systems never reach the schedule. `diagnostics`
+(simply no F3 panel and no probes) and `content-default` (no declared language set) are genuinely optional.
+`player` and `render` are the game itself: they boot, but the body has no input/movement/collision and the
+screen is never drawn. `ui` is REMOVABLE in the mechanical sense — `boot/main.ts` logs and carries on
+instead of throwing — but the loading screen and the menus ARE ui surfaces, so the window then stays
+unpainted. A plugin whose declared `deps` are missing is REPORTED at boot, not silently half-installed.
 settings, blocks, languages, uiActions); the UI's existing action/source tables are the working prototype.
 
 **What is NOT enforced yet.** Nothing checks the import direction today: 21 imports still cross a layer (the
@@ -185,6 +193,21 @@ load-bearing (the one thing a purely functional pipeline would not need). What i
 discipline that survives: one owner per value, no cached derivation of another's state, and behaviour
 that is a function of data rather than a second copy of it.
 
+## The window's first frame (do not "clean up" these two lines)
+
+`src-tauri/tauri.conf.json`'s window sets `"visible": false` and `"backgroundColor": "#000000"` **on
+purpose**. The chain: wry maps the configured colour onto
+`ICoreWebView2Controller2::SetDefaultBackgroundColor`; with NO colour wry sets nothing, so WebView2 paints
+its factory default — WHITE — until the page's first frame, and every launch opens with a white flash that
+reads as "the app is broken". (The line was added in P1.22 and the flash disappeared; deleting it brings the
+flash back.) The three layers agree on black: the native window is created hidden, the WebView is black from
+creation, and the page is black from `<head>` (`index.html`).
+
+**The reveal is a race, and "await two rAF frames before `showWindow()`" is NOT the fix.** `showWindow()`
+runs inside a boot stage, the ONE rAF chain only starts AFTER the boot flow, and at that moment the window is
+still hidden — where Chromium throttles rAF. A bare rAF wait could therefore never resolve and the window
+would never appear. If the remaining ~2-frame black is ever worth removing, it must be a `Promise.race`
+with a timeout (~120 ms), never a bare rAF wait.
 ## The three lanes (how the loop runs)
 
 The schedule has three stages — `fixed`, `render`, `ui` — and they do NOT all stop together. That

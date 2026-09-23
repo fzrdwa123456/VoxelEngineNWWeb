@@ -220,3 +220,18 @@ Zalando Mosaic、Module Federation）；要真隔离 —— Wasm/WASI 宿主（S
 5. **真游戏内容**（与架构无关）：真实地形、按体素值选方块材质、区块淘汰、世界边缘的雾。
 
 **明确不做**：能力令牌 / 权限授权（L3）。理由见 §7：模组目前是纯数据，没有"陌生人的代码"要防；而 JS 没有执行边界时，权限只是纸糊的。
+
+---
+
+## 10. ui 插件当前状态（截至 P1.22）
+
+- **归属：全部完成。** 10 个系统的**声明**（`declareUiSystems`）、10 个系统的**构造**（10 个
+  `ConstructorParameters` 直通工厂）、5 个**视图构造**（`createUiViews` / `createInventoryView` /
+  `createPauseMenu` / `createMainMenu`）、10 组件 + 18 资源 + 3 命令，全部在 `plugins/ui/`
+  （17 文件 / 3486 行）。`boot/main.ts`（1390 行）里**没有任何 ui 类名**，也不再手工注册任何系统。
+- **可移除：机械上可以，实质上没意义。** 清单里关掉 `ui` → 启动不再崩（记一行日志后继续），但没有
+  东西把 widget 数据画成 DOM，所以窗口是空的——**加载屏和菜单本身就是 ui 的表面**。
+- **依赖关系：** `render` 依赖 `ui`（它的 diagnostics 系统读 ui 的组件 schema）。关掉 ui 而留着 render
+  时，启动会明确告警"依赖未安装"，而不是装作依赖存在。
+- **未做：** 把 ui 拆成"必需核心"（reconciler + loading + hud + navigation）与"可选面"（F3 调试、改键页、
+  提示、背包）——只有这样，"关掉一个插件"才是玩家真正想要的能力。

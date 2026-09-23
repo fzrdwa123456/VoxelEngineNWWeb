@@ -932,6 +932,23 @@ Still outstanding:
   system NAMES inside string literals (`name: "cameraView.render"`) and the EDGES that name a system; the
   schedule parser caught both immediately, which is the argument for a gate that re-resolves the real
   schedule instead of counting assertions.
+- **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
+  to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
+  It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`
+  reports any installed plugin whose declared `deps` are missing (`PLUGIN x depends on "y", which is NOT
+  installed`). What "removable" does NOT mean yet: with the ui lane off nothing paints, because the loading
+  screen and the menus are ui surfaces — it boots, and shows nothing. Making it MEANINGFUL is the ui split
+  below.
+- **P1.22 — the launch white flash is fixed, and it is one config line.** `DONE`. The window carries
+  `"backgroundColor": "#000000"`, which wry turns into
+  `ICoreWebView2Controller2::SetDefaultBackgroundColor` — the documented cure for WebView2's white first
+  frame. Verified by hand: the flash is gone. Why that line exists, and why "await rAF before
+  `showWindow()`" must NOT be implemented naively (the rAF chain starts after the boot flow, and the window
+  is hidden, where Chromium throttles rAF), are recorded in AGENTS.md. STILL OPEN: the ui split — a REQUIRED
+  core (reconciler + loading + hud + navigation) versus OPTIONAL surfaces (F3/debug, the key bind page, the
+  toast, the backpack) — so that turning a plugin off is something a player actually wants; and the test
+  machine's C: drive (≈380 MB free, with the WebView2 profile on it) slows the first paint and widens that
+  race, which needs no code to fix.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
