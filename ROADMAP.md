@@ -919,6 +919,19 @@ Still outstanding:
   change (the `World` has to exist earlier, and the plugin contributions become an input to the config
   loaders instead of a consumer of them). That is the next slice; hot reload of the pack chain comes after
   it, because a reload is "re-run the content phase", which needs the same shape.
+- **P1.18b, continued — the declarations follow the constructions.** `PARTLY DONE`: `player` (6) and
+  `render` (4) declare their own systems through `api.system({...})` now, so **18 of the 21** systems are
+  constructed AND declared by the plugin that owns them; the ten ui ones are the remainder, and they need
+  the VIEW construction to move with them (they are built around the hud, the loading screen and the panel
+  entities the root creates). Two lessons this stretch produced, both worth keeping:
+  (1) the boot-order invariant — a plugin factory CONSTRUCTS its systems and a system resolves its resources
+  in the constructor, so the install block must sit AFTER the whole resource table and BEFORE the first
+  registration; that was violated for two commits and no gate could see it, so `check:ecs` now asserts the
+  order (insert < install < first registration);
+  (2) the retarget hazard — moving a declaration by rewriting `instance.` to `s.instance.` also hits the
+  system NAMES inside string literals (`name: "cameraView.render"`) and the EDGES that name a system; the
+  schedule parser caught both immediately, which is the argument for a gate that re-resolves the real
+  schedule instead of counting assertions.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
