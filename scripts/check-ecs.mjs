@@ -2629,8 +2629,8 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   equal(countOf(widgetsSrc, /^let nextOrder\b/gm), 0, "the order counter is not module state");
   assert(/world\.resource\(UI_ORDER\)\.next\+\+/.test(widgetsSrc), "spawnUiNode draws the order from it");
   assert(/insertResource\(UI_ORDER, createUiOrder\(\)\)/.test(main), "the composition root inserts it");
-  assert(main.indexOf("insertResource(UI_ORDER") < main.indexOf("new Hud("),
-    "…BEFORE the first widget is spawned");
+  assert(main.indexOf("insertResource(UI_ORDER") < main.indexOf("createUiViews("),
+    "…BEFORE the first widget is spawned (the views are built by the ui plugin, called from here)");
 
   // 7. The block target outline: the FIXED lane used to own the mesh and write its transform
   //    (`writesExternal: ["outline"]` on a sim-lane system). The hit is a component now and the render

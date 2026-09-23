@@ -78,7 +78,7 @@ import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
 import { createRenderPlugin } from "../plugins/render";
 import { createDiagnosticsPlugin } from "../plugins/diagnostics";
-import { declareUiSystems, uiPlugin } from "../plugins/ui";
+import { createUiViews, declareUiSystems, uiPlugin } from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
 import { contentDefaultPlugin } from "../plugins/content-default";
 
@@ -384,14 +384,15 @@ const bootFlow = world.resource(BOOT_FLOW);
 // The widget tree's creation counter (UI_TREE.order). It is inserted BEFORE the first spawn below —
 // spawnUiNode draws every order from it, and a missing resource would throw on the first widget.
 world.insertResource(UI_ORDER, createUiOrder());
-const hud = new Hud(world);
+// The ui plugin owns its views: it declares them and constructs the two that need only the world. The root
+// keeps the handles it wires by hand (the toast's panel, the loading screen's stage entities).
+const { hud, loadingScreen } = createUiViews(world);
 // The F3 panel's two widget handles, published for diagnostics (which writes the text) — the HUD view
 // spawns the tree, the system owns the data written into it.
 world.insertResource(F3_PANEL, hud.debugPanelEntities);
 const picker = spawnPickerPanel(world);
 // The startup screen's tree: spawned hidden during wiring (spawning is a structural change, so it
 // belongs here or inside a command) and shown for as long as LOADING_STATE.active says the startup runs.
-const loadingScreen = new LoadingScreen(world);
 
 // The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,

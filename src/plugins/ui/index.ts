@@ -5,6 +5,9 @@
 import { SLOT_COMMANDS, SLOT_COMPONENTS, SLOT_RESOURCES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
+import type { World } from "../../core/world";
+import { Hud } from "./views/hud";
+import { LoadingScreen } from "./views/loading";
 // The ACCESS sets the ten systems declare. They live next to each system (that is where a reader looks for
 // "what does this touch"), and the plugin is the module that now assembles them into the schedule.
 import { UI_BINDING_ACCESS } from "./systems/bindings";
@@ -54,6 +57,17 @@ import {
 /** The ten ui-lane systems, as the PLUGIN knows them: their stage, their edges and what they read and
  *  write. The instances come from the root (each wraps a view the root builds), but the DECLARATION — the
  *  part the architecture cares about — lives here. */
+/** The two views this plugin constructs itself (they need nothing but the world). The root keeps the
+ *  handles: the toast's panel, the loading screen's stage entities and the F3 panel come from `hud`. */
+export interface UiViews {
+  readonly hud: Hud;
+  readonly loadingScreen: LoadingScreen;
+}
+
+export function createUiViews(world: World): UiViews {
+  return { hud: new Hud(world), loadingScreen: new LoadingScreen(world) };
+}
+
 export interface UiSystems {
   readonly uiHud: { step(): void };
   readonly uiLoading: { step(): void };
