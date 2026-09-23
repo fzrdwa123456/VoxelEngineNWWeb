@@ -3571,10 +3571,26 @@ check("the plugin system: extension points, the registry, the install and the ma
   const contentReg = contribute(load("plugins/content-default/index.js").contentDefaultPlugin);
   equal(contentReg.list(S.SLOT_LANGUAGES).map((l) => l.id).join(","), "zh,en,ja",
     "the content plugin declares the language set (it used to be a literal in the i18n module)");
+  // The ui lane is OPTIONAL: disabling it in the manifest must log and carry on, never throw.
+  const bootSrcNow = stripComments(readSource("src/boot/main.ts"));
+  assert(/if \(!uiApi\) \{/.test(bootSrcNow) && !/if \(!uiApi\) throw/.test(bootSrcNow),
+    "the composition root degrades when the ui plugin is not installed (it used to THROW)");
+  assert(/the ui lane is off/.test(bootSrcNow), "…and it says so in the log");
   assert(/api\.system\(\{/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin DECLARES its system (api.system), so the root no longer knows its name/stage/access");
   assert(typeof load("plugins/content-default/index.js").contentDefaultPlugin.start === "function",
     "…and it uses the start phase to report what the pack chain delivered");
+  const warned = [];
+  const dependent = definePlugin({ id: "needs-a", deps: ["a"], setup: () => {} });
+  const inst3 = installPlugins([lifecyclePlugin("a", []), dependent], {
+    world: {},
+    registry: new ExtensionRegistry(),
+    log: (l) => warned.push(l),
+    enabled: (id) => id !== "a",
+  });
+  equal(inst3.installed.join(","), "needs-a", "a dependent still installs when its dependency was vetoed");
+  assert(warned.some((l) => l.includes("which is NOT installed")),
+    "…and the boot REPORTS it instead of pretending the dependency is there");
   assert(typeof load("plugins/diagnostics/index.js").createDiagnosticsPlugin === "function",
     "a REAL plugin uses the lifecycle (diagnostics starts and stops the perf sampler)");
   equal(load("plugins/world/index.js").worldPlugin.start ?? null, null,

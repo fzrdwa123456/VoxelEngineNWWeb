@@ -912,8 +912,14 @@ navTrees = {
 // instances (they wrap the views it creates) and the plugin says what they are, where they run and what
 // they touch. One call, before the schedule is fed from the registry.
 const uiApi = installOutcome.apiOf("ui");
-if (!uiApi) throw new Error("the ui plugin was not installed; its systems cannot be declared");
-declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiPicker, uiToast, uiKeybind, navigation, delays, uiRender });
+// The ui plugin is OPTIONAL for the boot: the manifest may disable it, and the engine then runs with
+// nothing painting the screen (the views are widget DATA — without the ui systems nothing turns them into
+// DOM). What it must not do is crash, which is what an unconditional apiOf("ui")! did.
+if (!uiApi) {
+  logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
+} else {
+  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiPicker, uiToast, uiKeybind, navigation, delays, uiRender });
+}
 
 for (const def of registry.list(SLOT_SYSTEMS)) world.addSystem(def);
 

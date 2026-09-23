@@ -105,6 +105,15 @@ export function installPlugins(plugins: readonly Plugin[], options: InstallOptio
       log(`PLUGIN ${plugin.id} FAILED and is disabled: ${describeError(error)}`);
     }
   }
+  // A plugin whose DECLARED dependency is missing (the manifest vetoed it, or it failed) is not silently
+  // half-installed: the boot says so, because the dependent's systems may read state nobody produces.
+  for (const plugin of installedPlugins) {
+    for (const dep of plugin.deps ?? []) {
+      if (!installed.includes(dep)) {
+        log(`PLUGIN ${plugin.id} depends on "${dep}", which is NOT installed — it may read state nobody produces`);
+      }
+    }
+  }
   log(`PLUGIN installed ${installed.length}/${plugins.length}: [${installed.join(", ")}]`);
   return {
     installed,
