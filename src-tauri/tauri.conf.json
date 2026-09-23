@@ -21,6 +21,7 @@
         "resizable": true,
         "center": true,
         "visible": false,
+        "backgroundColor": "#000000",
         "focus": true,
         "dragDropEnabled": false,
         "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist --disable-gesture-requirement-for-presentation --disable-blink-features=RateLimitPointerLockRequests --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
