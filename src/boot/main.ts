@@ -79,6 +79,16 @@ import { createPlayerPlugin } from "../plugins/player";
 import { createRenderPlugin } from "../plugins/render";
 import { createDiagnosticsPlugin } from "../plugins/diagnostics";
 import {
+  createRenderSystem,
+  createBindingSystem,
+  createPickerSystem,
+  createToastSystem,
+  createLoadingSystem,
+  createKeybindSystem,
+  createInventorySystem,
+  createHudSystem,
+  createNavigationSystem,
+  createDelaySystem,
   createInventoryView,
   createMainMenu,
   createPauseMenu,
@@ -415,7 +425,7 @@ const { chunkStream, cameraView, outline, menuBg } = renderPlugin.systems;
 // `fontCss` / `rootFontPx` come along for the same reason: the FONT and UI_SCALE resources hold the
 // values, and the reconciler — the one system allowed to write the DOM — is what applies them to the
 // document root (see its reconcileAppliedStyle).
-const uiRender = new UiRenderSystem(world, {
+const uiRender = createRenderSystem(world, {
   translate: t,
   fontCss: currentFontCss,
   rootFontPx: currentRootFontPx,
@@ -423,13 +433,13 @@ const uiRender = new UiRenderSystem(world, {
 });
 // Resolves every BOUND widget's value from its source (ecs/ui/bindings.ts), so a slider that shows
 // shared state never holds a private copy of it.
-const uiBindings = new UiBindingSystem(world, logDebug);
+const uiBindings = createBindingSystem(world, logDebug);
 // The F3+F4 picker: the F3 debug panel and the mode chord are GAMEPLAY UI, so they are gated on
 // `inWorld()` — outside a world (the main menu, and the loading screen while a world is built) it
 // consumes the key edges and does nothing, and it takes its own panels down. The HUD toast below is
 // NOT gated: a main-menu toast is a documented case (the multiplayer placeholder is drawn by the menu
 // frame, which is the reason the ui lane can be pumped with no world running).
-const uiPicker = new UiPickerSystem(world, {
+const uiPicker = createPickerSystem(world, {
   panel: picker.panel,
   items: picker.items,
   debugPanel: hud.debugPanelEntity,
@@ -440,16 +450,16 @@ const uiPicker = new UiPickerSystem(world, {
   inWorld,
   log: logDebug,
 });
-const uiToast = new UiToastSystem(world, hud.toastPanel, hud.toastText);
+const uiToast = createToastSystem(world, hud.toastPanel, hud.toastText);
 // The startup screen's painter: it reads LOADING_STATE and writes the boot tree's widgets, so it is in
 // the ui lane with the other widget-data writers — that lane is also the only one that runs in `load`
 // mode, which is exactly the mode the screen is shown in.
-const uiLoading = new UiLoadingSystem(world, loadingScreen);
+const uiLoading = createLoadingSystem(world, loadingScreen);
 // The key bind drag's data: derived every frame from the bind table + the GESTURE + the POINTER resource,
 // with the platform reads injected so this layer stays free of platform imports (and so the gate can drive
 // it with fakes). `line` is the rubber-band WIDGET the view only spawns — the system writes its geometry.
 const keybindLine = spawnKeybindLine(world);
-const uiKeybind = new UiKeybindSystem(world, {
+const uiKeybind = createKeybindSystem(world, {
   boundCodes,
   capturing: getCapturing,
   bindOf: getBind,
@@ -493,11 +503,11 @@ const inv = createInventoryView(world, player);
 // The handles the reconcile writes into (the view only spawns them): `ui.inventory` reads the component
 // and writes these widgets, which is why the view is no longer called once per frame.
 world.insertResource(INVENTORY_WIDGETS, inv.widgets);
-const uiInventory = new UiInventorySystem(world, { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon });
+const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon });
 // The GAMEPLAY widgets' visibility: the crosshair and the hotbar exist in every mode (they were spawned
 // visible and nothing wrote their flag), so one system owns that flag and derives it from "is a world
 // running". It needs the hotbar, which is why it is built here rather than with the other UI systems.
-const uiHud = new UiHudSystem(world, {
+const uiHud = createHudSystem(world, {
   crosshair: hud.crosshairEntity,
   hotbar: inv.hotbarEntity,
   inWorld,
@@ -584,7 +594,7 @@ const contributeSystem = (owner: string, def: SystemDef): void => {
 // through a getter that is filled once they exist. The schedule resolves edges at start(), so an `after`
 // naming a system registered later would silently drop the edge.
 let navTrees: NavigationTrees | null = null;
-const navigation = new UiNavigationSystem(world, {
+const navigation = createNavigationSystem(world, {
   get trees(): NavigationTrees {
     if (!navTrees) throw new Error("navTrees not wired");
     return navTrees;
@@ -613,7 +623,7 @@ const navigation = new UiNavigationSystem(world, {
 // system that decided it, before the frame is painted. Both halves of that order are FORCED rather than
 // stylistic: it writes the two targets ui.navigation writes (`pointerLock` / `cursor`), which the schedule
 // refuses to leave unordered, and the reconciler must stay the last system in the lane.
-const delays = new DelaySystem(world, {
+const delays = createDelaySystem(world, {
   relock: (reason) => pointerLock.relock(reason),
   lockRetry: (source) => pointerLock.retry(source),
   cursor: () => pointerLock.applyCursor(),

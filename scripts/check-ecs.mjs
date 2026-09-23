@@ -2500,12 +2500,13 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     stripComments(readSource("src/plugins/player/index.ts")),
     stripComments(readSource("src/plugins/render/index.ts")),
     stripComments(readSource("src/plugins/diagnostics/index.ts")),
+    stripComments(readSource("src/plugins/ui/index.ts")),
   ].join("\n");
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(w\.world\)/],
     ["the chunk stream", /new ChunkStreamSystem\(w\.world, w\.mesh\)/],
     ["the device layer", /new PlayerInputSystem\(w\.world, w\.log, w\.inWorld, w\.mouse\)/],
-    ["the reconciler", /new UiRenderSystem\(world, \{\s*translate:/],
+    ["the reconciler", /export function createRenderSystem\(\.\.\.args: ConstructorParameters/],
   ]) {
     assert(needle.test(construction), `${what} takes no presentation object any more`);
   }

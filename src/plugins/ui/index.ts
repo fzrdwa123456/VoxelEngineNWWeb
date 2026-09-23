@@ -7,6 +7,16 @@ import { definePlugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
 import type { Entity, World } from "../../core/world";
 import { Hud } from "./views/hud";
+import { UiRenderSystem } from "./systems/reconcile";
+import { UiBindingSystem } from "./systems/bindings";
+import { UiPickerSystem } from "./systems/picker";
+import { UiToastSystem } from "./systems/toast";
+import { UiLoadingSystem } from "./systems/loading";
+import { UiKeybindSystem } from "./systems/keybind";
+import { UiInventorySystem } from "./systems/inventory";
+import { UiHudSystem } from "./systems/hud";
+import { UiNavigationSystem } from "./systems/navigation";
+import { DelaySystem } from "./systems/delays";
 import { Inventory } from "./views/inventory";
 import { Menu, type MenuCallbacks } from "./views/menu";
 import { MainMenu, type MainMenuCallbacks } from "./views/mainmenu";
@@ -84,6 +94,49 @@ export function createPauseMenu(world: World, cb: MenuCallbacks): Menu {
 
 export function createMainMenu(world: World, cb: MainMenuCallbacks): MainMenu {
   return new MainMenu(world, cb);
+}
+
+/** One pass-through factory per ui system. The ROOT still assembles every dependency (that is the wiring,
+ *  and where it is built relative to the resource table is load-bearing), but the plugin is the module that
+ *  knows these classes exist — a new ui system is registered here now. */
+export function createRenderSystem(...args: ConstructorParameters<typeof UiRenderSystem>): UiRenderSystem {
+  return new UiRenderSystem(...args);
+}
+
+export function createBindingSystem(...args: ConstructorParameters<typeof UiBindingSystem>): UiBindingSystem {
+  return new UiBindingSystem(...args);
+}
+
+export function createPickerSystem(...args: ConstructorParameters<typeof UiPickerSystem>): UiPickerSystem {
+  return new UiPickerSystem(...args);
+}
+
+export function createToastSystem(...args: ConstructorParameters<typeof UiToastSystem>): UiToastSystem {
+  return new UiToastSystem(...args);
+}
+
+export function createLoadingSystem(...args: ConstructorParameters<typeof UiLoadingSystem>): UiLoadingSystem {
+  return new UiLoadingSystem(...args);
+}
+
+export function createKeybindSystem(...args: ConstructorParameters<typeof UiKeybindSystem>): UiKeybindSystem {
+  return new UiKeybindSystem(...args);
+}
+
+export function createInventorySystem(...args: ConstructorParameters<typeof UiInventorySystem>): UiInventorySystem {
+  return new UiInventorySystem(...args);
+}
+
+export function createHudSystem(...args: ConstructorParameters<typeof UiHudSystem>): UiHudSystem {
+  return new UiHudSystem(...args);
+}
+
+export function createNavigationSystem(...args: ConstructorParameters<typeof UiNavigationSystem>): UiNavigationSystem {
+  return new UiNavigationSystem(...args);
+}
+
+export function createDelaySystem(...args: ConstructorParameters<typeof DelaySystem>): DelaySystem {
+  return new DelaySystem(...args);
 }
 
 export interface UiSystems {
