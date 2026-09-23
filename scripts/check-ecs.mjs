@@ -1748,7 +1748,8 @@ console.log("\n--- the schedule: access declarations, batches, commutativity ---
 function registrations() {
   // A registration lives either in the root (the ones not yet moved) or in the plugin that owns it, so the
   //  parser reads both. Same object shape in both places, which is why one regex covers them.
-  const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts"]
+  const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts",
+    "src/plugins/render/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
   // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
@@ -1835,7 +1836,7 @@ check("the real schedule resolves into the batches the docs claim", () => {
   // writes a target of its own (`blockOutline`), so any order among the four is correct — and the draw,
   // which reads the scene they fill, stays in the batch after it.
   const expectedRender = [
-    ["cameraView.render", "chunk.stream", "block.outline", "diagnostics"],
+    ["diagnostics", "cameraView.render", "chunk.stream", "block.outline"],
     ["renderer.draw"],
   ];
   // The ui lane: every widget-data WRITER, then the reconciler that reads all of it. The writers are a
@@ -2517,7 +2518,10 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // panorama's canvas kept its old pixel size until a world was entered (that bug shipped once).
   assert(/function frame\(\)[\s\S]{0,200}applyViewportSize\(\)/.test(main),
     "the frame applies the viewport size, before the mode body");
-  assert(/run: \(\) => world\.resource\(RENDERER3D\)\.render\(/.test(main),
+  // The draw declaration left the root (the render plugin owns it now), so the check reads both.
+  assert(
+    /run: \(\) => world\.resource\(RENDERER3D\)\.render\(/.test(main) ||
+      /run: \(\) => world\.resource\(RENDERER3D\)\.render\(/.test(readSource("src/plugins/render/index.ts")),
     "…and the draw only draws (it must not resize the canvas)");
   // A WINDOW GEOMETRY change is a DEVICE signal treated like losing the window: hand the mouse back and
   // pause if the player was playing. It is deliberately NOT a blur — dragging a border keeps the window
@@ -3472,7 +3476,8 @@ check("the plugin system: extension points, the registry, the install and the ma
     "the world plugin owns the voxel resource");
   equal(contribute(load("plugins/input/index.js").inputPlugin).list(S.SLOT_RESOURCES).length, 2,
     "the input plugin owns the bind table and the rebind gesture");
-  assert(contribute(load("plugins/render/index.js").renderPlugin).list(S.SLOT_RESOURCES).length >= 8,
+  assert(/SLOT_RESOURCES/.test(stripComments(readSource("src/plugins/render/index.ts"))) &&
+    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 4,
     "the render plugin owns the GPU resources");
   assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
@@ -3482,7 +3487,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   const together = new ExtensionRegistry();
   // diagnostics is skipped here: its setup lives in a factory that needs a real world (it CONSTRUCTS its
   // system), so its ownership is asserted above instead.
-  for (const id of ["world", "render", "ui", "input"]) {
+  for (const id of ["world", "ui", "input"]) {
     load(`plugins/${id}/index.js`)[`${id}Plugin`].setup({
       id,
       world: {},
@@ -3491,7 +3496,7 @@ check("the plugin system: extension points, the registry, the install and the ma
       log: () => {},
     });
   }
-  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,render,ui,input",
+  equal(together.owners(S.SLOT_RESOURCES).join(","), "world,ui,input",
     "the six plugins contribute side by side with no duplicate resource id");
   equal(together.list(S.SLOT_COMPONENTS).length, 10, "…and the widget schemas come from the ui plugin");
   equal(together.list(S.SLOT_COMMANDS).length, 3, "…and three commands from the ui plugin");
@@ -3501,11 +3506,13 @@ check("the plugin system: extension points, the registry, the install and the ma
   //    leave the schedule (the manifest's veto is implemented by exactly that check).
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   const known = [...bootSrc.matchAll(/contributeSystem\("([^"]+)"/g)].map((m) => m[1]);
-  equal([...new Set(known)].sort().join(","), "render,ui",
-    "the systems still declared in the root belong to render/ui (player and diagnostics have moved theirs out)");
+  equal([...new Set(known)].sort().join(","), "ui",
+    "the systems still declared in the root are the ui lane (player, render and diagnostics have moved theirs out)");
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
+  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 4,
+    "…the render plugin declares its four systems");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
     "…the player plugin declares its six systems");
   equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,

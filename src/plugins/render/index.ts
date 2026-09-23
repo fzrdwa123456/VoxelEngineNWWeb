@@ -4,10 +4,10 @@
 // because they are values; this plugin is what claims them).
 import type { World } from "../../core/world";
 import { SLOT_RESOURCES } from "../../core/extension/slots";
-import { CameraViewSystem } from "./systems/camera";
-import { ChunkStreamSystem, type ChunkMeshFactory } from "./systems/chunk-stream";
+import { CameraViewSystem, CAMERA_VIEW_ACCESS } from "./systems/camera";
+import { ChunkStreamSystem, type ChunkMeshFactory, CHUNK_STREAM_ACCESS } from "./systems/chunk-stream";
 import { MenuBackgroundSystem } from "./systems/menu-background";
-import { BlockOutlineSystem } from "./systems/outline";
+import { BlockOutlineSystem, OUTLINE_ACCESS } from "./systems/outline";
 import { definePlugin } from "../../core/plugin/descriptor";
 import {
   BLOCK_OUTLINE,
@@ -37,7 +37,13 @@ export function createRenderSystems(w: RenderWiring) {
   };
 }
 
-export const renderPlugin = definePlugin({
+/** The plugin, built with the wiring the root owns (the world and the platform's mesher): it CONSTRUCTS
+ *  its four systems and DECLARES them, so `boot/main.ts` no longer knows their names, stages, edges or
+ *  access sets. The systems are handed back too — the boot driver primes the chunk stream by hand. */
+export function createRenderPlugin(w: RenderWiring) {
+  const world = w.world;
+  const s = createRenderSystems(w);
+  const plugin = definePlugin({
   id: "render",
   deps: ["world", "player", "ui"],
   setup(api) {
@@ -45,5 +51,43 @@ export const renderPlugin = definePlugin({
       SCENE3D, CAMERA3D, RENDERER3D, CANVAS_HOST, CHUNK_MESHES, CHUNK_MATERIAL, BLOCK_OUTLINE,
       MENU_BACKGROUND, ICON_BAKE,
     ]);
+    api.system({
+  name: "cameraView.render",
+  stage: "render",
+  ...CAMERA_VIEW_ACCESS,
+  run: (ctx) => s.cameraView.render(ctx.alpha),
+    });
+    api.system({
+  name: "chunk.stream",
+  stage: "render",
+  ...CHUNK_STREAM_ACCESS,
+  run: () => s.chunkStream.step(),
+    });
+    api.system({
+  // The block target wireframe: it reads the TARGET_HIT component `player.interaction` wrote in the fixed
+  // lane and moves the mesh. It touches no component the other render producers touch and writes a target
+  // of its own (`blockOutline`), so the schedule puts it in their batch — any order is correct, because
+  // the mesh is only read by the draw at the END of the lane (it is in the scene).
+  name: "block.outline",
+  stage: "render",
+  ...OUTLINE_ACCESS,
+  run: () => s.outline.render(),
+    });
+    api.system({
+  // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself
+  // keeps it after their producers.
+  name: "renderer.draw",
+  stage: "render",
+  after: ["cameraView.render", "chunk.stream"],
+  readsExternal: ["camera3d", "chunkMeshes"],
+  writesExternal: ["framebuffer"],
+  // It reads the three objects it draws with from the WORLD, not from wiring variables: they are
+  // resources now (SCENE3D / CAMERA3D / RENDERER3D — see ecs/presentation.ts). The declared targets
+  // above stay as they are: the schedule models those NAMES, not the resource handles.
+  // It does NOT resize the canvas: that belongs to the FRAME, not to this lane (see applyViewportSize).
+  run: () => world.resource(RENDERER3D).render(world.resource(SCENE3D), world.resource(CAMERA3D)),
+    });
   },
-});
+  });
+  return { plugin, systems: s };
+}

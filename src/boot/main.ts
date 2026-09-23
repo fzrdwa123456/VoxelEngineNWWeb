@@ -76,7 +76,7 @@ import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
-import { createRenderSystems, renderPlugin } from "../plugins/render";
+import { createRenderPlugin } from "../plugins/render";
 import { createDiagnosticsPlugin } from "../plugins/diagnostics";
 import { uiPlugin } from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
@@ -396,10 +396,11 @@ const loadingScreen = new LoadingScreen(world);
 // The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
 // so no system is handed one. See ecs/presentation.ts.
-const { chunkStream, cameraView, outline, menuBg } = createRenderSystems({
+const renderPlugin = createRenderPlugin({
   world,
   mesh: { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial },
 });
+const { chunkStream, cameraView, outline, menuBg } = renderPlugin.systems;
 // The reconciler that owns every widget's DOM element. It mounts roots on the world's UI_MOUNT resource
 // (the same element the hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never
 // imports src/ui/.
@@ -541,7 +542,7 @@ const PLUGINS = [
   contentDefaultPlugin,
   worldPlugin,
   playerPlugin.plugin,
-  renderPlugin,
+  renderPlugin.plugin,
   createDiagnosticsPlugin(world),
   uiPlugin,
   inputPlugin,
@@ -570,28 +571,6 @@ const contributeSystem = (owner: string, def: SystemDef): void => {
   if (!installOutcome.has(owner)) return;
   registry.contribute(SLOT_SYSTEMS, owner, [def]);
 };
-contributeSystem("render", {
-  name: "cameraView.render",
-  stage: "render",
-  ...CAMERA_VIEW_ACCESS,
-  run: (ctx) => cameraView.render(ctx.alpha),
-});
-contributeSystem("render", {
-  name: "chunk.stream",
-  stage: "render",
-  ...CHUNK_STREAM_ACCESS,
-  run: () => chunkStream.step(),
-});
-contributeSystem("render", {
-  // The block target wireframe: it reads the TARGET_HIT component `player.interaction` wrote in the fixed
-  // lane and moves the mesh. It touches no component the other render producers touch and writes a target
-  // of its own (`blockOutline`), so the schedule puts it in their batch — any order is correct, because
-  // the mesh is only read by the draw at the END of the lane (it is in the scene).
-  name: "block.outline",
-  stage: "render",
-  ...OUTLINE_ACCESS,
-  run: () => outline.render(),
-});
 contributeSystem("ui", {
   // The GAMEPLAY widgets' gate, FIRST in the lane: it decides whether the crosshair and the hotbar are
   // on screen at all, and it writes the same component (UI_STATE) as every writer after it, so the
@@ -725,20 +704,6 @@ contributeSystem("ui", {
   run: () => uiRender.step(),
 });
 // The size the draw last applied to the renderer — this system's own state (it owns the framebuffer).
-contributeSystem("render", {
-  // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself
-  // keeps it after their producers.
-  name: "renderer.draw",
-  stage: "render",
-  after: ["cameraView.render", "chunk.stream"],
-  readsExternal: ["camera3d", "chunkMeshes"],
-  writesExternal: ["framebuffer"],
-  // It reads the three objects it draws with from the WORLD, not from wiring variables: they are
-  // resources now (SCENE3D / CAMERA3D / RENDERER3D — see ecs/presentation.ts). The declared targets
-  // above stay as they are: the schedule models those NAMES, not the resource handles.
-  // It does NOT resize the canvas: that belongs to the FRAME, not to this lane (see applyViewportSize).
-  run: () => world.resource(RENDERER3D).render(world.resource(SCENE3D), world.resource(CAMERA3D)),
-});
 
 // (world.start() moved below: ui.navigation needs the widget trees the surfaces build during wiring.)
 
