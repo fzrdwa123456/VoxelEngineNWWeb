@@ -2027,7 +2027,7 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   // …and BOTH flows have to be in that mode while their screen is up: the startup starts in it, and a
   // world entry (driven from the MENU) has to switch into it, or every frame in between is a menu frame
   // that draws the panorama behind an opaque screen for nothing.
-  const entryForMode = main.slice(main.indexOf("async function enterWorld("), main.indexOf("const mainMenu = new MainMenu("));
+  const entryForMode = main.slice(main.indexOf("async function enterWorld("), main.indexOf("const mainMenu = createMainMenu("));
   assert(/setLoopMode\("load"\)/.test(entryForMode), "the world entry puts the loop in load mode");
   equal(countOf(main, /loop\.mode = mode;/g), 1, "the mode has exactly one writer (LOOP_STATE.mode)");
   // …and the chain is kicked off once, by calling frame() directly rather than scheduling it. The call
@@ -2107,7 +2107,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   // entry was broken — the boot driver's own `active: true` was inside the slice).
   const entryBody = main.slice(
     main.indexOf("async function enterWorld("),
-    main.indexOf("const mainMenu = new MainMenu("),
+    main.indexOf("const mainMenu = createMainMenu("),
   );
   assert(bootBody.length > 0, "the startup driver is in the source");
   assert(entryBody.length > 0, "the world-entry driver is in the source");

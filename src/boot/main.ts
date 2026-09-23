@@ -78,7 +78,14 @@ import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
 import { createRenderPlugin } from "../plugins/render";
 import { createDiagnosticsPlugin } from "../plugins/diagnostics";
-import { createUiViews, declareUiSystems, uiPlugin } from "../plugins/ui";
+import {
+  createInventoryView,
+  createMainMenu,
+  createPauseMenu,
+  createUiViews,
+  declareUiSystems,
+  uiPlugin,
+} from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
 import { contentDefaultPlugin } from "../plugins/content-default";
 
@@ -482,7 +489,7 @@ bindKeybindDrag({
 // its mouse bind) and its panel is painted from that state, so this view has no callback any more. The
 // pointer-lock effects that used to live in the callback (release on open, relock on close) are
 // edge-triggered from the same state inside ui.navigation.
-const inv = new Inventory(world, player);
+const inv = createInventoryView(world, player);
 // The handles the reconcile writes into (the view only spawns them): `ui.inventory` reads the component
 // and writes these widgets, which is why the view is no longer called once per frame.
 world.insertResource(INVENTORY_WIDGETS, inv.widgets);
@@ -722,7 +729,7 @@ const onSetWindowMode = (mode: WindowMode): void => {
     logDebug(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
 };
 
-const menu = new Menu(world, {
+const menu = createPauseMenu(world, {
   // The three platform capabilities a view may not import itself (see SettingsCallbacks).
   log: logDebug,
   onViewportChange,
@@ -840,7 +847,7 @@ async function enterWorld(mode: string): Promise<void> {
 }
 
 // Main menu: singleplayer picks a world type then enters; multiplayer placeholder; settings/exit
-const mainMenu = new MainMenu(world, {
+const mainMenu = createMainMenu(world, {
   log: logDebug,
   onViewportChange,
   onWindowModeChange,

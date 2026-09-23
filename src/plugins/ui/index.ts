@@ -5,8 +5,11 @@
 import { SLOT_COMMANDS, SLOT_COMPONENTS, SLOT_RESOURCES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
-import type { World } from "../../core/world";
+import type { Entity, World } from "../../core/world";
 import { Hud } from "./views/hud";
+import { Inventory } from "./views/inventory";
+import { Menu, type MenuCallbacks } from "./views/menu";
+import { MainMenu, type MainMenuCallbacks } from "./views/mainmenu";
 import { LoadingScreen } from "./views/loading";
 // The ACCESS sets the ten systems declare. They live next to each system (that is where a reader looks for
 // "what does this touch"), and the plugin is the module that now assembles them into the schedule.
@@ -66,6 +69,21 @@ export interface UiViews {
 
 export function createUiViews(world: World): UiViews {
   return { hud: new Hud(world), loadingScreen: new LoadingScreen(world) };
+}
+
+/** The three views whose construction needs wiring the root assembles (the player handle, and the panels'
+ *  callbacks). The root still decides WHEN they are built — the resource order around them is load-bearing
+ *  — but the plugin owns what they ARE and how they are constructed. */
+export function createInventoryView(world: World, player: Entity): Inventory {
+  return new Inventory(world, player);
+}
+
+export function createPauseMenu(world: World, cb: MenuCallbacks): Menu {
+  return new Menu(world, cb);
+}
+
+export function createMainMenu(world: World, cb: MainMenuCallbacks): MainMenu {
+  return new MainMenu(world, cb);
 }
 
 export interface UiSystems {
