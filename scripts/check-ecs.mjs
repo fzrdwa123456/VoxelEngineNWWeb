@@ -1487,7 +1487,7 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   // The system is registered in the ui lane with a declared access set, ahead of every other writer —
   // "what may the lane show at all" comes first — and the composition root hands it the two roots.
   const main = stripComments(readSource("src/boot/main.ts"));
-  assert(/name: "ui\.hud"/.test(main), "the composition root registers ui.hud");
+  assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")), "the composition root registers ui.hud");
   assert(/crosshair: hud\.crosshairEntity/.test(main), "…with the crosshair root");
   assert(/hotbar: inv\.hotbarEntity/.test(main), "…and the hotbar root");
   assert(/inWorld,/.test(main), "…gated on the one definition of \"a world is running\"");
@@ -1749,7 +1749,7 @@ function registrations() {
   // A registration lives either in the root (the ones not yet moved) or in the plugin that owns it, so the
   //  parser reads both. Same object shape in both places, which is why one regex covers them.
   const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts",
-    "src/plugins/render/index.ts"]
+    "src/plugins/render/index.ts", "src/plugins/ui/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
   // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
@@ -2713,7 +2713,7 @@ check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {
   // …and main.ts must declare the order the conflict demands, or the schedule throws at boot.
   const main = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
   assert(
-    /name:\s*"ui\.widgets"[\s\S]{0,300}after:\s*\["ui\.inventory"/.test(main),
+    /name:\s*"ui\.widgets"[\s\S]{0,300}after:\s*\["ui\.inventory"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")),
     "main.ts orders ui.widgets after ui.inventory",
   );
 });
@@ -3506,11 +3506,13 @@ check("the plugin system: extension points, the registry, the install and the ma
   //    leave the schedule (the manifest's veto is implemented by exactly that check).
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   const known = [...bootSrc.matchAll(/contributeSystem\("([^"]+)"/g)].map((m) => m[1]);
-  equal([...new Set(known)].sort().join(","), "ui",
-    "the systems still declared in the root are the ui lane (player, render and diagnostics have moved theirs out)");
+  equal([...new Set(known)].sort().join(","), "",
+    "EVERY system is declared by its plugin: the root registers nothing by hand any more");
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
+  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 10,
+    "…the ui plugin declares its ten systems");
   equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 4,
     "…the render plugin declares its four systems");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
@@ -3591,8 +3593,10 @@ check("the plugin system: extension points, the registry, the install and the ma
   const firstRegistration = lineOf('contributeSystem("');
   assert(lastInsert < installLine,
     `the plugin install runs AFTER the whole resource table (insert ${lastInsert} < install ${installLine})`);
-  assert(installLine < firstRegistration,
-    `…and BEFORE the first registration (install ${installLine} < registration ${firstRegistration})`);
+  const declareLine = lineOf("declareUiSystems(uiApi,");
+  assert(firstRegistration === 0 && declareLine > installLine,
+    `…and BEFORE the declarations are contributed (install ${installLine} < declare ${declareLine}; the root\n` +
+      ` registers nothing by hand, firstRegistration=${firstRegistration})`);
 
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
   //    declared graph must be acyclic — otherwise the install order it implies does not exist. Reading

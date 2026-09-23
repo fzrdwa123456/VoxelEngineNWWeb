@@ -78,7 +78,7 @@ import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
 import { createRenderPlugin } from "../plugins/render";
 import { createDiagnosticsPlugin } from "../plugins/diagnostics";
-import { uiPlugin } from "../plugins/ui";
+import { declareUiSystems, uiPlugin } from "../plugins/ui";
 import { inputPlugin } from "../plugins/input";
 import { contentDefaultPlugin } from "../plugins/content-default";
 
@@ -571,72 +571,6 @@ const contributeSystem = (owner: string, def: SystemDef): void => {
   if (!installOutcome.has(owner)) return;
   registry.contribute(SLOT_SYSTEMS, owner, [def]);
 };
-contributeSystem("ui", {
-  // The GAMEPLAY widgets' gate, FIRST in the lane: it decides whether the crosshair and the hotbar are
-  // on screen at all, and it writes the same component (UI_STATE) as every writer after it, so the
-  // conflict rule demands an order — this is the honest one ("what may the lane show" comes first). It
-  // shares the first batch with ui.bindings: that pair touches disjoint components (UI_INPUT vs
-  // UI_STATE) and may therefore run in either order.
-  name: "ui.hud",
-  stage: "ui",
-  before: ["ui.loading"],
-  ...UI_HUD_ACCESS,
-  run: () => uiHud.step(),
-});
-contributeSystem("ui", {
-  // The loading screen (the startup, and a world entry). Registered right after the gameplay gate and
-  // before the other widget-data writers: it writes the same components (UI_STATE / UI_TEXT) as all of
-  // them, so the conflict rule demands an order and the honest one is "the loading screen is painted
-  // before the surfaces it hides behind it".
-  name: "ui.loading",
-  stage: "ui",
-  before: ["ui.inventory"],
-  ...UI_LOADING_ACCESS,
-  run: () => uiLoading.step(),
-});
-contributeSystem("ui", {
-  name: "ui.inventory",
-  stage: "ui",
-  ...INVENTORY_VIEW_ACCESS,
-  run: () => uiInventory.step(),
-});
-contributeSystem("ui", {
-  // Bound widget values (a slider that shows shared state), resolved before the reconciler reads them.
-  // It writes UI_INPUT only, so it shares a batch with ui.inventory (disjoint components).
-  name: "ui.bindings",
-  stage: "ui",
-  ...UI_BINDING_ACCESS,
-  run: () => uiBindings.step(),
-});
-contributeSystem("ui", {
-  // The F3+F4 picker. It writes UI_STATE/UI_TEXT (the picker panel's items and the F3 panel's
-  // visibility), and ui.inventory writes the same COMPONENTS on different entities — the conflict model
-  // is per component, not per entity, so the order has to be declared. That is a pessimisation (they
-  // touch nothing of each other's) and it costs the ui lane its only parallel pair.
-  name: "ui.picker",
-  stage: "ui",
-  after: ["ui.inventory"],
-  ...UI_PICKER_ACCESS,
-  run: () => uiPicker.step(),
-});
-contributeSystem("ui", {
-  // The HUD toast: same component-level conflict as ui.picker, so it follows it. It is the reason the
-  // ui lane is pumped while the game loop is stopped (a main-menu toast has no frame to ride).
-  name: "ui.toast",
-  stage: "ui",
-  after: ["ui.picker"],
-  ...UI_TOAST_ACCESS,
-  run: () => uiToast.step(),
-});
-contributeSystem("ui", {
-  // The bind panels (derived data) and the drag highlight/rubber band, ordered after the other widget
-  // writers by the same component-level rule.
-  name: "ui.keybind",
-  stage: "ui",
-  after: ["ui.toast"],
-  ...UI_KEYBIND_ACCESS,
-  run: () => uiKeybind.step(),
-});
 // ui.navigation steps LAST in the ui lane and needs the modal widget trees, which the surfaces build
 // further down — so it is registered HERE (before ui.widgets, which must follow it) and its trees arrive
 // through a getter that is filled once they exist. The schedule resolves edges at start(), so an `after`
@@ -667,13 +601,6 @@ const navigation = new UiNavigationSystem(world, {
   applyCursor: () => pointerLock.applyCursor(),
   log: logDebug,
 });
-contributeSystem("ui", {
-  name: "ui.navigation",
-  stage: "ui",
-  after: ["ui.keybind"],
-  ...UI_NAVIGATION_ACCESS,
-  run: () => navigation.step(),
-});
 // The delayed intents (ecs/systems/delays.ts): whatever deadline has passed is applied HERE — after the
 // system that decided it, before the frame is painted. Both halves of that order are FORCED rather than
 // stylistic: it writes the two targets ui.navigation writes (`pointerLock` / `cursor`), which the schedule
@@ -683,25 +610,6 @@ const delays = new DelaySystem(world, {
   lockRetry: (source) => pointerLock.retry(source),
   cursor: () => pointerLock.applyCursor(),
   log: logDebug,
-});
-contributeSystem("ui", {
-  name: "ui.delays",
-  stage: "ui",
-  after: ["ui.navigation"],
-  before: ["ui.widgets"],
-  ...DELAYS_ACCESS,
-  run: () => delays.step(),
-});
-contributeSystem("ui", {
-  // Ordered by a REAL dependency: every system above WRITES widget data (icons, counts, the selected
-  // flag, slider values, the picker, the toast, the chips/keycaps, the modal trees) and this one reads
-  // all of it before reconciling the elements. Stage order runs the ui lane after the render lane, which
-  // is the other half of the guarantee: everything `diagnostics` wrote this frame is already in place.
-  name: "ui.widgets",
-  stage: "ui",
-  after: ["ui.inventory", "ui.bindings", "ui.picker", "ui.toast", "ui.keybind", "ui.navigation"],
-  ...UI_RENDER_ACCESS,
-  run: () => uiRender.step(),
 });
 // The size the draw last applied to the renderer — this system's own state (it owns the framebuffer).
 
@@ -982,6 +890,13 @@ navTrees = {
 
 // Everything the installed plugins contributed, contributed order — the schedule resolves and verifies
 // the order from the declared after/before edges, so the registration order carries no meaning.
+// The ui lane's ten declarations belong to the ui PLUGIN (plugins/ui/index.ts): the root builds the
+// instances (they wrap the views it creates) and the plugin says what they are, where they run and what
+// they touch. One call, before the schedule is fed from the registry.
+const uiApi = installOutcome.apiOf("ui");
+if (!uiApi) throw new Error("the ui plugin was not installed; its systems cannot be declared");
+declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiPicker, uiToast, uiKeybind, navigation, delays, uiRender });
+
 for (const def of registry.list(SLOT_SYSTEMS)) world.addSystem(def);
 
 world.start();
