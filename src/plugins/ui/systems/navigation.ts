@@ -18,7 +18,7 @@ import { HOTBAR_SLOTS } from "../../player/components";
 import { SelectSlot } from "../../../core/effect/commands";
 import { HotPlugPlugin } from "../../../core/effect/commands";
 import { hotPlugSurfaceForKey } from "../../../data/globals/hotplug";
-import { LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
+import { isModalUi, LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
 import { KEY_EVENTS } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
 import { UI_PAINT, type UiNavigationPaint } from "../../../data/globals/paint";
@@ -250,10 +250,12 @@ export class UiNavigationSystem {
     // whenever ANY modal surface is. It is painted HERE because this is the one place that turns UI_MODAL into
     // modal visibility. (Its first version borrowed the role name `menu.backdrop`, which belongs to the main
     // menu's opaque z-50 background — see theme.ts; that is what covered the backpack and ate its clicks.)
-    // IN-GAME menus only: the MAIN menu has its own full-screen background art, so it neither wants the world
-    // blurred behind it nor shows it (P1.30). This is also why the condition is spelled out instead of asking
-    // `isModalUi` — that predicate includes the main menu on purpose, for the pointer-lock gate.
-    setUiVisible(this.world, t.backdrop, ui.menu || ui.inventory);
+    // EVERY modal state blurs the world, with ONE exception: the main menu's HOME screen, which has its own
+    // full-screen background art. The sub-pages reached FROM the main menu DO blur — its settings lists and the
+    // single-player world-type picker — which is what "clicking into a screen blurs the background" means.
+    // (`isModalUi` is the right predicate again: it is exactly "some modal surface is up".)
+    const mainMenuHome = ui.mainMenu && ui.settings === null && !ui.gen;
+    setUiVisible(this.world, t.backdrop, isModalUi(ui) && !mainMenuHome);
     setUiVisible(this.world, t.pauseRoot, ui.menu);
     setUiVisible(this.world, t.mainRoot, ui.mainMenu);
     setUiVisible(this.world, t.inventoryPanel, ui.inventory);
