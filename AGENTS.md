@@ -59,10 +59,12 @@ src/
 │   │   └── systems/         input, snapshot, controller, movement, collision, interaction (fixed lane)
 │   ├── render/              systems/: camera, chunk-stream, outline, menu-background, diagnostics
 │   ├── ui/                  components.ts (the widget components + prefabs)
-│   │   ├── systems/         reconcile (the ONE DOM writer), hud, loading, inventory, bindings, picker,
+│   │   ├── systems/         reconcile (the ONE DOM writer), hud, loading, inventory, bindings,
 │   │   │                    toast, keybind, navigation, delays
 │   │   └── views/           the wiring that spawns the trees and registers action ids (menu, mainmenu,
 │   │                        inventory, hud, loading)
+│   ├── ui-debug/            the F3 debug panel + the F3+F4 game-mode chord, split out of `ui` so the
+│   │   └── systems/         DEBUG surface is one manifest line away from being off: picker.ts
 │   └── input/               keybinds.ts (the bind table, its validation and the settings file) +
 │                            bind-gesture.ts (the rebind gesture's EVENT-TIME half)
 ├── host/                  the boundary: the only place with side effects
@@ -148,20 +150,31 @@ started is never stopped. More slots are planned (views,
 
 **Which plugins are OPTIONAL today.** `plugins.json` (read from the pack chain) toggles the ids the code
 declares: a disabled plugin contributes nothing, so its systems never reach the schedule. `diagnostics`
-(simply no F3 panel and no probes) and `content-default` (no declared language set) are genuinely optional.
+(simply no F3 panel and no probes), `content-default` (no declared language set) and `ui-debug` (no F3 debug
+panel and no F3+F4 mode chord; everything else about the UI is untouched) are genuinely optional.
 `player` and `render` are the game itself: they boot, but the body has no input/movement/collision and the
 screen is never drawn. `ui` is REMOVABLE in the mechanical sense — `boot/main.ts` logs and carries on
 instead of throwing — but the loading screen and the menus ARE ui surfaces, so the window then stays
 unpainted. A plugin whose declared `deps` are missing is REPORTED at boot, not silently half-installed.
+
+**Turning a SURFACE off must not need a rebuild, and that is a rewriting rule, not a plugin.** The ui lane
+was one plugin whose removal left a blank window because every surface lived in it; the fix is one plugin
+per OPTIONAL surface (`ui-debug` is the first, P1.23). The rule that falls out of it: **an order edge may
+never name a system that another plugin decides whether to install.** An `after: ["ui.picker"]` inside
+`ui` would be a dangling name the moment `ui-debug` is disabled, so the two edges that position the picker
+are declared ON the picker (`before: ["ui.toast", "ui.widgets"]` in `plugins/ui-debug/index.ts`) and the ui
+plugin's own chain stays complete without them (`ui.toast` follows `ui.inventory`, and the picker slips in
+between when it is installed). A system's STATE moves with its surface: `PICKER_STATE` is contributed by
+`ui-debug` now, not by `ui`.
 settings, blocks, languages, uiActions); the UI's existing action/source tables are the working prototype.
 
-**What is NOT enforced yet.** Nothing checks the import direction today: 21 imports still cross a layer (the
-count and the list are in the directory map above), and the systems' CONSTRUCTION still happens in
-`boot/main.ts` (it closes over the wiring: the views, the injected hooks) — so a plugin owns its
-registrations and its data, but not yet its own file. Closing both is P1.18b: each plugin declares `deps`,
-its declaration moves next to its systems, and the gate grows an assertion that fails on an undeclared
-cross-plugin import or any `plugins/**` -> `host/**` import. Until then the debt is a RATCHET in
-`check:ecs` (the counts may not grow).
+**What the gate enforces about plugins.** Every system is declared by the plugin that owns it (the root
+registers nothing by hand: `check:ecs` asserts `world.addSystem({` never appears in `boot/main.ts`), a
+cross-plugin import needs a declared `deps`, `plugins/**` may not import `host/**`, the declared graph must
+be acyclic, and the boot order is pinned (`last insertResource` < `installPlugins` < the first declaration).
+What is still true: a plugin owns its registrations and its data, but the systems' CONSTRUCTION happens in
+`boot/main.ts` (it closes over the wiring: the views, the injected hooks), which is why each plugin exports
+`create*System` pass-through factories and a `declare*Systems(api, instances)` function.
 
 ## Programming model — DOD (data-oriented design)
 

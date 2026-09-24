@@ -223,15 +223,38 @@ Zalando Mosaic、Module Federation）；要真隔离 —— Wasm/WASI 宿主（S
 
 ---
 
-## 10. ui 插件当前状态（截至 P1.22）
+## 10. ui 的拆分状态（截至 P1.23）
 
-- **归属：全部完成。** 10 个系统的**声明**（`declareUiSystems`）、10 个系统的**构造**（10 个
-  `ConstructorParameters` 直通工厂）、5 个**视图构造**（`createUiViews` / `createInventoryView` /
-  `createPauseMenu` / `createMainMenu`）、10 组件 + 18 资源 + 3 命令，全部在 `plugins/ui/`
-  （17 文件 / 3486 行）。`boot/main.ts`（1390 行）里**没有任何 ui 类名**，也不再手工注册任何系统。
+> 这是本文件最后一节，按版本继续追加。P1.22 之前它叫「ui 插件当前状态」。
+
+### 10.1 ui 核心（`plugins/ui/`，必需）
+
+- **归属：声明在插件，构造仍在根。** 9 个系统的**声明**（`declareUiSystems`）、9 个系统的**构造**
+  （`ConstructorParameters` 直通工厂）、5 个**视图构造**（`createUiViews` / `createInventoryView` /
+  `createPauseMenu` / `createMainMenu`）、10 组件 + 17 资源 + 3 命令，全部在 `plugins/ui/`。
+  `boot/main.ts` 里**没有任何 `world.addSystem({...})`**（闸门断言这条），但它仍然**构造**这些系统并把
+  实例交给 `declareUiSystems(uiApi, {...})`——因为它持有视图和注入的回调。这就是"声明与构造分家"的现状。
 - **可移除：机械上可以，实质上没意义。** 清单里关掉 `ui` → 启动不再崩（记一行日志后继续），但没有
   东西把 widget 数据画成 DOM，所以窗口是空的——**加载屏和菜单本身就是 ui 的表面**。
 - **依赖关系：** `render` 依赖 `ui`（它的 diagnostics 系统读 ui 的组件 schema）。关掉 ui 而留着 render
-  时，启动会明确告警"依赖未安装"，而不是装作依赖存在。
-- **未做：** 把 ui 拆成"必需核心"（reconciler + loading + hud + navigation）与"可选面"（F3 调试、改键页、
-  提示、背包）——只有这样，"关掉一个插件"才是玩家真正想要的能力。
+  时，启动会明确告警「依赖未安装」，而不是装作依赖存在。
+
+### 10.2 ui-debug（`plugins/ui-debug/`，可选，P1.23 新增）
+
+- **拆出去的东西：** F3 调试面板 + F3/F4 游戏模式选择环（系统 `ui.picker`）、它自己的状态
+  `PICKER_STATE`、以及两个工厂 `spawnPickerPanel` / `createPickerSystem`。`deps: ["ui"]`。
+- **效果：** 在 `plugins.json` 里写 `{"id":"ui-debug","enabled":false}` → 没有 F3 面板、没有 F3+F4 环，
+  **其它 UI 一切照旧**（这才是 P1.21 想说的"可关"）。启动日志会打印
+  `PLUGIN ui-debug is not installed - the F3 debug panel and the F3+F4 mode chord are off …`。
+- **拆分逼出来的规则（重要，做下一个可选面时必须遵守）：** **一个 `after`/`before` 边不许指向"别的插件
+  决定装不装"的系统。** 原来 `ui.toast` / `ui.widgets` 写着 `after: ["ui.picker"]`；一旦 ui-debug 被关掉，
+  这两个名字就成了悬挂引用（而且 boot 对未知系统名是**响亮报错**的——这正是这条规则能成立的前提）。
+  所以这两条边现在写在 picker 自己身上（`before: ["ui.toast", "ui.widgets"]`），`ui` 自己的链在
+  **没有 picker 时也是完整**的（`ui.toast` 跟在 `ui.inventory` 后面；picker 装了才插进中间）。
+- **状态跟着表面走：** `PICKER_STATE` 现在由 `ui-debug` 贡献（`check:ecs` 断言 ui 不再声明它、ui-debug
+  声明了它）。F3 面板的**部件**仍由 ui 的 hud 视图生成——ui-debug 依赖 ui，正是因为这个。
+- **未做：** 另外三个可选面（提示 toast、改键页、背包）还没拆；`ui` 核心（reconciler + loading + hud +
+  navigation）必须留下，否则窗口空白。
+- **给下一个人的坑：** 注释里的 `before:` / `after:` **字面量**会被闸门的边缘解析器（`scripts/check-ecs.mjs`
+  的 `registrations()`，它匹配的是文本不是语法）当成真边读进去，造出一条幻影自环。写这段散文时别用方括号形式。
+

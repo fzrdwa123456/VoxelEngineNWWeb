@@ -20,7 +20,7 @@
 import { MODE_NAMES, type MoveMode } from "../../player/components";
 import { KEY_EVENTS, KeyEdgeReader, PICKER_STATE, type PickerState } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
-import { UI_STATE, spawnLabel, spawnPanel, setUiSelected, setUiVisible } from "../components";
+import { UI_STATE, spawnLabel, spawnPanel, setUiSelected, setUiVisible } from "../../ui/components";
 
 /** Declared access: it writes the picker panel's own widget data and the F3 debug panel's visibility,
  *  and reads that panel's state to toggle it. The key log, the picker state and the player's mode reach

@@ -28,7 +28,9 @@ import { BLOCK_OUTLINE, CAMERA3D, CANVAS_HOST, CHUNK_MATERIAL, CHUNK_MESHES, ICO
 import { createBlockOutline, createChunkMaterial, createChunkMeshCache, createIconBake, createMenuBackground, createUiMount } from "../host/browser/presentation";
 import { createKeybindGesture, KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
 import { UI_KEYBIND_ACCESS, UiKeybindSystem } from "../plugins/ui/systems/keybind";
-import { spawnPickerPanel, UI_PICKER_ACCESS, UiPickerSystem } from "../plugins/ui/systems/picker";
+import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
+// The F3/F4 DEBUG surface is its own plugin: the factory, the declaration it owns and the descriptor.
+import { createPickerSystem, declareUiDebugSystems, uiDebugPlugin } from "../plugins/ui-debug";
 import { UI_TOAST_ACCESS, UiToastSystem } from "../plugins/ui/systems/toast";
 import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loading";
 import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
@@ -81,7 +83,6 @@ import { createDiagnosticsPlugin } from "../plugins/diagnostics";
 import {
   createRenderSystem,
   createBindingSystem,
-  createPickerSystem,
   createToastSystem,
   createLoadingSystem,
   createKeybindSystem,
@@ -563,6 +564,7 @@ const PLUGINS = [
   renderPlugin.plugin,
   createDiagnosticsPlugin(world),
   uiPlugin,
+  uiDebugPlugin,
   inputPlugin,
 ];
 const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
@@ -918,7 +920,17 @@ const uiApi = installOutcome.apiOf("ui");
 if (!uiApi) {
   logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
 } else {
-  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiPicker, uiToast, uiKeybind, navigation, delays, uiRender });
+  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiToast, uiKeybind, navigation, delays, uiRender });
+}
+
+// The DEBUG surface is its own plugin (F3 panel + the F3+F4 mode chord). It is OPTIONAL twice over: the
+// manifest may disable it, and it needs the ui plugin (its `deps`), so disabling `ui` takes it with it.
+// What it must not do is crash, and the resource table above already holds PICKER_STATE either way.
+const uiDebugApi = installOutcome.apiOf("ui-debug");
+if (!uiDebugApi) {
+  logDebug("PLUGIN ui-debug is not installed - the F3 debug panel and the F3+F4 mode chord are off (the rest of the ui lane is unaffected)");
+} else {
+  declareUiDebugSystems(uiDebugApi, { uiPicker });
 }
 
 for (const def of registry.list(SLOT_SYSTEMS)) world.addSystem(def);

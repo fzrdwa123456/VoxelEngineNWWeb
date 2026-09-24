@@ -949,6 +949,23 @@ Still outstanding:
   toast, the backpack) — so that turning a plugin off is something a player actually wants; and the test
   machine's C: drive (≈380 MB free, with the WebView2 profile on it) slows the first paint and widens that
   race, which needs no code to fix.
+- **P1.23 — the ui SPLIT starts: the DEBUG surface is a plugin of its own (`plugins/ui-debug/`).**
+  `PARTLY DONE` (1 of the 4 optional surfaces). The F3 debug panel and the F3+F4 game-mode chord moved out
+  of `ui` into `ui-debug` (one system, `ui.picker`, plus the `PICKER_STATE` resource it owns and the
+  `spawnPickerPanel`/`createPickerSystem` factories). Disabling it in `plugins.json` now removes exactly
+  that surface — no F3 panel, no mode chord, every other ui surface untouched — which is what P1.21 only
+  claimed. The rewriting rule the split produced (and the reason it is not just "move a file"): **an order
+  edge may never name a system another plugin decides whether to install.** `ui.toast`/`ui.widgets` used to
+  say `after: ["ui.picker"]`; a disabled `ui-debug` would have left those names dangling (and the boot now
+  fails LOUDLY on an unknown name, which is the only reason this is safe to do at all), so both edges are
+  declared on the picker instead (`before: ["ui.toast", "ui.widgets"]`) and `ui`'s own chain stays complete
+  without them (`ui.toast` follows `ui.inventory`; the picker slips in between). A surface's STATE moves with
+  the surface: `PICKER_STATE` is contributed by `ui-debug` now, asserted by the gate. STILL OPEN: the other
+  three surfaces (the toast, the key bind page, the backpack) and the same treatment for the `ui` core
+  itself (reconciler + loading + hud + navigation stay required, because without them the window is blank).
+  Doc note for whoever does the next one: a `before:`/`after:` LITERAL inside a COMMENT is parsed by the
+  gate's naive edge extractor (`registrations()` in `scripts/check-ecs.mjs` matches text, not syntax) and
+  produced a phantom self-edge — write the prose without the bracket form.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

@@ -48,6 +48,7 @@ const SOURCES = [
   "src/plugins/render/index.ts",
   "src/plugins/diagnostics/index.ts",
   "src/plugins/ui/index.ts",
+  "src/plugins/ui-debug/index.ts",
   "src/plugins/input/index.ts",
   "src/plugins/content-default/index.ts",
   "src/data/globals/resources.ts",
@@ -90,7 +91,7 @@ const SOURCES = [
   // The three UI systems that own state the views used to keep privately: the F3+F4 picker (key edges
   // -> PICKER_STATE -> a SetMode command), the HUD toast (a wall-clock deadline in a resource), and the
   // key bind panels + drag gesture (KEYBIND_GESTURE as data, the panels derived every frame).
-  "src/plugins/ui/systems/picker.ts",
+  "src/plugins/ui-debug/systems/picker.ts",
   "src/plugins/ui/systems/toast.ts",
   "src/plugins/ui/systems/loading.ts",
   "src/plugins/ui/systems/hud.ts",
@@ -637,7 +638,7 @@ check("the theme is the ONLY place a colour literal lives", () => {
     "src/plugins/ui/views/mainmenu.ts",
     // …and the three UI systems the surfaces migrated INTO: a colour literal there would be just as
     // wrong as one in a view (they write widget data; the theme owns every colour).
-    "src/plugins/ui/systems/picker.ts",
+    "src/plugins/ui-debug/systems/picker.ts",
     "src/plugins/ui/systems/toast.ts",
     "src/plugins/ui/systems/keybind.ts",
   ]) {
@@ -1318,7 +1319,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   }
   // The UI SYSTEMS the views migrated into: no DOM, no styling, and —the point of the migration —no
   // `document.addEventListener` (only the device layer listens) and no private timer for "how long".
-  for (const rel of ["src/plugins/ui/systems/picker.ts", "src/plugins/ui/systems/toast.ts", "src/plugins/ui/systems/keybind.ts", "src/plugins/ui/systems/delays.ts"]) {
+  for (const rel of ["src/plugins/ui-debug/systems/picker.ts", "src/plugins/ui/systems/toast.ts", "src/plugins/ui/systems/keybind.ts", "src/plugins/ui/systems/delays.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b|rgba?\(/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /document\.|createElement|style\.cssText/g), 0, `${rel} still touches the DOM`);
@@ -1344,8 +1345,8 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   }
   // …and they compose the prefabs instead
   assert(/spawnPanel\(/.test(readSource("src/plugins/ui/views/hud.ts")), "hud composes panels");
-  assert(/spawnLabel\(/.test(readSource("src/plugins/ui/systems/picker.ts")), "the picker composes its own labels");
-  assert(/setUiVisible\(/.test(readSource("src/plugins/ui/systems/picker.ts")), "…and shows/hides them as data");
+  assert(/spawnLabel\(/.test(readSource("src/plugins/ui-debug/systems/picker.ts")), "the picker composes its own labels");
+  assert(/setUiVisible\(/.test(readSource("src/plugins/ui-debug/systems/picker.ts")), "…and shows/hides them as data");
   assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the settings panel composes buttons");
   assert(/spawnGridKey\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the visual keyboard composes keycaps");
   assert(/onUiAction\(/.test(readSource("src/plugins/ui/views/mainmenu.ts")), "the main menu dispatches actions");
@@ -1359,7 +1360,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
 
 check("the F3+F4 picker is a system: key edges in, widget data and a mode change out", () => {
   // It used to be a class in ui/gamemode.ts with its own document listeners and private fields.
-  const P = load("plugins/ui/systems/picker.js");
+  const P = load("plugins/ui-debug/systems/picker.js");
   const world = widgetWorld;
   world.insertResource(PICKER_STATE, createPickerState());
   world.insertResource(KEY_EVENTS, createKeyEventLog());
@@ -1749,7 +1750,7 @@ function registrations() {
   // A registration lives either in the root (the ones not yet moved) or in the plugin that owns it, so the
   //  parser reads both. Same object shape in both places, which is why one regex covers them.
   const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts",
-    "src/plugins/render/index.ts", "src/plugins/ui/index.ts"]
+    "src/plugins/render/index.ts", "src/plugins/ui/index.ts", "src/plugins/ui-debug/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
   // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
@@ -1784,7 +1785,7 @@ function registrations() {
     UI_BINDING_ACCESS: load("plugins/ui/systems/bindings.js").UI_BINDING_ACCESS,
     UI_LOADING_ACCESS: load("plugins/ui/systems/loading.js").UI_LOADING_ACCESS,
     UI_HUD_ACCESS: load("plugins/ui/systems/hud.js").UI_HUD_ACCESS,
-    UI_PICKER_ACCESS: load("plugins/ui/systems/picker.js").UI_PICKER_ACCESS,
+    UI_PICKER_ACCESS: load("plugins/ui-debug/systems/picker.js").UI_PICKER_ACCESS,
     UI_TOAST_ACCESS: load("plugins/ui/systems/toast.js").UI_TOAST_ACCESS,
     UI_KEYBIND_ACCESS: load("plugins/ui/systems/keybind.js").UI_KEYBIND_ACCESS,
     UI_NAVIGATION_ACCESS: load("plugins/ui/systems/navigation.js").UI_NAVIGATION_ACCESS,
@@ -3421,7 +3422,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(outcome.has("ui"), false, "…including the manifest's veto");
 
   // 3. The manifest is DATA the pack chain can override, and it can never break the boot.
-  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,input",
+  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-debug,input",
     "the built-in plugin list (the content plugin comes first: it declares what the install HAS)");
   equal(M.isEnabled(M.defaultManifest(), "ui"), true, "an unmentioned plugin follows the default list");
   const off = M.parseManifest({ plugins: [{ id: "diagnostics", enabled: false }] });
@@ -3498,7 +3499,14 @@ check("the plugin system: extension points, the registry, the install and the ma
     });
   }
   equal(together.owners(S.SLOT_RESOURCES).join(","), "world,ui,input",
-    "the six plugins contribute side by side with no duplicate resource id");
+    "the plugins contribute side by side with no duplicate resource id");
+  // The F3+F4 picker's state moved OUT of the ui plugin with the surface (P1.23): the plugin that owns
+  // the surface owns its data, which is what makes disabling it leave nothing behind.
+  assert(!together.list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
+    "the ui plugin no longer claims the picker's state");
+  assert(contribute(load("plugins/ui-debug/index.js").uiDebugPlugin)
+    .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
+    "…the ui-debug plugin owns it");
   equal(together.list(S.SLOT_COMPONENTS).length, 10, "…and the widget schemas come from the ui plugin");
   equal(together.list(S.SLOT_COMMANDS).length, 3, "…and three commands from the ui plugin");
 
@@ -3512,8 +3520,12 @@ check("the plugin system: extension points, the registry, the install and the ma
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
-  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 10,
-    "…the ui plugin declares its ten systems");
+  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 9,
+    "…the ui plugin declares its nine systems");
+  // The DEBUG surface is a plugin of its own now (F3 panel + the F3+F4 chord): ONE system, contributed
+  // under its own id, so a manifest line that disables it removes exactly that system.
+  equal(countOf(stripComments(readSource("src/plugins/ui-debug/index.ts")), /api\.system\(/g), 1,
+    "…and the ui-debug plugin declares the F3/picker system itself");
   equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 4,
     "…the render plugin declares its four systems");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
@@ -3522,7 +3534,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
-  equal((declared[1].match(/Plugin/g) || []).length, 7, "…and installs all seven");
+  equal((declared[1].match(/Plugin/g) || []).length, 8, "…and installs all eight");
   assert(/installPlugins\(PLUGINS, \{/.test(bootSrc), "…through installPlugins, not by hand");
   assert(/registry\.list\(SLOT_SYSTEMS\)\) world\.addSystem\(def\)/.test(bootSrc),
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
@@ -3658,7 +3670,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
   equal(toHost, 0, `no plugin reads host/ any more (now ${toHost}) — that is what the injected services are for`);
-  const unresolved = new Set(["content-default", "world", "player", "render", "diagnostics", "ui", "input"]);
+  const unresolved = new Set(["content-default", "world", "player", "render", "diagnostics", "ui", "ui-debug", "input"]);
   let progressed = true;
   while (progressed) {
     progressed = false;

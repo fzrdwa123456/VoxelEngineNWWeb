@@ -9,7 +9,6 @@ import type { Entity, World } from "../../core/world";
 import { Hud } from "./views/hud";
 import { UiRenderSystem } from "./systems/reconcile";
 import { UiBindingSystem } from "./systems/bindings";
-import { UiPickerSystem } from "./systems/picker";
 import { UiToastSystem } from "./systems/toast";
 import { UiLoadingSystem } from "./systems/loading";
 import { UiKeybindSystem } from "./systems/keybind";
@@ -30,7 +29,6 @@ import { INVENTORY_VIEW_ACCESS } from "./systems/inventory";
 import { UI_KEYBIND_ACCESS } from "./systems/keybind";
 import { UI_LOADING_ACCESS } from "./systems/loading";
 import { UI_NAVIGATION_ACCESS } from "./systems/navigation";
-import { UI_PICKER_ACCESS } from "./systems/picker";
 import { UI_RENDER_ACCESS } from "./systems/reconcile";
 import { UI_TOAST_ACCESS } from "./systems/toast";
 import { SetFpsCap, SetLoadingStage, ShowToast } from "../../core/effect/commands";
@@ -46,7 +44,6 @@ import {
   KEY_EVENTS,
   LOADING_STATE,
   LOCALE,
-  PICKER_STATE,
   TOAST,
   UI_MODAL,
   UI_SCALE,
@@ -107,10 +104,6 @@ export function createBindingSystem(...args: ConstructorParameters<typeof UiBind
   return new UiBindingSystem(...args);
 }
 
-export function createPickerSystem(...args: ConstructorParameters<typeof UiPickerSystem>): UiPickerSystem {
-  return new UiPickerSystem(...args);
-}
-
 export function createToastSystem(...args: ConstructorParameters<typeof UiToastSystem>): UiToastSystem {
   return new UiToastSystem(...args);
 }
@@ -144,7 +137,6 @@ export interface UiSystems {
   readonly uiLoading: { step(): void };
   readonly uiInventory: { step(): void };
   readonly uiBindings: { step(): void };
-  readonly uiPicker: { step(): void };
   readonly uiToast: { step(): void };
   readonly uiKeybind: { step(): void };
   readonly navigation: { step(): void };
@@ -191,22 +183,14 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   run: () => s.uiBindings.step(),
   });
   api.system({
-  // The F3+F4 picker. It writes UI_STATE/UI_TEXT (the picker panel's items and the F3 panel's
-  // visibility), and ui.inventory writes the same COMPONENTS on different entities — the conflict model
-  // is per component, not per entity, so the order has to be declared. That is a pessimisation (they
-  // touch nothing of each other's) and it costs the ui lane its only parallel pair.
-  name: "ui.picker",
-  stage: "ui",
-  after: ["ui.inventory"],
-  ...UI_PICKER_ACCESS,
-  run: () => s.uiPicker.step(),
-  });
-  api.system({
-  // The HUD toast: same component-level conflict as ui.picker, so it follows it. It is the reason the
+  // The HUD toast: the same component-level conflict as its predecessor in the chain. `ui.inventory` is that
+  // predecessor when the ui-debug plugin is off; when it is on, the picker DECLARES the edge that puts itself
+  // ahead of this system, so this list never names a system this plugin does not itself install
+  // (plugins/ui-debug/index.ts). It is the reason the
   // ui lane is pumped while the game loop is stopped (a main-menu toast has no frame to ride).
   name: "ui.toast",
   stage: "ui",
-  after: ["ui.picker"],
+  after: ["ui.inventory"],
   ...UI_TOAST_ACCESS,
   run: () => s.uiToast.step(),
   });
@@ -241,7 +225,7 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // is the other half of the guarantee: everything `diagnostics` wrote this frame is already in place.
   name: "ui.widgets",
   stage: "ui",
-  after: ["ui.inventory", "ui.bindings", "ui.picker", "ui.toast", "ui.keybind", "ui.navigation"],
+  after: ["ui.inventory", "ui.bindings", "ui.toast", "ui.keybind", "ui.navigation"],
   ...UI_RENDER_ACCESS,
   run: () => s.uiRender.step(),
   });
@@ -256,7 +240,7 @@ export const uiPlugin = definePlugin({
     ]);
     api.contribute(SLOT_RESOURCES, [
       UI_MOUNT, UI_PAINT, UI_THEME, UI_ACTIONS, UI_SOURCES, UI_ORDER, UI_MODAL, UI_SCALE, LOCALE, FONT,
-      TOAST, PICKER_STATE, LOADING_STATE, DELAYED_INTENTS, INVENTORY_WIDGETS, F3_PANEL, KEY_EVENTS,
+      TOAST, LOADING_STATE, DELAYED_INTENTS, INVENTORY_WIDGETS, F3_PANEL, KEY_EVENTS,
       VIEWPORT,
     ]);
     api.contribute(SLOT_COMMANDS, [ShowToast, SetLoadingStage, SetFpsCap]);

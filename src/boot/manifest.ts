@@ -25,6 +25,7 @@ export const DEFAULT_PLUGINS: readonly string[] = [
   "render",
   "diagnostics",
   "ui",
+  "ui-debug",
   "input",
 ];
 
