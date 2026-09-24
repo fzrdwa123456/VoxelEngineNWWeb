@@ -183,14 +183,49 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // ui lane is pumped while the game loop is stopped (a main-menu toast has no frame to ride).
   name: "ui.toast",
   stage: "ui",
-  after: ["ui.inventory"],
+  after: ["ui.slot.debug"],
+  before: ["ui.slot.toast"],
   ...UI_TOAST_ACCESS,
   run: () => s.uiToast.step(),
+  });
+  // ===== The optional ui surfaces' SLOT ANCHORS (P1.27) =====
+  // A surface that may be DISABLED cannot be named in another surface's order list: the name would dangle
+  // the moment that plugin is turned off, and the boot refuses an unknown name. But two widget WRITERS still
+  // have to be ordered (the conflict model is per COMPONENT, not per entity), so the order needs something
+  // that ALWAYS exists. These three are it: no-op systems owned by the CORE, one per optional slot, chained
+  // among themselves and to the core's own writers. Each optional surface declares "after the anchor before
+  // it, before its own anchor", so any subset of them is totally ordered and no surface ever names another.
+  //
+  // `reads: [UI_STATE]` is not decoration: it makes an anchor CONFLICT with every writer, which is what keeps
+  // it in a batch of its own instead of being batched with an unrelated system (edges alone would allow it).
+  api.system({
+  name: "ui.slot.debug",
+  stage: "ui",
+  after: ["ui.inventory"],
+  before: ["ui.slot.toast"],
+  reads: [UI_STATE],
+  run: () => {},
+  });
+  api.system({
+  name: "ui.slot.toast",
+  stage: "ui",
+  after: ["ui.slot.debug"],
+  before: ["ui.slot.keybind"],
+  reads: [UI_STATE],
+  run: () => {},
+  });
+  api.system({
+  name: "ui.slot.keybind",
+  stage: "ui",
+  after: ["ui.slot.toast"],
+  before: ["ui.navigation"],
+  reads: [UI_STATE],
+  run: () => {},
   });
   api.system({
   name: "ui.navigation",
   stage: "ui",
-  after: ["ui.toast"],
+  after: ["ui.slot.keybind"],
   ...UI_NAVIGATION_ACCESS,
   run: () => s.navigation.step(),
   });
@@ -209,7 +244,7 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // is the other half of the guarantee: everything `diagnostics` wrote this frame is already in place.
   name: "ui.widgets",
   stage: "ui",
-  after: ["ui.inventory", "ui.bindings", "ui.toast", "ui.navigation"],
+  after: ["ui.inventory", "ui.bindings", "ui.navigation"],
   ...UI_RENDER_ACCESS,
   run: () => s.uiRender.step(),
   });

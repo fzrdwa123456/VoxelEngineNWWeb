@@ -38,10 +38,10 @@ export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
     name: "ui.picker",
     stage: "ui",
     after: ["ui.inventory"],
-    // The two edges that used to live in the ui plugin. `ui.toast` and `ui.widgets` conflict with this system
-    // (same components, different entities), so a path has to exist — declared from THIS side it survives
-    // disabling the plugin, from the other side it would not.
-    before: ["ui.toast", "ui.widgets"],
+    // The slot anchor replaces the edges that used to name `ui.toast`/`ui.widgets` (P1.27): a system another
+    // OPTIONAL plugin owns must never appear here, and the core's anchor gives the same total order while
+    // surviving any subset of surfaces being disabled.
+    before: ["ui.slot.debug"],
     ...UI_PICKER_ACCESS,
     run: () => s.uiPicker.step(),
   });

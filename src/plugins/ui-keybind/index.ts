@@ -35,11 +35,10 @@ export function declareUiKeybindSystems(api: PluginApi, s: UiKeybindSystems): vo
     // it follows the toast and precedes the painter and the reconciler.
     name: "ui.keybind",
     stage: "ui",
-    after: ["ui.toast"],
-    // These two edges used to live on the OTHER side (`ui.navigation` said `after: ["ui.keybind"]`, and
-    // `ui.widgets` listed it). A disabled plugin must not leave a dangling name in another plugin's order
-    // list, so they are declared here — see P1.23's note in ROADMAP.md.
-    before: ["ui.navigation", "ui.widgets"],
+    after: ["ui.slot.toast"],
+    // The edges that used to name `ui.toast`/`ui.navigation`/`ui.widgets` are the core's anchors now (P1.27):
+    // a surface may only be ordered against systems that EXIST whatever else is turned off.
+    before: ["ui.slot.keybind"],
     ...UI_KEYBIND_ACCESS,
     run: () => s.uiKeybind.step(),
   });

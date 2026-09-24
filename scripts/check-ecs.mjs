@@ -1857,8 +1857,13 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["ui.loading"],
     ["ui.inventory"],
     ["ui.picker"],
+    // The optional surfaces sit between the core's SLOT ANCHORS, which are what orders them without any
+    // surface naming another (see plugins/ui/index.ts).
+    ["ui.slot.debug"],
     ["ui.toast"],
+    ["ui.slot.toast"],
     ["ui.keybind"],
+    ["ui.slot.keybind"],
     ["ui.navigation"],
     // The delayed intents are applied right after the systems that decide them and before the frame is
     // painted. It writes ui.navigation's two targets (`pointerLock` / `cursor`), so the conflict rule
@@ -3524,6 +3529,18 @@ check("the plugin system: extension points, the registry, the install and the ma
   // KEYBIND_TAB token) and keeps the entry entity it gets back, so `ui` knows nothing about keycaps.
   assert(/KEYBIND_TAB/.test(readSource("src/plugins/ui/views/menu.ts")),
     "the settings panel asks the plugin for the tab");
+  // TWO OPTIONAL PLUGINS MAY NOT NAME EACH OTHER (P1.27): the order between them is the CORE's slot anchors,
+  // because a name is a dangling reference as soon as the plugin that owns it is disabled.
+  const OPTIONAL_SYSTEMS = ["ui.picker", "ui.toast", "ui.keybind"];
+  for (const file of ["src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts"]) {
+    const src = stripComments(readSource(file));
+    for (const m of src.matchAll(/(?:after|before):\s*\[([^\]]*)\]/g)) {
+      for (const named of OPTIONAL_SYSTEMS) {
+        assert(!m[1].includes(`"${named}"`),
+          `${file} orders itself against "${named}", which another OPTIONAL plugin owns`);
+      }
+    }
+  }
   assert(/spawnKeybindPanel/.test(readSource("src/plugins/ui-keybind/views/keybind.ts")),
     "…and the plugin's own view builds the chips, the keycaps and the entry button");
   assert(!/keycap|spawnGridKey/.test(stripComments(readSource("src/plugins/ui/views/menu.ts"))),
@@ -3573,8 +3590,8 @@ check("the plugin system: extension points, the registry, the install and the ma
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
-  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 8,
-    "…the ui plugin declares its eight systems (two optional surfaces have moved out)");
+  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 11,
+    "…the ui plugin declares its eight systems + the three optional-surface slot anchors (P1.27)");
   equal(countOf(stripComments(readSource("src/plugins/ui-keybind/index.ts")), /api\.system\(/g), 1,
     "…and the ui-keybind plugin declares the bind-page system itself");
   // The DEBUG surface is a plugin of its own now (F3 panel + the F3+F4 chord): ONE system, contributed
