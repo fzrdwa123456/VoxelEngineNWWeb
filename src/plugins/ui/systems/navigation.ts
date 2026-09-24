@@ -246,8 +246,12 @@ export class UiNavigationSystem {
   private paint(): void {
     const ui = this.ui;
     const t = this.deps.trees;
-    // The frost first: it must be down whenever ANY modal surface is up, and it is BELOW the panels.
-    setUiVisible(this.world, t.backdrop, isModalUi(ui) || ui.gen);
+    // The frost: OFF for now (P1.30 follow-up). With it up, the backpack stopped taking clicks, and that is
+    // not understood yet — so the layer is never shown until it is. Everything else stays wired (the widget is
+    // spawned hidden), which makes restoring it exactly this one line:
+    //   setUiVisible(this.world, t.backdrop, isModalUi(ui) || ui.gen);
+    void t.backdrop;
+    void isModalUi;
     setUiVisible(this.world, t.pauseRoot, ui.menu);
     setUiVisible(this.world, t.mainRoot, ui.mainMenu);
     setUiVisible(this.world, t.inventoryPanel, ui.inventory);
