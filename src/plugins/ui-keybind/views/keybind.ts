@@ -127,6 +127,15 @@ export function cancelKeybindDrag(reason: string, log: (line: string) => void): 
   g.drag = null;
   g.hover = null;
   endCapture();
+  // THE CANCELLED PRESS MUST NOT BECOME A CLICK. ESC ends the drag, but the button is usually STILL DOWN:
+  // Chromium synthesizes a `click` on whatever is under the pointer when it finally comes up, and the click
+  // shield is the only thing that swallows it. The shield was armed by a COMPLETED drag release
+  // (`armShield(true)`) and by a capture-mode mousedown — never here — so ESC + keep holding + release over an
+  // action chip ran the chip's own handler and re-armed a capture ("let go over the options and it captures").
+  // Armed WITHOUT the self-timeout on purpose: the release can be seconds away, and the mouseup listener is the
+  // documented fallback that clears it (the synthetic click, which the browser dispatches in the same task,
+  // consumes it first).
+  armSuppressNextClick(false);
   log(`KBCAP drag cancelled (${reason})`);
 }
 

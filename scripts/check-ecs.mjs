@@ -3545,6 +3545,17 @@ check("the plugin system: extension points, the registry, the install and the ma
   assert(/this\.deps\.endCapture\(\)/.test(kbClose), "…and ends a rebind capture that was armed");
   assert(/setUiVisible\(this\.world, this\.deps\.line, false\)/.test(kbClose),
     "…and hides the rubber band, which nothing else would");
+  // A CANCELLED PRESS MUST NOT BECOME A CLICK: ESC ends a drag while the button is still down, and Chromium
+  // still synthesizes a click on whatever is under the pointer when it comes up. The shield is what swallows
+  // it, and ESC's cancel path was the one arm path that did not arm it — releasing over an action chip ran the
+  // chip's own handler and re-armed a capture.
+  const kbView = stripComments(readSource("src/plugins/ui-keybind/views/keybind.ts"));
+  const cancelFn = kbView.slice(kbView.indexOf("export function cancelKeybindDrag"),
+    kbView.indexOf("export function cancelKeybindDrag") + 700);
+  assert(/armSuppressNextClick\(false\)/.test(cancelFn),
+    "ESC's cancel arms the click shield (without the self-timeout: the release may be seconds away)");
+  assert(/g\.drag = null/.test(cancelFn) && /endCapture\(\)/.test(cancelFn),
+    "…and still clears the drag and the capture");
   assert(contribute(load("plugins/ui-debug/index.js")
     .createUiDebugPlugin({ uiPicker: { step: () => {}, close: () => {} } }))
     .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
