@@ -422,12 +422,14 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
         `border-radius:0.375rem;cursor:pointer;`;
     case "settings.btnRow":
       return "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
-    // The container PAGE ROWS are mounted into (P1.29). It must be LAYOUT-NEUTRAL: `margin`/`padding`/`gap`
-    // all zero, so a hosted `settings.btn` keeps exactly the spacing it had as a direct child. A container
-    // that adds its own margin (this role first borrowed `settings.btnRow`) makes the row look "almost right
-    // but too far apart", which is very hard to attribute by eye.
+    // The container PAGE ROWS are mounted into (P1.29). It must be LAYOUT-NEUTRAL, and the reason is subtler
+    // than "no margins": the settings panel is a plain BLOCK box, so the spacing between two rows comes from
+    // their own `margin:0.375rem 0` COLLAPSING (0.375rem between neighbours, not 0.75). A `display:flex`
+    // wrapper turns its child into a flex item, where margins do NOT collapse — the row then sits 0.375rem
+    // further from everything around it, which reads as "almost right, but the gap is bigger". A plain block
+    // wrapper collapses through, so the row ends up exactly where it was as a direct child.
     case "settings.pageRows":
-      return "display:flex;flex-direction:column;margin:0;padding:0;";
+      return "display:block;margin:0;padding:0;border:0;";
     // A CHOICE: one of a small set (language, font, world type). Blue while selected.
     case "settings.choice":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
