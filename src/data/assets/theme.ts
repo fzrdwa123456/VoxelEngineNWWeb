@@ -228,7 +228,7 @@ export type UiRecipe =
   | "settings.btn"
   | "settings.btnRow"
   | "settings.pageRows"
-  | "menu.backdrop"
+  | "ui.frost"
   | "settings.choice"
   | "settings.scrollArea"
   | "settings.row"
@@ -437,7 +437,10 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     //     the world (or a UI element below it) would be swallowed by a full-screen div;
     //   * `z-index:1` keeps it under the panels (z-30/31) and above the canvas;
     //   * the alpha is the DARKENING the user asked for (0.25 = medium).
-    case "menu.backdrop":
+    // NOT `menu.backdrop` — that name is TAKEN (the main menu's full-screen background, z-50 opaque). The
+    // first version of this layer reused it, so the widget inherited THAT style: an opaque z-50 sheet over
+    // everything, which covered the backpack and swallowed its clicks, while this case was unreachable.
+    case "ui.frost":
       return "position:fixed;left:0;top:0;right:0;bottom:0;z-index:1;pointer-events:none;" +
         "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);background:rgba(0,0,0,0.25);";
     // A CHOICE: one of a small set (language, font, world type). Blue while selected.

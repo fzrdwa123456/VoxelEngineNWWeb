@@ -246,12 +246,11 @@ export class UiNavigationSystem {
   private paint(): void {
     const ui = this.ui;
     const t = this.deps.trees;
-    // The frost: OFF for now (P1.30 follow-up). With it up, the backpack stopped taking clicks, and that is
-    // not understood yet — so the layer is never shown until it is. Everything else stays wired (the widget is
-    // spawned hidden), which makes restoring it exactly this one line:
-    //   setUiVisible(this.world, t.backdrop, isModalUi(ui) || ui.gen);
-    void t.backdrop;
-    void isModalUi;
+    // THE FROST (`ui.frost`): a full-screen, click-transparent, blurred + darkened layer UNDER the panels, up
+    // whenever ANY modal surface is. It is painted HERE because this is the one place that turns UI_MODAL into
+    // modal visibility. (Its first version borrowed the role name `menu.backdrop`, which belongs to the main
+    // menu's opaque z-50 background — see theme.ts; that is what covered the backpack and ate its clicks.)
+    setUiVisible(this.world, t.backdrop, isModalUi(ui) || ui.gen);
     setUiVisible(this.world, t.pauseRoot, ui.menu);
     setUiVisible(this.world, t.mainRoot, ui.mainMenu);
     setUiVisible(this.world, t.inventoryPanel, ui.inventory);

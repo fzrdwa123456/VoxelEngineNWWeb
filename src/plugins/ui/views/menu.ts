@@ -103,7 +103,7 @@ export interface SettingsCallbacks {
 /** The menu FROST: one full-screen layer, painted by `ui.navigation` while any modal surface is up. Spawned
  *  here (wiring time) because spawning is a structural change; `parent = null` = a child of the UI root. */
 export function spawnMenuBackdrop(world: World): Entity {
-  return spawnPanel(world, null, "menu.backdrop", { hidden: true });
+  return spawnPanel(world, null, "ui.frost", { hidden: true });
 }
 
 export interface MenuCallbacks extends SettingsCallbacks {
