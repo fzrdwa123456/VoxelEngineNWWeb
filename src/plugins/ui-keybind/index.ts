@@ -9,10 +9,13 @@
 // wiring that belongs to that view). What moved is the BEHAVIOUR — and with it the way IN: the entry
 // buttons are spawned invisible and only this system shows them, so "the plugin is off" means the tab is
 // not reachable, from either menu.
+import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
 import type { Plugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
+import { KEYBIND_TAB } from "../../data/globals/keybind-tab";
 import { UI_KEYBIND_ACCESS, UiKeybindSystem } from "./systems/keybind";
+import { spawnKeybindPanel } from "./views/keybind";
 
 /** Pass-through factory: the composition root builds the instance (it needs the bind table, the rubber
  *  band widget and the entry buttons), the plugin owns what it IS and where it runs. */
@@ -47,8 +50,15 @@ export function createUiKeybindPlugin(s: UiKeybindSystems): Plugin {
     id: "ui-keybind",
     // It renders into the settings panel the ui plugin's views build, and it reads the widget components the
     // ui plugin owns: without the widget layer there is no page to fill.
-    deps: ["ui"],
+    // `input` is a REAL dependency: the bind table lives there (plugins/input/keybinds.ts) and this
+    // plugin's view reads it to draw the chips and to apply a captured key.
+    deps: ["ui", "input"],
     setup(api) {
+      // The tab's WIDGETS are this plugin's too (views/keybind.ts). The settings panel asks for them
+      // through the KEYBIND_TAB resource: inserted here — install time, i.e. before the views are wired —
+      // so a build without this plugin has no tab at all; contributed so the registry reports its owner.
+      if (!api.world.hasResource(KEYBIND_TAB)) api.world.insertResource(KEYBIND_TAB, spawnKeybindPanel);
+      api.contribute(SLOT_RESOURCES, [KEYBIND_TAB]);
       declareUiKeybindSystems(api, s);
     },
     // The page goes down with the plugin (see UiKeybindSystem.close()).

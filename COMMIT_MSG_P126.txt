@@ -1,0 +1,35 @@
+P1.26: the key bind page's WIDGETS move into plugins/ui-keybind (the ui plugin keeps only the layout)
+
+P1.25 moved the page's BEHAVIOUR (UiKeybindSystem) out of `ui`. This moves what the page IS MADE OF, so
+that "the plugin is off" no longer means "a panel the ui plugin still builds and hides".
+
+What moved (plugins/ui-keybind/views/keybind.ts)
+- the action chips, the visual keyboard (chips, keycaps, legend resolution, the OS-layout fetch)
+- the ENTRY button (still spawned hidden: `ui.keybind` shows it while the plugin runs)
+- the two mouse-button ARM PATHS, the click shield's arming and the keycap hit test the device layer asks
+- the rubber-band widget's prefab (spawnKeybindLine) and cancelKeybindDrag (ESC's canceller)
+- boundCodes() — the "blue face" derivation the system reads
+
+How the two plugins agree without importing each other
+- The settings panel lives in `ui`, the tab in `ui-keybind`, and the dependency runs one way
+  (`ui-keybind` -> `ui`), so the mount shape cannot live in either: it is DATA
+  (data/globals/keybind-tab.ts: KeybindTabMount / KeybindTabSurfaces / KeybindTabBuilder / KEYBIND_TAB).
+- `plugins/ui-keybind`'s `setup` inserts its builder under that token (install time, i.e. before the views
+  are wired) and contributes it, so the registry reports who owns it.
+- `buildSettingsPanel` calls the builder only when the token is present, hands it the settings list, the
+  (empty) sub-panel container, its action-id prefix and `show()`, and keeps the entry entity it gets back.
+- Deps: `ui-keybind` now declares ["ui", "input"] — the bind TABLE is plugins/input/keybinds.ts and this
+  view reads it to draw the chips and to apply a captured key.
+
+Gate: the assertions that named views/menu.ts for the visual keyboard and the KBCAP probe now name the
+plugin's view, and two new ones pin the split — the settings panel asks (KEYBIND_TAB), and the ui plugin
+no longer mentions a keycap at all. 58 groups, RESULT: OK.
+
+KNOWN LIMIT, documented in ROADMAP: a runtime install (F9) cannot add the tab when the plugin was OFF at
+boot, because the settings layout builds its tabs once during wiring and there is then no button to show.
+Uninstall/re-install of a plugin that was ON at boot works (the button exists, hidden). A "tab host" the
+plugin fills on install is the shape that would fix it.
+
+Verified: tsc clean, check:ecs 58 groups OK, build-all + cargo --features custom-protocol +
+package-portable, exe sha256 8F5A56C3DF8986825ED2BE4D6026BC9E6E68F52354CA69E4164662DBE6DE713F
+(identical in target/release and release/VoxelEngineTauri).

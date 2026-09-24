@@ -45,7 +45,10 @@ import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "
 import { LoadingScreen } from "../plugins/ui/views/loading";
 import { Inventory } from "../plugins/ui/views/inventory";
 import { INVENTORY_VIEW_ACCESS, UiInventorySystem } from "../plugins/ui/systems/inventory";
-import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, Menu, spawnKeybindLine } from "../plugins/ui/views/menu";
+import { Menu } from "../plugins/ui/views/menu";
+// The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
+// them from THERE: the ui plugin exports none of it any more.
+import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, spawnKeybindLine } from "../plugins/ui-keybind/views/keybind";
 import { MainMenu } from "../plugins/ui/views/mainmenu";
 import { Hud } from "../plugins/ui/views/hud";
 import { PointerLock } from "../host/browser/pointerlock";
@@ -951,7 +954,9 @@ navTrees = {
   inventoryPanel: inv.panelEntity,
 };
 // Both menus exist now, so `ui.keybind` gets the two ways in to its page (it shows them while it runs).
-keybindEntries.push(menu.keybindEntryEntity, mainMenu.keybindEntryEntity);
+for (const entry of [menu.keybindEntryEntity, mainMenu.keybindEntryEntity]) {
+  if (entry) keybindEntries.push(entry);
+}
 
 // Everything the installed plugins contributed, contributed order — the schedule resolves and verifies
 // the order from the declared after/before edges, so the registration order carries no meaning.

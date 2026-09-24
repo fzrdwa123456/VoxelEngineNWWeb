@@ -16,7 +16,7 @@
 //   4. buildSettingsPanel()            — the settings panels (shared by pause menu + main menu).
 //   5. Menu                            — the pause menu class.
 //
-// WHAT THE LISTENERS IN §2 NO LONGER DO: draw. The keycap highlight, the rubber band and the redraw of
+// WHAT THE PAGE'S LISTENERS NO LONGER DO: draw. The key highlight, the rubber band and the redraw of
 // every panel instance are derived once per frame by `ui.keybind` (ecs/ui/keybind.ts) from the gesture
 // resource and the bind table, so a bind change, a language switch and the async OS layout all land
 // without a call site to remember. The listeners keep their exact order and decisions — they are the
@@ -37,7 +37,7 @@
 //     which is why only mousedown-with-button-0 arms the shield in capture mode.
 //
 // THIS FILE OWNS NO DOM ANY MORE. The drag rubber band was the last element it created: an SVG line whose
-// geometry was rewritten on every mousemove. It is a WIDGET now (`spawnKeybindLine` below) whose UI_LAYOUT
+// geometry was rewritten on every mousemove. It is a WIDGET now, spawned by the `ui-keybind` plugin, whose UI_LAYOUT
 // string `ui.keybind` writes once per frame from the GESTURE + the POINTER resource — so the pointer
 // position travels as data (published by the device layer, which already listens for mousemove) instead of
 // through a second listener here. What is left of the gesture in this file is the EVENT-TIME half only:
@@ -45,36 +45,24 @@
 // decisions that can only be taken inside the event that must be cancelled (see the contract above).
 import { t, getLang, setLang } from "../../../data/assets/i18n";
 import { getUIScaleMode, setUIScaleMode, getCurrentScale } from "../../../data/globals/uiscale";
-import { installBindGestureHandlers } from "../../input/bind-gesture";
 import { getFontId, setFontId } from "../../../data/globals/fonts";
 import { listPacks } from "../../../data/assets/textures";
 import type { WindowMode } from "../../../data/globals/shell";
-import { getBind, setBind, beginCapture, endCapture, getCapturing, codeDisplayName, buttonToCode } from "../../input/keybinds";
-import { KB_ACTIONS, type BindAction } from "../../../data/globals/binds";
-import { KB_ROWS, TOWER_GRID, NUM_GRID, MOUSE_GRID } from "../../../data/globals/keylayout";
 import { onConfigChange } from "../../../core/services/bus";
 import type { Entity, World } from "../../../core/world";
 import { CAP_MAX, CAP_MIN, CAP_STEP, sanitizeFrameCap, UI_MODAL, type UiModalState } from "../../../data/globals/resources";
 import { stepBackSettings } from "../systems/navigation";
-import { ACTION_KEYBIND_CHIP, ACTION_KEYBIND_KEY, onUiAction, UI_ACTIONS, type UiActionHandler } from "../../../data/globals/actions";
+import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
 import { onUiSource, SOURCE_FPS_CAP, UI_SOURCES, type UiSource } from "../../../data/globals/sources";
 import { PACK_LIST_CAPACITY } from "../../../data/globals/paint";
-import {
-  registerKeybindPanel,
-  type KeybindChip,
-  type KeybindGesture,
-  type KeybindKeycap,
-} from "../../../data/globals/keybind-gesture";
-import type { UiHit } from "../../../shared/types/ui";
 import { UI_THEME } from "../../../data/assets/theme";
+import { KEYBIND_TAB } from "../../../data/globals/keybind-tab";
 import {
   setUiSelected,
   setUiText,
   setUiVisible,
   spawnButton,
-  spawnGridKey,
   spawnLabel,
-  spawnLayoutBox,
   spawnList,
   spawnPanel,
   spawnSlider,
@@ -87,168 +75,7 @@ import {
 // cross-instance desync to avoid: the old `keybindRenderers` registry + imperative `renderAllPanels()`
 // existed only because the panels owned copies of the state they displayed.
 
-/** What the document-level drag needs in order to reach the widget tree: the world (for the theme), the
- *  hit test (which only the UI system can answer — it owns the elements) and the GESTURE STATE, which is
- *  the world resource ecs/ui/keybind.ts declares. The object is created by the composition root, handed
- *  over here AND inserted as that resource, so the listeners below and the system that applies them see
- *  the same data. Set once during wiring, because the gesture outlives any one panel. */
-export interface KeybindDragDeps {
-  /** The platform's log sink, INJECTED (a plugin may not import `host/`). */
-  log: (line: string) => void;
-  readonly world: World;
-  readonly hitTest: (x: number, y: number) => UiHit | null;
-  readonly gesture: KeybindGesture;
-}
-let dragDeps: KeybindDragDeps | null = null;
-export function bindKeybindDrag(deps: KeybindDragDeps): void {
-  dragDeps = deps;
-  // Install the gesture's DEVICE listeners (platform/bind-gesture.ts) — the click shield, the drag's
-  // start/end, the wheel block and the key capture. They live in the device layer because every one of them
-  // decides something inside the event itself; what is injected here is the state they read and the two
-  // facts only this file knows: which action ids a chip/keycap carries, and the hit test that finds one.
-  // A BIND is no longer written here: the listener queues the decision (KEYBIND_GESTURE.rebinds) and
-  // `ui.keybind` applies it in the ui lane.
-  installBindGestureHandlers({
-    gesture: gestureState,
-    capturing: getCapturing,
-    endCapture,
-    queueRebind: (intent) => deps.gesture.rebinds.push(intent),
-    chipAction: ACTION_KEYBIND_CHIP,
-    keycapCodeAt: (x, y) => keycapAt(x, y)?.code ?? null,
-    hitTest: (x, y) => deps.hitTest(x, y),
-    armShield: armSuppressNextClick,
-    buttonToCode: (button) => buttonToCode(button),
-    log: deps.log,
-  });
-}
 
-/** The gesture, for the event-time readers below. They MUST see the live state synchronously (the click
- *  shield decides inside the click it swallows), which is why it is data they read rather than a step
- *  they wait for. */
-function gestureState(): KeybindGesture | null {
-  return dragDeps?.gesture ?? null;
-}
-
-/** The codes bound to an action right now — the keycap "blue face" state. Injected into `ui.keybind`,
- *  because the bind table is platform state this file happens to know the layout of. */
-export function boundCodes(): Set<string> {
-  const bound = new Set<string>();
-  for (const { action } of KB_ACTIONS) {
-    const code = getBind(action);
-    if (code) bound.add(code);
-  }
-  return bound;
-}
-
-/** Arm the one-shot click shield. schedSelf=false (capture-mode mousedown): cleared by the click shield
- *  when the synthetic click is consumed, or by the global mouseup fallback if none is synthesized.
- *  schedSelf=true (drag release): also schedule a 0ms self-clear — the synthetic click follows
- *  mouseup synchronously and consumes the flag first; the timeout only covers the no-click paths. */
-function armSuppressNextClick(schedSelf: boolean): void {
-  const g = gestureState();
-  if (!g) return;
-  g.shield = true;
-  if (schedSelf) {
-    setTimeout(() => {
-      g.shield = false;
-    }, 0);
-  }
-}
-
-/** The drag RUBBER BAND, as a widget prefab. One layout-only box: its UI_LAYOUT string carries
- *  left/top/width/rotate and is rewritten by `ui.keybind` once per frame while a drag is past its
- *  threshold, so the geometry is DATA (derived from the gesture + the POINTER resource) and the
- *  reconciler paints it. Spawned by the composition root during wiring — spawning is a structural change,
- *  which a system may not make (iron rule 1). */
-export function spawnKeybindLine(world: World): Entity {
-  const line = spawnLayoutBox(world, null, "kb.line", "left:0;top:0;width:0;");
-  // HIDDEN through the widget's own UI_STATE, like every other widget — the layout string carries the
-  // geometry only, so `ui.keybind` rewriting it cannot accidentally reveal the line.
-  setUiVisible(world, line, false);
-  return line;
-}
-
-/** The drag's hover target for `ui.keybind`: the keycap under a point. Only a widget whose action IS a
- *  keycap counts — a drag released over an action chip must not bind the chip's own value as a key. */
-export function keycapAtPoint(x: number, y: number): Entity | null {
-  return keycapAt(x, y)?.entity ?? null;
-}
-
-/** Cancel the drag in progress: clear the gesture and end a rebind capture. `ui.navigation` calls this for
- *  ESC — the ONE decision-maker for that key (see its Escape branch). The device listener in
- *  platform/bind-gesture.ts only neutralizes keyboard defaults while a drag is live; deciding there too is
- *  what made ESC both cancel the drag AND walk up a menu level once the registration order changed. */
-export function cancelKeybindDrag(reason: string, log: (line: string) => void): void {
-  const g = gestureState();
-  if (!g?.drag) return;
-  g.drag = null;
-  g.hover = null;
-  endCapture();
-  log(`KBCAP drag cancelled (${reason})`);
-}
-
-/** The KEYCAP under a point, if any. Only a widget whose action IS a keycap counts: a drag released
- *  over an action chip must not bind the chip's own value as a key. */
-function keycapAt(x: number, y: number): { entity: Entity; code: string } | null {
-  const hit = dragDeps?.hitTest(x, y) ?? null;
-  if (!hit || hit.action !== ACTION_KEYBIND_KEY) return null;
-  return { entity: hit.entity, code: hit.value };
-}
-
-// ===== 2. The key bind gesture =====
-// The gesture's STATE is the KEYBIND_GESTURE resource (ecs/ui/keybind.ts): the drag in progress, the
-// keycap it lit, the live pointer position and the click shield. What the listeners below do NOT do any
-// more is the PRESENTATION — the keycap highlight, the rubber band and the panel redraw are derived from
-// that state once per frame by `ui.keybind`. Their order, their decisions and their synchronous reads
-// are unchanged: they are timing-sensitive click-synthesis handling (see the contract at the top).
-
-// Capture-free drag binding: hold an action chip and drop it onto a keycap — no capture mode
-// needed first. Either mouse button can start; the drag records the initiator — presses/releases
-// of the OTHER button during the drag must be ignored (no interruptions/misbinds). Movement
-// beyond the threshold makes it a drag; a plain click falls through to the native click's
-// select toggle.
-
-/** The key bind panel's two actions are DATA (`data/globals/actions.ts`). This flag is the file's own
- *  "registered once" bit: they are instance-independent (the capture state and the binds are global), so
- *  both settings instances dispatch to the same handlers — registered once, or the second instance would
- *  collide on the id. */
-let keybindActionsReady = false;
-
-function registerKeybindActions(actions: Map<string, UiActionHandler>, log: (line: string) => void): void {
-  if (keybindActionsReady) return;
-  keybindActionsReady = true;
-  onUiAction(actions, ACTION_KEYBIND_CHIP, (value) => {
-    const action = value as BindAction; // the chip's value IS a BindAction (see the spawn loop)
-    log(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
-    if (getCapturing() === action) endCapture();
-    else beginCapture(action);
-  });
-  onUiAction(actions, ACTION_KEYBIND_KEY, (code) => {
-    const selected = getCapturing();
-    if (!selected) return; // Clicking the keyboard with no action selected is a no-op
-    setBind(selected, code);
-    endCapture();
-    log(`KBCAP keycap bind done (${code})`);
-  });
-}
-
-// Global click shield (capture phase: runs before all elements' own click). Swallows every synthetic
-// click while capture/drag is active or the shield is armed — the physical press already completed the
-// binding, so the browser-generated click must not re-trigger chip reselect/keycap pick/back button.
-// Consuming the shield clears it (except during drags, where a drag may outlive one click —
-// preserving the original semantics).
-// ===== 2b. The gesture's DEVICE listeners =====
-// The five `document` listeners that used to sit here (click shield, mouseup = fallback + drag end, wheel
-// block, key capture, drag start) are in `platform/bind-gesture.ts` now: they decide things that can only
-// be decided INSIDE the event, which makes them device-layer code rather than a view's — this file was the
-// last place in the project where a view owned `document` listeners. They are relocated, not refactored
-// (not one condition or order changed), and they are installed by `bindKeybindDrag` below with the two
-// things only this file can answer: which action ids a chip/keycap carries, and the hit test that finds one.
-
-// ===== 3. The keyboard layout table =====
-// The visual keyboard's codes, widths and grid areas are DATA now (`data/globals/keylayout.ts`), and so
-// are the bind panel's rows with their i18n keys (`data/globals/binds.ts`). This file composes them into
-// keycaps and chips; it holds no table of its own.
 
 // The pack list's CAPACITY is data too: `PACK_LIST_CAPACITY` (data/globals/paint.ts).
 
@@ -314,7 +141,7 @@ export interface SettingsPanels {
    *  page owns the way into it, so a build without that plugin has no entry to a page nothing fills.
    *  Deliberately NOT part of `entities`: that map is the painter's ("visible when UI_MODAL.settings is
    *  this key"), and a key there would fight the plugin for the same flag. */
-  readonly keybindEntry: Entity;
+  readonly keybindEntry: Entity | null;
 }
 
 // Shared settings panel: FPS cap slider + vsync toggle + language collection + resource pack
@@ -330,7 +157,6 @@ export function buildSettingsPanel(
   opts: SettingsCallbacks & { onBack: () => void },
 ): SettingsPanels {
   const actions = world.resource(UI_ACTIONS);
-  registerKeybindActions(actions, opts.log);
 
   const panels: Record<SettingsPanelId, Entity> = {
     settings: spawnPanel(world, root, "settings.panel", { hidden: true }),
@@ -470,104 +296,22 @@ export function buildSettingsPanel(
     });
   };
 
-  // --- Key binds: entry button + sub-panel (action chips + visual keyboard) ---
-  const keybindEntry = spawnButton(world, panels.settings, "settings.btn", `${id}.openKeybind`, "", "settings.keybinds");
-  // Invisible until `ui.keybind` runs: the tab is the PLUGIN's, so the way in is its to hand out.
-  setUiVisible(world, keybindEntry, false);
-  onUiAction(actions, `${id}.openKeybind`, () => show("keybind"));
-
-  // Key bind sub-panel: action chips + visual keyboard (full 104-key ANSI layout, fixed QWERTY
-  // reference geometry = KeyboardEvent.code physical positions). Interaction: click an action
-  // chip to select -> click a keyboard key to bind; conflict preemption handled by setBind.
-  spawnLabel(world, panels.keybind, "kb.title", "settings.keybinds");
-  spawnLabel(world, panels.keybind, "kb.hint", "bind.hint");
-  const kbFlex = spawnPanel(world, panels.keybind, "kb.flex");
-  const kbBoard = spawnPanel(world, kbFlex, "kb.board");
-  const kbSide = spawnPanel(world, kbFlex, "kb.side");
-  spawnLabel(world, kbSide, "kb.sideTitle", "settings.bindOptions");
-  const chipList = spawnPanel(world, kbSide, "kb.chips");
-
-  // Keycap legends: prefer the OS's actual layout (Keyboard Map API), fall back to QWERTY
-  // reference letters on failure. Positions are always correct (code IS the physical position).
-  let layoutLegends: Map<string, string> | null = null;
-  const legendFor = (code: string): string => {
-    const real = layoutLegends?.get(code);
-    if (real) return real.length === 1 ? real.toUpperCase() : real;
-    return codeDisplayName(code);
-  };
-
-  // What `ui.keybind` re-derives every frame from the bind table: one spec per panel INSTANCE, so the
-  // pause menu and the main menu show the same thing by construction (they render from the same data,
-  // not from two copies of it).
-  const chipSpecs: KeybindChip[] = [];
-  const capSpecs: KeybindKeycap[] = [];
-  for (const { action, labelKey } of KB_ACTIONS) {
-    const entity = spawnButton(world, chipList, "kb.chip", ACTION_KEYBIND_CHIP, action, "");
-    chipSpecs.push({
-      action,
-      entity,
-      labelKey,
-      // Selected: the bare name (a KEY the reconciler re-resolves). Otherwise the name plus the current
-      // key — a literal, because it carries a value.
-      format: (code) => `${t(labelKey)} · ${code ? codeDisplayName(code) : t("bind.unbound")}`,
-    });
-  }
-
-  /** code -> the keycap and its legend. The legend is a separate widget because the keycap is a
-   *  `<button>` and its face is a `<span>` (the flex/grid centring relies on that). */
-  const addKeycap = (parent: Entity, layout: string, code: string): void => {
-    const key = spawnGridKey(world, parent, "kb.keycap", layout, ACTION_KEYBIND_KEY, code);
-    const legend = spawnLabel(world, key, "kb.keyLegend", "", { raw: true });
-    capSpecs.push({ code, key, legend, legendText: () => legendFor(code) });
-  };
-
-  for (const row of KB_ROWS) {
-    const rowEl = spawnPanel(world, kbBoard, "kb.row");
-    for (const [code, unit] of row) {
-      const flex = `flex:${unit} ${unit} 0%;min-width:0;`;
-      if (code === "") {
-        // An empty cell: it is a ROW CELL with no key on it, so it uses the row-cell recipe and takes
-        // its width from the layout table (the layout string always comes after the recipe, so the
-        // exact flex wins over the recipe's default).
-        spawnLayoutBox(world, rowEl, "kb.key", flex);
-        continue;
-      }
-      addKeycap(rowEl, `${flex}height:1.8rem;`, code);
-    }
-  }
-  const kbBottom = spawnPanel(world, kbBoard, "kb.bottom");
-  const towerGrid = spawnPanel(world, kbBottom, "kb.tower");
-  for (const cap of TOWER_GRID) addKeycap(towerGrid, `grid-area:${cap.area};`, cap.code);
-  const numGrid = spawnPanel(world, kbBottom, "kb.numpad");
-  for (const cap of NUM_GRID) addKeycap(numGrid, `grid-area:${cap.area};`, cap.code);
-  const mouseGrid = spawnPanel(world, kbBottom, "kb.mouse");
-  for (const cap of MOUSE_GRID) addKeycap(mouseGrid, `grid-area:${cap.area};`, cap.code);
-
-  spawnButton(world, panels.keybind, "settings.btn", `${id}.keybindBack`, "", "menu.back");
-  onUiAction(actions, `${id}.keybindBack`, () => {
-    endCapture(); // Leaving the panel cancels an unfinished selection
-    show("settings");
-  });
-
-  // This instance's chips and keycaps are now DATA `ui.keybind` renders every frame. Registering the
-  // spec replaces the old `keybindRenderers.add(renderBinds)` + `renderAllPanels(...)` fan-out: a bind
-  // change, a language switch and the OS layout arriving asynchronously all land on the next frame with
-  // no call site to remember.
-  registerKeybindPanel({ chips: chipSpecs, keycaps: capSpecs });
-
-  // Async fetch of the OS keyboard layout for legends (silent fallback to the QWERTY reference)
-  void (async () => {
-    try {
-      const kbApi = (navigator as unknown as { keyboard?: { getLayoutMap?: () => Promise<Map<string, string>> } }).keyboard;
-      if (kbApi?.getLayoutMap) {
-        layoutLegends = await kbApi.getLayoutMap();
-      }
-    } catch {
-      /* Fall back to reference letters */
-    }
-  })();
-
-  // (The physical key/mouse capture listeners are module-level — see the top of this file.)
+  // --- Key binds: the tab belongs to the `ui-keybind` PLUGIN, widgets included (P1.26). The settings
+  //     panel asks for it through the KEYBIND_TAB resource, which that plugin's setup inserts; a build
+  //     without the plugin has no token, so there is no entry button and no panel to fill — and the empty
+  //     container above stays empty and hidden. Nothing in this file knows how the page is drawn. ---
+  const keybindTab = world.hasResource(KEYBIND_TAB)
+    ? world.resource(KEYBIND_TAB)({
+        world,
+        settingsPanel: panels.settings,
+        panel: panels.keybind,
+        id,
+        show: (target) => show(target),
+        log: opts.log,
+      })
+    : null;
+  // `ui.keybind` shows this while the plugin runs (it is spawned hidden by the tab builder).
+  const keybindEntry = keybindTab?.entry ?? null;
 
   // --- UI scale: small/normal/large/auto (MC-style GUI Scale) ---
   const scaleLabel = spawnLabel(world, panels.settings, "settings.label", "", { raw: true });
@@ -761,7 +505,7 @@ export class Menu {
     return this.panels.entities;
   }
   /** The key bind tab's entry button (see SettingsPanels.keybindEntry): the root hands it to `ui.keybind`. */
-  get keybindEntryEntity(): Entity {
+  get keybindEntryEntity(): Entity | null {
     return this.panels.keybindEntry;
   }
 }

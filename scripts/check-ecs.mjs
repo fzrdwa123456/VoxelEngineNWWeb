@@ -1349,7 +1349,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   assert(/spawnLabel\(/.test(readSource("src/plugins/ui-debug/systems/picker.ts")), "the picker composes its own labels");
   assert(/setUiVisible\(/.test(readSource("src/plugins/ui-debug/systems/picker.ts")), "…and shows/hides them as data");
   assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the settings panel composes buttons");
-  assert(/spawnGridKey\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the visual keyboard composes keycaps");
+  assert(/spawnGridKey\(/.test(readSource("src/plugins/ui-keybind/views/keybind.ts")), "the visual keyboard composes keycaps (in the plugin that owns the page)");
   assert(/onUiAction\(/.test(readSource("src/plugins/ui/views/mainmenu.ts")), "the main menu dispatches actions");
   assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/inventory.ts")), "the inventory VIEW composes slot buttons");
   assert(/setUiImage\(/.test(readSource("src/plugins/ui/systems/inventory.ts")), "…and the SYSTEM fills icon slots as data");
@@ -2290,7 +2290,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
     // The key bind gestures fire on ordinary clicks, so they are probes too (a click must not write a
     // line into a log whose switch is off).
     ["src/plugins/input/bind-gesture.ts", /`KBCAP mousedown/, "KBCAP "],
-    ["src/plugins/ui/views/menu.ts", /`KBCAP click interactive button/, "KBCAP "],
+    ["src/plugins/ui-keybind/views/keybind.ts", /`KBCAP click interactive button/, "KBCAP "],
     ["src/plugins/player/systems/input.ts", /"RAWINPUT takeover \(movementX suspended\)"/, "RAWINPUT takeover"],
     ["src/plugins/player/systems/input.ts", /"RAWINPUT hands back to movementX"/, "RAWINPUT hands back"],
   ]) {
@@ -3520,8 +3520,14 @@ check("the plugin system: extension points, the registry, the install and the ma
     "the ui-keybind plugin declares ui.keybind");
   assert(!/name: "ui\.keybind"/.test(readSource("src/plugins/ui/index.ts")),
     "…and the ui plugin does not");
-  assert(/keybindEntry/.test(readSource("src/plugins/ui/views/menu.ts")),
-    "the view spawns the entry button the plugin hands out");
+  // P1.26: the tab's WIDGETS are the plugin's too — the settings panel only ASKS for them (through the
+  // KEYBIND_TAB token) and keeps the entry entity it gets back, so `ui` knows nothing about keycaps.
+  assert(/KEYBIND_TAB/.test(readSource("src/plugins/ui/views/menu.ts")),
+    "the settings panel asks the plugin for the tab");
+  assert(/spawnKeybindPanel/.test(readSource("src/plugins/ui-keybind/views/keybind.ts")),
+    "…and the plugin's own view builds the chips, the keycaps and the entry button");
+  assert(!/keycap|spawnGridKey/.test(stripComments(readSource("src/plugins/ui/views/menu.ts"))),
+    "…so the ui plugin no longer mentions a keycap at all");
   // THE TRAP THIS SHIPPED WITH ONCE, pinned so it cannot come back: showing the entries from the
   // CONSTRUCTOR is a no-op — the root fills `deps.entries` only after BOTH menus exist, which is later —
   // and the binding page then had no way in at all. The call belongs in step(), i.e. once per ui frame.

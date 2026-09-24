@@ -1010,6 +1010,22 @@ Still outstanding:
   chips/keycaps/keycap-hit-test + the drag's arm paths in `views/menu.ts`) into the plugin's own view, which
   is what would let the ui plugin drop the widget prefabs it only serves that page; and the other two
   optional surfaces (the toast, the backpack).
+- **P1.26 — the key bind page's WIDGETS moved too.** `DONE`. `plugins/ui-keybind/views/keybind.ts` now owns
+  everything the page is made of: the action chips, the visual keyboard (chips, keycaps, legends, the
+  OS-layout fetch), the ENTRY button, the two mouse-button arm paths with the click shield's arming, the
+  keycap hit test the device layer asks for, and the rubber-band prefab. `plugins/ui/views/menu.ts` keeps
+  the settings LAYOUT and ASKS for the tab: the mount shape lives in a data module
+  (`data/globals/keybind-tab.ts`) so that neither plugin has to import the other, `plugins/ui-keybind`'s
+  `setup` inserts its builder under the `KEYBIND_TAB` token (install time, i.e. before the views are wired),
+  and `buildSettingsPanel` calls it only when the token is there. So a build without the plugin has no tab,
+  no entry button and no rubber band — and `ui` no longer mentions a keycap at all (the gate asserts it, the
+  same way it asserts the KBCAP probe now lives in the plugin). `ui-keybind` declares `["ui", "input"]`: the
+  bind TABLE is `plugins/input/keybinds.ts` and this view reads it to draw the chips.
+  STILL OPEN, and worth knowing before the next surface: a RUNTIME install (F9) cannot add the tab if the
+  plugin was OFF at boot — the settings layout builds its tabs once during wiring, so there is no button to
+  show. Uninstalling and re-installing a plugin that was ON at boot works (the button exists, hidden). The
+  fix is a "tab host" the plugin fills on install (one per menu); until then the F9 demo needs the plugin
+  enabled at boot. The toast and the backpack are still in `ui`.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
