@@ -3557,7 +3557,20 @@ check("the plugin system: extension points, the registry, the install and the ma
   assert(/m\.page\.dispose\?\.\(\)/.test(pagesSys),
     "…and unmount disposes the page it MOUNTED, not a lookup in the withdrawn contributions");
   assert(/rowContainer/.test(readSource("src/plugins/ui/views/menu.ts")),
-    "the view owns WHERE page rows go (a container, not the end of the settings list)");
+    "the view owns WHERE page rows go (a container, not the end of the settings list)");
+  // A PAGE IS BUILT ON EVERY MOUNT, so every action a page view registers must sit behind a `has` guard
+  // (the table refuses a duplicate id, and the throw lands MID-BUILD: the second mount of the key bind page
+  // died on `pause.keybindBack`, after its widgets existed and before its spec was registered, which is why
+  // the page opened with an unwritten keyboard).
+  const kbViewSrc = stripComments(readSource("src/plugins/ui-keybind/views/keybind.ts"));
+  assert(/if \(!actions\.has\(open\)\) onUiAction\(/.test(kbViewSrc),
+    "the page's ENTRY action is registered once (the table refuses a duplicate id)");
+  assert(/if \(!actions\.has\(back\)\)/.test(kbViewSrc),
+    "…and so is its Back action (this is the one that threw mid-build)");
+  assert(/if \(keybindActionsReady\) return;/.test(kbViewSrc),
+    "…and the chip/keycap actions keep their one-shot flag");
+  assert(kbViewSrc.indexOf(".keybindBack") > kbViewSrc.indexOf("registerKeybindPanel({ chips: chipSpecs"),
+    "the spec is registered BEFORE the Back button: a throw after it must not leave a page that looks built");
   // TWO OPTIONAL PLUGINS MAY NOT NAME EACH OTHER (P1.27): the order between them is the CORE's slot anchors,
   // because a name is a dangling reference as soon as the plugin that owns it is disabled.
   const OPTIONAL_SYSTEMS = ["ui.picker", "ui.toast", "ui.keybind"];

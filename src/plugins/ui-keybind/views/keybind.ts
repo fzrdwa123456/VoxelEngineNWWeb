@@ -189,7 +189,8 @@ export function spawnKeybindPanel(mount: KeybindTabMount): KeybindTabSurfaces {
   if (mount.entry === undefined) {
     // Invisible until `ui.keybind` runs: the tab is the PLUGIN's, so the way in is its to hand out.
     setUiVisible(world, entry, false);
-    onUiAction(actions, `${id}.openKeybind`, () => mount.show("keybind"));
+    const open = `${id}.openKeybind`;
+    if (!actions.has(open)) onUiAction(actions, open, () => mount.show("keybind"));
   }
 
   // Key bind sub-panel: action chips + visual keyboard (full 104-key ANSI layout, fixed QWERTY
@@ -250,6 +251,12 @@ export function spawnKeybindPanel(mount: KeybindTabMount): KeybindTabSurfaces {
       addKeycap(rowEl, `${flex}height:1.8rem;`, code);
     }
   }
+  // Registered HERE, as soon as the widgets exist: `ui.keybind` renders FROM this spec, so a page that is
+  // built but not registered shows an empty-looking keyboard. (It used to be at the very end of the build,
+  // after the Back button — one throw above it left the page exactly like that.)
+  // Registering the spec replaces the old `keybindRenderers.add(renderBinds)` + `renderAllPanels(...)`
+  // fan-out: a bind change, a language switch and the OS layout arriving asynchronously all land on the next
+  // frame with no call site to remember. `dispose` clears it again on unmount.
   const kbBottom = spawnPanel(world, kbBoard, "kb.bottom");
   const towerGrid = spawnPanel(world, kbBottom, "kb.tower");
   for (const cap of TOWER_GRID) addKeycap(towerGrid, `grid-area:${cap.area};`, cap.code);
@@ -257,18 +264,20 @@ export function spawnKeybindPanel(mount: KeybindTabMount): KeybindTabSurfaces {
   for (const cap of NUM_GRID) addKeycap(numGrid, `grid-area:${cap.area};`, cap.code);
   const mouseGrid = spawnPanel(world, kbBottom, "kb.mouse");
   for (const cap of MOUSE_GRID) addKeycap(mouseGrid, `grid-area:${cap.area};`, cap.code);
+  registerKeybindPanel({ chips: chipSpecs, keycaps: capSpecs });
 
   spawnButton(world, mount.panel, "settings.btn", `${id}.keybindBack`, "", "menu.back");
-  onUiAction(actions, `${id}.keybindBack`, () => {
-    endCapture(); // Leaving the panel cancels an unfinished selection
-    mount.show("settings");
-  });
-
-  // This instance's chips and keycaps are now DATA `ui.keybind` renders every frame. Registering the
-  // spec replaces the old `keybindRenderers.add(renderBinds)` + `renderAllPanels(...)` fan-out: a bind
-  // change, a language switch and the OS layout arriving asynchronously all land on the next frame with
-  // no call site to remember.
-  registerKeybindPanel({ chips: chipSpecs, keycaps: capSpecs });
+  // ONCE, like every other global registration in this view: `build` runs on EVERY mount, and the action
+  // table refuses a duplicate id. Registering this again threw mid-build — after the chips and keycaps were
+  // spawned and BEFORE the spec below was registered — so the page opened with an unwritten keyboard (no
+  // legends, no highlights). The handler closes over no panel instance, so one registration is its lifetime.
+  const back = `${id}.keybindBack`;
+  if (!actions.has(back)) {
+    onUiAction(actions, back, () => {
+      endCapture(); // Leaving the panel cancels an unfinished selection
+      mount.show("settings");
+    });
+  }
 
   // Async fetch of the OS keyboard layout for legends (silent fallback to the QWERTY reference)
   void (async () => {
