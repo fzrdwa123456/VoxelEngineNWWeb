@@ -281,8 +281,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
   const c = theme.color;
   const s = theme.space;
   /** The modal panel face, in the three widths the settings surfaces use */
+  // ===== LOUD RED, ON PURPOSE (look-and-see test) =====
+  // The settings BOARD (`settings.panel` / `settings.panelWide` / `settings.panelXl`, and the pause menu's main
+  // panel) is what the user wanted to identify on screen. Every OTHER panel keeps `menuPanel`; change this ONE
+  // token back to `c.menuPanel` to undo it.
+  const settingsPanelBg = "#c0392b";
   const settingsPanel = (width: string): string =>
-    `width:${width};background:${c.menuPanel};border-radius:0.625rem;padding:1.25rem;` +
+    `width:${width};background:${settingsPanelBg};border-radius:0.625rem;padding:1.25rem;` +
     `text-align:center;color:${c.text};font:1rem ${theme.font.ui};box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);`;
   switch (recipe) {
     case "text.label":
