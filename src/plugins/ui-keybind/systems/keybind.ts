@@ -79,12 +79,16 @@ export class UiKeybindSystem {
     private readonly deps: KeybindDeps,
   ) {
     this.paint = world.resource(UI_PAINT).keybind;
-    this.showEntries();
   }
 
   /** The way IN to the page: one button per settings panel, spawned hidden by the view. It is written on
    *  every frame (the reconciler diffs it), because the ONLY question it answers is "is this plugin
-   *  installed" — and after a hot uninstall nobody would be left to answer it. */
+   *  installed" — and after a hot uninstall nobody would be left to answer it.
+   *
+   *  IT IS CALLED FROM step(), NEVER FROM THE CONSTRUCTOR, and that is load-bearing: the composition root
+   *  fills `deps.entries` only once BOTH menus exist (their views spawn the buttons while they build the
+   *  settings panel), while this system is constructed earlier. Showing them once from the constructor was a
+   *  no-op over an empty array, and the binding page then had NO way in — from either menu. */
   private showEntries(): void {
     for (const entry of this.deps.entries) setUiVisible(this.world, entry, true);
   }
@@ -102,6 +106,9 @@ export class UiKeybindSystem {
   /** ui lane, once per frame: derive every panel's text/state from the bind table, then apply the
    *  gesture's presentation (the hover highlight and the rubber band). */
   step(): void {
+    // The way IN first: these buttons are spawned hidden, and this system is the only thing that shows them
+    // (see the note on showEntries — it has to be here, not in the constructor).
+    this.showEntries();
     // The queued REBIND decisions first: they were taken inside the events of the last frame, and this is
     // the lane that owns the bind table.
     this.applyRebinds();

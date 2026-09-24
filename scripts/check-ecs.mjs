@@ -3522,6 +3522,14 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and the ui plugin does not");
   assert(/keybindEntry/.test(readSource("src/plugins/ui/views/menu.ts")),
     "the view spawns the entry button the plugin hands out");
+  // THE TRAP THIS SHIPPED WITH ONCE, pinned so it cannot come back: showing the entries from the
+  // CONSTRUCTOR is a no-op — the root fills `deps.entries` only after BOTH menus exist, which is later —
+  // and the binding page then had no way in at all. The call belongs in step(), i.e. once per ui frame.
+  const kbSys = stripComments(readSource("src/plugins/ui-keybind/systems/keybind.ts"));
+  const kbCtor = kbSys.slice(kbSys.indexOf("constructor("), kbSys.indexOf("constructor(") + 400);
+  assert(!kbCtor.includes("this.showEntries()"), "the entry buttons are NOT shown from the constructor");
+  assert(/step\(\): void \{[\s\S]{0,400}this\.showEntries\(\)/.test(kbSys),
+    "…they are shown from step(), so the tab appears on the next ui frame (and after a hot install)");
   assert(contribute(load("plugins/ui-debug/index.js")
     .createUiDebugPlugin({ uiPicker: { step: () => {}, close: () => {} } }))
     .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
