@@ -171,7 +171,7 @@ settings, blocks, languages, uiActions); the UI's existing action/source tables 
 **HOT-PLUG (P1.24).** The boot is not the only moment a plugin can arrive. `core/plugin/hotplug.ts` is
 `installPlugins` without the restart: `hotInstall` runs the same three phases (`setup` contributes, the
 systems join the schedule, `start`), `hotUninstall` stops the plugin, withdraws its contributions AND undoes
-them (its systems leave the schedule, its resource tokens leave the world). Both are BARRIER-ONLY and the
+them (its systems leave the schedule; the resources it CLAIMED stay — P1.28). Both are BARRIER-ONLY and the
 door is the `HotPlugPlugin` COMMAND — installing a plugin re-resolves the schedule, so it may not happen
 under a running system. The rule that decides what can be plugged in: **a plugin is hot-pluggable exactly
 when its `setup` alone is enough to install it** (so it declares its own systems and inserts its own resource;

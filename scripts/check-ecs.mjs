@@ -3765,6 +3765,7 @@ check("the plugin system: extension points, the registry, the install and the ma
 // ===== hot-plug (P1.24) =====
 check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no trace", () => {
   const H = load("core/plugin/hotplug.js");
+  const { defineResource } = load("core/world.js");
   const { ExtensionRegistry } = load("core/extension/registry.js");
   const { definePlugin } = load("core/plugin/descriptor.js");
   const S = load("core/extension/slots.js");
@@ -3772,14 +3773,17 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
   const registry = new ExtensionRegistry();
   let installed = ["base"];
   let ran = 0;
+  // A REAL resource token: the claim/uninstall behaviour is what this check is about.
+  const SURFACE_STATE = defineResource("checkSurfaceState");
   const surface = definePlugin({
     id: "surface",
     deps: ["base"],
     setup: (api) => {
-      api.contribute(S.SLOT_RESOURCES, [{ name: "surfaceState" }]);
+      api.contribute(S.SLOT_RESOURCES, [SURFACE_STATE]);
       api.system({ name: "surface.step", stage: "ui", run: () => { ran++; } });
     },
   });
+  world.insertResource(SURFACE_STATE, { n: 1 });
   const bomb = definePlugin({
     id: "bomb",
     deps: [],
@@ -3821,7 +3825,11 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
   equal(gone.ok, true, "it uninstalls again");
   equal(world.systemOrder("ui").length, 0, "…its system left the schedule");
   equal(registry.list(S.SLOT_SYSTEMS).length, 0, "…and the registry has no trace of it");
-  equal(registry.list(S.SLOT_RESOURCES).length, 0, "…nor of the resource it owned");
+  equal(registry.list(S.SLOT_RESOURCES).length, 0, "…nor of the CLAIM it filed in the registry");
+  // P1.28: the OBJECT stays. The resource table is the ROOT's, a plugin's contribution is a claim on it, and
+  // core commands read these tokens unconditionally — dropping one on uninstall broke every later toast.
+  equal(world.hasResource(SURFACE_STATE), true, "…but the resource itself STAYS in the world");
+  equal(world.resource(SURFACE_STATE).n, 1, "…still the same object, untouched");
   world.renderUi();
   equal(ran, 1, "…and it no longer runs");
 
@@ -3838,6 +3846,8 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   assert(/const uiDebugPlugin = createUiDebugPlugin\(\{ uiPicker \}\)/.test(bootSrc),
     "the root builds the debug plugin from the factory the catalogue lists");
+  assert(!/removeResource/.test(readSource("src/core/plugin/hotplug.ts")),
+    "the uninstall path does not remove resources (P1.28: it broke core commands that read them)");
   assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin, uiToastPlugin, uiKeybindPlugin\]/.test(bootSrc),
     "…and catalogues that same value, in the lane order of the optional surfaces");
   assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");

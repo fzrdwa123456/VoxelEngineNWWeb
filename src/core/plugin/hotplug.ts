@@ -23,9 +23,9 @@
 //   * uninstall a plugin another INSTALLED plugin declares as a dep — that would leave a reader of state
 //     nobody produces, which is exactly what the reverse-dependency guard is for;
 //   * leave a trace of a failed install: the contributions are withdrawn and the systems removed again.
-import { defineResource, type Resource } from "../data/resource";
+import { defineResource } from "../data/resource";
 import type { ExtensionRegistry } from "../extension/registry";
-import { SLOT_RESOURCES, SLOT_SYSTEMS } from "../extension/slots";
+import { SLOT_SYSTEMS } from "../extension/slots";
 import type { SystemDef } from "../flow/schedule";
 import type { World } from "../world";
 import { createPluginApi } from "./api";
@@ -131,7 +131,7 @@ export function hotInstall(host: HotPlugHost, id: string): HotPlugOutcome {
 }
 
 /** Uninstall ONE plugin now: stop it, withdraw its contributions, and undo what they stood for (its
- *  systems leave the schedule; the resource tokens it owned leave the world). */
+ *  systems leave the schedule — and the RESOURCES it claimed stay in the world, see the note at the loop). */
 export function hotUninstall(host: HotPlugHost, id: string): HotPlugOutcome {
   const { world, registry } = host;
   if (!host.installed().includes(id)) return failed(id, "uninstall", "not installed");
@@ -156,14 +156,21 @@ export function hotUninstall(host: HotPlugHost, id: string): HotPlugOutcome {
     }
   }
 
+  // WHAT AN UNINSTALL UNDOES, and what it deliberately does NOT (fixed in P1.28):
+  //
+  //   * the SYSTEMS it declared leave the schedule — that IS the surface going away;
+  //   * the RESOURCES it claimed STAY in the world. They were inserted by the composition root's resource
+  //     table (boot) or by the plugin's own `setup` when the world had not got them, and the token is a
+  //     CLAIM on that object, not ownership of its existence. Removing them was a real defect: the CORE reads
+  //     some of these tokens unconditionally (`ShowToast` -> TOAST), so after uninstalling `ui-toast` every
+  //     later toast command threw `World.resource: "toast" was never registered` — a frame error per call,
+  //     forever. "The surface is off" must never mean "the engine is broken". Keeping the object also makes
+  //     a re-install a no-op on the world (`setup`'s `hasResource` guard), i.e. boot and hot-plug stay one
+  //     code path.
   const withdrawn = registry.withdraw(id);
   const systems: string[] = [];
   for (const entry of withdrawn) {
-    if (entry.point === SLOT_SYSTEMS.name) {
-      if (world.hotRemoveSystem(entry.id)) systems.push(entry.id);
-    } else if (entry.point === SLOT_RESOURCES.name) {
-      world.removeResource(entry.value as Resource<unknown>);
-    }
+    if (entry.point === SLOT_SYSTEMS.name && world.hotRemoveSystem(entry.id)) systems.push(entry.id);
   }
   host.markUninstalled(id);
   host.log(`PLUGIN ${id} HOT-UNINSTALLED: ${systems.length} system(s) left the schedule [${systems.join(", ")}]`);

@@ -173,9 +173,10 @@ export class World {
     return removed;
   }
 
-  /** Drop a resource (the uninstall path). Any system left READING it now throws on `world.resource(...)`,
-   *  which is the honest failure: nothing produces that state any more, and a silent stale copy would be
-   *  worse. The reverse-dependency guard in `core/plugin/hotplug.ts` is what keeps that from happening. */
+  /** Drop a resource. NOT used by the hot-plug uninstall path any more (P1.28): a resource the root's table
+   *  inserted is read by CORE commands too (`ShowToast` -> TOAST), so dropping it on uninstall broke the
+   *  engine rather than the surface — see the note at the loop in `core/plugin/hotplug.ts`. This stays for a
+   *  plugin that genuinely created an object at runtime and owns its lifetime. */
   removeResource<T>(resource: Resource<T>): boolean {
     return this.resources.delete(resource as Resource<unknown>);
   }
