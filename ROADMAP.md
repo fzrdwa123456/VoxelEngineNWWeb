@@ -1065,6 +1065,19 @@ Still outstanding:
   with the hotbar — so "turn the backpack off" must decide whether the hotbar leaves with it. The likely
   shape: keep the hotbar+crosshair in `ui.hud` (they are the gameplay HUD) and move the backpack panel +
   `ui.inventory`'s reconcile into `plugins/ui-backpack`, with `ui.inventory`'s icon writes splitting in two.
+- **P1.28 — an uninstall must not remove the resources a plugin CLAIMED.** `DONE`. The F10 test log showed
+  it as a real defect: after `PLUGIN ui-toast HOT-UNINSTALLED`, EVERY later toast command threw
+  `frame error: World.resource: "toast" was never registered` (12 of them, one per multiplayer-button click),
+  while the same click before the uninstall was clean. `hotUninstall` had treated a `SLOT_RESOURCES`
+  contribution as ownership of the object and called `world.removeResource`. It is only a CLAIM: the root's
+  resource table inserts those objects (or the plugin's own `setup` does, guarded by `hasResource`), and CORE
+  code reads some of them unconditionally — `ShowToast` reads TOAST whatever plugin is installed — so removing
+  one turned "this surface is off" into "the engine is broken". The uninstall path now takes only the SYSTEMS
+  out of the schedule and withdraws the registry claims; the objects stay, which also keeps boot and hot-plug
+  on one code path (`setup`'s guard finds the object and re-claims it). Pinned twice by the gate. NOT fixed,
+  because it cannot be: the feedback toast for `ui-toast`'s OWN uninstall is never shown — its painter is what
+  was just removed; the `HOT-UNINSTALLED` log line is the trace. Same reasoning applies to any future plugin
+  whose resource a core command reads.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
