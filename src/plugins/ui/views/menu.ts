@@ -310,6 +310,11 @@ export interface SettingsPanels {
   hideAll(): void;
   /** The four panel widgets, for the system that paints modal visibility (ui.navigation). */
   readonly entities: Readonly<Record<SettingsPanelId, Entity>>;
+  /** The "key binds" ENTRY button, spawned HIDDEN and shown by `ui.keybind` — the plugin that owns the
+   *  page owns the way into it, so a build without that plugin has no entry to a page nothing fills.
+   *  Deliberately NOT part of `entities`: that map is the painter's ("visible when UI_MODAL.settings is
+   *  this key"), and a key there would fight the plugin for the same flag. */
+  readonly keybindEntry: Entity;
 }
 
 // Shared settings panel: FPS cap slider + vsync toggle + language collection + resource pack
@@ -466,7 +471,9 @@ export function buildSettingsPanel(
   };
 
   // --- Key binds: entry button + sub-panel (action chips + visual keyboard) ---
-  spawnButton(world, panels.settings, "settings.btn", `${id}.openKeybind`, "", "settings.keybinds");
+  const keybindEntry = spawnButton(world, panels.settings, "settings.btn", `${id}.openKeybind`, "", "settings.keybinds");
+  // Invisible until `ui.keybind` runs: the tab is the PLUGIN's, so the way in is its to hand out.
+  setUiVisible(world, keybindEntry, false);
   onUiAction(actions, `${id}.openKeybind`, () => show("keybind"));
 
   // Key bind sub-panel: action chips + visual keyboard (full 104-key ANSI layout, fixed QWERTY
@@ -653,6 +660,7 @@ export function buildSettingsPanel(
     show,
     hideAll,
     entities: panels,
+    keybindEntry,
   };
 }
 
@@ -751,5 +759,9 @@ export class Menu {
   }
   get panelEntities(): Readonly<Record<SettingsPanelId, Entity>> {
     return this.panels.entities;
+  }
+  /** The key bind tab's entry button (see SettingsPanels.keybindEntry): the root hands it to `ui.keybind`. */
+  get keybindEntryEntity(): Entity {
+    return this.panels.keybindEntry;
   }
 }

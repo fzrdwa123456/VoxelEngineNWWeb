@@ -27,7 +27,9 @@ import { UI_BINDING_ACCESS, UiBindingSystem } from "../plugins/ui/systems/bindin
 import { BLOCK_OUTLINE, CAMERA3D, CANVAS_HOST, CHUNK_MATERIAL, CHUNK_MESHES, ICON_BAKE, MENU_BACKGROUND, PERF_SAMPLER, RENDERER3D, SCENE3D, UI_MOUNT } from "../data/globals/gfx";
 import { createBlockOutline, createChunkMaterial, createChunkMeshCache, createIconBake, createMenuBackground, createUiMount } from "../host/browser/presentation";
 import { createKeybindGesture, KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
-import { UI_KEYBIND_ACCESS, UiKeybindSystem } from "../plugins/ui/systems/keybind";
+// The key bind PAGE is its own plugin too (P1.25), and hot-pluggable like the debug surface: the factory
+// below is called once, and the value goes into both the boot list and the runtime catalogue.
+import { createKeybindSystem, createUiKeybindPlugin } from "../plugins/ui-keybind";
 import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // The F3/F4 DEBUG surface is its own plugin, and it is HOT-PLUGGABLE: the factory is called further down with
 // the instance the root constructs, and that ONE value goes into both the boot's plugin list and the runtime
@@ -35,6 +37,7 @@ import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
 import type { Plugin } from "../core/plugin/descriptor";
+import type { Entity } from "../core/world";
 import { UI_TOAST_ACCESS, UiToastSystem } from "../plugins/ui/systems/toast";
 import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loading";
 import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
@@ -89,7 +92,6 @@ import {
   createBindingSystem,
   createToastSystem,
   createLoadingSystem,
-  createKeybindSystem,
   createInventorySystem,
   createHudSystem,
   createNavigationSystem,
@@ -464,6 +466,9 @@ const uiLoading = createLoadingSystem(world, loadingScreen);
 // with the platform reads injected so this layer stays free of platform imports (and so the gate can drive
 // it with fakes). `line` is the rubber-band WIDGET the view only spawns — the system writes its geometry.
 const keybindLine = spawnKeybindLine(world);
+// The key bind tab's entry buttons, one per settings panel: the VIEW spawns them hidden and `ui.keybind`
+// shows them, so this is filled once both menus exist (further down) and handed over by reference.
+const keybindEntries: Entity[] = [];
 const uiKeybind = createKeybindSystem(world, {
   boundCodes,
   capturing: getCapturing,
@@ -474,6 +479,7 @@ const uiKeybind = createKeybindSystem(world, {
   endCapture,
   log: logDebug,
   line: keybindLine,
+  entries: keybindEntries,
   keycapAt: keycapAtPoint,
 });
 // The key bind drag asks the UI SYSTEM what is under the cursor: only it owns the elements (the
@@ -567,7 +573,8 @@ const { input, snapshot, controller, movement, collision, interaction } = player
 // system, because that is the property that makes it hot-pluggable at all. It is the SAME value the boot
 // installs below, so the boot path and the runtime path cannot drift apart.
 const uiDebugPlugin = createUiDebugPlugin({ uiPicker });
-const hotCatalog: readonly Plugin[] = [uiDebugPlugin];
+const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind });
+const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiKeybindPlugin];
 const livePlugins = new Set<string>();
 const hotHost: HotPlugHost = {
   world,
@@ -596,6 +603,7 @@ const PLUGINS = [
   createDiagnosticsPlugin(world),
   uiPlugin,
   uiDebugPlugin,
+  uiKeybindPlugin,
   inputPlugin,
 ];
 const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
@@ -942,6 +950,8 @@ navTrees = {
   mainPanels: mainMenu.panelEntities,
   inventoryPanel: inv.panelEntity,
 };
+// Both menus exist now, so `ui.keybind` gets the two ways in to its page (it shows them while it runs).
+keybindEntries.push(menu.keybindEntryEntity, mainMenu.keybindEntryEntity);
 
 // Everything the installed plugins contributed, contributed order — the schedule resolves and verifies
 // the order from the declared after/before edges, so the registration order carries no meaning.
@@ -955,7 +965,7 @@ const uiApi = installOutcome.apiOf("ui");
 if (!uiApi) {
   logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
 } else {
-  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiToast, uiKeybind, navigation, delays, uiRender });
+  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiToast, navigation, delays, uiRender });
 }
 
 // The DEBUG surface's system is declared by the plugin itself now (`createUiDebugPlugin`), which is what makes

@@ -14,11 +14,11 @@
 // a RebindIntent; writing the bind table is this lane's job, so the event half holds no policy and the
 // capture state (KEYBIND_GESTURE.capturing) is read where it is applied.
 import type { BindAction } from "../../../data/globals/binds";
-import { POINTER } from "../../../data/globals/resources";
+import { POINTER, UI_MODAL } from "../../../data/globals/resources";
 import { KEYBIND_GESTURE, keybindPanels } from "../../../data/globals/keybind-gesture";
 import type { Entity, SystemAccess, World } from "../../../core/world";
 import { UI_PAINT, type UiKeybindPaint } from "../../../data/globals/paint";
-import { UI_LAYOUT, UI_STATE, UI_TEXT, setUiActive, setUiLayout, setUiSelected, setUiText, setUiVisible } from "../components";
+import { UI_LAYOUT, UI_STATE, UI_TEXT, setUiActive, setUiLayout, setUiSelected, setUiText, setUiVisible } from "../../ui/components";
 
 export interface KeybindDeps {
   /** The bind table (logic/host/input/keybinds.ts owns it — injected so this layer never imports it) */
@@ -40,6 +40,10 @@ export interface KeybindDeps {
   readonly line: Entity;
   /** The keycap under a point, or null (the settings panel owns the hit test and the keycap action id) */
   readonly keycapAt: (x: number, y: number) => Entity | null;
+  /** The "key binds" ENTRY buttons, one per settings panel (the pause menu and the main menu each build
+   *  one). They are spawned HIDDEN and it is THIS system that shows them: the plugin that owns the page
+   *  owns the way IN to it, so a build without the plugin has no entry point rather than a dead one. */
+  readonly entries: readonly Entity[];
 }
 
 /** Declared access: widget data for the panels, the drag highlight and the rubber band. */
@@ -75,6 +79,24 @@ export class UiKeybindSystem {
     private readonly deps: KeybindDeps,
   ) {
     this.paint = world.resource(UI_PAINT).keybind;
+    this.showEntries();
+  }
+
+  /** The way IN to the page: one button per settings panel, spawned hidden by the view. It is written on
+   *  every frame (the reconciler diffs it), because the ONLY question it answers is "is this plugin
+   *  installed" — and after a hot uninstall nobody would be left to answer it. */
+  private showEntries(): void {
+    for (const entry of this.deps.entries) setUiVisible(this.world, entry, true);
+  }
+
+  /** The UNINSTALL path (P1.24): the way in goes away with the page, and a page that was OPEN steps back
+   *  to the settings list — otherwise the sub-page would stay up with no system left to fill it, and no
+   *  way back (its Back button belongs to the panel the ui view built, which is still there). */
+  close(): void {
+    for (const entry of this.deps.entries) setUiVisible(this.world, entry, false);
+    const ui = this.world.resource(UI_MODAL);
+    if (ui.settings === "keybind") ui.settings = "settings";
+    this.deps.log("KEYBIND page closed - the plugin was uninstalled");
   }
 
   /** ui lane, once per frame: derive every panel's text/state from the bind table, then apply the

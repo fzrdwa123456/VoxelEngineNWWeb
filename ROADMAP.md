@@ -993,6 +993,23 @@ Still outstanding:
   REMOVAL when they are component schemas (a component cannot be withdrawn from a live entity yet, so the
   hot-pluggable surfaces are the ones that bring systems + resources).
 
+- **P1.25 — the key bind PAGE is a plugin of its own (`plugins/ui-keybind/`), and hot-pluggable on F9.**
+  `DONE` for the behaviour; the page's WIDGETS still live in `plugins/ui/views/menu.ts` (see below).
+  `UiKeybindSystem` + `UI_KEYBIND_ACCESS` moved out of `ui` with its declaration (`ui.keybind`), its edges
+  moved onto the plugin (it now says `after: ["ui.toast"]` / `before: ["ui.navigation", "ui.widgets"]`, and
+  `ui.navigation`/`ui.widgets` no longer name it — the P1.23 rule, applied a second time), and the plugin is
+  a factory (`createUiKeybindPlugin`) so the boot list and the runtime catalogue hold ONE value.
+  THE INTERESTING PART: the way IN. The "key binds" entry button is spawned HIDDEN by the view and shown by
+  `ui.keybind` every frame, so **"the plugin is off" means the tab is not reachable in either menu**, instead
+  of opening a panel nothing fills — and a runtime install (F9) makes the tab appear, which no boot-time
+  boolean could have done. Its `stop` → `UiKeybindSystem.close()` hides the entry and steps `UI_MODAL.settings`
+  back to the settings list if the page was open. What made it cheap: the sub-page navigation was ALREADY
+  data (`ui.navigation.paint()` iterates the panel maps and derives visibility from `UI_MODAL.settings`), so
+  no navigation refactor was needed — only the entry handle, which `SettingsPanels.keybindEntry` +
+  `Menu/MainMenu.keybindEntryEntity` now hand to the root. STILL OPEN: moving the panel CONSTRUCTION (the
+  chips/keycaps/keycap-hit-test + the drag's arm paths in `views/menu.ts`) into the plugin's own view, which
+  is what would let the ui plugin drop the widget prefabs it only serves that page; and the other two
+  optional surfaces (the toast, the backpack).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

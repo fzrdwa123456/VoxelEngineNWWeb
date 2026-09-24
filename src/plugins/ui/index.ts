@@ -11,7 +11,6 @@ import { UiRenderSystem } from "./systems/reconcile";
 import { UiBindingSystem } from "./systems/bindings";
 import { UiToastSystem } from "./systems/toast";
 import { UiLoadingSystem } from "./systems/loading";
-import { UiKeybindSystem } from "./systems/keybind";
 import { UiInventorySystem } from "./systems/inventory";
 import { UiHudSystem } from "./systems/hud";
 import { UiNavigationSystem } from "./systems/navigation";
@@ -26,7 +25,6 @@ import { UI_BINDING_ACCESS } from "./systems/bindings";
 import { DELAYS_ACCESS } from "./systems/delays";
 import { UI_HUD_ACCESS } from "./systems/hud";
 import { INVENTORY_VIEW_ACCESS } from "./systems/inventory";
-import { UI_KEYBIND_ACCESS } from "./systems/keybind";
 import { UI_LOADING_ACCESS } from "./systems/loading";
 import { UI_NAVIGATION_ACCESS } from "./systems/navigation";
 import { UI_RENDER_ACCESS } from "./systems/reconcile";
@@ -112,10 +110,6 @@ export function createLoadingSystem(...args: ConstructorParameters<typeof UiLoad
   return new UiLoadingSystem(...args);
 }
 
-export function createKeybindSystem(...args: ConstructorParameters<typeof UiKeybindSystem>): UiKeybindSystem {
-  return new UiKeybindSystem(...args);
-}
-
 export function createInventorySystem(...args: ConstructorParameters<typeof UiInventorySystem>): UiInventorySystem {
   return new UiInventorySystem(...args);
 }
@@ -138,7 +132,6 @@ export interface UiSystems {
   readonly uiInventory: { step(): void };
   readonly uiBindings: { step(): void };
   readonly uiToast: { step(): void };
-  readonly uiKeybind: { step(): void };
   readonly navigation: { step(): void };
   readonly delays: { step(): void };
   readonly uiRender: { step(): void };
@@ -195,18 +188,9 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   run: () => s.uiToast.step(),
   });
   api.system({
-  // The bind panels (derived data) and the drag highlight/rubber band, ordered after the other widget
-  // writers by the same component-level rule.
-  name: "ui.keybind",
-  stage: "ui",
-  after: ["ui.toast"],
-  ...UI_KEYBIND_ACCESS,
-  run: () => s.uiKeybind.step(),
-  });
-  api.system({
   name: "ui.navigation",
   stage: "ui",
-  after: ["ui.keybind"],
+  after: ["ui.toast"],
   ...UI_NAVIGATION_ACCESS,
   run: () => s.navigation.step(),
   });
@@ -225,7 +209,7 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // is the other half of the guarantee: everything `diagnostics` wrote this frame is already in place.
   name: "ui.widgets",
   stage: "ui",
-  after: ["ui.inventory", "ui.bindings", "ui.toast", "ui.keybind", "ui.navigation"],
+  after: ["ui.inventory", "ui.bindings", "ui.toast", "ui.navigation"],
   ...UI_RENDER_ACCESS,
   run: () => s.uiRender.step(),
   });
