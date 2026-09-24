@@ -1048,6 +1048,23 @@ Still outstanding:
   and enforces the rule itself (no optional surface may order itself against `ui.picker` / `ui.toast` /
   `ui.keybind`). NEXT STEP, now mechanical: move the toast into `plugins/ui-toast` (its slot already exists),
   then decide the backpack/hotbar ownership and do the same.
+- **P1.27 (step 2) — the HUD TOAST is a plugin (`plugins/ui-toast/`), and it hot-plugs BOTH ways.**
+  `DONE`. `UiToastSystem` + `UI_TOAST_ACCESS` + the `ui.toast` declaration + the `TOAST` resource left `ui`,
+  and so did the WIDGETS: `spawnToastPanel` (a panel + a label) moved out of `views/hud.ts`. The reason this
+  surface is fully symmetric while the key bind page is not: **its panel is TOP-LEVEL (parented to the UI
+  root), so it needs no mount inside a layout somebody else owns** — the "tab host" gap simply does not
+  exist for it. It is therefore the first surface that can be installed FROM OFF at runtime: press F10 and the
+  toast works, because the widgets exist and the system only writes their data. Its edges are the core's slot
+  anchors (`after: ui.slot.debug`, `before: ui.slot.toast`), so turning off any other surface cannot dangle
+  them. `close()` takes the panel down and clears the armed message, so an uninstall cannot leave a stale
+  toast and a re-install cannot immediately show one (the same class of residue the rubber band had).
+  REMEMBER: a surface that brings WIDGETS INTO ANOTHER VIEW'S LAYOUT still needs the tab host (below).
+- **P1.27 (step 3, open) — the BACKPACK / hotbar.** The last optional surface inside `ui`. Before moving it,
+  the ownership question has to be answered: the crosshair and the HOTBAR are the gameplay gate's widgets
+  (`ui.hud` shows them only in a world) and the backpack shares `INVENTORY_WIDGETS` and the selected-slot data
+  with the hotbar — so "turn the backpack off" must decide whether the hotbar leaves with it. The likely
+  shape: keep the hotbar+crosshair in `ui.hud` (they are the gameplay HUD) and move the backpack panel +
+  `ui.inventory`'s reconcile into `plugins/ui-backpack`, with `ui.inventory`'s icon writes splitting in two.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

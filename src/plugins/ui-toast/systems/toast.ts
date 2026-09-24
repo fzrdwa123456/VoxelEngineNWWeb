@@ -15,7 +15,7 @@
 import { TOAST, type ToastState } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
 import { UI_PAINT, type UiToastPaint } from "../../../data/globals/paint";
-import { UI_STATE, UI_TEXT, setUiText, setUiVisible } from "../components";
+import { UI_STATE, UI_TEXT, setUiText, setUiVisible } from "../../ui/components";
 
 /** It writes the toast's own widgets and nothing else. */
 export const UI_TOAST_ACCESS: SystemAccess = {
@@ -60,6 +60,18 @@ export class UiToastSystem {
     this.panel = panel;
     this.body = body;
     this.paint = world.resource(UI_PAINT).toast;
+  }
+
+  /** The UNINSTALL path (P1.27): the panel's visibility is written by step(), so an uninstall has to take it
+   *  down itself (the same trap the rubber band had), and clearing the armed message keeps a RE-install from
+   *  immediately showing a stale one. */
+  close(): void {
+    this.state.key = "";
+    this.state.until = 0;
+    this.shown = false;
+    this.shownKey = "";
+    this.shownRaw = false;
+    setUiVisible(this.world, this.panel, false);
   }
 
   /** ui lane, once per frame: puts the armed message up, then takes it down when its deadline passes. */

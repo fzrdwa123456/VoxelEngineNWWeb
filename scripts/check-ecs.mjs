@@ -50,6 +50,7 @@ const SOURCES = [
   "src/plugins/ui/index.ts",
   "src/plugins/ui-debug/index.ts",
   "src/plugins/ui-keybind/index.ts",
+  "src/plugins/ui-toast/index.ts",
   "src/plugins/input/index.ts",
   "src/plugins/content-default/index.ts",
   "src/data/globals/resources.ts",
@@ -93,7 +94,7 @@ const SOURCES = [
   // -> PICKER_STATE -> a SetMode command), the HUD toast (a wall-clock deadline in a resource), and the
   // key bind panels + drag gesture (KEYBIND_GESTURE as data, the panels derived every frame).
   "src/plugins/ui-debug/systems/picker.ts",
-  "src/plugins/ui/systems/toast.ts",
+  "src/plugins/ui-toast/systems/toast.ts",
   "src/plugins/ui/systems/loading.ts",
   "src/plugins/ui/systems/hud.ts",
   // The inventory reconcile (a system now �?it used to be `Inventory.sync()`, a method on the view, which
@@ -640,7 +641,7 @@ check("the theme is the ONLY place a colour literal lives", () => {
     // …and the three UI systems the surfaces migrated INTO: a colour literal there would be just as
     // wrong as one in a view (they write widget data; the theme owns every colour).
     "src/plugins/ui-debug/systems/picker.ts",
-    "src/plugins/ui/systems/toast.ts",
+    "src/plugins/ui-toast/systems/toast.ts",
     "src/plugins/ui-keybind/systems/keybind.ts",
   ]) {
     equal(
@@ -1320,7 +1321,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   }
   // The UI SYSTEMS the views migrated into: no DOM, no styling, and —the point of the migration —no
   // `document.addEventListener` (only the device layer listens) and no private timer for "how long".
-  for (const rel of ["src/plugins/ui-debug/systems/picker.ts", "src/plugins/ui/systems/toast.ts", "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui/systems/delays.ts"]) {
+  for (const rel of ["src/plugins/ui-debug/systems/picker.ts", "src/plugins/ui-toast/systems/toast.ts", "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui/systems/delays.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b|rgba?\(/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /document\.|createElement|style\.cssText/g), 0, `${rel} still touches the DOM`);
@@ -1620,7 +1621,7 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
 check("the toast is a system: a command arms a wall-clock deadline, the ui lane applies it", () => {
   // `showToast()` used to write two widgets and arm a setTimeout inside the view; the message now
   // outlives its caller, which is what lets the MAIN MENU show one (nothing there reconciles a DOM write).
-  const T = load("plugins/ui/systems/toast.js");
+  const T = load("plugins/ui-toast/systems/toast.js");
   const world = widgetWorld;
   world.insertResource(TOAST, createToastState());
   const panel = W.spawnPanel(world, null, "hud.toast", { hidden: true });
@@ -1756,7 +1757,7 @@ function registrations() {
   //  parser reads both. Same object shape in both places, which is why one regex covers them.
   const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts",
     "src/plugins/render/index.ts", "src/plugins/ui/index.ts", "src/plugins/ui-debug/index.ts",
-    "src/plugins/ui-keybind/index.ts"]
+    "src/plugins/ui-keybind/index.ts", "src/plugins/ui-toast/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
   // Since P1.18 a registration goes through the plugin registry �?`contributeSystem("<plugin id>", {...})` �?
@@ -1792,7 +1793,7 @@ function registrations() {
     UI_LOADING_ACCESS: load("plugins/ui/systems/loading.js").UI_LOADING_ACCESS,
     UI_HUD_ACCESS: load("plugins/ui/systems/hud.js").UI_HUD_ACCESS,
     UI_PICKER_ACCESS: load("plugins/ui-debug/systems/picker.js").UI_PICKER_ACCESS,
-    UI_TOAST_ACCESS: load("plugins/ui/systems/toast.js").UI_TOAST_ACCESS,
+    UI_TOAST_ACCESS: load("plugins/ui-toast/systems/toast.js").UI_TOAST_ACCESS,
     UI_KEYBIND_ACCESS: load("plugins/ui-keybind/systems/keybind.js").UI_KEYBIND_ACCESS,
     UI_NAVIGATION_ACCESS: load("plugins/ui/systems/navigation.js").UI_NAVIGATION_ACCESS,
     DELAYS_ACCESS: load("plugins/ui/systems/delays.js").DELAYS_ACCESS,
@@ -3355,7 +3356,7 @@ check("the view paint state, the host state and the loop's own state are RESOURC
   const movedFields =
     /^\s+private (?:readonly )?(?:shown|shownKey|shownRaw|shownPercent|filled|shownNote|shownNoteKey|shownNoteVisible|hovered|lineShown|drawnSelected|outsideWorld|inventoryOpen|menuOpen|lastCursor|rawFrameDx|rawFrameDy|wanted|lastPcx|lastPcz|applied|appliedAspect|stylesheetInjected|appliedFontUi|appliedFontMono|appliedRootFontPx|reported|flushTimer|diagLogEnabled|windowFocused|installed|scheduled|cached|loaded|snapshot)\s*[:=]/gm;
   for (const rel of [
-    "src/plugins/ui/systems/reconcile.ts", "src/plugins/ui/systems/loading.ts", "src/plugins/ui/systems/toast.ts", "src/plugins/ui/systems/hud.ts",
+    "src/plugins/ui/systems/reconcile.ts", "src/plugins/ui/systems/loading.ts", "src/plugins/ui-toast/systems/toast.ts", "src/plugins/ui/systems/hud.ts",
     "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui/systems/inventory.ts", "src/plugins/ui/systems/navigation.ts", "src/plugins/ui/systems/bindings.ts",
     "src/plugins/player/systems/input.ts", "src/plugins/render/systems/chunk-stream.ts", "src/plugins/ui/systems/delays.ts",
     "src/plugins/render/systems/camera.ts", "src/host/browser/pointerlock.ts", "src/plugins/input/keybinds.ts",
@@ -3433,7 +3434,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(outcome.has("ui"), false, "…including the manifest's veto");
 
   // 3. The manifest is DATA the pack chain can override, and it can never break the boot.
-  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-debug,ui-keybind,input",
+  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-debug,ui-toast,ui-keybind,input",
     "the built-in plugin list (the content plugin comes first: it declares what the install HAS)");
   equal(M.isEnabled(M.defaultManifest(), "ui"), true, "an unmentioned plugin follows the default list");
   const off = M.parseManifest({ plugins: [{ id: "diagnostics", enabled: false }] });
@@ -3521,6 +3522,9 @@ check("the plugin system: extension points, the registry, the install and the ma
   // The key bind page moved the same way (P1.25): its SYSTEM is the ui-keybind plugin's, and the way IN
   // to the page is spawned hidden by the view and shown by that system — so "plugin off" means the tab is
   // not reachable, in either menu, instead of opening a panel nothing fills.
+  assert(/name: "ui\.toast"/.test(readSource("src/plugins/ui-toast/index.ts")),
+    "the ui-toast plugin declares ui.toast");
+  assert(!/name: "ui\.toast"/.test(readSource("src/plugins/ui/index.ts")), "…and the ui plugin does not");
   assert(/name: "ui\.keybind"/.test(readSource("src/plugins/ui-keybind/index.ts")),
     "the ui-keybind plugin declares ui.keybind");
   assert(!/name: "ui\.keybind"/.test(readSource("src/plugins/ui/index.ts")),
@@ -3532,7 +3536,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   // TWO OPTIONAL PLUGINS MAY NOT NAME EACH OTHER (P1.27): the order between them is the CORE's slot anchors,
   // because a name is a dangling reference as soon as the plugin that owns it is disabled.
   const OPTIONAL_SYSTEMS = ["ui.picker", "ui.toast", "ui.keybind"];
-  for (const file of ["src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts"]) {
+  for (const file of ["src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts", "src/plugins/ui-toast/index.ts"]) {
     const src = stripComments(readSource(file));
     for (const m of src.matchAll(/(?:after|before):\s*\[([^\]]*)\]/g)) {
       for (const named of OPTIONAL_SYSTEMS) {
@@ -3590,8 +3594,10 @@ check("the plugin system: extension points, the registry, the install and the ma
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
-  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 11,
-    "…the ui plugin declares its eight systems + the three optional-surface slot anchors (P1.27)");
+  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 10,
+    "…the ui plugin declares its seven core systems + the three optional-surface slot anchors (P1.27)");
+  equal(countOf(stripComments(readSource("src/plugins/ui-toast/index.ts")), /api\.system\(/g), 1,
+    "…and the ui-toast plugin declares the HUD message system itself");
   equal(countOf(stripComments(readSource("src/plugins/ui-keybind/index.ts")), /api\.system\(/g), 1,
     "…and the ui-keybind plugin declares the bind-page system itself");
   // The DEBUG surface is a plugin of its own now (F3 panel + the F3+F4 chord): ONE system, contributed
@@ -3606,7 +3612,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
-  equal((declared[1].match(/Plugin/g) || []).length, 9, "…and installs all nine");
+  equal((declared[1].match(/Plugin/g) || []).length, 10, "…and installs all ten");
   assert(/installPlugins\(PLUGINS, \{/.test(bootSrc), "…through installPlugins, not by hand");
   assert(/registry\.list\(SLOT_SYSTEMS\)\) world\.addSystem\(def\)/.test(bootSrc),
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
@@ -3742,7 +3748,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
   equal(toHost, 0, `no plugin reads host/ any more (now ${toHost}) �?that is what the injected services are for`);
-  const unresolved = new Set(["content-default", "world", "player", "render", "diagnostics", "ui", "ui-debug", "ui-keybind", "input"]);
+  const unresolved = new Set(["content-default", "world", "player", "render", "diagnostics", "ui", "ui-debug", "ui-toast", "ui-keybind", "input"]);
   let progressed = true;
   while (progressed) {
     progressed = false;
@@ -3832,8 +3838,8 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   assert(/const uiDebugPlugin = createUiDebugPlugin\(\{ uiPicker \}\)/.test(bootSrc),
     "the root builds the debug plugin from the factory the catalogue lists");
-  assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin, uiKeybindPlugin\]/.test(bootSrc),
-    "…and catalogues that same value (plus the key bind page, which is shaped the same way)");
+  assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin, uiToastPlugin, uiKeybindPlugin\]/.test(bootSrc),
+    "…and catalogues that same value, in the lane order of the optional surfaces");
   assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");
   const dbgSrc = stripComments(readSource("src/plugins/ui-debug/index.ts"));
   assert(/setup\(api\)[\s\S]{0,400}hasResource\(PICKER_STATE\)/.test(dbgSrc),

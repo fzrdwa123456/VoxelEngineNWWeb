@@ -9,7 +9,6 @@ import type { Entity, World } from "../../core/world";
 import { Hud } from "./views/hud";
 import { UiRenderSystem } from "./systems/reconcile";
 import { UiBindingSystem } from "./systems/bindings";
-import { UiToastSystem } from "./systems/toast";
 import { UiLoadingSystem } from "./systems/loading";
 import { UiInventorySystem } from "./systems/inventory";
 import { UiHudSystem } from "./systems/hud";
@@ -28,7 +27,6 @@ import { INVENTORY_VIEW_ACCESS } from "./systems/inventory";
 import { UI_LOADING_ACCESS } from "./systems/loading";
 import { UI_NAVIGATION_ACCESS } from "./systems/navigation";
 import { UI_RENDER_ACCESS } from "./systems/reconcile";
-import { UI_TOAST_ACCESS } from "./systems/toast";
 import { SetFpsCap, SetLoadingStage, ShowToast } from "../../core/effect/commands";
 import { UI_THEME } from "../../data/assets/theme";
 import { UI_ACTIONS } from "../../data/globals/actions";
@@ -102,10 +100,6 @@ export function createBindingSystem(...args: ConstructorParameters<typeof UiBind
   return new UiBindingSystem(...args);
 }
 
-export function createToastSystem(...args: ConstructorParameters<typeof UiToastSystem>): UiToastSystem {
-  return new UiToastSystem(...args);
-}
-
 export function createLoadingSystem(...args: ConstructorParameters<typeof UiLoadingSystem>): UiLoadingSystem {
   return new UiLoadingSystem(...args);
 }
@@ -131,7 +125,6 @@ export interface UiSystems {
   readonly uiLoading: { step(): void };
   readonly uiInventory: { step(): void };
   readonly uiBindings: { step(): void };
-  readonly uiToast: { step(): void };
   readonly navigation: { step(): void };
   readonly delays: { step(): void };
   readonly uiRender: { step(): void };
@@ -174,19 +167,6 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   stage: "ui",
   ...UI_BINDING_ACCESS,
   run: () => s.uiBindings.step(),
-  });
-  api.system({
-  // The HUD toast: the same component-level conflict as its predecessor in the chain. `ui.inventory` is that
-  // predecessor when the ui-debug plugin is off; when it is on, the picker DECLARES the edge that puts itself
-  // ahead of this system, so this list never names a system this plugin does not itself install
-  // (plugins/ui-debug/index.ts). It is the reason the
-  // ui lane is pumped while the game loop is stopped (a main-menu toast has no frame to ride).
-  name: "ui.toast",
-  stage: "ui",
-  after: ["ui.slot.debug"],
-  before: ["ui.slot.toast"],
-  ...UI_TOAST_ACCESS,
-  run: () => s.uiToast.step(),
   });
   // ===== The optional ui surfaces' SLOT ANCHORS (P1.27) =====
   // A surface that may be DISABLED cannot be named in another surface's order list: the name would dangle
@@ -259,7 +239,7 @@ export const uiPlugin = definePlugin({
     ]);
     api.contribute(SLOT_RESOURCES, [
       UI_MOUNT, UI_PAINT, UI_THEME, UI_ACTIONS, UI_SOURCES, UI_ORDER, UI_MODAL, UI_SCALE, LOCALE, FONT,
-      TOAST, LOADING_STATE, DELAYED_INTENTS, INVENTORY_WIDGETS, F3_PANEL, KEY_EVENTS,
+      LOADING_STATE, DELAYED_INTENTS, INVENTORY_WIDGETS, F3_PANEL, KEY_EVENTS,
       VIEWPORT,
     ]);
     api.contribute(SLOT_COMMANDS, [ShowToast, SetLoadingStage, SetFpsCap]);

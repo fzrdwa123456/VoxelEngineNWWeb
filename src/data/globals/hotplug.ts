@@ -19,6 +19,7 @@ export interface HotPlugSurface {
 
 export const HOT_PLUG_SURFACES: readonly HotPlugSurface[] = [
   { id: "ui-debug", key: "F8", label: "ui-debug (F3/F4 debug surface)" },
+  { id: "ui-toast", key: "F10", label: "ui-toast (HUD message)" },
   { id: "ui-keybind", key: "F9", label: "ui-keybind (key bind page)" },
 ];
 

@@ -38,7 +38,10 @@ import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
 import type { Plugin } from "../core/plugin/descriptor";
 import type { Entity } from "../core/world";
-import { UI_TOAST_ACCESS, UiToastSystem } from "../plugins/ui/systems/toast";
+// The HUD message is its own plugin (P1.27 step 2) and needs NO mount: its panel is a TOP-LEVEL widget, so
+// it can be plugged in and out at runtime in BOTH directions (unlike the key bind tab, which lives inside a
+// view's layout). The root still spawns the widgets — it does the wiring — through the plugin's helper.
+import { createToastSystem, createUiToastPlugin, spawnToastPanel } from "../plugins/ui-toast";
 import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loading";
 import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
 import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "../plugins/ui/systems/navigation";
@@ -93,7 +96,6 @@ import { createDiagnosticsPlugin } from "../plugins/diagnostics";
 import {
   createRenderSystem,
   createBindingSystem,
-  createToastSystem,
   createLoadingSystem,
   createInventorySystem,
   createHudSystem,
@@ -460,7 +462,8 @@ const uiPicker = createPickerSystem(world, {
   inWorld,
   log: logDebug,
 });
-const uiToast = createToastSystem(world, hud.toastPanel, hud.toastText);
+const toastPanel = spawnToastPanel(world);
+const uiToast = createToastSystem(world, toastPanel.panel, toastPanel.body);
 // The startup screen's painter: it reads LOADING_STATE and writes the boot tree's widgets, so it is in
 // the ui lane with the other widget-data writers — that lane is also the only one that runs in `load`
 // mode, which is exactly the mode the screen is shown in.
@@ -576,8 +579,11 @@ const { input, snapshot, controller, movement, collision, interaction } = player
 // system, because that is the property that makes it hot-pluggable at all. It is the SAME value the boot
 // installs below, so the boot path and the runtime path cannot drift apart.
 const uiDebugPlugin = createUiDebugPlugin({ uiPicker });
+const uiToastPlugin = createUiToastPlugin({ uiToast });
 const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind });
-const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiKeybindPlugin];
+// The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
+// the core's slot anchors encode; the list itself is only what may be installed at runtime.
+const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiKeybindPlugin];
 const livePlugins = new Set<string>();
 const hotHost: HotPlugHost = {
   world,
@@ -606,6 +612,7 @@ const PLUGINS = [
   createDiagnosticsPlugin(world),
   uiPlugin,
   uiDebugPlugin,
+  uiToastPlugin,
   uiKeybindPlugin,
   inputPlugin,
 ];
@@ -970,7 +977,7 @@ const uiApi = installOutcome.apiOf("ui");
 if (!uiApi) {
   logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
 } else {
-  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiToast, navigation, delays, uiRender });
+  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, navigation, delays, uiRender });
 }
 
 // The DEBUG surface's system is declared by the plugin itself now (`createUiDebugPlugin`), which is what makes

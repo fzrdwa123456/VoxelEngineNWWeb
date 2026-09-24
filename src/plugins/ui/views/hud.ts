@@ -1,4 +1,4 @@
-// ===== HUD: crosshair + F3 debug panel + toast =====
+// ===== HUD: crosshair + hotbar-adjacent gameplay widgets + the F3 debug panel =====
 // These are WIDGETS now, not DOM: this class spawns four widget trees during wiring and afterwards only
 // writes component data (text, visibility). The elements belong to ecs/ui/system.ts, so there is no
 // createElement, no style string and no CSS literal left in this file.
@@ -20,16 +20,7 @@ export class Hud {
   private readonly crosshair: Entity;
   private readonly debugPanel: Entity;
   private readonly debugBody: Entity;
-  private readonly toast: Entity;
-  private readonly toastBody: Entity;
 
-  /** The toast widgets, for ecs/ui/toast.ts (the system that owns the message's lifetime) */
-  get toastPanel(): Entity {
-    return this.toast;
-  }
-  get toastText(): Entity {
-    return this.toastBody;
-  }
   /** The F3 panel, for ecs/ui/picker.ts (F3 alone toggles it; its UI_STATE IS the shown/hidden state) */
   get debugPanelEntity(): Entity {
     return this.debugPanel;
@@ -51,10 +42,6 @@ export class Hud {
     this.debugPanel = spawnPanel(world, null, "debug.panel", { hidden: true });
     this.debugBody = spawnLabel(world, this.debugPanel, "debug.line");
 
-    // Toast: one panel + one text widget, put up and taken down by ecs/ui/toast.ts from the TOAST
-    // resource (the message and its deadline are world state now — see the file header).
-    this.toast = spawnPanel(world, null, "hud.toast", { hidden: true });
-    this.toastBody = spawnLabel(world, this.toast, "text.label");
   }
 
   /** The F3 panel and its text line, for the composition root to publish as the F3_PANEL resource
