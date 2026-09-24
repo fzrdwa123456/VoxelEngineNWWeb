@@ -84,6 +84,20 @@ mkdirSync(OUT, { recursive: true });
 copyFileSync(EXE_SRC, path.join(OUT, "voxelengine-tauri.exe"));
 copyFileSync(LOADER_SRC, path.join(OUT, "WebView2Loader.dll"));
 
+// The plugin TOGGLE scripts (tools\*.bat) ride along: they are what a tester double-clicks to turn one of the
+// optional surfaces off (they write game\resourcepacks\<pack>\plugins.json) or to restore the default list.
+// They are COPIED here rather than kept in release\ because this script REBUILDS that directory — the first
+// time they existed only there, one repackage silently deleted them.
+const TOOLS = path.join(ROOT, "tools");
+let toggleScripts = 0;
+if (existsSync(TOOLS)) {
+  for (const entry of readdirSync(TOOLS, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".bat")) continue;
+    copyFileSync(path.join(TOOLS, entry.name), path.join(OUT, entry.name));
+    toggleScripts++;
+  }
+}
+
 // The portable data directory: in a release build the Rust side's game_root() looks for game\ beside the exe
 for (const d of GAME_DIRS) mkdirSync(path.join(OUT, "game", d), { recursive: true });
 
@@ -127,6 +141,16 @@ The data lives in the game\\ directory next to it:
   game\\saves\\
 
 Environment variable: VOXEL_GAME_ROOT forces the data root (handy when diagnosing).
+
+Plugin toggles (double-click one, then RESTART the game — the manifest is read at boot):
+  plugins-status.bat               show the current plugins.json and the PLUGIN lines of the log
+  plugins-default.bat              restore the default list (deletes plugins.json)
+  plugins-no-ui-debug.bat          off: the F3 debug panel and the F3+F4 mode chord
+  plugins-no-ui-toast.bat          off: every HUD message (including the F8/F9/F10 feedback)
+  plugins-no-ui-keybind.bat        off: the key bind page in both menus
+  plugins-no-optional-surfaces.bat off: all three optional surfaces at once
+While the game runs, F8 / F10 / F9 install or uninstall those same surfaces live (the result appears as a
+HUD message and in game\\logs\\debug.log).
 `;
 
 writeFileSync(path.join(OUT, "README.txt"), readme, "utf8");
@@ -149,4 +173,5 @@ console.log(`  voxelengine-tauri.exe  ${Math.round(statSync(EXE_SRC).size / 1024
 console.log(`  WebView2Loader.dll     ${Math.round(statSync(LOADER_SRC).size / 1024)} KB  (required)`);
 if (installed.length) console.log(`  sample packs installed under game\\: ${installed.join(", ")}`);
 else console.log("  no resource packs under game\\ (plan A: assets are fully external)");
+if (toggleScripts) console.log(`  ${toggleScripts} plugin-toggle .bat scripts (plugins-default / plugins-no-ui-*)`);
 console.log(`  ${files.length} files, ${(total / 1024 / 1024).toFixed(1)} MB`);
