@@ -1,0 +1,38 @@
+P1.29 (step 1): the layout is DATA — a page HOST materializes pages at a barrier
+
+The root cause of "the key bind page cannot be hot-plugged from off": the settings panel was built by ONE
+burst of imperative spawn calls during view wiring, and the mount (which panel, which action-id prefix,
+how to open a sub-page) lived in that function's locals. A surface contributed LATER — a plugin
+installed while the game runs — could therefore never get an entry: nobody remembered where it belonged
+and nothing re-ran the layout.
+
+What replaces it
+- `SLOT_UI_PAGES` (core/extension/slots.ts) + `data/globals/ui-pages.ts`: a page is DATA
+  (`{ id, section, order, titleKey, build, dispose }`).
+- A HOST is registered by the view that owns the container (`buildSettingsPanel`): `{ world, id,
+  settingsPanel, root, show, log }` — generic, and it knows nothing about any page. It is the ONLY thing
+  that has to exist at wiring time.
+- `ui.pages` (plugins/ui/systems/ui-pages.ts) is the host system: it DIFFS the contributed pages against
+  what it has mounted, defers the spawn/despawn to a `UiLayoutOp` COMMAND (a structural change is only
+  legal at a barrier, and a system may not make one), and paints the two widgets it owns — the entry row
+  (up iff the page is mounted) and the panel (up iff that page is what `UI_MODAL.settings` names).
+  Unmount despawns the whole subtree itself (the ECS has no cascade) and calls the page's `dispose`.
+- `plugins/ui-keybind` contributes its page instead of asking the settings panel for a tab. Its `build`
+  runs at the barrier, fills the host's panel and hands the host's entry row to `ui.keybind`, which keeps
+  lighting it; `dispose` clears the derived-panel specs and drops its entry handles, so repeated
+  install/uninstall cannot accumulate.
+
+Consequences
+- A page (and its entry) appears or disappears within a frame of its plugin being installed/uninstalled
+  — including installed FROM OFF while the game runs. The layout is no longer one-shot code, which is
+  what "add many options later" needs: a new page is a contributed value, not a change to the ui plugin.
+- `SettingsPanelId` lost "keybind" and the settings panels no longer spawn a key bind container or entry
+  (dead `keybindEntry: null` + the inert KEYBIND_TAB branch remain for now; removing them is cleanup).
+- The ui lane's report is now `14 systems, 12 batches, 3 parallel pair(s)` and the page host shares the
+  first batch (it declares no component access, so it conflicts with nobody).
+
+Verified: tsc clean, check:ecs 58 groups OK, build-all + cargo --features custom-protocol +
+package-portable, exe sha256 65DF32F03CBE2B5008A3A92BFB2D8AB240F31A7E6137D657A43E873BB0C0E1D0.
+STILL OPEN: a real behavioural gate assertion for the host (mount -> widgets exist -> unmount -> no dead
+handles), which needs a stub world with the widget components; and the same treatment for the remaining
+settings pages so `SettingsPanelId` can go away entirely.

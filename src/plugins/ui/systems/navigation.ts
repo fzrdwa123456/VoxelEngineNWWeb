@@ -25,7 +25,7 @@ import { UI_PAINT, type UiNavigationPaint } from "../../../data/globals/paint";
 import { UI_STATE, setUiVisible } from "../components";
 
 /** The settings sub-panel ids, as data. `ui/menu.ts` owns the panel list; this is the same four. */
-export type SettingsPanelId = "settings" | "lang" | "pack" | "keybind";
+export type SettingsPanelId = "settings" | "lang" | "pack";
 
 export interface NavigationTrees {
   /** The pause menu: its root, its main panel and its four settings panels */

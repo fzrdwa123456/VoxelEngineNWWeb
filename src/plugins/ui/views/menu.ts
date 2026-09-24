@@ -56,7 +56,7 @@ import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
 import { onUiSource, SOURCE_FPS_CAP, UI_SOURCES, type UiSource } from "../../../data/globals/sources";
 import { PACK_LIST_CAPACITY } from "../../../data/globals/paint";
 import { UI_THEME } from "../../../data/assets/theme";
-import { KEYBIND_TAB } from "../../../data/globals/keybind-tab";
+import { UI_PAGE_HOSTS } from "../../../data/globals/ui-pages";
 import {
   setUiSelected,
   setUiText,
@@ -105,7 +105,7 @@ export interface MenuCallbacks extends SettingsCallbacks {
   onToMainMenu: () => void;
 }
 
-export type SettingsPanelId = "settings" | "lang" | "pack" | "keybind";
+export type SettingsPanelId = "settings" | "lang" | "pack";
 
 /** The id of the frame cap's binding source. Registered ONCE (both settings instances read the same
  *  value through it), and the only place that knows the mapping between what is stored (0 = unlimited)
@@ -162,7 +162,6 @@ export function buildSettingsPanel(
     settings: spawnPanel(world, root, "settings.panel", { hidden: true }),
     lang: spawnPanel(world, root, "settings.panelWide", { hidden: true }),
     pack: spawnPanel(world, root, "settings.panel", { hidden: true }),
-    keybind: spawnPanel(world, root, "settings.panelXl", { hidden: true }),
   };
   // Which sub-panel is up is DATA (`UI_MODAL.settings`), not a closure variable: ui.navigation paints the
   // panels from it and the ESC step-back reads it, so there is one answer. These two functions only
@@ -296,22 +295,20 @@ export function buildSettingsPanel(
     });
   };
 
-  // --- Key binds: the tab belongs to the `ui-keybind` PLUGIN, widgets included (P1.26). The settings
-  //     panel asks for it through the KEYBIND_TAB resource, which that plugin's setup inserts; a build
-  //     without the plugin has no token, so there is no entry button and no panel to fill — and the empty
-  //     container above stays empty and hidden. Nothing in this file knows how the page is drawn. ---
-  const keybindTab = world.hasResource(KEYBIND_TAB)
-    ? world.resource(KEYBIND_TAB)({
-        world,
-        settingsPanel: panels.settings,
-        panel: panels.keybind,
-        id,
-        show: (target) => show(target),
-        log: opts.log,
-      })
-    : null;
-  // `ui.keybind` shows this while the plugin runs (it is spawned hidden by the tab builder).
-  const keybindEntry = keybindTab?.entry ?? null;
+  // --- THE PAGE HOST (P1.29): this panel does not know which pages exist. It registers WHERE a page may be
+  //     mounted (this list, this root, this action-id prefix, this `show`), and `ui.pages` materializes every
+  //     page a plugin contributes — including one contributed by a plugin installed while the game runs.
+  world.resource(UI_PAGE_HOSTS).push({
+    world,
+    id,
+    settingsPanel: panels.settings,
+    root,
+    show: (page) => show(page as SettingsPanelId | null),
+    log: opts.log,
+  });
+  // The per-plugin TAB call is gone with the token it used: a page is DATA now (data/globals/ui-pages.ts).
+  // The entry row belongs to the host, so the settings panels carry no key bind entry any more.
+  const keybindEntry: Entity | null = null;
 
   // --- UI scale: small/normal/large/auto (MC-style GUI Scale) ---
   const scaleLabel = spawnLabel(world, panels.settings, "settings.label", "", { raw: true });

@@ -183,10 +183,14 @@ export function spawnKeybindPanel(mount: KeybindTabMount): KeybindTabSurfaces {
   const actions = world.resource(UI_ACTIONS);
   registerKeybindActions(actions, mount.log);
 
-  const entry = spawnButton(world, mount.settingsPanel, "settings.btn", `${id}.openKeybind`, "", "settings.keybinds");
-  // Invisible until `ui.keybind` runs: the tab is the PLUGIN's, so the way in is its to hand out.
-  setUiVisible(world, entry, false);
-  onUiAction(actions, `${id}.openKeybind`, () => mount.show("keybind"));
+  // WHO OWNS THE WAY IN: since P1.29 the ui lane's PAGE HOST spawns the entry row and wires its action (it
+  // knows the page data); this view only spawns one when nobody did, which keeps the older call shape working.
+  const entry = mount.entry ?? spawnButton(world, mount.settingsPanel, "settings.btn", `${id}.openKeybind`, "", "settings.keybinds");
+  if (mount.entry === undefined) {
+    // Invisible until `ui.keybind` runs: the tab is the PLUGIN's, so the way in is its to hand out.
+    setUiVisible(world, entry, false);
+    onUiAction(actions, `${id}.openKeybind`, () => mount.show("keybind"));
+  }
 
   // Key bind sub-panel: action chips + visual keyboard (full 104-key ANSI layout, fixed QWERTY
   // reference geometry = KeyboardEvent.code physical positions).

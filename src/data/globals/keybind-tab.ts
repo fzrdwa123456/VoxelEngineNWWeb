@@ -19,6 +19,9 @@ export interface KeybindTabMount {
   /** The (empty, hidden) sub-panel container the tab fills — part of the settings layout, so the caller
    *  spawns it and the tab only adds children. */
   readonly panel: Entity;
+  /** The settings-list row that opens this tab, when the caller already made one (the ui lane's PAGE HOST
+   *  does, P1.29). Absent = the tab spawns its own, which is what the pre-P1.29 wiring did. */
+  readonly entry?: Entity;
   /** The caller's action-id prefix ("pause" | "main"): the two menus each build a settings panel. */
   readonly id: string;
   /** Open a settings sub-page (what a menu's `show()` does — it writes `UI_MODAL.settings`). */

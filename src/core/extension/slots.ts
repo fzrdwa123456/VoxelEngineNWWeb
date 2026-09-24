@@ -10,6 +10,7 @@
 // still registered by the views that own them).
 import type { SystemDef } from "../flow/schedule";
 import type { Resource } from "../data/resource";
+import type { UiPage } from "../../data/globals/ui-pages";
 import { defineExtensionPoint } from "./point";
 
 /** Systems a plugin wants in the schedule (each carries its own stage/edges/access declaration). */
@@ -24,6 +25,10 @@ export const SLOT_RESOURCES = defineExtensionPoint<Resource<unknown>>("resources
 /** The LANGUAGES a content plugin brings. The engine validates a language against this set instead of
  *  against a list baked into the code (see plugins/content-default). */
 export const SLOT_LANGUAGES = defineExtensionPoint<{ readonly id: string }>("languages");
+
+/** UI PAGES a plugin brings (a settings tab, a panel). Materialized by the ui lane's HOST system, so a page
+ *  contributed at RUNTIME appears without a restart — see data/globals/ui-pages.ts and P1.29. */
+export const SLOT_UI_PAGES = defineExtensionPoint<UiPage>("uiPages");
 
 /** Command types a plugin owns. */
 export const SLOT_COMMANDS = defineExtensionPoint<{ readonly name: string }>("commands");

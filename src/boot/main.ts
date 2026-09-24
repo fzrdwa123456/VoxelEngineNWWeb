@@ -36,6 +36,8 @@ import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
 import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
+import { SLOT_UI_PAGES } from "../core/extension/slots";
+import { UI_PAGE_HOSTS, UI_PAGES_MOUNTED } from "../data/globals/ui-pages";
 import type { Plugin } from "../core/plugin/descriptor";
 import type { Entity } from "../core/world";
 // The HUD message is its own plugin (P1.27 step 2) and needs NO mount: its panel is a TOP-LEVEL widget, so
@@ -99,6 +101,7 @@ import {
   createLoadingSystem,
   createInventorySystem,
   createHudSystem,
+  createPagesSystem,
   createNavigationSystem,
   createDelaySystem,
   createInventoryView,
@@ -373,6 +376,10 @@ world.insertResource(UI_SCALE, uiScale);
 world.insertResource(KEY_EVENTS, createKeyEventLog());
 world.insertResource(PICKER_STATE, createPickerState());
 world.insertResource(TOAST, createToastState());
+// THE PAGE HOST (P1.29): where pages may be mounted (filled by the views during wiring) and what is mounted
+// right now (the host system's diff state). Both belong to the ROOT, inserted before any plugin is installed.
+world.insertResource(UI_PAGE_HOSTS, []);
+world.insertResource(UI_PAGES_MOUNTED, new Map());
 // The startup screen's state: the boot driver publishes the current stage into it (through the
 // SetLoadingStage command) and `ui.loading` paints it — the loading screen is UI, so it is data like every
 // other surface, and main.ts never builds an element. See ecs/resources.ts.
@@ -464,6 +471,9 @@ const uiPicker = createPickerSystem(world, {
 });
 const toastPanel = spawnToastPanel(world);
 const uiToast = createToastSystem(world, toastPanel.panel, toastPanel.body);
+// The page host. `pages` is late-bound on purpose: the registry is declared further down the file, and this
+// getter is only ever called from the lane.
+const uiPages = createPagesSystem(world, { pages: () => registry.list(SLOT_UI_PAGES) });
 // The startup screen's painter: it reads LOADING_STATE and writes the boot tree's widgets, so it is in
 // the ui lane with the other widget-data writers — that lane is also the only one that runs in `load`
 // mode, which is exactly the mode the screen is shown in.
@@ -580,7 +590,7 @@ const { input, snapshot, controller, movement, collision, interaction } = player
 // installs below, so the boot path and the runtime path cannot drift apart.
 const uiDebugPlugin = createUiDebugPlugin({ uiPicker });
 const uiToastPlugin = createUiToastPlugin({ uiToast });
-const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind });
+const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind }, keybindEntries);
 // The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
 // the core's slot anchors encode; the list itself is only what may be installed at runtime.
 const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiKeybindPlugin];
@@ -977,7 +987,9 @@ const uiApi = installOutcome.apiOf("ui");
 if (!uiApi) {
   logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
 } else {
-  declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, navigation, delays, uiRender });
+  declareUiSystems(uiApi, {
+  uiPages, uiHud, uiLoading, uiInventory, uiBindings, navigation, delays, uiRender,
+});
 }
 
 // The DEBUG surface's system is declared by the plugin itself now (`createUiDebugPlugin`), which is what makes

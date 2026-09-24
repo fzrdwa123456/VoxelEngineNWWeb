@@ -13,8 +13,11 @@ import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
 import type { Plugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
-import { KEYBIND_TAB } from "../../data/globals/keybind-tab";
+import type { Entity } from "../../core/world";
+import { SLOT_UI_PAGES } from "../../core/extension/slots";
+import type { UiPage } from "../../data/globals/ui-pages";
 import { UI_KEYBIND_ACCESS, UiKeybindSystem } from "./systems/keybind";
+import { clearKeybindPanels } from "../../data/globals/keybind-gesture";
 import { spawnKeybindPanel } from "./views/keybind";
 
 /** Pass-through factory: the composition root builds the instance (it needs the bind table, the rubber
@@ -44,7 +47,38 @@ export function declareUiKeybindSystems(api: PluginApi, s: UiKeybindSystems): vo
   });
 }
 
-export function createUiKeybindPlugin(s: UiKeybindSystems): Plugin {
+export function createUiKeybindPlugin(s: UiKeybindSystems, entries: Entity[]): Plugin {
+  const mine: Entity[] = [];
+  const keybindPage: UiPage = {
+    id: "keybind",
+    section: "settings",
+    order: 40,
+    titleKey: "settings.keybinds",
+    build(mount) {
+      // `build` runs at a BARRIER (inside the host's mount command), which is why it may spawn at all.
+      mine.push(mount.entry);
+      entries.push(mount.entry);
+      spawnKeybindPanel({
+        world: mount.host.world,
+        settingsPanel: mount.host.settingsPanel,
+        panel: mount.panel,
+        entry: mount.entry,
+        id: mount.host.id,
+        show: (page) => mount.host.show(page),
+        log: mount.host.log,
+      });
+    },
+    dispose() {
+      // The widgets in the page and its entry are despawned by the host; what this must undo is the GLOBAL
+      // registrations the build made (the derived-panel specs) and the entry handles the system still holds.
+      clearKeybindPanels();
+      for (const e of mine) {
+        const at = entries.indexOf(e);
+        if (at >= 0) entries.splice(at, 1);
+      }
+      mine.length = 0;
+    },
+  };
   return definePlugin({
     id: "ui-keybind",
     // It renders into the settings panel the ui plugin's views build, and it reads the widget components the
@@ -53,11 +87,10 @@ export function createUiKeybindPlugin(s: UiKeybindSystems): Plugin {
     // plugin's view reads it to draw the chips and to apply a captured key.
     deps: ["ui", "input"],
     setup(api) {
-      // The tab's WIDGETS are this plugin's too (views/keybind.ts). The settings panel asks for them
-      // through the KEYBIND_TAB resource: inserted here — install time, i.e. before the views are wired —
-      // so a build without this plugin has no tab at all; contributed so the registry reports its owner.
-      if (!api.world.hasResource(KEYBIND_TAB)) api.world.insertResource(KEYBIND_TAB, spawnKeybindPanel);
-      api.contribute(SLOT_RESOURCES, [KEYBIND_TAB]);
+      // THE PAGE IS DATA NOW (P1.29): the host system materializes it wherever a container was registered, so
+      // this plugin no longer needs the settings panel to ask it for a tab — and a plugin installed at RUNTIME
+      // gets its page (and its entry row) within a frame.
+      api.contribute(SLOT_UI_PAGES, [keybindPage]);
       declareUiKeybindSystems(api, s);
     },
     // The page goes down with the plugin (see UiKeybindSystem.close()).

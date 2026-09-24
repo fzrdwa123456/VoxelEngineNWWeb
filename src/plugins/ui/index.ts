@@ -14,6 +14,7 @@ import { UiInventorySystem } from "./systems/inventory";
 import { UiHudSystem } from "./systems/hud";
 import { UiNavigationSystem } from "./systems/navigation";
 import { DelaySystem } from "./systems/delays";
+import { UiPagesSystem } from "./systems/ui-pages";
 import { Inventory } from "./views/inventory";
 import { Menu, type MenuCallbacks } from "./views/menu";
 import { MainMenu, type MainMenuCallbacks } from "./views/mainmenu";
@@ -21,6 +22,7 @@ import { LoadingScreen } from "./views/loading";
 // The ACCESS sets the ten systems declare. They live next to each system (that is where a reader looks for
 // "what does this touch"), and the plugin is the module that now assembles them into the schedule.
 import { UI_BINDING_ACCESS } from "./systems/bindings";
+import { UI_PAGES_ACCESS } from "./systems/ui-pages";
 import { DELAYS_ACCESS } from "./systems/delays";
 import { UI_HUD_ACCESS } from "./systems/hud";
 import { INVENTORY_VIEW_ACCESS } from "./systems/inventory";
@@ -116,6 +118,11 @@ export function createNavigationSystem(...args: ConstructorParameters<typeof UiN
   return new UiNavigationSystem(...args);
 }
 
+/** The page HOST (P1.29): pass-through like the others — the root builds it, the plugin owns it. */
+export function createPagesSystem(...args: ConstructorParameters<typeof UiPagesSystem>): UiPagesSystem {
+  return new UiPagesSystem(...args);
+}
+
 export function createDelaySystem(...args: ConstructorParameters<typeof DelaySystem>): DelaySystem {
   return new DelaySystem(...args);
 }
@@ -128,9 +135,21 @@ export interface UiSystems {
   readonly navigation: { step(): void };
   readonly delays: { step(): void };
   readonly uiRender: { step(): void };
+  readonly uiPages: { step(): void };
 }
 
 export function declareUiSystems(api: PluginApi, s: UiSystems): void {
+  api.system({
+  // THE PAGE HOST (P1.29): the first system of the lane, because it decides what the settings panel IS made
+  // of (it materializes pages contributed by plugins through a command) and it paints its own two widgets.
+  // It touches no component another system writes, so it conflicts with nothing and batches early.
+  name: "ui.pages",
+  stage: "ui",
+  reads: [],
+  writes: [],
+  ...UI_PAGES_ACCESS,
+  run: () => s.uiPages.step(),
+  });
   api.system({
   // The GAMEPLAY widgets' gate, FIRST in the lane: it decides whether the crosshair and the hotbar are
   // on screen at all, and it writes the same component (UI_STATE) as every writer after it, so the
