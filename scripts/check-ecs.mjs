@@ -95,7 +95,7 @@ const SOURCES = [
   "src/plugins/ui/systems/toast.ts",
   "src/plugins/ui/systems/loading.ts",
   "src/plugins/ui/systems/hud.ts",
-  // The inventory reconcile (a system now — it used to be `Inventory.sync()`, a method on the view, which
+  // The inventory reconcile (a system now �?it used to be `Inventory.sync()`, a method on the view, which
   // is why this file was not compiled here before). It imports the icon baker + the block registry, both
   // of which are import-safe in Node (the WebGPU renderer they use is created lazily on the first bake).
   "src/plugins/ui/systems/inventory.ts",
@@ -103,12 +103,12 @@ const SOURCES = [
   "src/plugins/ui/systems/navigation.ts",
   "src/plugins/render/systems/camera.ts",
   // The block target outline: a render-lane system that reads the TARGET_HIT component and moves a
-  // three.js mesh. Import-safe in Node — it imports three.js for TYPES only and the mesh arrives as the
+  // three.js mesh. Import-safe in Node �?it imports three.js for TYPES only and the mesh arrives as the
   // BLOCK_OUTLINE resource, which the check inserts as a stub.
   "src/plugins/render/systems/outline.ts",
   // Import-safe in Node: the settings repair is a PURE comparison and lives in its own
   // dependency-free module (the Tauri shell it belongs to imports @tauri-apps/api, which Node's
-  // CJS require cannot load) — which is exactly what the boot check asserts here.
+  // CJS require cannot load) �?which is exactly what the boot check asserts here.
   "src/core/services/settings-diff.ts",
   // Import-safe in Node: no DOM at import time, and the WebGPU renderer is created lazily on the first
   // bake —so the icon cache's synchronous reader can be asserted here.
@@ -573,7 +573,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // The world-entry screen is only honest if it covers real work, and a RE-entry into a window that is
   // still built has none: `needsWarmUp` is what keeps that from being a one-frame flash of the screen.
   // Driven on a stub voxel whose chunks are all AIR (getChunk -> null), so no mesh is ever built and
-  // the mesher's material — which needs a DOM — is never touched.
+  // the mesher's material �?which needs a DOM �?is never touched.
   const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
   const P = loadPresentation();
   const streamWorld = new World();
@@ -584,7 +584,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
     takeDirty: () => [],
   });
   // The player HANDLE from the world above: resources are per World, and the POSITION column is shared
-  // per definition (a second World may not INSERT a component — the one-World rule — but the chunk
+  // per definition (a second World may not INSERT a component �?the one-World rule �?but the chunk
   // stream only reads the row).
   streamWorld.insertResource(LOCAL_PLAYER, localPlayer);
   // The mesh CACHE is the CHUNK_MESHES resource, not a private field, so the gate inserts a stub one
@@ -592,7 +592,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // system is driven here with no GPU at all.
   const meshCache = P.createChunkMeshCache({ add() {}, remove() {} });
   streamWorld.insertResource(P.CHUNK_MESHES, meshCache);
-  // The shared chunk material is a RESOURCE too, so it is inserted here — a stub with a null material,
+  // The shared chunk material is a RESOURCE too, so it is inserted here �?a stub with a null material,
   // which is never reached because this world is all AIR and builds no mesh at all.
   streamWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
   const stream = new ChunkStreamSystem(streamWorld);
@@ -739,7 +739,7 @@ check("every recipe resolves to a style, and state changes it", () => {
     "selection must change the item's style",
   );
   // The loading bar is filled by DATA (`active` per segment), so its role has to answer to that
-  // state — otherwise the loading bar would draw the same face filled and empty.
+  // state �?otherwise the loading bar would draw the same face filled and empty.
   assert(
     recipeStyle("loading.segment", { active: true }, theme) !==
       recipeStyle("loading.segment", { active: false }, theme),
@@ -816,7 +816,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
       scrollTop: 0,
       /** Listeners by type. The delegation check reads these: a widget element must have NONE. */
       listeners: {},
-      /** What `<input type=range>` reports on an `input` event — read off the widget's own element. */
+      /** What `<input type=range>` reports on an `input` event �?read off the widget's own element. */
       get valueAsNumber() {
         return Number(this.value);
       },
@@ -849,7 +849,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   const previousDocument = globalThis.document;
   const mount = mkEl();
   // The document ROOT: the reconciler applies the GLOBAL STYLE to it (the font pair + the root font size),
-  // because the config modules do not apply themselves any more. Count the writes — the point is that it
+  // because the config modules do not apply themselves any more. Count the writes �?the point is that it
   // writes what CHANGED and nothing per frame (which is what lets the resize callback go away).
   const root = mkEl();
   let rootVarWrites = 0;
@@ -898,7 +898,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     // ── the GLOBAL STYLE is the reconciler's, and it writes it on CHANGE ───────────────────────────
     // The font pair and the root font size used to be applied by ui/fonts.ts and ui/uiscale.ts
     // themselves: a DOM write from outside any system, unconditional per call, and re-run on every
-    // resize. They publish the VALUE now and the reconciler diffs it — which is exactly why the
+    // resize. They publish the VALUE now and the reconciler diffs it �?which is exactly why the
     // resize callback could be deleted.
     equal(root.style["--font-ui"], "a-ui", "the font pair reaches the document root");
     equal(rootFontSize, "16px", "…and so does the root font size");
@@ -972,8 +972,8 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     // ── a scrollable ROLE starts at the TOP on every visit, and its position is NOT recorded ───────
     // What it must NOT do is what the previous attempt did: write a shared offset into a hidden subtree
     // (a `display:none` box cannot hold one) while marking it "applied", so the list that came back was
-    // the one that had been at the top and the two settings panels disagreed. The rule is an EDGE — the
-    // frame a list (or the PANEL around it) becomes visible — and nothing else touches the position.
+    // the one that had been at the top and the two settings panels disagreed. The rule is an EDGE �?the
+    // frame a list (or the PANEL around it) becomes visible �?and nothing else touches the position.
     const capPanel = W.spawnPanel(world, null, "settings.panelXl", { hidden: true });
     const capA = W.spawnPanel(world, capPanel, "kb.chips"); // inside a hidden PANEL, itself visible
     const capB = W.spawnPanel(world, null, "kb.chips"); // an independent second instance
@@ -983,7 +983,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     assert(!!elA && !!elB, "two instances of the scrollable role are mounted");
     equal(elA.scrollTop, 0, "a list behind a hidden panel starts at the top");
 
-    // Scrolling it — by any means — is NOT recorded and NOT undone while the panel stays up: the list
+    // Scrolling it �?by any means �?is NOT recorded and NOT undone while the panel stays up: the list
     // the user scrolled stays where the user put it.
     elA.scrollTop = 40;
     elB.scrollTop = 12;
@@ -995,7 +995,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     // ancestor, or the next visit keeps the old position.
     W.setUiVisible(world, capPanel, false);
     system.step();
-    elA.scrollTop = 40; // what a hidden box may keep, or may be reset to — either way it is stale
+    elA.scrollTop = 40; // what a hidden box may keep, or may be reset to �?either way it is stale
     W.setUiVisible(world, capPanel, true);
     system.step();
     equal(elA.scrollTop, 0, "coming back from a hidden ANCESTOR panel returns the list to the top");
@@ -1012,7 +1012,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
 
     // ── the DELEGATED events: one listener per TYPE on the mount root, none per widget ─────────────
     // Six listeners used to be attached to every widget at mount time (click, input, mouseenter,
-    // mouseleave, mousedown, mouseup) — six closures each, none of them enumerable from outside. The
+    // mouseleave, mousedown, mouseup) �?six closures each, none of them enumerable from outside. The
     // reconciler listens to the mount root now and finds the widget by walking up from `ev.target`;
     // hover is an ancestor-chain DIFF, because mouseenter/mouseleave do not bubble. Both halves are
     // asserted on the same stub DOM.
@@ -1046,7 +1046,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
 
     /** Bubble one synthetic event from `target` up to (and including) the mount root. `detail` is the
      *  click COUNT: >= 1 is a real press/release (Chromium's own synthesis from mousedown+mouseup
-     *  included), 0 is what TAB+ENTER/SPACE — and a programmatic `.click()` — produce. */
+     *  included), 0 is what TAB+ENTER/SPACE �?and a programmatic `.click()` �?produce. */
     const fire = (type, target, relatedTarget = null, detail = 1) => {
       const ev = { type, target, relatedTarget, detail };
       let node = target;
@@ -1069,7 +1069,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     equal(fired.join(","), "v1,moved:7", "a slider reports the value it was moved to");
 
     // KEYBOARD activation is DROPPED. A widget element is focusable, so TAB then ENTER (or SPACE) fires a
-    // `click` with `detail === 0` — the UI is mouse-driven, and the filter lives on the EVENT, so a real
+    // `click` with `detail === 0` �?the UI is mouse-driven, and the filter lives on the EVENT, so a real
     // press/release (which carries the click count) is untouched.
     const dispatched = fired.length;
     fire("click", labelEl2, null, 0);
@@ -1079,7 +1079,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     fire("click", labelEl2, null, 2);
     equal(fired.length, dispatched + 2, "…a double click included");
 
-    // HOVER: entering the label hovers the button above it…
+    // HOVER: entering the label hovers the button above it�?
     const idle = btnEl2.style.cssText;
     fire("mouseover", labelEl2);
     system.step();
@@ -1089,7 +1089,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     system.step();
     equal(btnEl2.style.cssText, idle, "leaving the tree takes the shade back");
 
-    // PRESS: down on the label presses the button, and ANY release inside the tree ends it — the
+    // PRESS: down on the label presses the button, and ANY release inside the tree ends it �?the
     // per-widget listener only heard a release on the widget itself, so a press that ended elsewhere
     // stayed pressed until the pointer left and came back.
     fire("mousedown", labelEl2);
@@ -1116,11 +1116,11 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     "hover is an ancestor-chain diff over the bubbling mouseover");
 });
 
-check("a delayed intent is DATA with a deadline, applied by a system — never a timer", () => {
+check("a delayed intent is DATA with a deadline, applied by a system �?never a timer", () => {
   // Four `setTimeout`s used to be the only way this process could say "in a moment": closing the backpack
   // relocking the mouse, the lock manager's 1300 ms retry, and the cursor re-asserts after the window
   // regained focus (0/120 ms) or after the menu/Apps key (0/32/80 ms). Each was a timer owned by whichever
-  // module wanted it. The DEADLINE is a resource now, which is what makes the timing assertable at all —
+  // module wanted it. The DEADLINE is a resource now, which is what makes the timing assertable at all �?
   // the gate drives the clock instead of sleeping through it.
   const R = load("data/globals/resources.js");
   const { DelaySystem, DELAYS_ACCESS } = load("plugins/ui/systems/delays.js");
@@ -1159,7 +1159,7 @@ check("a delayed intent is DATA with a deadline, applied by a system — never a
   equal(notYet.takeDue().length, 1, "…and fires the moment it is reached");
 
   // The cap: the menu/Apps key schedules four re-asserts per press (keydown AND keyup), so the queue must
-  // not grow without limit. At the cap the FURTHEST deadline goes — the urgent re-asserts are the ones
+  // not grow without limit. At the cap the FURTHEST deadline goes �?the urgent re-asserts are the ones
   // that win the cursor race.
   for (let i = 0; i < R.DELAY_QUEUE_CAP + 8; i++) queue.schedule("cursor", 0);
   equal(queue.pending, R.DELAY_QUEUE_CAP, "the queue is capped");
@@ -1210,7 +1210,7 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   const icons = load("host/browser/blockicons.js");
   const P = loadPresentation();
   // The bake's state is a RESOURCE (ecs/presentation.ts::ICON_BAKE): the two readers operate on it, so
-  // they can be driven here with no GPU and no browser — the renderer is created on the first real bake.
+  // they can be driven here with no GPU and no browser �?the renderer is created on the first real bake.
   const bake = P.createIconBake();
   equal(icons.iconCacheKey("stone", 40), "stone@40", "the key is type@size");
   equal(icons.iconCacheKey("stone", 40.4), "stone@40", "…with the size rounded");
@@ -1232,7 +1232,7 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   assert(!/\.then\(/.test(invSource), "the inventory draws the icon from the cache, not from a promise");
   // Since P1.18b the icon baker is INJECTED (a plugin may not import `host/`), so the check is
   // two-sided: the system asks through its IconSource, and the composition root hands it the real one.
-  // A missing wire would not crash — it would silently ship placeholder icons — so it is asserted.
+  // A missing wire would not crash �?it would silently ship placeholder icons �?so it is asserted.
   assert(/this\.icons\.request\(/.test(invSource), "…and asks for a bake when the cache misses");
   assert(/request: requestBlockIcon/.test(stripComments(readSource("src/boot/main.ts"))),
     "…with the real baker wired in by the composition root");
@@ -1268,7 +1268,7 @@ check("a bound widget takes its value from its source, not from whoever built it
   equal(value(), 240, "'unlimited' arrives as the top of the slider's own range");
   cap = 61;
   system.step();
-  // The exact tie-break is not the contract —"lands ON the slider's grid, inside its range" is, and
+  // The exact tie-break is not the contract �?lands ON the slider's grid, inside its range" is, and
   // that is what keeps the component and the element saying the same number.
   const snapped = value();
   assert(
@@ -1427,8 +1427,8 @@ check("the F3+F4 picker is a system: key edges in, widget data and a mode change
   equal(world.get(debug, W.UI_STATE).hidden, before, "auto-repeat does not re-toggle the F3 panel");
 
   // 6. OUTSIDE A WORLD none of it fires. F3 and F3+F4 are GAMEPLAY chords: at the main menu (and on the
-  //    loading screen) they used to open the F3 panel — with stale text, because its numbers come from
-  //    the render lane, which does not run there — and to switch the movement mode through SetMode, i.e.
+  //    loading screen) they used to open the F3 panel �?with stale text, because its numbers come from
+  //    the render lane, which does not run there �?and to switch the movement mode through SetMode, i.e.
   //    write a COMPONENT from a menu. The edges are still consumed, so nothing is replayed on entry.
   inWorld = false;
   const modeBefore = mode;
@@ -1459,8 +1459,8 @@ check("the F3+F4 picker is a system: key edges in, widget data and a mode change
 check("the GAMEPLAY widgets are visible only while a world runs (the crosshair and the hotbar)", () => {
   // Both were spawned VISIBLE during wiring and nothing ever wrote their flag, so they were on screen in
   // every mode: at the main menu (through its translucent backdrop), on the loading screen, and over the
-  // PAUSE menu — where the hotbar's z-index (31) is above that menu's whole root (30), so it drew on top
-  // of the panel — with its slots still clickable (a menu click could select a slot, a SetMode-free but
+  // PAUSE menu �?where the hotbar's z-index (31) is above that menu's whole root (30), so it drew on top
+  // of the panel �?with its slots still clickable (a menu click could select a slot, a SetMode-free but
   // still component-writing command). `ui.hud` owns that flag and derives it from `inWorld()`.
   const H = load("plugins/ui/systems/hud.js");
   const world = widgetWorld;
@@ -1485,8 +1485,8 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   hud.step();
   equal(shown(crosshair) && shown(hotbar), true, "entering a world brings both back");
 
-  // The system is registered in the ui lane with a declared access set, ahead of every other writer —
-  // "what may the lane show at all" comes first — and the composition root hands it the two roots.
+  // The system is registered in the ui lane with a declared access set, ahead of every other writer �?
+  // "what may the lane show at all" comes first �?and the composition root hands it the two roots.
   const main = stripComments(readSource("src/boot/main.ts"));
   assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")), "the composition root registers ui.hud");
   assert(/crosshair: hud\.crosshairEntity/.test(main), "…with the crosshair root");
@@ -1520,7 +1520,7 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
     inventoryPanel: mkPanel("inv.panel"),
   };
   const effects = [];
-  /** "Is a world running?" — the ESC/inventory gate. false is the LOADING-SCREEN state (the startup and
+  /** "Is a world running?" �?the ESC/inventory gate. false is the LOADING-SCREEN state (the startup and
    *  a world being built behind the screen), where neither the pause menu nor the backpack may open. */
   let inWorld = false;
   const nav = new N.UiNavigationSystem(world, {
@@ -1718,7 +1718,7 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   equal(world.get(b.legend, W.UI_TEXT).key, "W", "…legends included");
 
   // The drag: the gesture says WHICH chip is being dragged and where the drag was ANCHORED; WHERE THE
-  // POINTER IS comes from the POINTER resource (the device layer publishes it — it owns the mousemove
+  // POINTER IS comes from the POINTER resource (the device layer publishes it �?it owns the mousemove
   // listener), and the system derives the threshold, the hover target and the line's geometry from the two.
   gesture.drag = { action: "forward", button: 0, anchorX: 10, anchorY: 20, moved: false };
   pointer.x = 12;
@@ -1753,7 +1753,7 @@ function registrations() {
     "src/plugins/render/index.ts", "src/plugins/ui/index.ts", "src/plugins/ui-debug/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
-  // Since P1.18 a registration goes through the plugin registry — `contributeSystem("<plugin id>", {...})` —
+  // Since P1.18 a registration goes through the plugin registry �?`contributeSystem("<plugin id>", {...})` �?
   // so the owner is captured too and a test can assert every system belongs to a plugin the manifest knows.
   const blocks = [...source.matchAll(/(?:world\.addSystem\(|contributeSystem\("([^"]+)",\s*|api\.system\()\{([\s\S]*?)\n\s*\}\);/g)]
     .map((m) => ({ owner: m[1] ?? "boot", body: m[2] }));
@@ -1834,7 +1834,7 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["player.interaction"],
   ];
   // The block target wireframe joins the render producers' batch: it shares no component with them and
-  // writes a target of its own (`blockOutline`), so any order among the four is correct — and the draw,
+  // writes a target of its own (`blockOutline`), so any order among the four is correct �?and the draw,
   // which reads the scene they fill, stays in the batch after it.
   const expectedRender = [
     ["diagnostics", "cameraView.render", "chunk.stream", "block.outline"],
@@ -1846,7 +1846,7 @@ check("the real schedule resolves into the batches the docs claim", () => {
   // and the schedule cannot see that, so the order has to be declared.
   const expectedUi = [
     // The GAMEPLAY gate shares the first batch with the binding resolver: they touch DISJOINT components
-    // (UI_STATE vs UI_INPUT), so the schedule says they may run in either order — and it is right.
+    // (UI_STATE vs UI_INPUT), so the schedule says they may run in either order �?and it is right.
     ["ui.hud", "ui.bindings"],
     ["ui.loading"],
     ["ui.inventory"],
@@ -1856,7 +1856,7 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["ui.navigation"],
     // The delayed intents are applied right after the systems that decide them and before the frame is
     // painted. It writes ui.navigation's two targets (`pointerLock` / `cursor`), so the conflict rule
-    // FORCES the edge — and `before: ["ui.widgets"]` is what keeps the reconciler the last system.
+    // FORCES the edge �?and `before: ["ui.widgets"]` is what keeps the reconciler the last system.
     ["ui.delays"],
     ["ui.widgets"],
   ];
@@ -1890,7 +1890,7 @@ check("renderUi() pumps the barrier + the ui lane ONLY, and render() still ends 
 check("every system that writes the DOM is in the ui lane", () => {
   // The invariant behind the regression this lane was split for: a DOM writer left in the render
   // lane stops reconciling the moment stopLoop() runs, which today is the main menu. A `dom.` target
-  // is the discriminator —"framebuffer" is a canvas, not DOM.
+  // is the discriminator �?framebuffer" is a canvas, not DOM.
   const dom = registrations().filter((def) =>
     (def.writesExternal ?? []).some((target) => target.startsWith("dom.")),
   );
@@ -1927,8 +1927,8 @@ check("the frame cap is world state AND a persisted setting", () => {
   equal(R.createFrameCap(-5).cap, 0, "a negative cap from a hand-edited settings.json is refused");
   equal(R.createFrameCap(Number.NaN).cap, 0, "…and so is a non-number");
   // The cap's DOMAIN is part of the value's contract. A stored cap the slider cannot express makes the
-  // label and the slider disagree — a hand-edited `fpsCap: 1` showed "1 FPS" above a slider parked at
-  // 30, and the first drag silently replaced it — so the sanitiser clamps and snaps into it.
+  // label and the slider disagree �?a hand-edited `fpsCap: 1` showed "1 FPS" above a slider parked at
+  // 30, and the first drag silently replaced it �?so the sanitiser clamps and snaps into it.
   equal(R.CAP_MIN, 30, "the domain's floor");
   equal(R.CAP_MAX, 240, "…its top, which means unlimited");
   equal(R.createFrameCap(1).cap, 30, "below the floor becomes the floor");
@@ -1941,7 +1941,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   equal(R.createFrameCap(239).cap, 0, "…and rounding UP onto the top is unlimited too");
   equal(R.createFrameCap(Number.POSITIVE_INFINITY).cap, 0, "an infinite cap is refused like a NaN");
   // THE INVARIANT the label and the slider rely on: whatever goes in, what comes out is exactly what
-  // the slider shows for it — `snapToRange` with the slider's own domain must be a NO-OP.
+  // the slider shows for it �?`snapToRange` with the slider's own domain must be a NO-OP.
   const range = { min: R.CAP_MIN, max: R.CAP_MAX, step: R.CAP_STEP };
   const { snapToRange } = load("plugins/ui/components.js");
   for (const input of [-10, 0, 0.4, 1, 29, 30, 31, 32, 58, 59, 60, 61, 119, 120, 238, 239, 240, 241, 300, 1e6,
@@ -1984,7 +1984,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   );
   // The cap LABEL is a push, and the number it shows arrives through that same command at the next
   // barrier: the drag handler must hand it the value it just sent. Re-reading the resource printed the
-  // PREVIOUS drag step, and nothing else refreshes the label — the reported "the FPS number is not
+  // PREVIOUS drag step, and nothing else refreshes the label �?the reported "the FPS number is not
   // accurate while sliding".
   const menuSrc = stripComments(readSource("src/plugins/ui/views/menu.ts"));
   assert(/renderCap\(cap\)/.test(menuSrc), "the cap label is handed the value the drag just sent");
@@ -2003,7 +2003,7 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   // ran last —and stopLoop() started the UI pump as a side effect that startLoop() then undid. Then the
   // ui pump and the panorama became exactly one caller each (setLoopMode). NOW there is nothing to start
   // or stop at all: ONE chain runs for the process lifetime, `setLoopMode` only writes the mode, and the
-  // frame body dispatches on it — so a mode transition cannot half-stop a loop.
+  // frame body dispatches on it �?so a mode transition cannot half-stop a loop.
   const main = stripComments(readSource("src/boot/main.ts"));
   equal(countOf(main, /function stopLoop|function startLoop/g), 0, "no stopLoop/startLoop pair");
   equal(countOf(main, /\btimerId\b|\bstarted\b/g), 0, "no dead timer handle, no second running flag");
@@ -2039,7 +2039,7 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
 
 check("the startup screen is DATA: a command moves LOADING_STATE, `ui.loading` paints the widgets", () => {
   // The window is now revealed while the GPU is still being initialised, so the process needs a
-  // loading screen — and a loading screen is UI, which in this repo means: a surface writes data and
+  // loading screen �?and a loading screen is UI, which in this repo means: a surface writes data and
   // the reconciler paints it. main.ts therefore publishes the stage into a resource (through a
   // command, like every other outside write) and `ui.loading` turns it into widget data, which is also
   // what keeps the loading text translatable and the bar free of per-frame style strings.
@@ -2097,7 +2097,7 @@ check("the startup screen is DATA: a command moves LOADING_STATE, `ui.loading` p
 check("the startup reveals the window behind the screen, and entering a world rebuilds it there", () => {
   // The window used to be revealed AFTER `await renderer.init()`, so the GPU handshake, the spawn
   // window's generation and the first ~100 frames of chunk meshing all happened behind a hidden
-  // window — the startup was a black rectangle for as long as it took. The order below is the feature.
+  // window �?the startup was a black rectangle for as long as it took. The order below is the feature.
   const main = stripComments(readSource("src/boot/main.ts"));
   // The two drivers, extracted by name: EVERY assertion about "the screen is activated" / "the world is
   // built here" has to be scoped to ONE of them, because an unscoped `indexOf` finds whichever comes
@@ -2105,7 +2105,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   const bootBody = main.slice(main.indexOf("async function boot("), main.indexOf("void boot()"));
   // The end marker has to be CODE: comments are stripped above, so a `//` marker matches nothing and the
   // slice would silently run to the end of the file (which is how the entry assertions passed while the
-  // entry was broken — the boot driver's own `active: true` was inside the slice).
+  // entry was broken �?the boot driver's own `active: true` was inside the slice).
   const entryBody = main.slice(
     main.indexOf("async function enterWorld("),
     main.indexOf("const mainMenu = createMainMenu("),
@@ -2123,7 +2123,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   assert(revealed > started, "…and before the window is revealed");
   assert(gpu > revealed, "the GPU handshake happens AFTER the window is already showing the screen");
   // …and the screen has to be ACTIVATED, or none of the above paints anything: `ui.loading` shows its root
-  // only while LOADING_STATE.active is true, and the root is spawned hidden. This shipped BROKEN TWICE —
+  // only while LOADING_STATE.active is true, and the root is spawned hidden. This shipped BROKEN TWICE �?
   // the startup without the line (a black window with the crosshair and the hotbar on it, the HUD being
   // visible by default) and then the world entry without it, because `boot()`'s final stage sets
   // `active: false` and the entry never set it back. Both drivers are asserted separately now; a
@@ -2134,7 +2134,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   );
   // The activation must precede STARTING the flow: the walker announces stage 0 (which pumps the ui lane
   // through the command barrier) before it runs that stage's work, so "screen up" precedes "window shown"
-  // by construction — the source order inside the driver plus the walker's own contract.
+  // by construction �?the source order inside the driver plus the walker's own contract.
   assert(
     bootBody.indexOf("active: true") < bootBody.indexOf("runBootFlow(bootFlow"),
     "…before the flow is started, so the first visible frame is the screen",
@@ -2178,7 +2178,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   // ===== the world is built at ENTRY, not at startup =====
   // Building it at boot made the STARTUP pay for a world the user may never enter (the spawn window's
   // generation plus ~100 frames of meshing, ~1.6 s in the measured log) and left "entering a world"
-  // with nothing to wait for — i.e. no honest place for a loading screen. Both halves are asserted:
+  // with nothing to wait for �?i.e. no honest place for a loading screen. Both halves are asserted:
   // `boot()` must NOT build a world, and the entry driver MUST. (Both bodies were extracted above.)
   equal(countOf(bootBody, /chunkStream\./g), 0, "the startup does not build or mesh the world any more");
   assert(/chunkStream\.prime\(/.test(entryBody), "entering a world generates the spawn window");
@@ -2194,7 +2194,7 @@ check("the startup reveals the window behind the screen, and entering a world re
 });
 
 check("the settings FILE is checked at boot, repaired and written back", () => {
-  // Each config module already ignores a value it cannot use and falls back — which silently left the
+  // Each config module already ignores a value it cannot use and falls back �?which silently left the
   // FILE disagreeing with the value in force, unreported, forever. The boot check compares the two.
   const { diffSettings } = load("core/services/settings-diff.js");
   const inForce = {
@@ -2253,8 +2253,8 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   // takeover) are what made the "held key" investigation possible, and several of them fire on ordinary
   // activity (a click writes KBCAP, a capture transition writes the takeover line), so they are the only
   // thing that keeps writing for as long as the app runs. The switch is a settings-panel toggle (default
-  // ON) and it filters in `logDebug` — the ONE place every probe line passes through — so the event lines
-  // (BOOT / SETTINGS / WORLD / LOCK / CURSOR / ESC / ERROR …) are never affected, and a new probe only has
+  // ON) and it filters in `logDebug` �?the ONE place every probe line passes through �?so the event lines
+  // (BOOT / SETTINGS / WORLD / LOCK / CURSOR / ESC / ERROR �? are never affected, and a new probe only has
   // to be added to the prefix table.
   const shell = stripComments(readSource("src/host/desktop/shell.ts"));
   // The prefix TABLE is DATA now (`data/globals/probes.ts`); the switch and the one filter point stay here.
@@ -2265,7 +2265,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
     "…and logDebug filters the probe lines with it");
   assert(/export function appendDebugLog/.test(shell) && !/isProbeLine/.test(shell.split("export function appendDebugLog")[1].split("export function logDebug")[0]),
     "the error/console channel (appendDebugLog) stays unfiltered");
-  // EVERY emitted probe line's OWN first token must be in the table — not just "the table names a
+  // EVERY emitted probe line's OWN first token must be in the table �?not just "the table names a
   // probe". The table used to carry a stale `"LOOK#"` while `player.input` printed `LOOK raw=…`, so with
   // the switch OFF that line kept being written every second (the flood the switch exists to stop) and
   // the old assertion here happily passed, because it only checked the table against ITSELF. Each entry
@@ -2303,7 +2303,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   );
   assert(/s\.diagLog = isDiagLogEnabled\(\)/.test(main), "…and persists it with the other settings");
   // …and it RECORDS the state the run booted in, as an EVENT line (its prefix is deliberately not in the
-  // probe table): with the switch off, a log with no probe lines is otherwise ambiguous — "off" and "the
+  // probe table): with the switch off, a log with no probe lines is otherwise ambiguous �?"off" and "the
   // probes never registered" look exactly the same to whoever reads it.
   assert(/`DIAGLOG probes [^`]*at boot/.test(main), "the composition root records the switch's boot state");
   assert(!probes.includes('"DIAGLOG '), "…as an event line: its prefix is not in the probe table");
@@ -2358,8 +2358,8 @@ check("the startup screen's copy exists in the shipped dictionaries", () => {
 
 check("configuration is a RESOURCE, and the input state caches no copy of it", () => {
   // Two leftovers of the same shape: state that lived as a module singleton or as a cached field.
-  //   * the mutable CONFIG (language, font, UI scale, key map) is world state — the bind table is asked
-  //     every tick and the language every frame — so it lives in resources with declared readers;
+  //   * the mutable CONFIG (language, font, UI scale, key map) is world state �?the bind table is asked
+  //     every tick and the language every frame �?so it lives in resources with declared readers;
   //   * INPUT_STATE carried a cached `clickLockAllowed`, i.e. a second copy of what UI_MODAL already
   //     answers. A stale copy there let a click capture the mouse behind an open menu.
   const R = load("data/globals/resources.js");
@@ -2414,7 +2414,7 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
 
   // The GLOBAL STYLE (the font pair + the root font size) is the reconciler's to apply, not the config
   // modules'. They used to fire `applyFont()` / `applyUIScale()` themselves: a DOM write from outside
-  // any system, past no barrier, and — for the root font size — repeated unconditionally on every resize.
+  // any system, past no barrier, and �?for the root font size �?repeated unconditionally on every resize.
   // The values live with the resources; the write is HERE, diffed against what was last applied.
   const renderSrc = stripComments(readSource("src/plugins/ui/systems/reconcile.ts"));
   const fontsSrc = stripComments(readSource("src/data/globals/fonts.ts"));
@@ -2422,7 +2422,7 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   for (const [file, src] of [["src/data/globals/fonts.ts", fontsSrc], ["src/data/globals/uiscale.ts", scaleSrc]]) {
     // The mount root uiStage is this module's own business (the reconciler is HANDED it). What it may
-    // not do any more is apply the DOCUMENT ROOT's style — that is the reconciler's one DOM write.
+    // not do any more is apply the DOCUMENT ROOT's style �?that is the reconciler's one DOM write.
     equal(countOf(src, /documentElement|style\.(?:setProperty|fontSize)/g), 0,
       `${file} still applies the global style itself`);
   }
@@ -2447,7 +2447,7 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
     "pointerlock.ts no longer publishes it");
 
   // Assets are DATA with an owner: the dictionaries, the block registry and the pack chain's background
-  // memo are loaded once and never change, but they are no longer invisible module-level `let`s — each
+  // memo are loaded once and never change, but they are no longer invisible module-level `let`s �?each
   // module creates its object at import time (all three can be asked before the World exists) and the
   // composition root INSERTS it, so the cache has a name and a reader that is not that module.
   for (const [name, token] of [
@@ -2462,10 +2462,10 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
 
 check("the presentation objects are RESOURCES, not constructor dependencies", () => {
   // The three.js scene, the camera, the renderer, the frame-time sampler, the canvas host, the UI mount
-  // root and the chunk-mesh cache used to arrive as CONSTRUCTOR ARGUMENTS — the only shared state in the
+  // root and the chunk-mesh cache used to arrive as CONSTRUCTOR ARGUMENTS �?the only shared state in the
   // process with no owner. They are world state, so the world holds them and each system resolves what
   // it uses (ecs/presentation.ts). Both halves are asserted: the root inserts every one, and none of
-  // them is handed to a system any more — that second half is the regression this group exists for.
+  // them is handed to a system any more �?that second half is the regression this group exists for.
   const P = loadPresentation();
   const main = stripComments(readSource("src/boot/main.ts"));
   for (const name of [
@@ -2480,7 +2480,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     assert(typeof P[name]?.name === "string", `${name} is a resource token`);
     assert(new RegExp(`insertResource\\(${name},`).test(main), `the composition root inserts ${name}`);
   }
-  // The consumers resolve them from the World — the shape every other resource uses.
+  // The consumers resolve them from the World �?the shape every other resource uses.
   for (const [file, token] of [
     ["src/plugins/render/systems/camera.ts", "CAMERA3D"],
     ["src/plugins/render/systems/chunk-stream.ts", "CHUNK_MESHES"],
@@ -2514,9 +2514,9 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   const diagDeps = /new DiagnosticsSystem\(([^)]*)\)/.exec(readSource("src/plugins/diagnostics/index.ts"));
   assert(diagDeps !== null, "diagnostics is constructed");
   equal(diagDeps[1].trim(), "world", "diagnostics takes NOTHING but the world (a view callback and another "
-    + "system's queues used to be constructor arguments — they are resources now)");
+    + "system's queues used to be constructor arguments �?they are resources now)");
   // The CANVAS SIZE belongs to the FRAME, not to a lane: a MENU frame and a LOAD frame run the ui lane
-  // alone, so a size applied by `renderer.draw` was applied only in a game — resize at the main menu and the
+  // alone, so a size applied by `renderer.draw` was applied only in a game �?resize at the main menu and the
   // panorama's canvas kept its old pixel size until a world was entered (that bug shipped once).
   assert(/function frame\(\)[\s\S]{0,200}applyViewportSize\(\)/.test(main),
     "the frame applies the viewport size, before the mode body");
@@ -2526,8 +2526,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
       /run: \(\) => world\.resource\(RENDERER3D\)\.render\(/.test(readSource("src/plugins/render/index.ts")),
     "…and the draw only draws (it must not resize the canvas)");
   // A WINDOW GEOMETRY change is a DEVICE signal treated like losing the window: hand the mouse back and
-  // pause if the player was playing. It is deliberately NOT a blur — dragging a border keeps the window
-  // focused and the cursor inside its rect — and it is the only signal that catches the reported bug
+  // pause if the player was playing. It is deliberately NOT a blur �?dragging a border keeps the window
+  // focused and the cursor inside its rect �?and it is the only signal that catches the reported bug
   // (start a resize-drag while a world loads, the entry locks the mouse on top of it, then both the drag
   // and the view rotation work).
   assert(/onWinGeometry\(/.test(main), "the window's geometry change is handled as a signal");
@@ -2535,7 +2535,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "…while our OWN window-mode switch suppresses it (fullscreen must not open the pause menu)");
   // CAPTURE REQUIRES THE FOREGROUND. The browser path refuses pointer lock by itself, which is why the NW.js
   // version could drop the focus gate; the NATIVE capture (ClipCursor) does not look at the foreground at
-  // all, so an AUTOMATIC relock — the world entry is the one — would capture the mouse while the user is in
+  // all, so an AUTOMATIC relock �?the world entry is the one �?would capture the mouse while the user is in
   // another app. Three places, and the gate pins all three.
   const pointerlockSrc = stripComments(readSource("src/host/browser/pointerlock.ts"));
   assert(/focused: \(\) => boolean/.test(pointerlockSrc), "the lock manager takes a foreground predicate");
@@ -2570,7 +2570,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
 
   // 1. The item-icon bake: a second offscreen WebGPU renderer + its two caches. The bake's COMPLETION
   //    used to write the inventory's UI_IMAGE from a `.then` continuation (a component write with no lane
-  //    around it) — that is asserted in the icon-cache group; here it is where the STATE lives.
+  //    around it) �?that is asserted in the icon-cache group; here it is where the STATE lives.
   assert(typeof P.ICON_BAKE?.name === "string" && typeof P.createIconBake === "function",
     "ICON_BAKE is a resource with a factory");
   assert(/insertResource\(ICON_BAKE, createIconBake\(\)\)/.test(main), "the composition root inserts it");
@@ -2615,7 +2615,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   assert(/this\.diag\.look\.frameSamples/.test(inputSrc), "the per-frame meter reads the resource");
 
   // 5. The UI mount root. uiscale.ts created the stage div and appended it to document.body at IMPORT
-  //    time — a DOM side effect of a config module, on the element the whole widget layer hangs off.
+  //    time �?a DOM side effect of a config module, on the element the whole widget layer hangs off.
   const uiscale = stripComments(readSource("src/data/globals/uiscale.ts"));
   equal(countOf(uiscale, /document\.(?:createElement|body)/g), 0,
     "uiscale.ts neither builds nor appends the UI stage");
@@ -2656,7 +2656,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
 
 check("the input race guards' state is a RESOURCE (and the logic did not move)", () => {
   // A3: the ten fields that make player.input race-sensitive are INPUT_TIMING now. What the change buys
-  // is that the STATE is visible — a test and a log can see why a mousemove was swallowed — never that
+  // is that the STATE is visible �?a test and a log can see why a mousemove was swallowed �?never that
   // the logic is different. So this group asserts where the facts live, and the behavior check further
   // down asserts that arming the grace window shows up in the resource.
   const R = load("data/globals/resources.js");
@@ -2688,10 +2688,10 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
   );
   assert(/resource\(INPUT_TIMING\)/.test(src), "…it resolves the resource instead");
   // A click may not CAPTURE the mouse before a world exists: the loading screen owns no modal flag, so the
-  // UI_MODAL guard let a click there engage the native capture — and the world entry then re-locked on top
+  // UI_MODAL guard let a click there engage the native capture �?and the world entry then re-locked on top
   // of it, which is the state the resize-drag bug needed.
   assert(/!this\.inWorld\(\)/.test(src), "…and the click-to-capture path requires a running world");
-  // The queued intents are a resource TOO (INPUT_INTENTS) — but they stayed the system's own producer and
+  // The queued intents are a resource TOO (INPUT_INTENTS) �?but they stayed the system's own producer and
   // consumer: no private field, a getter over the resource's array, and the drain happens in place at the
   // top of the tick. That shape is what keeps "nothing outside sees a half-applied frame" true.
   assert(/resource\(INPUT_INTENTS\)/.test(src), "…so is the pending intent queue");
@@ -2761,7 +2761,7 @@ check("the batcher finds parallelism when it exists, and separates conflicts", (
 });
 
 check("a declared order holds in EITHER registration order (the batcher's index space)", () => {
-  // ROADMAP §3.9 carried this as a GAP: a pure ORDERING edge — two systems that share no data at all —
+  // ROADMAP §3.9 carried this as a GAP: a pure ORDERING edge �?two systems that share no data at all �?
   // only worked when the declaration happened to be registered in topological order. `build()` built the
   // adjacency in REGISTRATION order and the verification + the batcher indexed that same array by
   // RESOLVED position, so as soon as Kahn's sort MOVED one of the two, the edge pointed at the wrong
@@ -2997,10 +2997,10 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     input.step();
     equal(control.keys.has("KeyW"), false, "…and the tick releases it");
 
-    // 1b. TAB: the browser default is CANCELLED while the game owns the mouse — Chromium's focus traversal
-    //     walks out of the tab order, the window deactivates and our "lost the window → pause" handler fires
-    //     (`code=Tab` → `WINFOCUS blur` → `blur -> pause menu`). But the KEY must not be SWALLOWED: the bind
-    //     panel accepts Tab, and an early return here recorded the bind and then never fired it — which is
+    // 1b. TAB: the browser default is CANCELLED while the game owns the mouse �?Chromium's focus traversal
+    //     walks out of the tab order, the window deactivates and our "lost the window �?pause" handler fires
+    //     (`code=Tab` �?`WINFOCUS blur` �?`blur -> pause menu`). But the KEY must not be SWALLOWED: the bind
+    //     panel accepts Tab, and an early return here recorded the bind and then never fired it �?which is
     //     exactly the bug this asserts.
     let tabDefault = false;
     handlers.keydown({ code: "Tab", repeat: false, preventDefault: () => { tabDefault = true; } });
@@ -3023,14 +3023,14 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     // 1c. a REBIND CAPTURE owns ESC. The capture handler lives in platform/bind-gesture.ts and is mounted
     //     by main.ts AFTER this system's constructor (the gesture's device listeners are installed by
     //     `bindKeybindDrag`), so its `stopImmediatePropagation()` can no longer take back an edge that is
-    //     already in KEY_EVENTS — the NW.js build installed that handler at IMPORT time, i.e. first. The
+    //     already in KEY_EVENTS �?the NW.js build installed that handler at IMPORT time, i.e. first. The
     //     gate therefore has to be HERE, at event time, where `capturing()` is still armed: the capture
     //     handler clears it synchronously, so a test in `ui.navigation` would read false by the time the ui
     //     lane drains the log. Without it, ESC unbound the action AND walked the settings panel one level
     //     back (the reported bug).
     const K = load("plugins/input/keybinds.js");
     // The capture STATE is the gesture resource now (platform/keybinds only holds a pointer to it), so the
-    // harness hands it one — exactly as the composition root does during wiring.
+    // harness hands it one �?exactly as the composition root does during wiring.
     K.adoptKeybindGesture(load("data/globals/keybind-gesture.js").createKeybindGesture());
     const edgeLog = world.resource(KEY_EVENTS);
     const escapeDowns = () => edgeLog.edges.filter((e) => e.code === "Escape" && e.down).length;
@@ -3097,7 +3097,7 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     input.step();
     equal(motion.vy, 0, "a press while a modal UI owns the input writes no impulse at all");
 
-    // 6. the race guards' state lives in a RESOURCE now (INPUT_TIMING) — and the point of the move is
+    // 6. the race guards' state lives in a RESOURCE now (INPUT_TIMING) �?and the point of the move is
     //    that the gate can SEE it. `prepareUnlock()` is still ONE synchronous call at the same moment
     //    (iron rule 3: nothing about the timing changed); what changed is that "was the grace window
     //    armed" used to require instrumenting the system to answer.
@@ -3445,9 +3445,12 @@ check("the plugin system: extension points, the registry, the install and the ma
     const registry = new ExtensionRegistry();
     mod.setup({
       id: "test",
-      world: {},
+      // A stub world: a plugin that can be installed at RUNTIME inserts its own resource when the world does
+      // not have it yet (ui-debug does), so the stub has to answer both questions.
+      world: { hasResource: () => false, insertResource: () => {} },
       registry,
       contribute: (point, items) => registry.contribute(point, "test", items),
+      system: (def) => registry.contribute(S.SLOT_SYSTEMS, "test", [def]),
       log: () => {},
     });
     return registry;
@@ -3484,7 +3487,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
   // …and ALL SIX into ONE registry, exactly as the boot does it. A resource token claimed by two plugins
-  // would make the second plugin's setup throw, and the install would then skip that plugin's SYSTEMS —
+  // would make the second plugin's setup throw, and the install would then skip that plugin's SYSTEMS �?
   // i.e. a duplicate here is not a cosmetic problem, it is "the UI stopped being registered".
   const together = new ExtensionRegistry();
   // diagnostics is skipped here: its setup lives in a factory that needs a real world (it CONSTRUCTS its
@@ -3504,9 +3507,10 @@ check("the plugin system: extension points, the registry, the install and the ma
   // the surface owns its data, which is what makes disabling it leave nothing behind.
   assert(!together.list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
     "the ui plugin no longer claims the picker's state");
-  assert(contribute(load("plugins/ui-debug/index.js").uiDebugPlugin)
+  assert(contribute(load("plugins/ui-debug/index.js")
+    .createUiDebugPlugin({ uiPicker: { step: () => {}, close: () => {} } }))
     .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
-    "…the ui-debug plugin owns it");
+    "…the ui-debug plugin owns it (its setup inserts it itself when the world has not)");
   equal(together.list(S.SLOT_COMPONENTS).length, 10, "…and the widget schemas come from the ui plugin");
   equal(together.list(S.SLOT_COMMANDS).length, 3, "…and three commands from the ui plugin");
 
@@ -3611,7 +3615,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   // 6b. THE BOOT ORDER, which no type-checker can see: a plugin factory CONSTRUCTS its systems and a system
   //     resolves its resources in the constructor, so the install block must sit AFTER the resource table and
   //     BEFORE the first registration. It was broken for two commits (the factories were built above the
-  //     inserts and would have thrown on the first frame) — the app boots, so only a boot would have shown it.
+  //     inserts and would have thrown on the first frame) �?the app boots, so only a boot would have shown it.
   const bootLines = readSource("src/boot/main.ts").split("\n");
   const lineOf = (needle) => bootLines.findIndex((l) => l.includes(needle)) + 1;
   const lastInsert = bootLines.reduce(
@@ -3628,7 +3632,7 @@ check("the plugin system: extension points, the registry, the install and the ma
       ` registers nothing by hand, firstRegistration=${firstRegistration})`);
 
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
-  //    declared graph must be acyclic — otherwise the install order it implies does not exist. Reading
+  //    declared graph must be acyclic �?otherwise the install order it implies does not exist. Reading
   //    into `host/` is not allowed either; the handful of reads that remain are PINNED, so the debt can
   //    shrink but never grow while P1.18b's injection half is unfinished.
   const pluginFiles = [];
@@ -3640,7 +3644,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   };
   collect(path.join(ROOT, "src", "plugins"));
-  /** Which plugin does a source path belong to? (…/src/plugins/<id>/…) */
+  /** Which plugin does a source path belong to? (�?src/plugins/<id>/�? */
   const pluginOf = (p) => (/\/src\/plugins\/([^/]+)\//.exec(p.replace(/\\/g, "/")) ?? [])[1];
   /** What a plugin DECLARED it depends on, read from its own descriptor. */
   const depsOf = (id) => {
@@ -3669,7 +3673,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   }
   equal(undeclared.join(" | "), "", "every plugin -> plugin import is covered by a declared dep");
-  equal(toHost, 0, `no plugin reads host/ any more (now ${toHost}) — that is what the injected services are for`);
+  equal(toHost, 0, `no plugin reads host/ any more (now ${toHost}) �?that is what the injected services are for`);
   const unresolved = new Set(["content-default", "world", "player", "render", "diagnostics", "ui", "ui-debug", "input"]);
   let progressed = true;
   while (progressed) {
@@ -3682,6 +3686,91 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   }
   equal([...unresolved].join(","), "", "the real plugin dependency graph is acyclic (an install order exists)");
+});
+
+// ===== hot-plug (P1.24) =====
+check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no trace", () => {
+  const H = load("core/plugin/hotplug.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  const { definePlugin } = load("core/plugin/descriptor.js");
+  const S = load("core/extension/slots.js");
+  const world = new World();
+  const registry = new ExtensionRegistry();
+  let installed = ["base"];
+  let ran = 0;
+  const surface = definePlugin({
+    id: "surface",
+    deps: ["base"],
+    setup: (api) => {
+      api.contribute(S.SLOT_RESOURCES, [{ name: "surfaceState" }]);
+      api.system({ name: "surface.step", stage: "ui", run: () => { ran++; } });
+    },
+  });
+  const bomb = definePlugin({
+    id: "bomb",
+    deps: [],
+    // Files a system and THEN throws: the rollback has to undo the contribution, not just report the error.
+    setup: (api) => {
+      api.system({ name: "bomb.step", stage: "ui", run: () => {} });
+      throw new Error("boom");
+    },
+  });
+  const host = {
+    world,
+    registry,
+    log: () => {},
+    catalog: (id) => (id === "surface" ? surface : id === "bomb" ? bomb : null),
+    installed: () => [...installed],
+    depsOf: (id) => (id === "surface" ? ["base"] : []),
+    markInstalled: (id) => { installed = [...installed, id]; },
+    markUninstalled: (id) => { installed = installed.filter((x) => x !== id); },
+  };
+  world.start();
+
+  const added = H.hotInstall(host, "surface");
+  equal(added.ok, true, "a catalogued plugin installs without a restart");
+  equal(added.systems.join(","), "surface.step", "…its system joins the schedule");
+  equal(world.systemOrder("ui").map((d) => d.name).join(","), "surface.step", "…and resolve() ran again");
+  world.renderUi();
+  equal(ran, 1, "…and the system RUNS on the next ui frame");
+  equal(H.hotInstall(host, "surface").ok, false, "installing it twice is refused");
+
+  // The REVERSE-DEPENDENCY guard: `surface` is needed by nobody here, but a plugin that depends on it is.
+  const blocked = { ...host, depsOf: (id) => (id === "dependent" ? ["surface"] : ["base"]),
+    installed: () => [...installed, "dependent"] };
+  const refused = H.hotUninstall(blocked, "surface");
+  equal(refused.ok, false, "uninstalling something another INSTALLED plugin needs is refused");
+  assert(refused.reason.includes("dependent"), "…and the reason names it");
+  equal(world.systemOrder("ui").length, 1, "…the refused uninstall changed nothing");
+
+  const gone = H.hotUninstall(host, "surface");
+  equal(gone.ok, true, "it uninstalls again");
+  equal(world.systemOrder("ui").length, 0, "…its system left the schedule");
+  equal(registry.list(S.SLOT_SYSTEMS).length, 0, "…and the registry has no trace of it");
+  equal(registry.list(S.SLOT_RESOURCES).length, 0, "…nor of the resource it owned");
+  world.renderUi();
+  equal(ran, 1, "…and it no longer runs");
+
+  // FAILURE ISOLATION, the runtime version: a setup that throws halfway leaves nothing behind.
+  const failedInstall = H.hotInstall(host, "bomb");
+  equal(failedInstall.ok, false, "a setup that throws does not install");
+  assert(failedInstall.reason.includes("boom"), "…the error text survives into the outcome");
+  equal(registry.list(S.SLOT_SYSTEMS).length, 0, "…the rolled-back contribution is gone from the registry");
+  equal(world.systemOrder("ui").length, 0, "…and its system never reached the schedule");
+  equal(H.hotInstall(host, "nope").ok, false, "a plugin outside the catalogue is refused, not guessed at");
+
+  // THE SHARED PATH: the boot and the runtime install the SAME value, and the root no longer declares the
+  // surface's system for it �?which is what makes the plugin installable at runtime at all.
+  const bootSrc = stripComments(readSource("src/boot/main.ts"));
+  assert(/const uiDebugPlugin = createUiDebugPlugin\(\{ uiPicker \}\)/.test(bootSrc),
+    "the root builds the debug plugin from the factory the catalogue lists");
+  assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin\]/.test(bootSrc), "…and catalogues that same value");
+  assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");
+  const dbgSrc = stripComments(readSource("src/plugins/ui-debug/index.ts"));
+  assert(/setup\(api\)[\s\S]{0,400}hasResource\(PICKER_STATE\)/.test(dbgSrc),
+    "the plugin inserts its own resource when a runtime install finds the world without it");
+  assert(/stop\(\)/.test(dbgSrc) && /close\(\)/.test(dbgSrc),
+    "…and its surface is closed by the lifecycle, not left on screen");
 });
 
 // ===== report =====

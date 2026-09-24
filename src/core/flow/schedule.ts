@@ -145,6 +145,22 @@ export class Schedule {
     return this.defs;
   }
 
+  /** Is a system with this name registered? (The hot-plug path asks before it removes one.) */
+  has(name: string): boolean {
+    return this.byName.has(name);
+  }
+
+  /** Remove one system by name and return it (null when there was none). The caller re-resolves: the
+   *  returned def is only out of the LANES once `resolve()` has run again. Used by the hot-plug path. */
+  remove(name: string): SystemDef | null {
+    const def = this.byName.get(name);
+    if (!def) return null;
+    this.byName.delete(name);
+    const at = this.defs.indexOf(def);
+    if (at >= 0) this.defs.splice(at, 1);
+    return def;
+  }
+
   /** Resolved execution order of one stage (empty until resolve()) */
   orderOf(stage: Stage): readonly SystemDef[] {
     return this.planOf(stage)?.systems ?? [];

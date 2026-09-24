@@ -150,6 +150,42 @@ export class World {
     this.started = true;
   }
 
+  /** Register or REMOVE a system at RUNTIME and re-resolve the schedule — the hot-plug path (P1.24).
+   *
+   *  Legal only at a BARRIER, and the command queue is the door that guarantees it: `HotPlugPlugin` is
+   *  flushed at the top of every entry point, before any lane runs, so no system ever sees the schedule
+   *  change underneath it. `resolve()` re-runs the whole verification (unknown name, cycle, unsatisfiable
+   *  edge, undeclared dependency) and THROWS in the schedule's own words — the caller undoes the
+   *  contributions it just filed, so a plugin that cannot be added leaves no trace.
+   *
+   *  `start()` deliberately is not re-run: the schedule is the thing being re-resolved, and re-running the
+   *  boot would re-run every plugin's `start`. */
+  hotAddSystem(def: SystemDef): void {
+    this.schedule.add(def);
+    this.schedule.resolve();
+  }
+
+  /** Take one system out at a barrier and re-resolve. Returns the def, or null when the name was never
+   *  there — a plugin that declared no system is not an error. */
+  hotRemoveSystem(name: string): SystemDef | null {
+    const removed = this.schedule.remove(name);
+    if (removed) this.schedule.resolve();
+    return removed;
+  }
+
+  /** Drop a resource (the uninstall path). Any system left READING it now throws on `world.resource(...)`,
+   *  which is the honest failure: nothing produces that state any more, and a silent stale copy would be
+   *  worse. The reverse-dependency guard in `core/plugin/hotplug.ts` is what keeps that from happening. */
+  removeResource<T>(resource: Resource<T>): boolean {
+    return this.resources.delete(resource as Resource<unknown>);
+  }
+
+  /** Is this resource registered? Asked by a plugin that has to insert its own when it is installed at
+   *  runtime (the boot table already inserted it in the ordinary case). */
+  hasResource<T>(resource: Resource<T>): boolean {
+    return this.resources.has(resource as Resource<unknown>);
+  }
+
   /** Registered systems of one stage, in resolved execution order */
   systemOrder(stage: Stage): readonly SystemDef[] {
     return this.schedule.orderOf(stage);

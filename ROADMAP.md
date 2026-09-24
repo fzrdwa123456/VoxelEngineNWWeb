@@ -966,6 +966,33 @@ Still outstanding:
   Doc note for whoever does the next one: a `before:`/`after:` LITERAL inside a COMMENT is parsed by the
   gate's naive edge extractor (`registrations()` in `scripts/check-ecs.mjs` matches text, not syntax) and
   produced a phantom self-edge — write the prose without the bracket form.
+- **P1.24 — HOT-PLUG: a plugin can be installed and uninstalled while the process runs.** `DONE` (the
+  mechanism + its first real user: the `ui-debug` surface, toggled with **F8**). The boot is no longer the
+  only moment a plugin can arrive: `core/plugin/hotplug.ts` is `installPlugins` without the restart —
+  `hotInstall` runs the same three phases the boot does (`setup` contributes, the systems join the schedule,
+  `start` may look at the assembled world) and `hotUninstall` stops the plugin, WITHDRAWS its contributions
+  (`ExtensionRegistry.withdraw(owner)`, the mirror of `contribute`) and undoes what they stood for
+  (`world.hotRemoveSystem` / `world.removeResource`). Both are barrier-only, and the door is a COMMAND
+  (`HotPlugPlugin`, flushed at the top of every entry point) — installing a plugin re-resolves the schedule,
+  which is exactly the kind of structural change that may not happen under a running system.
+  What it refuses, with a reason instead of a half-install: an id outside the catalogue, `deps` that are not
+  installed, a second install, and an uninstall that another INSTALLED plugin still depends on (the
+  reverse-dependency guard, which reads the whole plugin list, not just the hot one). A `setup` that throws
+  after filing a system leaves NO trace: the contributions are withdrawn and the systems removed again.
+  The observation that made it possible, and the rule for the next surface: **a plugin is hot-pluggable
+  exactly when its `setup` alone is enough to install it.** `plugins/ui-debug` therefore became
+  `createUiDebugPlugin(instances)` — a FACTORY that declares its own system and inserts its own resource when
+  the world has not (idempotent), so boot and runtime install the SAME value and cannot drift. A plugin whose
+  systems the root declares for it (`declare*Systems(api, instances)`, which is still how `ui` works) can be
+  installed at boot but not at runtime, because nothing re-runs the root's wiring. Its surface comes down
+  through `stop` → `UiPickerSystem.close()`: an unplugged plugin must not leave a panel on screen with no
+  system left to close it. The key and the label are DATA (`data/globals/hotplug.ts`), so the ui lane offers
+  the chord without knowing a single plugin id, and the outcome arrives as a raw toast (a window with no
+  console has no other way to report it). STILL OPEN: hot-plug for a plugin that needs a `stop` on the QUIT
+  path (`stopPlugins` still walks the boot's install order), and setting a plugin's contributions up for
+  REMOVAL when they are component schemas (a component cannot be withdrawn from a live entity yet, so the
+  hot-pluggable surfaces are the ones that bring systems + resources).
+
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

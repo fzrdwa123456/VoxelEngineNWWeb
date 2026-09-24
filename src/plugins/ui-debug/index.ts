@@ -12,7 +12,8 @@
 import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
-import { PICKER_STATE } from "../../data/globals/resources";
+import { PICKER_STATE, createPickerState } from "../../data/globals/resources";
+import type { Plugin } from "../../core/plugin/descriptor";
 import { UI_PICKER_ACCESS, UiPickerSystem } from "./systems/picker";
 
 /** Pass-through factory: the composition root builds the instance (it wraps the panel it spawned), and this
@@ -24,7 +25,8 @@ export function createPickerSystem(...args: ConstructorParameters<typeof UiPicke
 export { spawnPickerPanel } from "./systems/picker";
 
 export interface UiDebugSystems {
-  readonly uiPicker: { step(): void };
+  /** `step()` is the lane's entry point; `close()` is the LIFECYCLE's (an uninstall takes the panels down). */
+  readonly uiPicker: { step(): void; close(): void };
 }
 
 export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
@@ -45,14 +47,32 @@ export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
   });
 }
 
-export const uiDebugPlugin = definePlugin({
-  id: "ui-debug",
-  // The picker writes widget data (UI_STATE/UI_TEXT, through the ui plugin's components) and toggles the F3
-  // panel the hud view spawns, so the ui plugin is a hard dependency: a debug surface without the widget layer
-  // has nothing to draw into.
-  deps: ["ui"],
-  setup(api) {
-    // The picker's open/sel/held-key state — it was the ui plugin's resource until the surface moved out.
-    api.contribute(SLOT_RESOURCES, [PICKER_STATE]);
-  },
-});
+/** The plugin, built around the system the ROOT constructed (it wraps the panel the hud view spawned).
+ *
+ *  A FACTORY rather than a constant, and that is exactly what makes this surface HOT-PLUGGABLE: everything
+ *  the plugin needs is either in the instances handed to it or in the world, so its `setup` alone is enough
+ *  to install it — at boot AND at runtime (`core/plugin/hotplug.ts`). It also OWNS its resource: the boot
+ *  table inserts PICKER_STATE for the ordinary case, and a runtime install inserts it here when the world no
+ *  longer has it (idempotent on purpose, so boot and hot-plug are one code path). */
+export function createUiDebugPlugin(s: UiDebugSystems): Plugin {
+  return definePlugin({
+    id: "ui-debug",
+    // The picker writes widget data (UI_STATE/UI_TEXT, through the ui plugin's components) and toggles the F3
+    // panel the hud view spawns, so the ui plugin is a hard dependency: a debug surface without the widget
+    // layer has nothing to draw into.
+    deps: ["ui"],
+    setup(api) {
+      if (!api.world.hasResource(PICKER_STATE)) {
+        api.world.insertResource(PICKER_STATE, createPickerState());
+      }
+      api.contribute(SLOT_RESOURCES, [PICKER_STATE]);
+      declareUiDebugSystems(api, s);
+    },
+    // The surface comes down with the plugin (see UiPickerSystem.close()). Called by the uninstall path even
+    // though this plugin declares no `start`: the boot's `stopPlugins` mirrors `start`, an UNINSTALL has to
+    // close whatever the plugin owns either way.
+    stop() {
+      s.uiPicker.close();
+    },
+  });
+}

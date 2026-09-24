@@ -146,6 +146,20 @@ export class UiPickerSystem {
     this.deps.log(`DEBUG panel ${wantVisible ? "shown" : "hidden"}`);
   }
 
+  /** The UNINSTALL path (P1.24): hide everything this system owns and clear its state.
+   *
+   *  A plugin that can be hot-unplugged must not leave a panel on screen — there would be no system left to
+   *  close it, and F3/F4 would be dead keys with a stale debug panel stuck in the corner. `close()` is what
+   *  the plugin's `stop` hook calls, i.e. this is the one method whose caller is the LIFECYCLE rather than
+   *  the lane. */
+  close(): void {
+    this.state.open = false;
+    this.state.f3 = false;
+    setUiVisible(this.world, this.panel, false);
+    setUiVisible(this.world, this.deps.debugPanel, false);
+    this.deps.log("PICKER closed - the plugin was uninstalled");
+  }
+
   private open(): void {
     const mode = this.deps.readMode();
     this.state.sel = Math.max(0, PICKER_MODES.indexOf(mode as (typeof PICKER_MODES)[number]));

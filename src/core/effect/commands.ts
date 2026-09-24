@@ -14,6 +14,8 @@ import {
 } from "../../plugins/player/components";
 import { entityIndex, defineCommand, type Entity } from "../world";
 import { LOADING_STATE, FPS_CAP, sanitizeFrameCap, TOAST, TOAST_MS } from "../../data/globals/resources";
+import { hotPlugLabel } from "../../data/globals/hotplug";
+import { HOT_PLUG, hotInstall, hotUninstall } from "../plugin/hotplug";
 
 /** Switch the movement mode: resets flying and clears the vertical state, exactly as the F3+F4
  *  gamemode picker needs. Sent by ecs/ui/picker.ts (the picker reads CONTROL.mode itself). */
@@ -105,6 +107,27 @@ export const SetFpsCap = defineCommand<{ cap: number }>(
     world.resource(FPS_CAP).cap = sanitizeFrameCap(cap);
   },
 );
+
+/** HOT-PLUG one plugin: install it if it is not installed, uninstall it if it is (P1.24).
+ *
+ *  Assembly as a COMMAND, which is the whole point: installing a plugin adds systems to the schedule and
+ *  re-resolves it, and the barrier between two frames is the only place that is legal. The key edge that
+ *  raises this is a device event in the ui lane, so the request is queued and applied before the next lane
+ *  runs — the schedule is never changed underneath a running system.
+ *
+ *  The OUTCOME becomes a toast: a window with no console has no other way to say "that plugin is gone now,
+ *  and F3/F4 will do nothing". The toast is sent as a further command, so it is armed at the NEXT barrier
+ *  (one frame later) — it is a notification, not part of the change. */
+export const HotPlugPlugin = defineCommand<string>("hotPlugPlugin", (world, id) => {
+  const host = world.resource(HOT_PLUG);
+  const outcome = host.installed().includes(id) ? hotUninstall(host, id) : hotInstall(host, id);
+  const label = hotPlugLabel(id);
+  const text = outcome.ok
+    ? `${label}: ${outcome.action === "install" ? "ON" : "OFF"} — ${outcome.systems.length} system(s) ` +
+      `${outcome.action === "install" ? "added to" : "removed from"} the schedule`
+    : `${label}: FAILED — ${outcome.reason}`;
+  world.commands.send(ShowToast, { key: text, raw: true });
+});
 
 /** Move the loading screen along: which stage is running, how far it is, what the settings check
  *  found, and finally that it is over. Sent by the two drivers in main.ts (the startup, and entering

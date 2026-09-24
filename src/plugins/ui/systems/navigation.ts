@@ -16,6 +16,8 @@
 // bind gesture (click-synthesis timing, see ui/menu.ts).
 import { HOTBAR_SLOTS } from "../../player/components";
 import { SelectSlot } from "../../../core/effect/commands";
+import { HotPlugPlugin } from "../../../core/effect/commands";
+import { hotPlugSurfaceForKey } from "../../../data/globals/hotplug";
 import { LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
 import { KEY_EVENTS } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
@@ -131,6 +133,18 @@ export class UiNavigationSystem {
           return;
         }
         this.onEscape();
+        return;
+      }
+      // THE HOT-PLUG KEY (P1.24). Installing or uninstalling a plugin at runtime is ASSEMBLY, not game state:
+      // it adds systems to the schedule and re-resolves it, so it goes through the `HotPlugPlugin` COMMAND,
+      // which the barrier applies before the next lane runs. This system is the right home for the key because
+      // it already owns "which key means what" for the ui lane, and the table it asks is DATA
+      // (`data/globals/hotplug.ts`), so this branch knows no plugin ids at all. It is deliberately NOT gated on
+      // a world: hot-plugging is a developer affordance that works at the main menu too (the ui lane runs
+      // there), and the outcome comes back as a toast, which is the only feedback a window with no console has.
+      const hotSurface = hotPlugSurfaceForKey(edge.code);
+      if (hotSurface) {
+        this.world.commands.send(HotPlugPlugin, hotSurface.id);
         return;
       }
       if (edge.code === this.deps.inventoryCode()) {

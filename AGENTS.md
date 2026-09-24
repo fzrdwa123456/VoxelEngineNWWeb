@@ -168,6 +168,19 @@ between when it is installed). A system's STATE moves with its surface: `PICKER_
 `ui-debug` now, not by `ui`.
 settings, blocks, languages, uiActions); the UI's existing action/source tables are the working prototype.
 
+**HOT-PLUG (P1.24).** The boot is not the only moment a plugin can arrive. `core/plugin/hotplug.ts` is
+`installPlugins` without the restart: `hotInstall` runs the same three phases (`setup` contributes, the
+systems join the schedule, `start`), `hotUninstall` stops the plugin, withdraws its contributions AND undoes
+them (its systems leave the schedule, its resource tokens leave the world). Both are BARRIER-ONLY and the
+door is the `HotPlugPlugin` COMMAND — installing a plugin re-resolves the schedule, so it may not happen
+under a running system. The rule that decides what can be plugged in: **a plugin is hot-pluggable exactly
+when its `setup` alone is enough to install it** (so it declares its own systems and inserts its own resource;
+`plugins/ui-debug`'s factory is the worked example, and the root's `declare*Systems(api, instances)` shape —
+still how `ui` works — cannot be installed at runtime). Refused with a reason, never half-done: an id outside
+the catalogue, uninstalled `deps`, a double install, and an uninstall another INSTALLED plugin depends on.
+**F8 toggles the `ui-debug` surface live** (the key/label table is `data/globals/hotplug.ts`; the ui lane
+offers the chord without knowing any plugin id), and the outcome arrives as a raw toast.
+
 **What the gate enforces about plugins.** Every system is declared by the plugin that owns it (the root
 registers nothing by hand: `check:ecs` asserts `world.addSystem({` never appears in `boot/main.ts`), a
 cross-plugin import needs a declared `deps`, `plugins/**` may not import `host/**`, the declared graph must

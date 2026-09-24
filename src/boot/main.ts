@@ -29,8 +29,12 @@ import { createBlockOutline, createChunkMaterial, createChunkMeshCache, createIc
 import { createKeybindGesture, KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
 import { UI_KEYBIND_ACCESS, UiKeybindSystem } from "../plugins/ui/systems/keybind";
 import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
-// The F3/F4 DEBUG surface is its own plugin: the factory, the declaration it owns and the descriptor.
-import { createPickerSystem, declareUiDebugSystems, uiDebugPlugin } from "../plugins/ui-debug";
+// The F3/F4 DEBUG surface is its own plugin, and it is HOT-PLUGGABLE: the factory is called further down with
+// the instance the root constructs, and that ONE value goes into both the boot's plugin list and the runtime
+// catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
+import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
+import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
+import type { Plugin } from "../core/plugin/descriptor";
 import { UI_TOAST_ACCESS, UiToastSystem } from "../plugins/ui/systems/toast";
 import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loading";
 import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
@@ -557,6 +561,33 @@ const playerPlugin = createPlayerPlugin({
 });
 const { input, snapshot, controller, movement, collision, interaction } = playerPlugin.systems;
 
+// ===== The hot-plug host (P1.24) =====
+// Which plugins may be installed WITHOUT a restart, and the door the `HotPlugPlugin` command reads. Note WHO
+// builds the plugin: the ROOT does, from the instance it constructed — and the plugin still declares its own
+// system, because that is the property that makes it hot-pluggable at all. It is the SAME value the boot
+// installs below, so the boot path and the runtime path cannot drift apart.
+const uiDebugPlugin = createUiDebugPlugin({ uiPicker });
+const hotCatalog: readonly Plugin[] = [uiDebugPlugin];
+const livePlugins = new Set<string>();
+const hotHost: HotPlugHost = {
+  world,
+  registry,
+  log: logDebug,
+  catalog: (id) => hotCatalog.find((p) => p.id === id) ?? null,
+  installed: () => [...livePlugins],
+  // The reverse-dependency guard has to see the BOOT's plugins too (`render` deps on `ui`, and `ui` is not
+  // hot-pluggable), so this looks the id up in the whole list. Late-bound on purpose: PLUGINS is declared just
+  // below, and this is only ever called after the boot.
+  depsOf: (id) => PLUGINS.find((p) => p.id === id)?.deps ?? [],
+  markInstalled: (id) => {
+    livePlugins.add(id);
+  },
+  markUninstalled: (id) => {
+    livePlugins.delete(id);
+  },
+};
+world.insertResource(HOT_PLUG, hotHost);
+
 const PLUGINS = [
   contentDefaultPlugin,
   worldPlugin,
@@ -585,6 +616,10 @@ const installOutcome = installPlugins(PLUGINS, {
   log: logDebug,
   enabled: (id) => isEnabled(manifest, id),
 });
+// The hot-plug host's "installed right now" set starts as the boot's list: everything plugged in later is
+// added by `hotInstall`, everything unplugged is removed by `hotUninstall`, and the reverse-dependency guard
+// reads this list — so it sees the boot's plugins and the runtime ones in one place.
+for (const id of installOutcome.installed) livePlugins.add(id);
 for (const line of registry.report()) logDebug(`REGISTRY ${line}`);
 /** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
 const contributeSystem = (owner: string, def: SystemDef): void => {
@@ -923,15 +958,9 @@ if (!uiApi) {
   declareUiSystems(uiApi, { uiHud, uiLoading, uiInventory, uiBindings, uiToast, uiKeybind, navigation, delays, uiRender });
 }
 
-// The DEBUG surface is its own plugin (F3 panel + the F3+F4 mode chord). It is OPTIONAL twice over: the
-// manifest may disable it, and it needs the ui plugin (its `deps`), so disabling `ui` takes it with it.
-// What it must not do is crash, and the resource table above already holds PICKER_STATE either way.
-const uiDebugApi = installOutcome.apiOf("ui-debug");
-if (!uiDebugApi) {
-  logDebug("PLUGIN ui-debug is not installed - the F3 debug panel and the F3+F4 mode chord are off (the rest of the ui lane is unaffected)");
-} else {
-  declareUiDebugSystems(uiDebugApi, { uiPicker });
-}
+// The DEBUG surface's system is declared by the plugin itself now (`createUiDebugPlugin`), which is what makes
+// it installable at runtime: there is no root-side `declare…(api, instances)` call left for boot to run and
+// hot-plug to miss. Disabling it in the manifest, or unplugging it with F8, removes exactly that surface.
 
 for (const def of registry.list(SLOT_SYSTEMS)) world.addSystem(def);
 
