@@ -3556,6 +3556,10 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…the mount is recorded BEFORE the page can throw");
   assert(/m\.page\.dispose\?\.\(\)/.test(pagesSys),
     "…and unmount disposes the page it MOUNTED, not a lookup in the withdrawn contributions");
+  assert(!/setUiVisible\(this\.world, m\.panel/.test(pagesSys),
+    "the page host does NOT paint the panel (it runs early in the lane, so it would read the PREVIOUS frame's UI_MODAL)");
+  assert(/UI_PAGES_MOUNTED/.test(readSource("src/plugins/ui/systems/navigation.ts")),
+    "…ui.navigation does: it is the ONE painter of modal visibility, and a page panel is part of that tree");
   assert(/rowContainer/.test(readSource("src/plugins/ui/views/menu.ts")),
     "the view owns WHERE page rows go (a container, not the end of the settings list)");
   // A PAGE IS BUILT ON EVERY MOUNT, so every action a page view registers must sit behind a `has` guard

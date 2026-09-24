@@ -4,9 +4,11 @@
 // legal at a barrier and a system may not make one (iron rule 1). That is the whole mechanism, and it is what
 // makes the layout dynamic: a page contributed by a plugin installed at runtime appears within a frame.
 //
-// It also PAINTS its own two widgets per frame: the entry row (visible iff the page is mounted) and the panel
-// (visible iff that page is the one `UI_MODAL.settings` names). Nothing outside this file has to know a page's
-// id, which is why a new page needs no code in the ui plugin at all.
+// It paints the ENTRY rows (up iff their page is mounted). The PANEL's visibility is NOT its business: it runs
+// FIRST in the lane, so it would read the PREVIOUS frame's `UI_MODAL.settings` — and in the frame where ESC
+// steps back (an in-lane write, unlike a button's command) the panel would stay visible while the settings
+// list came up: one frame with both, i.e. a visible flicker. Modal visibility has ONE painter,
+// `ui.navigation` (see the ui conventions in AGENTS.md), and the page panel is part of that tree.
 import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
 import { UI_MODAL } from "../../../data/globals/resources";
 import {
@@ -121,16 +123,12 @@ export class UiPagesSystem {
       if (wanted.has(key)) continue;
       this.world.commands.send(UiLayoutOp, { apply: (w) => unmountPage(w, key) });
     }
-    this.paint();
+    this.paintEntries();
   }
 
-  /** The entry row is up iff the page is mounted; the panel is up iff it is the OPEN page. */
-  private paint(): void {
-    const open = this.world.resource(UI_MODAL).settings ?? null;
-    for (const m of this.mounted.values()) {
-      setUiVisible(this.world, m.entry, true);
-      setUiVisible(this.world, m.panel, open !== null && open === m.pageId);
-    }
+  /** The ENTRY rows: up iff their page is mounted. The PANEL is NOT painted here — see the note. */
+  private paintEntries(): void {
+    for (const m of this.mounted.values()) setUiVisible(this.world, m.entry, true);
   }
 }
 

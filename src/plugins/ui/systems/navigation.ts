@@ -22,6 +22,7 @@ import { LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals
 import { KEY_EVENTS } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
 import { UI_PAINT, type UiNavigationPaint } from "../../../data/globals/paint";
+import { UI_PAGES_MOUNTED, type MountedPage } from "../../../data/globals/ui-pages";
 import { UI_STATE, setUiVisible } from "../components";
 
 /** The settings sub-panel ids, as data. `ui/menu.ts` owns the panel list; this is the same four. */
@@ -89,6 +90,9 @@ export function stepBackSettings(ui: UiModalState): void {
 export class UiNavigationSystem {
   private readonly ui: UiModalState;
   private readonly reader: KeyEdgeReader;
+  /** The mounted pages (each carries the panel this painter shows) — world data, filled by the page host. */
+  /** null when the world has no page host at all — a legitimate world (and what the gate's stub builds). */
+  private readonly pages: Map<string, MountedPage> | null;
   /** The player whose INVENTORY the hotbar keys select on (LOCAL_PLAYER, resolved once) */
   private readonly player: Entity;
   /** What the last frame saw, so the pointer-lock effects fire on an EDGE and not every frame. The DATA
@@ -113,6 +117,7 @@ export class UiNavigationSystem {
   ) {
     this.ui = world.resource(UI_MODAL);
     this.reader = new KeyEdgeReader(world.resource(KEY_EVENTS) as KeyEventLog);
+    this.pages = world.hasResource(UI_PAGES_MOUNTED) ? world.resource(UI_PAGES_MOUNTED) : null;
     this.player = world.resource(LOCAL_PLAYER);
     this.paintCache = world.resource(UI_PAINT).navigation;
   }
@@ -249,6 +254,14 @@ export class UiNavigationSystem {
     }
     for (const id of Object.keys(t.mainPanels) as SettingsPanelId[]) {
       setUiVisible(this.world, t.mainPanels[id], ui.mainMenu && ui.settings === id);
+    }
+    // THE PAGES a plugin contributed (P1.29): their panels belong to this painter, exactly like the four
+    // settings panels above. `ui.pages` owns the widgets; WHERE they are shown is decided HERE, in the same
+    // pass and from the same state as everything else — painting them from the host (which runs earlier in
+    // the lane) left the page and the settings list visible together for one frame whenever ESC stepped back.
+    for (const mount of this.pages?.values() ?? []) {
+      const open = mount.host.id === "pause" ? ui.menu : ui.mainMenu;
+      setUiVisible(this.world, mount.panel, open && ui.settings === mount.pageId);
     }
     setUiVisible(this.world, t.pauseMain, ui.menu && ui.settings === null);
     setUiVisible(this.world, t.mainMain, ui.mainMenu && ui.settings === null && !ui.gen);
