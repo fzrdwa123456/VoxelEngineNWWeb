@@ -147,8 +147,4 @@ export class MainMenu {
   get panelEntities() {
     return this.panels.entities;
   }
-  /** The key bind tab's entry button, for `ui.keybind` (see SettingsPanels.keybindEntry). */
-  get keybindEntryEntity(): Entity | null {
-    return this.panels.keybindEntry;
-  }
 }

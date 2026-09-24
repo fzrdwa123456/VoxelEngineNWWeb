@@ -970,10 +970,6 @@ navTrees = {
   mainPanels: mainMenu.panelEntities,
   inventoryPanel: inv.panelEntity,
 };
-// Both menus exist now, so `ui.keybind` gets the two ways in to its page (it shows them while it runs).
-for (const entry of [menu.keybindEntryEntity, mainMenu.keybindEntryEntity]) {
-  if (entry) keybindEntries.push(entry);
-}
 
 // Everything the installed plugins contributed, contributed order — the schedule resolves and verifies
 // the order from the declared after/before edges, so the registration order carries no meaning.

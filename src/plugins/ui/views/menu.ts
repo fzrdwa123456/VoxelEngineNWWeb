@@ -137,11 +137,6 @@ export interface SettingsPanels {
   hideAll(): void;
   /** The four panel widgets, for the system that paints modal visibility (ui.navigation). */
   readonly entities: Readonly<Record<SettingsPanelId, Entity>>;
-  /** The "key binds" ENTRY button, spawned HIDDEN and shown by `ui.keybind` — the plugin that owns the
-   *  page owns the way into it, so a build without that plugin has no entry to a page nothing fills.
-   *  Deliberately NOT part of `entities`: that map is the painter's ("visible when UI_MODAL.settings is
-   *  this key"), and a key there would fight the plugin for the same flag. */
-  readonly keybindEntry: Entity | null;
 }
 
 // Shared settings panel: FPS cap slider + vsync toggle + language collection + resource pack
@@ -302,7 +297,7 @@ export function buildSettingsPanel(
   // have. Pages are mounted as its CHILDREN, so the layout decides the position and the data decides how many
   // rows there are. (Mounting them straight into the settings panel appended them after the Back button:
   // creation order IS render order, and the reconciler never re-orders.)
-  const pageRows = spawnPanel(world, panels.settings, "settings.btnRow");
+  const pageRows = spawnPanel(world, panels.settings, "settings.pageRows");
   world.resource(UI_PAGE_HOSTS).push({
     world,
     id,
@@ -312,9 +307,6 @@ export function buildSettingsPanel(
     show: (page) => show(page as SettingsPanelId | null),
     log: opts.log,
   });
-  // The per-plugin TAB call is gone with the token it used: a page is DATA now (data/globals/ui-pages.ts).
-  // The entry row belongs to the host, so the settings panels carry no key bind entry any more.
-  const keybindEntry: Entity | null = null;
 
   // --- UI scale: small/normal/large/auto (MC-style GUI Scale) ---
   const scaleLabel = spawnLabel(world, panels.settings, "settings.label", "", { raw: true });
@@ -407,7 +399,6 @@ export function buildSettingsPanel(
     show,
     hideAll,
     entities: panels,
-    keybindEntry,
   };
 }
 
@@ -506,9 +497,5 @@ export class Menu {
   }
   get panelEntities(): Readonly<Record<SettingsPanelId, Entity>> {
     return this.panels.entities;
-  }
-  /** The key bind tab's entry button (see SettingsPanels.keybindEntry): the root hands it to `ui.keybind`. */
-  get keybindEntryEntity(): Entity | null {
-    return this.panels.keybindEntry;
   }
 }

@@ -19,7 +19,18 @@ import { getBind, beginCapture, endCapture, getCapturing, codeDisplayName, butto
 import { KB_ACTIONS, type BindAction } from "../../../data/globals/binds";
 import { KB_ROWS, TOWER_GRID, NUM_GRID, MOUSE_GRID } from "../../../data/globals/keylayout";
 import { ACTION_KEYBIND_CHIP, ACTION_KEYBIND_KEY, onUiAction, UI_ACTIONS, type UiActionHandler } from "../../../data/globals/actions";
-import type { KeybindTabMount, KeybindTabSurfaces } from "../../../data/globals/keybind-tab";
+/** What the ui lane's PAGE HOST hands a page (P1.29). Declared HERE, by the view that consumes it: the
+ *  token module this used to live in is gone, and neither plugin should have to import the other. */
+export interface KeybindPanelMount {
+  readonly world: World;
+  readonly settingsPanel: Entity;
+  readonly panel: Entity;
+  /** The settings-list row that opens the page, when the host already made one (it does). */
+  readonly entry?: Entity;
+  readonly id: string;
+  readonly show: (page: string | null) => void;
+  readonly log: (line: string) => void;
+}
 import {
   registerKeybindPanel,
   type KeybindChip,
@@ -178,7 +189,7 @@ function registerKeybindActions(actions: Map<string, UiActionHandler>, log: (lin
  *  installed; the panel container is spawned by the caller (it is part of the settings layout) and handed
  *  over in the mount. Interaction: click an action chip to select, then a keyboard key to bind it; conflict
  *  preemption is `setBind`'s (the bind table's) business. */
-export function spawnKeybindPanel(mount: KeybindTabMount): KeybindTabSurfaces {
+export function spawnKeybindPanel(mount: KeybindPanelMount): { panel: Entity; entry: Entity } {
   const { world, id } = mount;
   const actions = world.resource(UI_ACTIONS);
   registerKeybindActions(actions, mount.log);

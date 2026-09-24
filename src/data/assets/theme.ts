@@ -227,6 +227,7 @@ export type UiRecipe =
   | "settings.columnLabel"
   | "settings.btn"
   | "settings.btnRow"
+  | "settings.pageRows"
   | "settings.choice"
   | "settings.scrollArea"
   | "settings.row"
@@ -416,6 +417,12 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
         `border-radius:0.375rem;cursor:pointer;`;
     case "settings.btnRow":
       return "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
+    // The container PAGE ROWS are mounted into (P1.29). It must be LAYOUT-NEUTRAL: `margin`/`padding`/`gap`
+    // all zero, so a hosted `settings.btn` keeps exactly the spacing it had as a direct child. A container
+    // that adds its own margin (this role first borrowed `settings.btnRow`) makes the row look "almost right
+    // but too far apart", which is very hard to attribute by eye.
+    case "settings.pageRows":
+      return "display:flex;flex-direction:column;margin:0;padding:0;";
     // A CHOICE: one of a small set (language, font, world type). Blue while selected.
     case "settings.choice":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
