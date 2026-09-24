@@ -13,8 +13,8 @@ import {
   UI_PAGE_HOSTS,
   UI_PAGES_MOUNTED,
   type UiPage,
+  type MountedPage,
   type UiPageHost,
-  type UiPageMount,
 } from "../../../data/globals/ui-pages";
 import { defineCommand, type Entity, type SystemAccess, type World } from "../../../core/world";
 import { setUiText, setUiVisible, spawnButton, spawnPanel, UI_TREE } from "../components";
@@ -52,20 +52,38 @@ function subtree(world: World, root: Entity): Entity[] {
 
 function mountPage(world: World, host: UiPageHost, page: UiPage): void {
   const actions = world.resource(UI_ACTIONS);
-  const entry = spawnButton(world, host.settingsPanel, "settings.btn", `${host.id}.page.${page.id}`, "", page.titleKey);
+  const key = `${host.id}/${page.id}`;
+  const action = `${host.id}.page.${page.id}`;
+  // INTO THE VIEW'S ROW CONTAINER, not the settings list: the position is the layout's decision, the NUMBER
+  // of rows is the data's.
+  const entry = spawnButton(world, host.rowContainer, "settings.btn", action, "", page.titleKey);
   setUiVisible(world, entry, false); // the host shows it on the next frame
-  onUiAction(actions, `${host.id}.page.${page.id}`, () => host.show(page.id));
   const panel = spawnPanel(world, host.root, "settings.panelXl", { hidden: true });
-  page.build({ host, pageId: page.id, panel, entry });
-  world.resource(UI_PAGES_MOUNTED).set(`${host.id}/${page.id}`, { host, pageId: page.id, panel, entry });
+  // RECORDED BEFORE ANYTHING CAN THROW: an unrecorded mount is retried every frame (that is how one bad line
+  // became a flood of `frame error`s and a hidden entry row leaked per frame).
+  world.resource(UI_PAGES_MOUNTED).set(key, { host, pageId: page.id, page, panel, entry });
+  // THE ACTION IS REGISTERED ONCE PER (host, page) — the handler is identical on every mount, and the action
+  // table REFUSES a duplicate id (the rule that stops "whoever registers last wins"). Registering it again
+  // threw inside the barrier command and took the whole ui lane down with it: the second install could never
+  // mount, every frame, forever.
+  if (!actions.has(action)) onUiAction(actions, action, () => host.show(page.id));
+  try {
+    page.build({ host, pageId: page.id, panel, entry });
+  } catch (error) {
+    // FAILURE ISOLATION: a page that cannot build must not be retried every frame, and must not kill the lane
+    // that paints every other surface. Logged, and left unreachable (its entry row stays hidden).
+    host.log(`PAGE mount FAILED ${page.id}: ${String((error as Error)?.message ?? error)}`);
+  }
   host.log(`PAGE mounted ${page.id} (${host.id})`);
 }
 
-function unmountPage(world: World, key: string, page: UiPage | null): void {
+function unmountPage(world: World, key: string): void {
   const mounted = world.resource(UI_PAGES_MOUNTED);
   const m = mounted.get(key);
   if (!m) return;
-  page?.dispose?.();
+  // `m.page`, NOT a lookup in the current contributions: the plugin was uninstalled before this runs, so the
+  // page is no longer in that list — and `dispose` was silently skipped, leaking its global specs.
+  m.page.dispose?.();
   // Children first: the ECS has no cascade, so an unmount has to take the whole subtree down itself.
   for (const e of subtree(world, m.panel)) world.despawn(e);
   for (const e of subtree(world, m.entry)) world.despawn(e);
@@ -75,7 +93,7 @@ function unmountPage(world: World, key: string, page: UiPage | null): void {
 
 /** The host system. `pages` is injected by the root (the registry is the root's, not the world's). */
 export class UiPagesSystem {
-  private readonly mounted: Map<string, UiPageMount>;
+  private readonly mounted: Map<string, MountedPage>;
   private readonly hosts: UiPageHost[];
 
   constructor(
@@ -101,9 +119,7 @@ export class UiPagesSystem {
     }
     for (const key of [...this.mounted.keys()]) {
       if (wanted.has(key)) continue;
-      const gone = this.mounted.get(key)!;
-      const page = pages.find((p) => p.id === gone.pageId) ?? null;
-      this.world.commands.send(UiLayoutOp, { apply: (w) => unmountPage(w, key, page) });
+      this.world.commands.send(UiLayoutOp, { apply: (w) => unmountPage(w, key) });
     }
     this.paint();
   }

@@ -298,10 +298,16 @@ export function buildSettingsPanel(
   // --- THE PAGE HOST (P1.29): this panel does not know which pages exist. It registers WHERE a page may be
   //     mounted (this list, this root, this action-id prefix, this `show`), and `ui.pages` materializes every
   //     page a plugin contributes — including one contributed by a plugin installed while the game runs.
+  // WHERE PAGE ROWS GO (P1.29): a container at THIS spot in the list — the position the key bind row used to
+  // have. Pages are mounted as its CHILDREN, so the layout decides the position and the data decides how many
+  // rows there are. (Mounting them straight into the settings panel appended them after the Back button:
+  // creation order IS render order, and the reconciler never re-orders.)
+  const pageRows = spawnPanel(world, panels.settings, "settings.btnRow");
   world.resource(UI_PAGE_HOSTS).push({
     world,
     id,
     settingsPanel: panels.settings,
+    rowContainer: pageRows,
     root,
     show: (page) => show(page as SettingsPanelId | null),
     log: opts.log,

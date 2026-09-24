@@ -3542,7 +3542,22 @@ check("the plugin system: extension points, the registry, the install and the ma
   assert(/SLOT_UI_PAGES/.test(readSource("src/plugins/ui-keybind/index.ts")),
     "…and the key bind page is contributed as PAGE DATA (so it can appear after boot)");
   assert(/SLOT_UI_PAGES/.test(readSource("src/core/extension/slots.ts")),
-    "…through the ui-pages extension point");
+    "…through the ui-pages extension point");
+  // THE THREE TRAPS THIS SHIPPED WITH (P1.29), each pinned by the line that prevents it:
+  //   1. registering the page action on EVERY mount threw `already registered` inside the barrier command,
+  //      which killed the whole ui lane every frame — the second install could never mount;
+  //   2. a mount that is not recorded before it can throw is retried every frame (and leaked a hidden row);
+  //   3. unmount looked the page up in the CURRENT contributions, where it is already gone → `dispose` was
+  //      skipped and the page's global specs leaked.
+  const pagesSys = stripComments(readSource("src/plugins/ui/systems/ui-pages.ts"));
+  assert(/if \(!actions\.has\(action\)\) onUiAction\(/.test(pagesSys),
+    "the page action is registered ONCE per host+page (a duplicate id throws)");
+  assert(/UI_PAGES_MOUNTED\)\.set\(key, \{ host, pageId: page\.id, page, panel, entry \}\)/.test(pagesSys),
+    "…the mount is recorded BEFORE the page can throw");
+  assert(/m\.page\.dispose\?\.\(\)/.test(pagesSys),
+    "…and unmount disposes the page it MOUNTED, not a lookup in the withdrawn contributions");
+  assert(/rowContainer/.test(readSource("src/plugins/ui/views/menu.ts")),
+    "the view owns WHERE page rows go (a container, not the end of the settings list)");
   // TWO OPTIONAL PLUGINS MAY NOT NAME EACH OTHER (P1.27): the order between them is the CORE's slot anchors,
   // because a name is a dangling reference as soon as the plugin that owns it is disabled.
   const OPTIONAL_SYSTEMS = ["ui.picker", "ui.toast", "ui.keybind"];

@@ -25,6 +25,10 @@ export interface UiPageHost {
   readonly id: string;
   /** The panel the page's ENTRY row is added to. */
   readonly settingsPanel: Entity;
+  /** The container the entry rows are appended to. The VIEW decides where that container sits (so page rows
+   *  land where the layout wants them); the DATA decides how many there are. Appending to `settingsPanel`
+   *  directly put every page row after the Back button, because creation order IS render order. */
+  readonly rowContainer: Entity;
   /** The widget the page's PANEL is a child of (hiding the menu hides the page). */
   readonly root: Entity;
   /** Open a page by id (writes `UI_MODAL.settings`), or go back to the list with null. */
@@ -41,6 +45,12 @@ export interface UiPageMount {
   readonly panel: Entity;
   /** The row in the settings list that opens the page — created by the host, shown by the host. */
   readonly entry: Entity;
+}
+
+/** What the host REMEMBERS about a mount: the page descriptor included, because by the time it is unmounted
+ *  the plugin that contributed it is already gone — and its `dispose` still has to run. */
+export interface MountedPage extends UiPageMount {
+  readonly page: UiPage;
 }
 
 /** A page a plugin contributes. `build` runs at a BARRIER (inside the mount command), so it may spawn. */
@@ -60,4 +70,4 @@ export interface UiPage {
 export const UI_PAGE_HOSTS = defineResource<UiPageHost[]>("uiPageHosts");
 
 /** What is mounted right now, keyed `hostId/pageId`. The host system's diff state, i.e. world data. */
-export const UI_PAGES_MOUNTED = defineResource<Map<string, UiPageMount>>("uiPagesMounted");
+export const UI_PAGES_MOUNTED = defineResource<Map<string, MountedPage>>("uiPagesMounted");
