@@ -100,6 +100,12 @@ export interface SettingsCallbacks {
 }
 
 // Pause menu callbacks: the settings panel's six items + resume / back to main menu
+/** The menu FROST: one full-screen layer, painted by `ui.navigation` while any modal surface is up. Spawned
+ *  here (wiring time) because spawning is a structural change; `parent = null` = a child of the UI root. */
+export function spawnMenuBackdrop(world: World): Entity {
+  return spawnPanel(world, null, "menu.backdrop", { hidden: true });
+}
+
 export interface MenuCallbacks extends SettingsCallbacks {
   onResume: () => void;
   onToMainMenu: () => void;

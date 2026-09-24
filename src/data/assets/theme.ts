@@ -228,6 +228,7 @@ export type UiRecipe =
   | "settings.btn"
   | "settings.btnRow"
   | "settings.pageRows"
+  | "menu.backdrop"
   | "settings.choice"
   | "settings.scrollArea"
   | "settings.row"
@@ -280,12 +281,11 @@ export interface UiWidgetState {
 export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiTheme): string {
   const c = theme.color;
   const s = theme.space;
-  /** The modal panel face, in the three widths the settings surfaces use */
-  // ===== LOUD RED, ON PURPOSE (look-and-see test) =====
-  // The settings BOARD (`settings.panel` / `settings.panelWide` / `settings.panelXl`, and the pause menu's main
-  // panel) is what the user wanted to identify on screen. Every OTHER panel keeps `menuPanel`; change this ONE
-  // token back to `c.menuPanel` to undo it.
-  const settingsPanelBg = "#c0392b";
+  /** The modal panel face, in the three widths the settings surfaces use. TRANSLUCENT on purpose: the ui lane
+   *  paints a full-screen frosted layer behind every menu (`menu.backdrop`), so a solid board would hide the
+   *  very thing the blur exists to show. The alpha is a weight, not a decoration: it is what keeps the text
+   *  readable over a bright world. */
+  const settingsPanelBg = "rgba(12,12,16,0.45)";
   const settingsPanel = (width: string): string =>
     `width:${width};background:${settingsPanelBg};border-radius:0.625rem;padding:1.25rem;` +
     `text-align:center;color:${c.text};font:1rem ${theme.font.ui};box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);`;
@@ -430,6 +430,16 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // wrapper collapses through, so the row ends up exactly where it was as a direct child.
     case "settings.pageRows":
       return "display:block;margin:0;padding:0;border:0;";
+    // THE FROST (P1.30): a full-screen, click-transparent layer UNDER every menu. `backdrop-filter` blurs what
+    // is painted below it — the WebGPU canvas — so opening a menu blurs and darkens the WORLD, while the
+    // panels and their text stay sharp (they are painted above this layer).
+    //   * `pointer-events:none` is load-bearing: the layer covers the canvas, and without it a click meant for
+    //     the world (or a UI element below it) would be swallowed by a full-screen div;
+    //   * `z-index:1` keeps it under the panels (z-30/31) and above the canvas;
+    //   * the alpha is the DARKENING the user asked for (0.25 = medium).
+    case "menu.backdrop":
+      return "position:fixed;left:0;top:0;right:0;bottom:0;z-index:1;pointer-events:none;" +
+        "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);background:rgba(0,0,0,0.25);";
     // A CHOICE: one of a small set (language, font, world type). Blue while selected.
     case "settings.choice":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +

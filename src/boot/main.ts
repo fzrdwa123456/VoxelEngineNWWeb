@@ -50,7 +50,7 @@ import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "
 import { LoadingScreen } from "../plugins/ui/views/loading";
 import { Inventory } from "../plugins/ui/views/inventory";
 import { INVENTORY_VIEW_ACCESS, UiInventorySystem } from "../plugins/ui/systems/inventory";
-import { Menu } from "../plugins/ui/views/menu";
+import { Menu, spawnMenuBackdrop } from "../plugins/ui/views/menu";
 // The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
 // them from THERE: the ui plugin exports none of it any more.
 import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, spawnKeybindLine } from "../plugins/ui-keybind/views/keybind";
@@ -526,6 +526,8 @@ bindKeybindDrag({
 // its mouse bind) and its panel is painted from that state, so this view has no callback any more. The
 // pointer-lock effects that used to live in the callback (release on open, relock on close) are
 // edge-triggered from the same state inside ui.navigation.
+// The menu FROST (P1.30): a full-screen frosted layer that `ui.navigation` shows while any modal is up.
+const menuBackdrop = spawnMenuBackdrop(world);
 const inv = createInventoryView(world, player);
 // The handles the reconcile writes into (the view only spawns them): `ui.inventory` reads the component
 // and writes these widgets, which is why the view is no longer called once per frame.
@@ -967,6 +969,7 @@ navTrees = {
   mainRoot: mainMenu.rootEntity,
   mainMain: mainMenu.mainPanelEntity,
   genPanel: mainMenu.genPanelEntity,
+  backdrop: menuBackdrop,
   mainPanels: mainMenu.panelEntities,
   inventoryPanel: inv.panelEntity,
 };

@@ -18,7 +18,7 @@ import { HOTBAR_SLOTS } from "../../player/components";
 import { SelectSlot } from "../../../core/effect/commands";
 import { HotPlugPlugin } from "../../../core/effect/commands";
 import { hotPlugSurfaceForKey } from "../../../data/globals/hotplug";
-import { LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
+import { isModalUi, LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
 import { KEY_EVENTS } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
 import { UI_PAINT, type UiNavigationPaint } from "../../../data/globals/paint";
@@ -31,6 +31,8 @@ export type SettingsPanelId = "settings" | "lang" | "pack";
 export interface NavigationTrees {
   /** The pause menu: its root, its main panel and its four settings panels */
   readonly pauseRoot: Entity;
+  /** The full-screen frost under every menu (see data/assets/theme.ts, `menu.backdrop`). */
+  readonly backdrop: Entity;
   readonly pauseMain: Entity;
   readonly pausePanels: Readonly<Record<SettingsPanelId, Entity>>;
   /** The main menu: root, main panel, world-type picker and its four settings panels */
@@ -244,6 +246,8 @@ export class UiNavigationSystem {
   private paint(): void {
     const ui = this.ui;
     const t = this.deps.trees;
+    // The frost first: it must be down whenever ANY modal surface is up, and it is BELOW the panels.
+    setUiVisible(this.world, t.backdrop, isModalUi(ui) || ui.gen);
     setUiVisible(this.world, t.pauseRoot, ui.menu);
     setUiVisible(this.world, t.mainRoot, ui.mainMenu);
     setUiVisible(this.world, t.inventoryPanel, ui.inventory);
