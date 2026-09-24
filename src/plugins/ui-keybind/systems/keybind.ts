@@ -93,13 +93,34 @@ export class UiKeybindSystem {
     for (const entry of this.deps.entries) setUiVisible(this.world, entry, true);
   }
 
-  /** The UNINSTALL path (P1.24): the way in goes away with the page, and a page that was OPEN steps back
-   *  to the settings list — otherwise the sub-page would stay up with no system left to fill it, and no
-   *  way back (its Back button belongs to the panel the ui view built, which is still there). */
+  /** The UNINSTALL path (P1.24): the way in goes away with the page, a page that is OPEN steps back to the
+   *  settings list, and the DRAG's residue is taken down — see the note below, this shipped broken. */
   close(): void {
     for (const entry of this.deps.entries) setUiVisible(this.world, entry, false);
     const ui = this.world.resource(UI_MODAL);
     if (ui.settings === "keybind") ui.settings = "settings";
+    // THE BAND IS THE SYSTEM'S TO HIDE, and that is exactly why an uninstall leaked it: its geometry AND its
+    // visibility are written by step() every frame (they are derived from the GESTURE resource + POINTER), so
+    // the moment this system leaves the schedule nothing re-derives them — F9 during a drag left the rubber
+    // band frozen on screen and the gesture still live, so a re-install resumed drawing it. ESC gets away with
+    // clearing only the gesture state because the system runs ONE MORE FRAME and hides the band then; an
+    // uninstall has no such frame, so the take-down is explicit here.
+    //
+    // What is NOT taken down here (and cannot be): the document listeners `bindKeybindDrag` installed —
+    // plugins/input/bind-gesture.ts registers them once and returns no disposer. They are inert after this (a
+    // hidden panel cannot be hit, `drag` is null, the capture is over), but a plugin that can be installed and
+    // uninstalled repeatedly should hand back a disposer; recorded in ROADMAP P1.26.
+    const gesture = this.world.resource(KEYBIND_GESTURE);
+    gesture.drag = null;
+    gesture.hover = null;
+    gesture.shield = false;
+    this.deps.endCapture();
+    if (this.hovered !== null) {
+      setUiSelected(this.world, this.hovered, false);
+      this.hovered = null;
+    }
+    setUiVisible(this.world, this.deps.line, false);
+    this.lineShown = false;
     this.deps.log("KEYBIND page closed - the plugin was uninstalled");
   }
 

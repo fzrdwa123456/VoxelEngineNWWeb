@@ -1025,7 +1025,17 @@ Still outstanding:
   plugin was OFF at boot — the settings layout builds its tabs once during wiring, so there is no button to
   show. Uninstalling and re-installing a plugin that was ON at boot works (the button exists, hidden). The
   fix is a "tab host" the plugin fills on install (one per menu); until then the F9 demo needs the plugin
-  enabled at boot. The toast and the backpack are still in `ui`.
+  enabled at boot.
+  FIXED LATER IN THE SAME ROUND — the drag's RESIDUE: the rubber band's geometry and visibility are written by
+  `step()` every frame (derived from the KEYBIND_GESTURE resource + POINTER), so a `stop` that only hid the
+  entry buttons left the band frozen on screen when F9 landed mid-drag, with the gesture still live (a
+  re-install resumed drawing it). `close()` now clears `drag`/`hover`/`shield`, ends the capture, clears the
+  hovered keycap and hides the band itself — an uninstall has no "next frame" to rely on, which is exactly why
+  ESC (which leaves the system running) never showed the bug. STILL DEBT:
+  `installBindGestureHandlers` (plugins/input/bind-gesture.ts) registers its four document listeners once and
+  returns NO disposer, so they outlive an uninstall — inert today (a hidden panel cannot be hit, `drag` is
+  null, the capture is over) but wrong for a plugin that can be cycled repeatedly.
+  The toast and the backpack are still in `ui`.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

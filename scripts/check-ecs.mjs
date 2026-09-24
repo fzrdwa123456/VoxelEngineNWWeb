@@ -3536,6 +3536,15 @@ check("the plugin system: extension points, the registry, the install and the ma
   assert(!kbCtor.includes("this.showEntries()"), "the entry buttons are NOT shown from the constructor");
   assert(/step\(\): void \{[\s\S]{0,400}this\.showEntries\(\)/.test(kbSys),
     "…they are shown from step(), so the tab appears on the next ui frame (and after a hot install)");
+  // THE RUBBER BAND'S RESIDUE (this shipped broken): its geometry AND its visibility are written by step()
+  // every frame from the GESTURE resource, so an uninstall that only hid the entry buttons left the band
+  // frozen on screen — and the still-live drag made a re-install resume drawing it. close() has no next frame
+  // to rely on, so it must take both down itself.
+  const kbClose = kbSys.slice(kbSys.indexOf("close(): void {"), kbSys.indexOf("close(): void {") + 1200);
+  assert(/gesture\.drag = null/.test(kbClose), "close() clears the live drag");
+  assert(/this\.deps\.endCapture\(\)/.test(kbClose), "…and ends a rebind capture that was armed");
+  assert(/setUiVisible\(this\.world, this\.deps\.line, false\)/.test(kbClose),
+    "…and hides the rubber band, which nothing else would");
   assert(contribute(load("plugins/ui-debug/index.js")
     .createUiDebugPlugin({ uiPicker: { step: () => {}, close: () => {} } }))
     .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
