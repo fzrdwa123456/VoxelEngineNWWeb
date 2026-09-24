@@ -1036,6 +1036,18 @@ Still outstanding:
   returns NO disposer, so they outlive an uninstall — inert today (a hidden panel cannot be hit, `drag` is
   null, the capture is over) but wrong for a plugin that can be cycled repeatedly.
   The toast and the backpack are still in `ui`.
+- **P1.27 (step 1) — the ui lane's optional surfaces are ordered by CORE SLOT ANCHORS.** `DONE`. The blocker
+  the key bind split exposed: two widget WRITERS must be ordered (the conflict model is per COMPONENT, not per
+  entity), but a surface that can be DISABLED may not appear in another surface's order list — the name
+  dangles the moment that plugin is off, and the boot refuses an unknown name. The core therefore owns three
+  no-op anchors (`ui.slot.debug` / `ui.slot.toast` / `ui.slot.keybind`), chained among themselves and to the
+  core's own writers, and every optional surface declares "after the anchor before it, before its own anchor".
+  Any SUBSET of surfaces is then totally ordered, and no surface ever names another. `reads: [UI_STATE]` on an
+  anchor is deliberate: it conflicts with every writer, which keeps the anchor in a batch of its own instead
+  of being batched with an unrelated system. The gate asserts the lane's batch sequence including the anchors
+  and enforces the rule itself (no optional surface may order itself against `ui.picker` / `ui.toast` /
+  `ui.keybind`). NEXT STEP, now mechanical: move the toast into `plugins/ui-toast` (its slot already exists),
+  then decide the backpack/hotbar ownership and do the same.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
