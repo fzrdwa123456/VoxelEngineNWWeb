@@ -191,11 +191,19 @@ export class Schedule {
     return this.plan.map((entry) => {
       const groups = entry.batches
         .map((batch) =>
-          batch.length > 1 ? `(${batch.map((def) => (def.gap ? `${def.name}*` : def.name)).join(" ~ ")})` : batch[0].name,
+          batch.length > 1
+            ? `(${batch.map((def) => (def.gap ? `${def.name}*` : def.name)).join(" ~ ")})`
+            : batch[0].gap
+              ? `${batch[0].name}*`
+              : batch[0].name,
         )
         .join(" | ");
+      // A gap is not a system: counting it as one made the ui lane look like 15 systems when 11 of them do
+      // work. The batch grouping below still names them (with a `*`), because that IS where they belong.
+      const gaps = entry.systems.filter((def) => def.gap).length;
       return (
-        `SCHEDULE ${entry.stage}: ${entry.systems.length} systems, ${entry.batches.length} batches, ` +
+        `SCHEDULE ${entry.stage}: ${entry.systems.length - gaps} systems${gaps > 0 ? ` + ${gaps} gap(s)` : ""}, ` +
+        `${entry.batches.length} batches, ` +
         `${entry.parallelPairs} parallel pair(s) [${groups}]`
       );
     });

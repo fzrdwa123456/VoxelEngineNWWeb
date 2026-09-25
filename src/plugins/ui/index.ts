@@ -173,19 +173,19 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // A surface that may be DISABLED cannot be named in another surface's order list: the name would dangle
   // the moment that plugin is turned off, and the boot refuses an unknown name. But two widget WRITERS still
   // have to be ordered (the conflict model is per COMPONENT, not per entity), so the order needs something
-  // that ALWAYS exists. These three are it: no-op systems owned by the CORE, one per optional slot, chained
+  // that ALWAYS exists. These four GAPS are it (P1.27; a real scheduler concept since P1.42): named places
   // among themselves and to the core's own writers. Each optional surface declares "after the anchor before
   // it, before its own anchor", so any subset of them is totally ordered and no surface ever names another.
   //
-  // `reads: [UI_STATE]` is not decoration: it makes an anchor CONFLICT with every writer, which is what keeps
-  // it in a batch of its own instead of being batched with an unrelated system (edges alone would allow it).
+  // owned by the CORE, one per optional slot. A gap has NO access and NO run: what splits a batch is the
+  // declared EDGE, which the batcher honours even between two systems that share no data at all.
   api.system({
   name: "ui.slot.bag",
   stage: "ui",
   after: ["ui.loading"],
   before: ["ui.slot.debug"],
-  reads: [UI_STATE],
-  run: () => {},
+  gap: true,
+  // (no run: a GAP is a place in the order, not a worker — P1.42)
   });
   api.system({
   // THE BAG SLOT (P1.31): the inventory layer became an OPTIONAL plugin, and the anchors used to name its
@@ -195,24 +195,24 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   stage: "ui",
   after: ["ui.slot.bag"],
   before: ["ui.slot.toast"],
-  reads: [UI_STATE],
-  run: () => {},
+  gap: true,
+  // (no run: a GAP is a place in the order, not a worker — P1.42)
   });
   api.system({
   name: "ui.slot.toast",
   stage: "ui",
   after: ["ui.slot.debug"],
   before: ["ui.slot.keybind"],
-  reads: [UI_STATE],
-  run: () => {},
+  gap: true,
+  // (no run: a GAP is a place in the order, not a worker — P1.42)
   });
   api.system({
   name: "ui.slot.keybind",
   stage: "ui",
   after: ["ui.slot.toast"],
   before: ["ui.navigation"],
-  reads: [UI_STATE],
-  run: () => {},
+  gap: true,
+  // (no run: a GAP is a place in the order, not a worker — P1.42)
   });
   api.system({
   name: "ui.navigation",

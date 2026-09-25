@@ -1951,6 +1951,10 @@ function registrations() {
         ? ACCESS[accessName]
         : {
             readsExternal: list(block, "readsExternal"),
+            // A GAP is declared by a flag the parser has to CARRY (P1.42): without it the gate's model of the
+            // schedule would keep treating the four `ui.slot.*` anchors as no-op systems, i.e. the report and
+            // the batches it asserts would be about a schedule the game does not run.
+            gap: block.includes("gap: true"),
             writesExternal: list(block, "writesExternal"),
           }),
     };
