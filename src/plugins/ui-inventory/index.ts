@@ -1,5 +1,5 @@
-// ===== Plugin: ui-backpack =====
-// The INVENTORY layer: the backpack panel, the hotbar it shares its data with, and the system that reconciles
+// ===== Plugin: ui-inventory =====
+// The INVENTORY layer: the panel opened with E, the hotbar it shares its data with, and the system that reconciles
 // both from the INVENTORY component (and bakes block icons through the injected render hooks). It left the ui
 // plugin in P1.31, so "no inventory layer" is a manifest line.
 //
@@ -31,11 +31,11 @@ export function createInventorySystem(
   return new UiInventorySystem(...args);
 }
 
-export interface UiBackpackSystems {
+export interface UiInventorySystems {
   readonly uiInventory: { step(): void };
 }
 
-export function declareUiBackpackSystems(api: PluginApi, s: UiBackpackSystems): void {
+export function declareUiInventorySystems(api: PluginApi, s: UiInventorySystems): void {
   api.system({
     // The bag + the hotbar. It writes the widget data for both, so it must run before every other widget
     // writer — ordered against the core's anchors, never against another OPTIONAL surface (see ui/index.ts).
@@ -48,14 +48,14 @@ export function declareUiBackpackSystems(api: PluginApi, s: UiBackpackSystems): 
   });
 }
 
-export function createUiBackpackPlugin(s: UiBackpackSystems): Plugin {
+export function createUiInventoryPlugin(s: UiInventorySystems): Plugin {
   return definePlugin({
-    id: "ui-backpack",
+    id: "ui-inventory",
     // The widget layer it renders into, and the player's INVENTORY component.
     deps: ["ui", "player"],
     setup(api) {
       api.contribute(SLOT_RESOURCES, [INVENTORY_WIDGETS]);
-      declareUiBackpackSystems(api, s);
+      declareUiInventorySystems(api, s);
     },
     // A hot uninstall must not leave a bag that can still be opened and never painted again: close it.
     stop(api) {

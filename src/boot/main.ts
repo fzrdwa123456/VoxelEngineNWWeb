@@ -52,9 +52,9 @@ import { LoadingScreen } from "../plugins/ui/views/loading";
 import {
   createInventorySystem,
   createInventoryView,
-  createUiBackpackPlugin,
-  declareUiBackpackSystems,
-} from "../plugins/ui-backpack";
+  createUiInventoryPlugin,
+  declareUiInventorySystems,
+} from "../plugins/ui-inventory";
 import { Menu, spawnMenuBackdrop } from "../plugins/ui/views/menu";
 // The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
 // them from THERE: the ui plugin exports none of it any more.
@@ -541,7 +541,7 @@ const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peek
 // running". It needs the hotbar, which is why it is built here rather than with the other UI systems.
 // "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain, so F11 is
 // felt immediately: the hotbar and the bag panel are the core's to show, and this is how the core asks.
-const inventoryOn = (): boolean => livePlugins.has("ui-backpack");
+const inventoryOn = (): boolean => livePlugins.has("ui-inventory");
 const uiHud = createHudSystem(world, {
   crosshair: hud.crosshairEntity,
   hotbar: inv.hotbarEntity,
@@ -602,8 +602,8 @@ const uiToastPlugin = createUiToastPlugin({ uiToast });
 const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind }, keybindEntries);
 // The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
 // the core's slot anchors encode; the list itself is only what may be installed at runtime.
-const uiBackpackPlugin = createUiBackpackPlugin({ uiInventory });
-const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiBackpackPlugin, uiKeybindPlugin];
+const uiInventoryPlugin = createUiInventoryPlugin({ uiInventory });
+const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiInventoryPlugin, uiKeybindPlugin];
 const livePlugins = new Set<string>();
 const hotHost: HotPlugHost = {
   world,
@@ -633,7 +633,7 @@ const PLUGINS = [
   uiPlugin,
   uiDebugPlugin,
   uiToastPlugin,
-  uiBackpackPlugin,
+  uiInventoryPlugin,
   uiKeybindPlugin,
   inputPlugin,
 ];
@@ -1001,8 +1001,8 @@ if (!uiApi) {
 // The backpack + hotbar system belongs to the ui-backpack plugin, and the PLUGIN declares it in its own `setup`
 // — the shape that makes a plugin self-installing and hot-pluggable. The ROOT must not declare it again: the
 // registry refuses a duplicate id, and doing it twice threw `"ui.inventory" is already contributed by
-// "ui-backpack"` during boot, which took the whole window down (the game never appeared).
-if (!installOutcome.has("ui-backpack")) {
+// "ui-inventory"` during boot, which took the whole window down (the game never appeared).
+if (!installOutcome.has("ui-inventory")) {
   logDebug("PLUGIN ui-backpack is not installed - the backpack and the hotbar are off (the crosshair stays)");
 }
 }

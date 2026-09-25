@@ -27,7 +27,7 @@ export const DEFAULT_PLUGINS: readonly string[] = [
   "ui",
   "ui-debug",
   "ui-toast",
-  "ui-backpack",
+  "ui-inventory",
   "ui-keybind",
   "input",
 ];

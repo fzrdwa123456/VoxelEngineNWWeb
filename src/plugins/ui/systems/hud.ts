@@ -59,14 +59,19 @@ export class UiHudSystem {
     this.paint = world.resource(UI_PAINT).hud;
   }
 
-  /** ui lane, once per frame. A hide/show only when the answer CHANGES: the record is data the
-   *  reconciler diffes, but writing it every frame would be noise (and `setUiVisible` is write-only,
-   *  so it could not even notice). */
+  /** ui lane, once per frame. TWO gates, not one (P1.32):
+   *    * the CROSSHAIR belongs to the gameplay HUD — a world is running, so it is up, full stop;
+   *    * the HOTBAR is the inventory layer's other half (same data, same reconcile pass), so it also needs
+   *      that layer to be INSTALLED.
+   *  Sharing one `visible` between them is what made switching the inventory plugin off take the crosshair
+   *  with it. The crosshair write is unconditional because it is a single record the reconciler diffs — the
+   *  cache below exists for the hotbar, whose answer changes when a plugin is (un)installed. */
   step(): void {
-    const visible = this.deps.inWorld() && this.deps.inventoryOn();
-    if (visible === this.shown) return;
-    this.shown = visible;
-    setUiVisible(this.world, this.deps.crosshair, visible);
-    setUiVisible(this.world, this.deps.hotbar, visible);
+    const inWorld = this.deps.inWorld();
+    setUiVisible(this.world, this.deps.crosshair, inWorld);
+    const hotbar = inWorld && this.deps.inventoryOn();
+    if (hotbar === this.shown) return;
+    this.shown = hotbar;
+    setUiVisible(this.world, this.deps.hotbar, hotbar);
   }
 }

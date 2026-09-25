@@ -1064,7 +1064,7 @@ Still outstanding:
   (`ui.hud` shows them only in a world) and the backpack shares `INVENTORY_WIDGETS` and the selected-slot data
   with the hotbar — so "turn the backpack off" must decide whether the hotbar leaves with it. The likely
   shape: keep the hotbar+crosshair in `ui.hud` (they are the gameplay HUD) and move the backpack panel +
-  `ui.inventory`'s reconcile into `plugins/ui-backpack`, with `ui.inventory`'s icon writes splitting in two.
+  `ui.inventory`'s reconcile into `plugins/ui-inventory`, with `ui.inventory`'s icon writes splitting in two.
 - **P1.28 — an uninstall must not remove the resources a plugin CLAIMED.** `DONE`. The F10 test log showed
   it as a real defect: after `PLUGIN ui-toast HOT-UNINSTALLED`, EVERY later toast command threw
   `frame error: World.resource: "toast" was never registered` (12 of them, one per multiplayer-button click),

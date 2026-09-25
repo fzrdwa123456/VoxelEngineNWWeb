@@ -50,7 +50,7 @@ const SOURCES = [
   "src/plugins/ui/index.ts",
   "src/plugins/ui-debug/index.ts",
   "src/plugins/ui-keybind/index.ts",
-  "src/plugins/ui-backpack/index.ts",
+  "src/plugins/ui-inventory/index.ts",
   "src/plugins/ui-toast/index.ts",
   "src/plugins/input/index.ts",
   "src/plugins/content-default/index.ts",
@@ -101,7 +101,7 @@ const SOURCES = [
   // The inventory reconcile (a system now �?it used to be `Inventory.sync()`, a method on the view, which
   // is why this file was not compiled here before). It imports the icon baker + the block registry, both
   // of which are import-safe in Node (the WebGPU renderer they use is created lazily on the first bake).
-  "src/plugins/ui-backpack/systems/inventory.ts",
+  "src/plugins/ui-inventory/systems/inventory.ts",
   "src/plugins/ui-keybind/systems/keybind.ts",
   "src/plugins/ui/systems/navigation.ts",
   "src/plugins/render/systems/camera.ts",
@@ -1231,7 +1231,7 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   // backfill the slot's UI_IMAGE from a `.then` continuation, i.e. a component write with no lane around
   // it (and a frame could be painted from it at any point). The system asks for the bake and reads the
   // cache on its next run instead.
-  const invSource = stripComments(readSource("src/plugins/ui-backpack/systems/inventory.ts"));
+  const invSource = stripComments(readSource("src/plugins/ui-inventory/systems/inventory.ts"));
   assert(!/\.then\(/.test(invSource), "the inventory draws the icon from the cache, not from a promise");
   // Since P1.18b the icon baker is INJECTED (a plugin may not import `host/`), so the check is
   // two-sided: the system asks through its IconSource, and the composition root hands it the real one.
@@ -1332,7 +1332,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   // The menus and the settings panel. `onLangChange` is ALLOWED here: a label composed from a VALUE
   // ("FPS 60", "1.25x") cannot be a key, so those few still have to be re-pushed on a language switch.
   // Everything a key can express is re-derived by the reconciler instead.
-  for (const rel of ["src/plugins/ui/views/menu.ts", "src/plugins/ui/views/mainmenu.ts", "src/plugins/ui-backpack/views/inventory.ts"]) {
+  for (const rel of ["src/plugins/ui/views/menu.ts", "src/plugins/ui/views/mainmenu.ts", "src/plugins/ui-inventory/views/inventory.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /document\.createElement\(/g), 0, `${rel} still creates an element by hand`);
     equal(countOf(code, /style\.cssText/g), 0, `${rel} still writes an inline style string`);
@@ -1353,9 +1353,9 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the settings panel composes buttons");
   assert(/spawnGridKey\(/.test(readSource("src/plugins/ui-keybind/views/keybind.ts")), "the visual keyboard composes keycaps (in the plugin that owns the page)");
   assert(/onUiAction\(/.test(readSource("src/plugins/ui/views/mainmenu.ts")), "the main menu dispatches actions");
-  assert(/spawnButton\(/.test(readSource("src/plugins/ui-backpack/views/inventory.ts")), "the inventory VIEW composes slot buttons");
-  assert(/setUiImage\(/.test(readSource("src/plugins/ui-backpack/systems/inventory.ts")), "…and the SYSTEM fills icon slots as data");
-  equal(countOf(stripComments(readSource("src/plugins/ui-backpack/views/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
+  assert(/spawnButton\(/.test(readSource("src/plugins/ui-inventory/views/inventory.ts")), "the inventory VIEW composes slot buttons");
+  assert(/setUiImage\(/.test(readSource("src/plugins/ui-inventory/systems/inventory.ts")), "…and the SYSTEM fills icon slots as data");
+  equal(countOf(stripComments(readSource("src/plugins/ui-inventory/views/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
     "the view writes no widget data any more (that is the system's job)");
 });
 
@@ -1791,7 +1791,7 @@ function registrations() {
     // The inventory reconcile is a SYSTEM now (ecs/ui/inventory.ts), so its declared access is loaded like
     // every other one. It used to be a method on the VIEW, which the gate could only read as source text
     // (the view imports the renderer and is not compiled here).
-    INVENTORY_VIEW_ACCESS: load("plugins/ui-backpack/systems/inventory.js").INVENTORY_VIEW_ACCESS,
+    INVENTORY_VIEW_ACCESS: load("plugins/ui-inventory/systems/inventory.js").INVENTORY_VIEW_ACCESS,
     UI_RENDER_ACCESS: load("plugins/ui/systems/reconcile.js").UI_RENDER_ACCESS,
     UI_BINDING_ACCESS: load("plugins/ui/systems/bindings.js").UI_BINDING_ACCESS,
     UI_PAGES_ACCESS: load("plugins/ui/systems/ui-pages.js").UI_PAGES_ACCESS,
@@ -2595,7 +2595,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   equal(countOf(stripComments(readSource("src/host/browser/blockicons.ts")),
     /^(?:let|var) (?:renderer|rendererReady|cache|pending)\b/gm), 0,
     "the baker keeps no module-level renderer or cache");
-  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/plugins/ui-backpack/systems/inventory.ts"))),
+  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/plugins/ui-inventory/systems/inventory.ts"))),
     "the inventory system resolves it");
 
   // 2. The ONE chunk material (a GPU object created on first use, because the pack chain must be
@@ -2721,7 +2721,7 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
     "the composition root inserts it");
 });
 
-check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "plugins", "ui-backpack", "systems", "inventory.ts"), "utf8");
+check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "plugins", "ui-inventory", "systems", "inventory.ts"), "utf8");
   const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
   assert(/reads:\s*\[INVENTORY\]/.test(block), "reads INVENTORY");
   // It writes WIDGET DATA now, not DOM: that is what makes it conflict with the reconciler and what
@@ -3363,7 +3363,7 @@ check("the view paint state, the host state and the loop's own state are RESOURC
     /^\s+private (?:readonly )?(?:shown|shownKey|shownRaw|shownPercent|filled|shownNote|shownNoteKey|shownNoteVisible|hovered|lineShown|drawnSelected|outsideWorld|inventoryOpen|menuOpen|lastCursor|rawFrameDx|rawFrameDy|wanted|lastPcx|lastPcz|applied|appliedAspect|stylesheetInjected|appliedFontUi|appliedFontMono|appliedRootFontPx|reported|flushTimer|diagLogEnabled|windowFocused|installed|scheduled|cached|loaded|snapshot)\s*[:=]/gm;
   for (const rel of [
     "src/plugins/ui/systems/reconcile.ts", "src/plugins/ui/systems/loading.ts", "src/plugins/ui-toast/systems/toast.ts", "src/plugins/ui/systems/hud.ts",
-    "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui-backpack/systems/inventory.ts", "src/plugins/ui/systems/navigation.ts", "src/plugins/ui/systems/bindings.ts",
+    "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui-inventory/systems/inventory.ts", "src/plugins/ui/systems/navigation.ts", "src/plugins/ui/systems/bindings.ts",
     "src/plugins/player/systems/input.ts", "src/plugins/render/systems/chunk-stream.ts", "src/plugins/ui/systems/delays.ts",
     "src/plugins/render/systems/camera.ts", "src/host/browser/pointerlock.ts", "src/plugins/input/keybinds.ts",
     "src/host/desktop/shell.ts", "src/host/browser/viewport.ts", "src/data/assets/blockregistry.ts", "src/data/assets/i18n.ts",
@@ -3440,7 +3440,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(outcome.has("ui"), false, "…including the manifest's veto");
 
   // 3. The manifest is DATA the pack chain can override, and it can never break the boot.
-  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-debug,ui-toast,ui-backpack,ui-keybind,input",
+  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-debug,ui-toast,ui-inventory,ui-keybind,input",
     "the built-in plugin list (the content plugin comes first: it declares what the install HAS)");
   equal(M.isEnabled(M.defaultManifest(), "ui"), true, "an unmentioned plugin follows the default list");
   const off = M.parseManifest({ plugins: [{ id: "diagnostics", enabled: false }] });
@@ -3580,7 +3580,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   // TWO OPTIONAL PLUGINS MAY NOT NAME EACH OTHER (P1.27): the order between them is the CORE's slot anchors,
   // because a name is a dangling reference as soon as the plugin that owns it is disabled.
   const OPTIONAL_SYSTEMS = ["ui.picker", "ui.toast", "ui.keybind"];
-  for (const file of ["src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts", "src/plugins/ui-toast/index.ts", "src/plugins/ui-backpack/index.ts"]) {
+  for (const file of ["src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts", "src/plugins/ui-toast/index.ts", "src/plugins/ui-inventory/index.ts"]) {
     const src = stripComments(readSource(file));
     for (const m of src.matchAll(/(?:after|before):\s*\[([^\]]*)\]/g)) {
       for (const named of OPTIONAL_SYSTEMS) {
@@ -3640,8 +3640,8 @@ check("the plugin system: extension points, the registry, the install and the ma
   }
   equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 11,
     "…the ui plugin declares its seven core systems + the FOUR slot anchors + the page host");
-  equal(countOf(stripComments(readSource("src/plugins/ui-backpack/index.ts")), /api\.system\(/g), 1,
-    "…and the ui-backpack plugin declares the inventory system itself");
+  equal(countOf(stripComments(readSource("src/plugins/ui-inventory/index.ts")), /api\.system\(/g), 1,
+    "…and the ui-inventory plugin declares the inventory system itself");
   equal(countOf(stripComments(readSource("src/plugins/ui-toast/index.ts")), /api\.system\(/g), 1,
     "…and the ui-toast plugin declares the HUD message system itself");
   equal(countOf(stripComments(readSource("src/plugins/ui-keybind/index.ts")), /api\.system\(/g), 1,
@@ -3894,8 +3894,8 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
     "the root builds the debug plugin from the factory the catalogue lists");
   assert(!/removeResource/.test(readSource("src/core/plugin/hotplug.ts")),
     "the uninstall path does not remove resources (P1.28: it broke core commands that read them)");
-  assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin, uiToastPlugin, uiBackpackPlugin, uiKeybindPlugin\]/.test(bootSrc),
-    "…and catalogues that same value, in the lane order of the optional surfaces (debug, toast, backpack, keybind)");
+  assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin, uiToastPlugin, uiInventoryPlugin, uiKeybindPlugin\]/.test(bootSrc),
+    "…and catalogues that same value, in the lane order of the optional surfaces (debug, toast, inventory, keybind)");
   assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");
   const dbgSrc = stripComments(readSource("src/plugins/ui-debug/index.ts"));
   assert(/setup\(api\)[\s\S]{0,400}hasResource\(PICKER_STATE\)/.test(dbgSrc),
