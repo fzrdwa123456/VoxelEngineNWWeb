@@ -3801,7 +3801,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
   for (const core of ["contentDefaultPlugin", "worldPlugin", "playerPlugin", "renderPlugin",
-    "createDiagnosticsPlugin", "uiPlugin", "inputPlugin"]) {
+    "uiPlugin", "inputPlugin"]) {
     assert(declared[1].includes(core), `the CORE plugin list still names ${core}`);
   }
   assert(/\.\.\.discoveredPlugins\.map\(\(p\) => p\.plugin\)/.test(bootSrc),

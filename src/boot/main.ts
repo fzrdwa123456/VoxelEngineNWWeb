@@ -103,7 +103,7 @@ import type { PluginHost } from "../core/plugin/host";
 import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
 import { createRenderPlugin } from "../plugins/render";
-import { createDiagnosticsPlugin } from "../plugins/diagnostics";
+// (the diagnostics plugin is discovered now too: see plugins/diagnostics/plugin.ts)
 import {
   createRenderSystem,
   createBindingSystem,
@@ -656,7 +656,7 @@ const PLUGINS = [
   worldPlugin,
   playerPlugin.plugin,
   renderPlugin.plugin,
-  createDiagnosticsPlugin(world),
+
   uiPlugin,
   ...discoveredPlugins.map((p) => p.plugin),
 
