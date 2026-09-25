@@ -27,7 +27,7 @@ export function createKeybindSystem(...args: ConstructorParameters<typeof UiKeyb
 }
 
 export interface UiKeybindSystems {
-  /** `step()` is the lane's; `close()` is the LIFECYCLE's (an uninstall takes the way in away). */
+  /** `step()` is the lane's; `close()` is the LIFECYCLE's (the teardown takes the way in away). */
   readonly uiKeybind: { step(): void; close(): void };
 }
 
@@ -39,8 +39,9 @@ export function declareUiKeybindSystems(api: PluginApi, s: UiKeybindSystems): vo
     name: "ui.keybind",
     stage: "ui",
     after: ["ui.slot.keybind"],
-    // The edges that used to name `ui.toast`/`ui.navigation`/`ui.widgets` are the core's anchors now (P1.27):
-    // a surface may only be ordered against systems that EXIST whatever else is turned off.
+    // The edges that used to name `ui.toast`/`ui.navigation`/`ui.widgets` are the core's GAPS now
+    // (P1.27; a real scheduler concept since P1.42): a surface may only be ordered against places that EXIST
+    // whatever else is turned off.
     before: ["ui.navigation"],
     ...UI_KEYBIND_ACCESS,
     run: () => s.uiKeybind.step(),
@@ -94,12 +95,13 @@ export function createUiKeybindPlugin(s: UiKeybindSystems, entries: Entity[]): P
       // The drag's document listeners follow the plugin's lifetime (see views/keybind.ts).
       rebindKeybindDrag();
       declareUiKeybindSystems(api, s);
-    },
-    // The page goes down with the plugin (see UiKeybindSystem.close()).
-    stop() {
-      s.uiKeybind.close();
-      // …and its device listeners go with it.
-      unbindKeybindDrag();
+      // LEAVE NOTHING BEHIND (P1.39): the page's way-in and its DEVICE LISTENERS are torn down together, filed
+      // next to the code that set them up. The framework runs this on both leave paths — an uninstall, and
+      // quitting — in reverse order, exactly once, and isolates it if it throws.
+      api.onStop(() => {
+        s.uiKeybind.close();
+        unbindKeybindDrag();
+      });
     },
   });
 }

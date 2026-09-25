@@ -3611,6 +3611,8 @@ check("the plugin system: extension points, the registry, the install and the ma
       registry,
       contribute: (point, items) => registry.contribute(point, "test", items),
       system: (def) => registry.contribute(S.SLOT_SYSTEMS, "test", [def]),
+      insertResource: () => {},
+      onStop: () => {},
       log: () => {},
     });
     return registry;
@@ -4047,10 +4049,10 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
     "…and the hot catalogue IS that discovered set, so a surface cannot exist without its F8-F11 key");
   assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");
   const dbgSrc = stripComments(readSource("src/plugins/ui-debug/index.ts"));
-  assert(/setup\(api\)[\s\S]{0,400}hasResource\(PICKER_STATE\)/.test(dbgSrc),
-    "the plugin inserts its own resource when a runtime install finds the world without it");
-  assert(/stop\(\)/.test(dbgSrc) && /close\(\)/.test(dbgSrc),
-    "…and its surface is closed by the lifecycle, not left on screen");
+  assert(/api\.insertResource\(PICKER_STATE, createPickerState\(\)\)/.test(dbgSrc),
+    "the plugin inserts its own resource through api.insertResource (once-semantics: a runtime install AND a re-install both work)");
+  assert(/api\.onStop\(\(\) => s\.uiPicker\.close\(\)\)/.test(dbgSrc),
+    "…and its surface is closed by the lifecycle TEARDOWN (api.onStop), not left on screen");
 });
 
 // ===== the page host, BEHAVIOURALLY (P1.29) =====
@@ -4211,8 +4213,11 @@ check("a plugin's REGISTERED teardowns run once, in reverse, on BOTH leave paths
   assert(/runTeardowns\(world, id/.test(hp), "an uninstall runs them too, before the withdrawal");
   assert(/plugin\.stop\?\.\(api\)/.test(lc),
     "…and a plugin with NO `stop` hook is no longer skipped by stopPlugins");
-  assert(/api\.onStop/.test(stripComments(readSource("src/plugins/ui-inventory/index.ts"))),
-    "a real plugin files its bag closing as a teardown (the migration is not only on paper)");
+  for (const id of ["ui-inventory", "ui-debug", "ui-toast", "ui-keybind"]) {
+    const src = stripComments(readSource(`src/plugins/${id}/index.ts`));
+    assert(/api\.onStop\(/.test(src), `${id}: files its surface teardown through api.onStop (P1.39)`);
+    assert(!/\bstop\((?:api)?\)\s*\{/.test(src), `${id}: …and no longer hand-writes a \`stop\` hook for it`);
+  }
 });
 
 // ===== THE setup IDEMPOTENCY CONTRACT (P1.38) =====

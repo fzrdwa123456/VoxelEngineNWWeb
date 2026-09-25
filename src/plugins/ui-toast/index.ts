@@ -20,14 +20,14 @@ export function createToastSystem(...args: ConstructorParameters<typeof UiToastS
 export { spawnToastPanel } from "./views/toast";
 
 export interface UiToastSystems {
-  /** `step()` is the lane's; `close()` is the LIFECYCLE's (an uninstall takes the panel down). */
+  /** `step()` is the lane's; `close()` is the LIFECYCLE's (the teardown takes the panel down). */
   readonly uiToast: { step(): void; close(): void };
 }
 
 export function declareUiToastSystems(api: PluginApi, s: UiToastSystems): void {
   api.system({
     // The HUD message. It writes UI_STATE/UI_TEXT on its OWN two widgets, so its order against the other
-    // widget writers has to be declared — and it is declared against the CORE'S SLOT ANCHORS (P1.27), never
+    // widget writers has to be declared — and it is declared against the CORE'S SLOT GAPS (P1.27/P1.42), never
     // against another optional surface's system: that name would dangle the moment that plugin is off.
     name: "ui.toast",
     stage: "ui",
@@ -45,15 +45,14 @@ export function createUiToastPlugin(s: UiToastSystems): Plugin {
     deps: ["ui"],
     setup(api) {
       // The message and its deadline are this surface's state, so the plugin owns the resource too: inserted
-      // here when the world has not got it (the boot table inserts it for the ordinary case), exactly like
-      // ui-debug's picker state — one code path for boot and for a runtime install.
-      if (!api.world.hasResource(TOAST)) api.world.insertResource(TOAST, createToastState());
+      // here when the world has not got it (`api.insertResource` is once-semantics, so a re-install keeps the
+      // object and boot and hot-plug stay one code path) — exactly like ui-debug's picker state.
+      api.insertResource(TOAST, createToastState());
       api.contribute(SLOT_RESOURCES, [TOAST]);
       declareUiToastSystems(api, s);
-    },
-    // The panel comes down with the plugin (see UiToastSystem.close()).
-    stop() {
-      s.uiToast.close();
+      // LEAVE NOTHING BEHIND (P1.39): the panel's teardown is filed next to the surface, and the framework
+      // runs it on both leave paths (an uninstall, and quitting), in reverse order, exactly once.
+      api.onStop(() => s.uiToast.close());
     },
   });
 }

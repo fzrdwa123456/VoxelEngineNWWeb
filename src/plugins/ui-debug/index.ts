@@ -25,7 +25,7 @@ export function createPickerSystem(...args: ConstructorParameters<typeof UiPicke
 export { spawnPickerPanel } from "./systems/picker";
 
 export interface UiDebugSystems {
-  /** `step()` is the lane's entry point; `close()` is the LIFECYCLE's (an uninstall takes the panels down). */
+  /** `step()` is the lane's entry point; `close()` is the LIFECYCLE's (the teardown closes the panels). */
   readonly uiPicker: { step(): void; close(): void };
 }
 
@@ -38,9 +38,9 @@ export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
     name: "ui.picker",
     stage: "ui",
     after: ["ui.slot.debug"],
-    // The slot anchor replaces the edges that used to name `ui.toast`/`ui.widgets` (P1.27): a system another
-    // OPTIONAL plugin owns must never appear here, and the core's anchor gives the same total order while
-    // surviving any subset of surfaces being disabled.
+    // The slot GAP replaces the edges that used to name `ui.toast`/`ui.widgets` (P1.27; a real scheduler
+    // concept since P1.42): a system another OPTIONAL plugin owns must never appear here, and the core's gap
+    // gives the same total order while surviving any subset of surfaces being disabled.
     before: ["ui.slot.toast"],
     ...UI_PICKER_ACCESS,
     run: () => s.uiPicker.step(),
@@ -53,7 +53,7 @@ export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
  *  the plugin needs is either in the instances handed to it or in the world, so its `setup` alone is enough
  *  to install it — at boot AND at runtime (`core/plugin/hotplug.ts`). It also OWNS its resource: the boot
  *  table inserts PICKER_STATE for the ordinary case, and a runtime install inserts it here when the world no
- *  longer has it (idempotent on purpose, so boot and hot-plug are one code path). */
+ *  longer has it (`api.insertResource` is once-semantics, so boot and hot-plug are one code path). */
 export function createUiDebugPlugin(s: UiDebugSystems): Plugin {
   return definePlugin({
     id: "ui-debug",
@@ -62,17 +62,13 @@ export function createUiDebugPlugin(s: UiDebugSystems): Plugin {
     // layer has nothing to draw into.
     deps: ["ui"],
     setup(api) {
-      if (!api.world.hasResource(PICKER_STATE)) {
-        api.world.insertResource(PICKER_STATE, createPickerState());
-      }
+      api.insertResource(PICKER_STATE, createPickerState());
       api.contribute(SLOT_RESOURCES, [PICKER_STATE]);
       declareUiDebugSystems(api, s);
-    },
-    // The surface comes down with the plugin (see UiPickerSystem.close()). Called by the uninstall path even
-    // though this plugin declares no `start`: the boot's `stopPlugins` mirrors `start`, an UNINSTALL has to
-    // close whatever the plugin owns either way.
-    stop() {
-      s.uiPicker.close();
+      // LEAVE NOTHING BEHIND (P1.39): the picker's teardown is filed HERE, next to the surface it closes,
+      // instead of in a `stop` hook that has to remember every surface the plugin owns. The framework runs it
+      // at the barrier on BOTH leave paths — an uninstall, and quitting — in reverse order, exactly once.
+      api.onStop(() => s.uiPicker.close());
     },
   });
 }
