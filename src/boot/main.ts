@@ -1007,12 +1007,15 @@ if (!uiApi) {
 } else {
   declareUiSystems(uiApi, { uiPages, uiHud, uiLoading, uiBindings, navigation, delays, uiRender });
 
-// The backpack + hotbar system belongs to the ui-backpack plugin, and the PLUGIN declares it in its own `setup`
+// The backpack + hotbar system belongs to the ui-inventory plugin, and the PLUGIN declares it in its own `setup`
 // — the shape that makes a plugin self-installing and hot-pluggable. The ROOT must not declare it again: the
 // registry refuses a duplicate id, and doing it twice threw `"ui.inventory" is already contributed by
 // "ui-inventory"` during boot, which took the whole window down (the game never appeared).
 if (!installOutcome.has("ui-inventory")) {
-  logDebug("PLUGIN ui-backpack is not installed - the backpack and the hotbar are off (the crosshair stays)");
+  // The strip is not a hidden widget any more (P1.35): the HUD ELEMENT is the plugin's, so uninstalling the
+  // layer takes it out of the table and `ui.hud` never builds it. The bag panel's widgets still exist (the view
+  // is wired by the root), but nothing can open it: ui.navigation's E key and its mouse bind are gated too.
+  logDebug("PLUGIN ui-inventory is not installed - NO hotbar element is built, and the backpack is off (the crosshair stays)");
 }
 }
 
