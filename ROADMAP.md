@@ -1217,6 +1217,21 @@ Still outstanding:
   optional: with the factory call gone, `renderPlugin` (the PLUGINS entry), `chunkStream` (three call sites)
   and the host instance (`chunkMeshFactory`) all have to change in the SAME round, and the tree is red until
   every one of them lands — which is why the slice was rolled back instead of being left in that state.
+- **P1.45 — `render` is DISCOVERED, and the "publish the handles" shape exists and is USED.** `DONE`. The
+  first of the three core plugins to move, and the one that proved the shape P1.43 asked for: the root DROVE
+  the render systems by hand (the boot driver primes and WARMS the chunk stream, the menu frame steps the
+  background) while `PluginHost.instances` only goes root -> plugin. Now the plugin's own `plugin.ts` builds
+  its wiring from the host (the platform MESHER is a host instance: a plugin may not import `host/`),
+  PUBLISHES what the root drives into `RENDER_HANDLES` (`data/globals/render-handles.ts` — typed structurally
+  and deliberately narrow, and it had to match the REAL signatures: `warmUp` yields and takes an OPTIONAL
+  progress callback), and the root reads that resource at its call sites. `boot/main.ts` no longer constructs
+  the render plugin nor lists it in `PLUGINS`; the gate's core list is down to five names.
+  TOOLING NOTE, because it cost the previous round: this checkout's `pwsh` is **Windows PowerShell 5.1** —
+  `Get-Content`/`Set-Content` round-trips DESTROY UTF-8 sources (they prepend a BOM and turn every em dash into
+  mojibake), and the editor tool refuses to touch a file an external script wrote until it is read again.
+  Whole-file work therefore goes through **Node** (`fs.readFileSync`/`writeFileSync` with a per-step "did this
+  replacement land" check so a missed anchor fails loudly), and a NEW file is written as an ASCII temporary
+  copy rather than through `Set-Content`.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

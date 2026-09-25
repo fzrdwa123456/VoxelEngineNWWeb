@@ -2343,7 +2343,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   assert(/chunkStream\.warmUp\(paint/.test(entryBody), "…and meshes it behind the screen");
   // A re-entry into a window that is still built skips the screen instead of flashing it for one frame.
   assert(
-    /if \(chunkStream\.needsWarmUp\(/.test(entryBody),
+    /if \(world\.resource\(RENDER_HANDLES\)\.chunkStream\.needsWarmUp\(/.test(entryBody),
     "the entry asks whether there is anything to build before it shows a screen",
   );
   assert(/setLoopMode\("game"\)/.test(entryBody), "the entry ends by handing the mode over to the game");
@@ -3802,7 +3802,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
-  for (const core of ["contentDefaultPlugin", "worldPlugin", "playerPlugin", "renderPlugin",
+  for (const core of ["contentDefaultPlugin", "worldPlugin", "playerPlugin",
     "uiPlugin", "inputPlugin"]) {
     assert(declared[1].includes(core), `the CORE plugin list still names ${core}`);
   }

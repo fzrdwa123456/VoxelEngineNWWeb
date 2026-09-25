@@ -75,6 +75,7 @@ import { installWindowGuards } from "../host/browser/window-guards";
 import { captureMouse, releaseMouse } from "../host/browser/mousecapture";
 import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../host/browser/blockicons";
 import { ChunkGeometry, getChunkMaterial } from "../host/browser/chunkmesh";
+import { RENDER_HANDLES } from "../data/globals/render-handles";
 import { adoptViewport, currentViewport, onViewportChange } from "../host/browser/viewport";
 import { DebugLogForwarder } from "../host/desktop/debuglog";
 import { PerfSampler } from "../core/services/perf";
@@ -102,7 +103,7 @@ import { discoverPlugins } from "./plugin-catalog";
 import type { PluginHost } from "../core/plugin/host";
 import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
-import { createRenderPlugin } from "../plugins/render";
+import type { ChunkMeshFactory } from "../plugins/render";
 // (the diagnostics plugin is discovered now too: see plugins/diagnostics/plugin.ts)
 import {
   createRenderSystem,
@@ -446,11 +447,10 @@ const picker = spawnPickerPanel(world);
 // The device layer takes the canvas from RENDERER3D (the renderer's domElement) and the camera from
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
 // so no system is handed one. See ecs/presentation.ts.
-const renderPlugin = createRenderPlugin({
-  world,
-  mesh: { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial },
-});
-const { chunkStream, cameraView, outline, menuBg } = renderPlugin.systems;
+const chunkMeshFactory: ChunkMeshFactory = { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial };
+// THE RENDER HANDLES COME FROM THE PLUGIN THAT PUBLISHES THEM (P1.45): the render plugin is DISCOVERED
+// now, so the root no longer CONSTRUCTS it - but the boot driver still primes and warms the chunk stream,
+// and the published resource is how it reaches the very instance the plugin registered.
 // The reconciler that owns every widget's DOM element. It mounts roots on the world's UI_MOUNT resource
 // (the same element the hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never
 // imports src/ui/.
@@ -622,7 +622,7 @@ const pluginHost: PluginHost = {
   world,
   log: logDebug,
   inWorld: () => inWorld(),
-  instances: { uiPicker, uiToast, uiInventory, inv, uiKeybind, keybindEntries },
+  instances: { uiPicker, uiToast, uiInventory, inv, uiKeybind, keybindEntries, chunkMeshFactory },
 };
 const discoveredPlugins = discoverPlugins(pluginHost);
 // (the toast, keybind and inventory plugin factories are no longer called here: see the catalogue below)
@@ -655,7 +655,6 @@ const PLUGINS = [
   contentDefaultPlugin,
   worldPlugin,
   playerPlugin.plugin,
-  renderPlugin.plugin,
 
   uiPlugin,
   ...discoveredPlugins.map((p) => p.plugin),
@@ -915,7 +914,7 @@ async function enterWorld(mode: string): Promise<void> {
   world.commands.send(Teleport, { entity: player, x: SPAWN.x, y: SPAWN.y, z: SPAWN.z });
   logDebug(`MAINMENU entering singleplayer (world type: ${mode === "noise" ? "noise" : "superflat"})`);
 
-  if (chunkStream.needsWarmUp(SPAWN.x, SPAWN.z)) {
+  if (world.resource(RENDER_HANDLES).chunkStream.needsWarmUp(SPAWN.x, SPAWN.z)) {
     // ACTIVATE the screen: the same trap as the startup's first stage — the root is spawned hidden and
     // `ui.loading` paints nothing while LOADING_STATE.active is false (which the END of boot() left it as).
     // Forgetting this line is invisible to a type-checker and to every "is the screen painted" test
@@ -935,13 +934,13 @@ async function enterWorld(mode: string): Promise<void> {
         progress: 0.15,
         key: "world.terrain",
         // Generate (no meshing) the spawn window: collision needs real blocks on the very first tick.
-        run: () => chunkStream.prime(SPAWN.x, SPAWN.z),
+        run: () => world.resource(RENDER_HANDLES).chunkStream.prime(SPAWN.x, SPAWN.z),
       },
       {
         progress: 0.2,
         key: "world.chunks",
         run: () =>
-          chunkStream.warmUp(paint, (done, total) => {
+          world.resource(RENDER_HANDLES).chunkStream.warmUp(paint, (done, total) => {
             // The bar owns almost the whole entry: the GPU was paid for at boot.
             world.commands.send(SetLoadingStage, { progress: total > 0 ? 0.2 + 0.75 * (done / total) : 0.2 });
           }),
@@ -1214,7 +1213,7 @@ function renderFrame(): void {
 //  command barrier is what used to be needed for it, back when it did stop the loop.)
 // Cheap by construction: an empty command queue plus a query over a dozen UI entities.
 function menuFrame(): void {
-  menuBg.step();
+  world.resource(RENDER_HANDLES).menuBackground.step();
   world.renderUi();
 }
 

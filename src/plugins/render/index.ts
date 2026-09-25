@@ -6,6 +6,9 @@ import type { World } from "../../core/world";
 import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { CameraViewSystem, CAMERA_VIEW_ACCESS } from "./systems/camera";
 import { ChunkStreamSystem, type ChunkMeshFactory, CHUNK_STREAM_ACCESS } from "./systems/chunk-stream";
+// The host builds the mesher (it is a `host/` object), so it needs the factory type: re-exported here rather
+// than reached for through `./systems/...`, which is this plugin own business.
+export type { ChunkMeshFactory };
 import { MenuBackgroundSystem } from "./systems/menu-background";
 import { BlockOutlineSystem, OUTLINE_ACCESS } from "./systems/outline";
 import { definePlugin } from "../../core/plugin/descriptor";
