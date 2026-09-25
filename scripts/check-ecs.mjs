@@ -1505,7 +1505,10 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")), "the composition root registers ui.hud");
   assert(/build: \(mount\) => \[hud\.buildCrosshair\(mount\.world\)\]/.test(main),
     "…which BUILDS the crosshair when the element is mounted (not at wiring)");
-  assert(/build: \(mount\) => \[inv\.buildHotbar\(mount\.world\)\]/.test(main), "…and the hotbar the same way");
+  const invPlugin = stripComments(readSource("src/plugins/ui-inventory/index.ts"));
+  assert(/api\.contribute\(SLOT_UI_HUD, \[hotbar\]\)/.test(invPlugin),
+    "…and the HOTBAR is the inventory plugin's OWN element (that is what makes F11 a real despawn)");
+  assert(!/id: "hotbar"/.test(main), "…so the core's table no longer declares it");
   assert(/gate: \(\) => inWorld\(\)/.test(main), "…each gated on the one definition of \"a world is running\"");
   // The toast is deliberately NOT part of this: a main-menu message is a documented case.
   assert(!/toast/.test(stripComments(readSource("src/plugins/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");

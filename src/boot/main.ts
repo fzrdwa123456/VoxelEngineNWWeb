@@ -540,18 +540,21 @@ world.insertResource(INVENTORY_WIDGETS, inv.widgets);
 const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon });
 // THE GAMEPLAY HUD — and the host that OWNS it (P1.34): the crosshair and the hotbar used to be spawned
 // during wiring and merely hidden outside a world. Now each one is BUILT by `ui.hud` when its element is
-// mounted and DESPAWNED with it, so the HUD is as dynamic as the plugin set: F11 builds a strip, and
-// uninstalling takes it down. Spawning is a STRUCTURAL change, so it happens at a barrier (the host defers it).
-// "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain, so F11 is
-// felt immediately: the hotbar and the bag panel are the core's to show, and this is how the core asks.
+// mounted and DESPAWNED with it, so the HUD is as dynamic as the plugin set: F11 removes the strip's element
+// and the host takes it down; installing it again BUILDS a new one. Spawning is a STRUCTURAL change, so it
+// happens at a barrier (the host defers it).
+// "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain. Only the
+// BAG's gate reads it (ui.navigation's E key and its mouse bind): the strip is that plugin's OWN element, so it
+// does not need to be asked about at all.
 const inventoryOn = (): boolean => livePlugins.has("ui-inventory");
-// THE HUD TABLE (P1.32, build added in P1.34): each element carries its own gate AND its own build. The core
-// plugin may contribute more through `SLOT_UI_HUD` (armor, xp, a boss bar...) without touching this file —
-// which is why the getter merges the registry with the core's pair instead of listing everything here.
+// THE HUD TABLE (P1.32/P1.34, plugin-owned elements in P1.35): each element carries its own gate AND its own
+// build. The core contributes ONE by name (the crosshair); everything else — the HOTBAR included — arrives
+// through `SLOT_UI_HUD` (armor, xp, a boss bar...), which is why the getter merges the registry with the core's.
 const hudElements = (): readonly UiHudElement[] => [
   ...registry.list(SLOT_UI_HUD),
   { id: "crosshair", order: 10, build: (mount) => [hud.buildCrosshair(mount.world)], gate: () => inWorld() },
-  { id: "hotbar", order: 20, build: (mount) => [inv.buildHotbar(mount.world)], gate: () => inWorld() && inventoryOn() },
+  // NO hotbar row: it is contributed by the `ui-inventory` plugin (SLOT_UI_HUD, order 20), which is what makes
+  // uninstalling that layer DESPAWN the strip instead of leaving hidden widgets behind.
 ];
 const uiHud = createHudSystem(world, { elements: hudElements, log: logDebug });
 
@@ -608,7 +611,7 @@ const uiToastPlugin = createUiToastPlugin({ uiToast });
 const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind }, keybindEntries);
 // The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
 // the core's slot anchors encode; the list itself is only what may be installed at runtime.
-const uiInventoryPlugin = createUiInventoryPlugin({ uiInventory });
+const uiInventoryPlugin = createUiInventoryPlugin({ uiInventory, inv, inWorld: () => inWorld() });
 const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiInventoryPlugin, uiKeybindPlugin];
 const livePlugins = new Set<string>();
 const hotHost: HotPlugHost = {

@@ -1093,6 +1093,17 @@ Still outstanding:
   marks its paint cache dirty, without which a re-installed strip came back blank. Pinned by the gate
   (deferral, subtree despawn, dispose once, re-install, failure isolation, the adopted `roots` path) and by
   `docs/TESTING.md`'s F11 leak test.
+- **P1.35 — the HOTBAR became the inventory plugin's HUD element.** `DONE`. P1.34 gave the host the lifetime
+  of a HUD element, but the hotbar was still one of the CORE's two rows in the table, gated on
+  `inventoryOn()` — and a gate can only HIDE, so F11 left the strip's widgets alive-but-unwritable and the
+  rebuild path was never exercised (a real F11 log showed 18 install/uninstall pairs with the two boot mount
+  lines and NO unmount at all). The element is now contributed by `plugins/ui-inventory` itself
+  (`SLOT_UI_HUD`, order 20, `build: (mount) => [inv.buildHotbar(mount.world)]`, `gate: () => inWorld()`), so
+  uninstalling that layer removes it from the table and `ui.hud` DESPAWNS the whole strip, and installing it
+  again builds a new one — `buildHotbar`'s paint-cache invalidation and the now-genuinely-sparse
+  `INVENTORY_WIDGETS` are the live path instead of latent code. The core contributes exactly ONE element by
+  name now (the crosshair), which is what makes `SLOT_UI_HUD` the only way a HUD element gets in. Pinned by
+  the gate (the plugin contributes it; the core's table no longer declares `id: "hotbar"`).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

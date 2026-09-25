@@ -337,7 +337,8 @@ DYNAMIC - the crosshair and the hotbar are not spawned during wiring any more, `
 its element is mounted and despawns them when it goes:
 (1) start with the inventory layer OFF (`tools\plugins-no-ui-inventory.bat`): the CROSSHAIR must be there and
 the hotbar must never appear anywhere - not at the main menu, not on the loading screen, not over the pause
-menu (it was a HUD element that did not exist yet, not a hidden one), and `E` must open nothing;
+menu (it was a HUD element that did not exist yet, not a hidden one: the boot log has `HUD element mounted
+crosshair` and NO `mounted hotbar` line), and `E` must open nothing;
 (2) press F11 -> the strip appears WITH its items drawn. A strip that comes back blank means the reconcile
 cache was not invalidated when its cells were respawned (`buildHotbar` marks the hotbar range dirty);
 (3) press F11 again -> the strip and the bag are gone and NOTHING is left on screen: a frozen strip is the
