@@ -29,6 +29,7 @@ import { SLOT_SYSTEMS } from "../extension/slots";
 import type { SystemDef } from "../flow/schedule";
 import type { World } from "../world";
 import { createPluginApi } from "./api";
+import { runTeardowns } from "./teardown";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -167,6 +168,11 @@ export function hotUninstall(host: HotPlugHost, id: string): HotPlugOutcome {
   //     forever. "The surface is off" must never mean "the engine is broken". Keeping the object also makes
   //     a re-install a no-op on the world (`setup`'s `hasResource` guard), i.e. boot and hot-plug stay one
   //     code path.
+  // THE PLUGIN'S OWN TEARDOWNS (P1.39), before the withdrawal: `api.onStop` tasks run for EVERY plugin that
+  // registered one, including a plugin with no `stop` hook — the surfaces a plugin owns are closed here even
+  // if its author forgot to say so in `stop`.
+  const torn = runTeardowns(world, id, (line) => host.log(line));
+  if (torn > 0) host.log(`PLUGIN ${id} ran ${torn} registered teardown(s)`);
   const withdrawn = registry.withdraw(id);
   const systems: string[] = [];
   for (const entry of withdrawn) {

@@ -10,6 +10,7 @@ import type { ExtensionRegistry } from "../extension/registry";
 import { SLOT_SYSTEMS } from "../extension/slots";
 import type { SystemDef } from "../flow/schedule";
 import type { Resource } from "../data/resource";
+import { registerTeardown } from "./teardown";
 
 export interface PluginApi {
   /** The id of the plugin this api was created for (it is also the owner tag every contribution gets). */
@@ -33,6 +34,14 @@ export interface PluginApi {
    *  so a re-install keeps the object the world already holds — a plugin must therefore never depend on a
    *  FRESH resource after a re-install. */
   insertResource<T>(resource: Resource<T>, value: T): void;
+  /** File a TEARDOWN for this plugin: it runs when the plugin LEAVES — an uninstall (F8/F9/F10/F11) or the
+   *  app quitting — at the barrier, in REVERSE registration order, exactly once.
+   *
+   *  Register it NEXT TO the thing it undoes, inside `setup`, instead of keeping a `stop` that has to remember
+   *  every surface the plugin ever made. This is the framework's half of "leave nothing behind": forgetting
+   *  one used to leave a frozen picker, a live rubber band or a bag that could still be opened (all three
+   *  shipped as bugs). A `stop` hook still works, and runs BEFORE the registered tasks. */
+  onStop(task: () => void): void;
 }
 
 export function createPluginApi(
@@ -53,6 +62,9 @@ export function createPluginApi(
     },
     insertResource(resource, value) {
       if (!world.hasResource(resource)) world.insertResource(resource, value);
+    },
+    onStop(task) {
+      registerTeardown(world, id, task);
     },
     log,
   };

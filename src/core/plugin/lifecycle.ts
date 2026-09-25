@@ -12,6 +12,7 @@
 import type { World } from "../world";
 import type { ExtensionRegistry } from "../extension/registry";
 import { createPluginApi, type PluginApi } from "./api";
+import { runTeardowns } from "./teardown";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -168,11 +169,15 @@ export function stopPlugins(
   const ids: string[] = [];
   const failed: { id: string; error: string }[] = [];
   for (const plugin of [...outcome.plugins].reverse()) {
-    if (!started.ids.includes(plugin.id) || !plugin.stop) continue;
+    if (!started.ids.includes(plugin.id)) continue;
     const api = outcome.apiOf(plugin.id);
     if (!api) continue;
     try {
-      plugin.stop(api);
+      plugin.stop?.(api);
+      // THE FRAMEWORK HALF OF "LEAVE NOTHING BEHIND" (P1.39): whatever the plugin registered through
+      // `api.onStop` runs here too, in reverse registration order, exactly once. A plugin with no `stop` hook
+      // is no longer skipped — a teardown registered during `setup` is enough.
+      runTeardowns(api.world, plugin.id);
       ids.push(plugin.id);
     } catch (error) {
       failed.push({ id: plugin.id, error: describeError(error) });

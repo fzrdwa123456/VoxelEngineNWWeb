@@ -81,12 +81,15 @@ export function createUiInventoryPlugin(s: UiInventorySystems): Plugin {
       };
       api.contribute(SLOT_UI_HUD, [hotbar]);
       declareUiInventorySystems(api, s);
+      // LEAVE NOTHING BEHIND (P1.39): the registered teardown runs when this plugin leaves — an uninstall
+      // (F11) or the app quitting — at the barrier, so the bag cannot stay OPEN over a plugin that is gone.
+      // It is filed here, next to the surface it belongs to, instead of in a `stop` hook that has to remember
+      // every surface the plugin ever made.
+      api.onStop(() => {
+        api.world.resource(UI_MODAL).inventory = false;
+      });
     },
-    // A hot uninstall must not leave a bag that can still be opened and never painted again: close it. The
-    // HOTBAR needs nothing here — the element left the table with this plugin, so `ui.hud` despawns its
-    // widgets at the next barrier (that is the whole point of contributing it).
-    stop(api) {
-      api.world.resource(UI_MODAL).inventory = false;
-    },
+    // NO `stop`: the bag is closed by the teardown registered in `setup` (P1.39), and the HOTBAR needs
+    // nothing at all — the element left the table with this plugin, so `ui.hud` despawns its widgets.
   });
 }

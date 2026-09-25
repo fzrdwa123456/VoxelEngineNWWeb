@@ -3780,7 +3780,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     });
   const inst = installPlugins(
     [lifecyclePlugin("a", []), lifecyclePlugin("b", ["a"]), lifecyclePlugin("c", ["b"])],
-    { world: {}, registry: new ExtensionRegistry(), log: () => {} },
+    { world: { hasResource: () => false }, registry: new ExtensionRegistry(), log: () => {} },
   );
   const started = startPlugins(inst, () => {});
   equal(started.ids.join(","), "a,b,c", "start runs in install order");
@@ -4050,6 +4050,42 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
     "…and an element says how it is BUILT (`roots` stays for a tree that was spawned during wiring)");
   assert(/UiLayoutOp/.test(hudSys), "…and the lifetime is DEFERRED to a barrier (a system may not spawn or despawn)");
   assert(/subtreeOf/.test(hudSys), "…taking the whole SUBTREE down with it (the ECS has no cascade)");
+});
+
+// ===== WHAT A PLUGIN LEAVES BEHIND (P1.39) =====
+check("a plugin's REGISTERED teardowns run once, in reverse, on BOTH leave paths", () => {
+  // "Leave nothing behind" was every plugin's own job, and forgetting it shipped three bugs (a frozen picker,
+  // a live rubber band, a bag that could still be opened). The framework now runs what a plugin files through
+  // `api.onStop` — at the barrier, in reverse registration order, exactly once — on an uninstall AND at quit.
+  const T = load("core/plugin/teardown.js");
+  const { World } = load("core/world.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  const { createPluginApi } = load("core/plugin/api.js");
+  const world = new World();
+  const api = createPluginApi("probe", world, new ExtensionRegistry(), () => {});
+  const order = [];
+  api.onStop(() => order.push("first"));
+  api.onStop(() => order.push("second"));
+  equal(T.runTeardowns(world, "probe"), 2, "every registered teardown runs");
+  equal(order.join(","), "second,first", "…in REVERSE order: what was built first is torn down last");
+  equal(T.runTeardowns(world, "probe"), 0, "…and exactly ONCE (a second leave finds nothing left to do)");
+  equal(T.runTeardowns(world, "never-installed"), 0, "a plugin that registered none is a no-op");
+  api.onStop(() => {
+    throw new Error("boom");
+  });
+  api.onStop(() => order.push("survivor"));
+  equal(T.runTeardowns(world, "probe", () => {}), 1, "a THROWING teardown does not stop the others");
+  equal(order[order.length - 1], "survivor", "…the one registered before it still ran");
+
+  // Both LEAVE paths must run them, or half of the surfaces come back after a quit.
+  const lc = stripComments(readSource("src/core/plugin/lifecycle.ts"));
+  const hp = stripComments(readSource("src/core/plugin/hotplug.ts"));
+  assert(/runTeardowns\(api\.world, plugin\.id\)/.test(lc), "quitting (stopPlugins) runs the registered teardowns");
+  assert(/runTeardowns\(world, id/.test(hp), "an uninstall runs them too, before the withdrawal");
+  assert(/plugin\.stop\?\.\(api\)/.test(lc),
+    "…and a plugin with NO `stop` hook is no longer skipped by stopPlugins");
+  assert(/api\.onStop/.test(stripComments(readSource("src/plugins/ui-inventory/index.ts"))),
+    "a real plugin files its bag closing as a teardown (the migration is not only on paper)");
 });
 
 // ===== THE setup IDEMPOTENCY CONTRACT (P1.38) =====
