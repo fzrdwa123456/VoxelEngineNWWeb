@@ -1205,6 +1205,18 @@ Still outstanding:
   (`RENDER_HANDLES`, `UI_HANDLES`, ...), filled by its own `plugin.ts` at construction time and read by the
   drivers that need it. That is a refactor of three boot-driver call sites, so it is a slice of its own; until
   then the list stays explicit and the gate keeps it honest.
+  TWO CONCRETE OBSTACLES FOUND WHILE ATTEMPTING THE `render` SLICE (written down so the next attempt does not
+  rediscover them, and because the attempt was REVERTED rather than left half-done): (1) removing the five-line
+  factory call in `boot/main.ts` needs a SPLICE, and **pwsh's `Get-Content`/`Set-Content` round-trip DAMAGED the
+  file** — it prepended a BOM and turned every em dash into mojibake, because the file is UTF-8 and the
+  round-trip did not preserve that. The SAME splice through **Node** (`fs.readFileSync`/`writeFileSync`,
+  `'utf8'`) is byte-exact and produced the intended 4-insertion/5-deletion diff. Use Node, never
+  `Set-Content`, for a whole-file rewrite of a UTF-8 source file. (2) After ANY external script writes a file,
+  the editor tool REFUSES further edits until the file is read again (the fs-observation policy), so a splice
+  plus N follow-up edits must be planned as: splice -> RE-READ -> edits. (3) The remaining edits are not
+  optional: with the factory call gone, `renderPlugin` (the PLUGINS entry), `chunkStream` (three call sites)
+  and the host instance (`chunkMeshFactory`) all have to change in the SAME round, and the tree is red until
+  every one of them lands — which is why the slice was rolled back instead of being left in that state.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
