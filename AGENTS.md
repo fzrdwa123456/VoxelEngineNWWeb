@@ -1,5 +1,11 @@
 # AGENTS.md — guide for AI assistants (and humans who want the fast tour)
 
+> **THIS FILE DESCRIBES THE ORIGINAL NW.js ENGINE, NOT THIS TAURI PORT.** The port's layout, conventions,
+> history and open work are in `ROADMAP.md` (plus `docs/TESTING.md` for the manual checklist), and its code
+> lives under `src/core`, `src/data`, `src/plugins`, `src/boot` — not under `ecs/`, `ui/` or `logic/`.
+> Paths and numbers quoted below (the `SCHEDULE` lines, `ecs/ui/*`, `ui/menu.ts`, the assertion-group counts)
+> are the ORIGINAL's and are stale here: treat them as historical context, never as a description of the code
+> in this checkout.
 Read this before changing anything. It maps the architecture, the invariants that keep it
 correct, and where new code goes. The user-facing README (Chinese) covers build/run and the
 mod/resource-pack format; this file covers how the CODE is organized and which lines are

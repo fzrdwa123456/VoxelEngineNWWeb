@@ -760,7 +760,7 @@ Still outstanding:
   (6) The BOOT / WORLD-ENTRY flows are `BOOT_FLOW` + a stage list (`core/flow/boot.ts`): the stages (progress, i18n
   key, the work) are declared by the composition root as DATA, the settings check's outcome is a field of the
   flow, and the only logic left is `runBootFlow` — announce a stage, yield one macrotask so the browser paints
-  it, then run its work. `check:ecs` pins all of it (its own group) and now counts **56** assertion groups.
+  it, then run its work. `check:ecs` pins all of it (its own group) and now counts **69** assertion groups.
   What is still outside is exactly the irreducible adapter layer: listeners that must `preventDefault` in the
   event, the rAF callback that drives the lanes, the ONE DOM writer, and file/pack I/O.
 - **P1.15 — the source tree is now three folders that say what they are: `components/`, `data/`,
@@ -1187,6 +1187,24 @@ Still outstanding:
   a teardown NEXT TO the surface it undoes; `runTeardowns` runs them at the barrier, in reverse registration
   order, exactly once, with per-task isolation — and BOTH leave paths run them (an uninstall, and quitting,
   which no longer skips a plugin that has no `stop` hook). `ui-inventory` migrated its bag closing onto it.
+- **P1.42b — the four `ui.slot.*` anchors ARE gaps now.** `DONE`. `plugins/ui/index.ts` drops
+  `reads: [UI_STATE]` + `run: () => {}` for `gap: true`, and the real schedule reports
+  `ui: 11 systems + 4 gap(s), 13 batches` with the SAME grouping: the anchors were never doing work, and the
+  EDGES to their neighbours are what keep the optional surfaces ordered — which is why nothing about the batch
+  structure moved. The gate's source PARSER had to learn the flag too: without it the gate kept modelling the
+  four anchors as no-op systems, i.e. it asserted a schedule the game does not run (the same blindness class as
+  P1.33). The report marks a gap with `*` and stops counting it as a system.
+- **P1.43 — the core plugins start moving onto the discovery path.** `DONE` for `diagnostics`
+  (`plugins/diagnostics/plugin.ts`, `hot: false`: turning measurement off is a manifest decision). The root's
+  hand-wired list is down to six names, and the gate asserts both that list and that EVERY folder is either
+  discovered or named there. WHAT BLOCKS `player` / `render` / `ui`, measured rather than guessed: the root
+  USES the handles their factories construct — `renderer` / `chunkStream` / `cameraView` in the boot and world
+  drivers, `player.input.prepareUnlock` in the navigation deps, and the ui plugin's ten systems and view
+  entities — and hands them to other factories. `PluginHost.instances` is one-way (root -> plugin), so what the
+  move needs is the reverse direction: **a plugin PUBLISHES what the root must use as a RESOURCE**
+  (`RENDER_HANDLES`, `UI_HANDLES`, ...), filled by its own `plugin.ts` at construction time and read by the
+  drivers that need it. That is a refactor of three boot-driver call sites, so it is a slice of its own; until
+  then the list stays explicit and the gate keeps it honest.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
@@ -1243,7 +1261,7 @@ gone with the kiosk path, `plugins/ui/views/inventory.ts`'s never-called `refres
 # 6. The verification loop (there are no tests)
 
 1. `node ./node_modules/typescript/bin/tsc --noEmit` — the type gate.
-2. `npm run check:ecs` — the ECS invariant gate (`scripts/check-ecs.mjs`, 63 assertion groups,
+2. `npm run check:ecs` — the ECS invariant gate (`scripts/check-ecs.mjs`, 69 assertion groups,
    `RESULT: OK|FAILED`). Run it after touching the ECS, a component, a command, a resource, a recipe,
    a stage or a system's access declaration. It compiles into git-ignored `node_modules/.cache/`, so it
    writes nothing tracked. Two of its groups read SOURCE TEXT (with comments stripped), and its batch
