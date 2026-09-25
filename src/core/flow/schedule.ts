@@ -103,7 +103,16 @@ export interface SystemDef extends SystemAccess {
   readonly after?: readonly string[];
   /** Labels that must run LATER in the same stage */
   readonly before?: readonly string[];
-  run(ctx: SystemContext): void;
+  /** The work. ABSENT only for a GAP (see `gap`): a place in the order, not a worker. */
+  run?(ctx: SystemContext): void;
+  /** TRUE marks an ORDER GAP (P1.42): a NAMED PLACE in a stage's order that other systems may point at with
+   *  `after`/`before`, with no access of its own and no `run`.
+   *
+   *  It is how an OPTIONAL surface gets a stable slot between two systems that must not name each other: the
+   *  ui lane's `ui.slot.*` anchors are exactly that. As gaps they stop pretending to be systems — no access,
+   *  so no conflict and no inflated batch count; what splits the batch is the EDGE, which the batcher already
+   *  honours (a declared order splits a batch even between two systems that share no data). */
+  readonly gap?: boolean;
 }
 
 /** The resolved plan for one stage */
@@ -182,7 +191,7 @@ export class Schedule {
     return this.plan.map((entry) => {
       const groups = entry.batches
         .map((batch) =>
-          batch.length > 1 ? `(${batch.map((def) => def.name).join(" ~ ")})` : batch[0].name,
+          batch.length > 1 ? `(${batch.map((def) => (def.gap ? `${def.name}*` : def.name)).join(" ~ ")})` : batch[0].name,
         )
         .join(" | ");
       return (
@@ -196,9 +205,10 @@ export class Schedule {
   run(stage: Stage, ctx: SystemContext): void {
     for (const batch of this.batchesOf(stage)) {
       for (const def of batch) {
+        if (def.gap) continue; // a place, not a worker: nothing to run, nothing that could change structure
         const before = ctx.world.structuralVersion;
         try {
-          def.run(ctx);
+          def.run?.(ctx); // a gap was skipped above; the resolve check refuses a non-gap without one
         } catch (err) {
           throw new Error(`system "${def.name}" (${stage}) failed: ${message(err)}`, { cause: err });
         }
@@ -305,6 +315,15 @@ export class Schedule {
     this.verifyDeclaredDependencies(stage, ordered, resolvedEdges, names);
 
     const batches = this.batch(stage, ordered, resolvedEdges, names);
+    // A def with neither a `run` nor the gap flag is a TYPO, not a place in the order: refusing it here is what
+    // keeps "forgot the run" from looking exactly like a deliberate gap.
+    for (const def of ordered) {
+      if (!def.gap && typeof def.run !== "function") {
+        throw new Error(
+          `Schedule.resolve("${stage}"): "${def.name}" has no run() - declare it with gap: true if it is only a place in the order`,
+        );
+      }
+    }
     const parallelPairs = batches.reduce((sum, group) => sum + (group.length * (group.length - 1)) / 2, 0);
     return { stage, systems: ordered, batches, parallelPairs };
   }

@@ -1514,6 +1514,42 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   assert(!/toast/.test(stripComments(readSource("src/plugins/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");
 });
 
+check("an ORDER GAP is a place, not a system (P1.42)", () => {
+  // The ui lane's four `ui.slot.*` anchors were no-op SYSTEMS (reads: [UI_STATE], run: () => {}) whose only job
+  // was to give an optional surface a stable slot between two systems that must not name each other. A gap is
+  // that concept, without the pretence: no access, no run, and the EDGE is what splits the batch.
+  const ran = [];
+  const s = new Schedule();
+  s.add({ name: "a", stage: "fixed", writesExternal: ["x"], run: () => ran.push("a") });
+  s.add({ name: "slot", stage: "fixed", gap: true, after: ["a"], before: ["b"] });
+  s.add({ name: "b", stage: "fixed", writesExternal: ["y"], run: () => ran.push("b") });
+  s.resolve();
+  equal(JSON.stringify(s.batchesOf("fixed").map((b) => b.map((d) => d.name))),
+    JSON.stringify([["a"], ["slot"], ["b"]]),
+    "a gap splits a batch even between two writers that share NO data (the edge alone does the work)");
+  s.run("fixed", { world: { structuralVersion: 0 } });
+  equal(ran.join(","), "a,b", "…and the gap itself never runs");
+  // Alone in its batch a gap prints as its own name; SHARING one it is marked — the marker is what tells a
+  // reader "this name is a place, not a worker" when a batch lists several.
+  const free = new Schedule();
+  free.add({ name: "a", stage: "fixed", writesExternal: ["x"], run: () => {} });
+  free.add({ name: "slot", stage: "fixed", gap: true });
+  free.resolve();
+  equal(JSON.stringify(free.batchesOf("fixed").map((b) => b.map((d) => d.name))),
+    JSON.stringify([["a", "slot"]]), "a gap with no edges shares a batch (by itself it orders nothing)");
+  assert(/\(a ~ slot\*\)/.test(free.report().join("\n")), "…and the report marks it with a `*` there");
+  // A def with NEITHER a run nor the gap flag is refused: "forgot the run" must not look like a deliberate gap.
+  const typo = new Schedule();
+  typo.add({ name: "nope", stage: "fixed" });
+  let threw = false;
+  try {
+    typo.resolve();
+  } catch {
+    threw = true;
+  }
+  equal(threw, true, "a system with no run() and no gap flag is REJECTED at resolve");
+});
+
 check("the HUD host MOUNTS and TAKES DOWN its elements at a BARRIER (P1.34)", () => {
   // THE DEBT THE ELEMENT TABLE LEFT OPEN: an element could only be SHOWN or HIDDEN. Its widgets had to be
   // spawned by the contributing view during wiring, so a plugin installed at runtime could not add one, and an
