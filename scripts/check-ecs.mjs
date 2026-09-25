@@ -3760,7 +3760,12 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
-  equal((declared[1].match(/Plugin/g) || []).length, 11, "…and installs all eleven");
+  for (const core of ["contentDefaultPlugin", "worldPlugin", "playerPlugin", "renderPlugin",
+    "createDiagnosticsPlugin", "uiPlugin", "inputPlugin"]) {
+    assert(declared[1].includes(core), `the CORE plugin list still names ${core}`);
+  }
+  assert(/\.\.\.discoveredPlugins\.map\(\(p\) => p\.plugin\)/.test(bootSrc),
+    "…appending the DISCOVERED ones: the four optional surfaces are no longer listed here (P1.40)");
   assert(/installPlugins\(PLUGINS, \{/.test(bootSrc), "…through installPlugins, not by hand");
   assert(/registry\.list\(SLOT_SYSTEMS\)\) world\.addSystem\(def\)/.test(bootSrc),
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
@@ -3992,12 +3997,14 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
   // THE SHARED PATH: the boot and the runtime install the SAME value, and the root no longer declares the
   // surface's system for it �?which is what makes the plugin installable at runtime at all.
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
-  assert(/const uiDebugPlugin = createUiDebugPlugin\(\{ uiPicker \}\)/.test(bootSrc),
-    "the root builds the debug plugin from the factory the catalogue lists");
+  assert(/discoverPlugins\(pluginHost\)/.test(bootSrc),
+    "the root gets every optional surface from the DISCOVERED catalogue (P1.40), not from a factory call here");
+  assert(/createUiDebugPlugin\(\{ uiPicker \}\)/.test(stripComments(readSource("src/plugins/ui-debug/plugin.ts"))),
+    "…and the debug surface's own plugin.ts is what builds it from the factory the catalogue lists");
   assert(!/removeResource/.test(readSource("src/core/plugin/hotplug.ts")),
     "the uninstall path does not remove resources (P1.28: it broke core commands that read them)");
-  assert(/hotCatalog: readonly Plugin\[\] = \[uiDebugPlugin, uiToastPlugin, uiInventoryPlugin, uiKeybindPlugin\]/.test(bootSrc),
-    "…and catalogues that same value, in the lane order of the optional surfaces (debug, toast, inventory, keybind)");
+  assert(/const hotCatalog: readonly Plugin\[\] = discoveredPlugins\.filter\(\(p\) => p\.hot\)/.test(bootSrc),
+    "…and the hot catalogue IS that discovered set, so a surface cannot exist without its F8-F11 key");
   assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");
   const dbgSrc = stripComments(readSource("src/plugins/ui-debug/index.ts"));
   assert(/setup\(api\)[\s\S]{0,400}hasResource\(PICKER_STATE\)/.test(dbgSrc),
@@ -4050,6 +4057,44 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
     "…and an element says how it is BUILT (`roots` stays for a tree that was spawned during wiring)");
   assert(/UiLayoutOp/.test(hudSys), "…and the lifetime is DEFERRED to a barrier (a system may not spawn or despawn)");
   assert(/subtreeOf/.test(hudSys), "…taking the whole SUBTREE down with it (the ECS has no cascade)");
+});
+
+// ===== THE CATALOGUE IS THE FOLDER TREE (P1.40) =====
+check("a plugin folder JOINS the catalogue by existing - and the two cannot drift", () => {
+  // The list used to be hand-maintained in main.ts: a folder nobody wired was invisible, and a surface nobody
+  // catalogued existed but had no hot-plug key. `plugins/<id>/plugin.ts` is the opt-in now and Vite's glob
+  // builds the list. The gate walks the SAME tree, so forgetting one side is red.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const dir = path.join(ROOT, "src", "plugins");
+  const folders = fs.readdirSync(dir).filter((name) => fs.statSync(path.join(dir, name)).isDirectory());
+  const opted = folders.filter((name) => fs.existsSync(path.join(dir, name, "plugin.ts")));
+  // RAW source (not stripped): the glob pattern itself contains `/*/`, which a comment stripper reads as the
+  // start of a block comment and then eats the rest of the file.
+  const catalog = readSource("src/boot/plugin-catalog.ts");
+  assert(/import\.meta\.glob\("\.\.\/plugins\/\*\/plugin\.ts", \{ eager: true \}\)/.test(catalog),
+    "the catalogue is a BUILD-TIME glob over the folder tree (no hand-written list, no runtime disk lookup)");
+  const boot = stripComments(readSource("src/boot/main.ts"));
+  assert(/discoverPlugins\(pluginHost\)/.test(boot), "the root asks the catalogue for the plugins");
+  assert(/const hotCatalog: readonly Plugin\[\] = discoveredPlugins\.filter\(\(p\) => p\.hot\)/.test(boot),
+    "…and the HOT catalogue is the discovered set filtered by the flag, not a second hand-written array");
+  assert(!/createUiDebugPlugin\(\{ uiPicker \}\)/.test(boot),
+    "…so no optional surface is constructed by the root any more");
+  assert(opted.length >= 4, `at least the four optional surfaces opted in (found: ${opted.join(", ")})`);
+  for (const name of opted) {
+    const src = stripComments(readSource(`src/plugins/${name}/plugin.ts`));
+    assert(/export function createPlugin\(host: PluginHost\): DiscoveredPlugin/.test(src),
+      `${name}/plugin.ts exports the discovery adapter the catalogue calls`);
+    assert(/hot: (true|false)/.test(src), `…and says whether it may be installed at runtime (hot)`);
+    assert(/from "\.\/index"/.test(src), `…by adapting to its own factory, not by re-implementing it`);
+  }
+  // EVERY folder must be either discovered or still named by the root's hand-wired core list: the second
+  // migration step (player/render/ui/diagnostics) is what remains, and this keeps that list honest.
+  for (const name of folders) {
+    if (opted.includes(name)) continue;
+    assert(new RegExp(`plugins/${name}"`).test(boot),
+      `${name}: not discovered, so the root must still name it (the remaining migration step)`);
+  }
 });
 
 // ===== WHAT A PLUGIN LEAVES BEHIND (P1.39) =====

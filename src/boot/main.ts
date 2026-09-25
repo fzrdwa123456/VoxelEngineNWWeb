@@ -29,12 +29,12 @@ import { createBlockOutline, createChunkMaterial, createChunkMeshCache, createIc
 import { createKeybindGesture, KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
 // The key bind PAGE is its own plugin too (P1.25), and hot-pluggable like the debug surface: the factory
 // below is called once, and the value goes into both the boot list and the runtime catalogue.
-import { createKeybindSystem, createUiKeybindPlugin } from "../plugins/ui-keybind";
+import { createKeybindSystem } from "../plugins/ui-keybind";
 import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // The F3/F4 DEBUG surface is its own plugin, and it is HOT-PLUGGABLE: the factory is called further down with
 // the instance the root constructs, and that ONE value goes into both the boot's plugin list and the runtime
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
-import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
+import { createPickerSystem } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
 import { SLOT_BLOCKS, SLOT_LANGUAGES, SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
 import { UI_HUD_PAINTED, type UiHudElement } from "../data/globals/ui-hud";
@@ -44,7 +44,7 @@ import type { Entity } from "../core/world";
 // The HUD message is its own plugin (P1.27 step 2) and needs NO mount: its panel is a TOP-LEVEL widget, so
 // it can be plugged in and out at runtime in BOTH directions (unlike the key bind tab, which lives inside a
 // view's layout). The root still spawns the widgets — it does the wiring — through the plugin's helper.
-import { createToastSystem, createUiToastPlugin, spawnToastPanel } from "../plugins/ui-toast";
+import { createToastSystem, spawnToastPanel } from "../plugins/ui-toast";
 import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loading";
 import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
 import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "../plugins/ui/systems/navigation";
@@ -53,7 +53,7 @@ import { LoadingScreen } from "../plugins/ui/views/loading";
 import {
   createInventorySystem,
   createInventoryView,
-  createUiInventoryPlugin,
+
   declareUiInventorySystems,
 } from "../plugins/ui-inventory";
 import { Menu, spawnMenuBackdrop } from "../plugins/ui/views/menu";
@@ -98,6 +98,8 @@ import { SLOT_RESOURCES, SLOT_SYSTEMS } from "../core/extension/slots";
 import { installPlugins, startPlugins, stopPlugins } from "../core/plugin/lifecycle";
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
+import { discoverPlugins } from "./plugin-catalog";
+import type { PluginHost } from "../core/plugin/host";
 import { worldPlugin } from "../plugins/world";
 import { createPlayerPlugin } from "../plugins/player";
 import { createRenderPlugin } from "../plugins/render";
@@ -612,13 +614,23 @@ const { input, snapshot, controller, movement, collision, interaction } = player
 // builds the plugin: the ROOT does, from the instance it constructed — and the plugin still declares its own
 // system, because that is the property that makes it hot-pluggable at all. It is the SAME value the boot
 // installs below, so the boot path and the runtime path cannot drift apart.
-const uiDebugPlugin = createUiDebugPlugin({ uiPicker });
-const uiToastPlugin = createUiToastPlugin({ uiToast });
-const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind }, keybindEntries);
+// THE PLUGIN CATALOGUE IS DISCOVERED (P1.40): `plugins/<id>/plugin.ts` is the opt-in, so the four optional
+// surfaces are no longer listed here and adding a plugin folder does not touch this file. The HOST publishes
+// what a plugin may need BY NAME (see core/plugin/host.ts); each plugin's own plugin.ts narrows it to its
+// factory's types, which is why the root can hand over instances it does not model.
+const pluginHost: PluginHost = {
+  world,
+  log: logDebug,
+  inWorld: () => inWorld(),
+  instances: { uiPicker, uiToast, uiInventory, inv, uiKeybind, keybindEntries },
+};
+const discoveredPlugins = discoverPlugins(pluginHost);
+// (the toast, keybind and inventory plugin factories are no longer called here: see the catalogue below)
+
 // The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
 // the core's slot anchors encode; the list itself is only what may be installed at runtime.
-const uiInventoryPlugin = createUiInventoryPlugin({ uiInventory, inv, inWorld: () => inWorld() });
-const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiInventoryPlugin, uiKeybindPlugin];
+
+const hotCatalog: readonly Plugin[] = discoveredPlugins.filter((p) => p.hot).map((p) => p.plugin);
 const livePlugins = new Set<string>();
 const hotHost: HotPlugHost = {
   world,
@@ -646,10 +658,10 @@ const PLUGINS = [
   renderPlugin.plugin,
   createDiagnosticsPlugin(world),
   uiPlugin,
-  uiDebugPlugin,
-  uiToastPlugin,
-  uiInventoryPlugin,
-  uiKeybindPlugin,
+  ...discoveredPlugins.map((p) => p.plugin),
+
+
+
   inputPlugin,
 ];
 const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
