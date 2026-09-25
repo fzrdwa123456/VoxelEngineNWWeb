@@ -12,5 +12,7 @@ echo [next]     I18N dictionaries loaded (lang/*.json layered merge): zh=NN en=N
 echo [next]   then: pause menu - Settings - Language/Font -- the list must show FOUR choices, and the new
 echo [next]   one is labelled "Francais (FROM THE PACK)": that label comes from the pack's OWN dictionary.
 echo [next]   pick it: every menu word it defines turns into the pack's own text (Solo / Options / Retour).
-echo [undo]   delete "%PACK%\fr.json" to go back to three languages. plugins-default.bat does NOT remove it.
+echo [undo]   delete "%PACK%\fr.json" to go back to three languages -- the game then comes up in ENGLISH
+echo [undo]   (the fallback language), settings.json is repaired from "fr" to "en", and plugins-default.bat
+echo [undo]   does NOT remove the file.
 pause

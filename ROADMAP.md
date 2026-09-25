@@ -1118,6 +1118,16 @@ Still outstanding:
   -> real `t()`), and `tools\lang-demo.bat` writes a fourth-language pack for a hand test. STILL OPEN from
   P1.20: the same treatment for BLOCKS (the registry is built before the install, and the mesher still
   ignores it) and for the menu layouts.
+- **P1.36a — an undeclared language falls back to the FALLBACK language, not to the default.** `DONE`. The
+  report that found it, in the user's words: "I deleted `lang/fr.json` and it came back Chinese — shouldn't it
+  be English?" The old rule (`... ? l : "zh"`, inherited from the original code, and still true after P1.36
+  because the default is checked first) answered "which language is in force" with the first-run DEFAULT for a
+  value it did not recognise, while the very next lookup for a missing WORD went to English (`en`, MC's en_us
+  convention) — one rule, two answers, and the visible one was the surprising one. `langOf()` now tries the
+  fallback language first and keeps `zh` for what it always meant: a fresh install with NO stored value
+  (`createLocale`). The settings repair still rewrites the file with the value in force, so it now writes
+  `en` where it used to write `zh`; the report that lists the fixed keys is unchanged, i.e. P1.36's option B
+  (a per-install REASON in the log — "this install does not declare fr") is still open. Pinned by the gate.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

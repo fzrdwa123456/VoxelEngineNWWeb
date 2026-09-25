@@ -359,6 +359,8 @@ dictionary (a raw `lang.fr` there means the label key is missing from it); (3) p
 main menu and the settings rows the pack defines turn into its text, and `settings.json` gains
 `"language": "fr"`; (4) quit and relaunch -> it comes back in the pack's language (an UNDECLARED value is the
 case the repair pass would rewrite, so this is what proves the declared set is what validates it); (5) delete
-`lang\fr.json` and relaunch -> back to three choices, and a `settings.json` still saying `fr` falls back to
-the default language instead of painting raw keys.
+`lang\fr.json` and relaunch -> back to three choices, and a `settings.json` still saying `fr` comes up in
+ENGLISH: an undeclared language reads as the fallback language (the same one a missing WORD uses), the boot
+log gains a `SETTINGS repaired: language` line, and the file is rewritten to `"language": "en"`. The
+removed-pack case must not paint raw keys, and must not silently turn the install Chinese.
 

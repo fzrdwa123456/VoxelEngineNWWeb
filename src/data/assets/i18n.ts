@@ -3,6 +3,7 @@
 // merge layer by layer — a mod/resource pack dropping lang\*.json incrementally adds entries or overrides
 // existing ones (same key: higher-priority layer wins; priority: resource packs > mods > default.zip).
 // Missing words fall back to the fallback language (en — MC's en_us convention), then to the key itself.
+// An undeclared LANGUAGE falls back the same way (see `langOf`): one rule, not two.
 //
 // ===== WHICH languages exist is a DECLARED SET, not a literal (P1.36) =====
 // It used to be a `Lang = "zh" | "en" | "ja"` union, i.e. a language a pack shipped could never be loaded:
@@ -108,15 +109,20 @@ function dicts(): Map<Lang, Dict> {
 let locale: LocaleState | null = null;
 
 /** The language in force, validated against the DECLARED set: a stored language this install does not
-  *  declare (a pack that was removed, a hand-edited settings.json) reads as the default, then as the
-  *  fallback language, then as whatever the install does declare. */
+  *  declare (a pack that was removed, a hand-edited settings.json) reads as the FALLBACK language, and a
+  *  declared one is used as it is — see the note inside. */
 function langOf(): Lang {
   const l = locale?.lang;
   const declared = i18nState.declared;
   if (typeof l === "string" && declared.includes(l)) return l;
-  if (declared.includes(DEFAULT_LANGUAGE)) return DEFAULT_LANGUAGE;
+  // AN UNDECLARED LANGUAGE IS A MISSING LANGUAGE, NOT A MISSING WORD (P1.36a): it reads as the FALLBACK
+  // language — the same `en` a missing KEY falls back to. It used to read as the first-run default (`zh`),
+  // so "the pack that shipped `lang/fr.json` was deleted" turned a French install Chinese while the very
+  // next lookup for a missing WORD would have gone to English: one rule, two answers. `DEFAULT_LANGUAGE`
+  // is only what a fresh install with no stored value starts in, and the last resort below.
   if (declared.includes(FALLBACK_LANGUAGE)) return FALLBACK_LANGUAGE;
-  return declared[0] ?? DEFAULT_LANGUAGE;
+  if (declared.includes(DEFAULT_LANGUAGE)) return DEFAULT_LANGUAGE;
+  return declared[0] ?? FALLBACK_LANGUAGE;
 }
 
 /** Copy for the current language; a missing word falls back to the fallback language, then to the key itself */

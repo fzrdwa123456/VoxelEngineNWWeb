@@ -4109,6 +4109,15 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
   I18n.setLang("en");
   equal(I18n.getLang(), "en", "…while a declared one can");
 
+  // THE UNDECLARED CASE (P1.36a): a stored language the install no longer declares — its pack was deleted —
+  // reads as the FALLBACK language, the same `en` a missing KEY falls back to. It used to read as the
+  // first-run default (`zh`), so removing a pack's dictionary silently switched a French install to Chinese.
+  const gone = R.createLocale("xx"); // what settings.json still says after the pack is gone
+  I18n.loadLang(gone, "xx", ["zh", "en", "ja"]);
+  equal(gone.lang, "xx", "an undeclared value is left in the FILE (loadLang does not rewrite it)");
+  equal(I18n.getLang(), "en", "…while the language in force falls back to the fallback (en), not to zh");
+  equal(I18n.t("main.single"), "main.single", "…and with no dictionary behind it, a key reads as its key");
+
   // The discovery is a DATA function (no plugin import), and the PICKER reads the same list as the loader —
   // that shared source is the point: the drift this replaces made a pack's language publishable but
   // unselectable.
