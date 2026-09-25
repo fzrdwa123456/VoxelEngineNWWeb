@@ -54,6 +54,8 @@ export interface KeybindDragDeps {
   readonly gesture: KeybindGesture;
 }
 let dragDeps: KeybindDragDeps | null = null;
+/** The disposer of the device listeners below — see the bind/unbind pair. */
+let unbindHandlers: (() => void) | null = null;
 export function bindKeybindDrag(deps: KeybindDragDeps): void {
   dragDeps = deps;
   // Install the gesture's DEVICE listeners (plugins/input/bind-gesture.ts) — the click shield, the drag's
@@ -62,7 +64,8 @@ export function bindKeybindDrag(deps: KeybindDragDeps): void {
   // facts only this file knows: which action ids a chip/keycap carries, and the hit test that finds one.
   // A BIND is not written here: the listener queues the decision (KEYBIND_GESTURE.rebinds) and `ui.keybind`
   // applies it in the ui lane.
-  installBindGestureHandlers({
+  unbindHandlers?.();
+  unbindHandlers = installBindGestureHandlers({
     gesture: gestureState,
     capturing: getCapturing,
     endCapture,
@@ -74,6 +77,17 @@ export function bindKeybindDrag(deps: KeybindDragDeps): void {
     buttonToCode: (button) => buttonToCode(button),
     log: deps.log,
   });
+}
+
+/** UNINSTALL (the plugin's stop): the document listeners go with the plugin that owns them. */
+export function unbindKeybindDrag(): void {
+  unbindHandlers?.();
+  unbindHandlers = null;
+}
+
+/** RE-INSTALL (the plugin's setup, after an uninstall): the wiring is unchanged, so it is re-used. */
+export function rebindKeybindDrag(): void {
+  if (dragDeps) bindKeybindDrag(dragDeps);
 }
 
 /** The gesture, for the event-time readers below. They MUST see the live state synchronously (the click

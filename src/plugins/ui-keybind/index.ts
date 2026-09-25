@@ -18,7 +18,7 @@ import { SLOT_UI_PAGES } from "../../core/extension/slots";
 import type { UiPage } from "../../data/globals/ui-pages";
 import { UI_KEYBIND_ACCESS, UiKeybindSystem } from "./systems/keybind";
 import { clearKeybindPanels } from "../../data/globals/keybind-gesture";
-import { spawnKeybindPanel } from "./views/keybind";
+import { rebindKeybindDrag, spawnKeybindPanel, unbindKeybindDrag } from "./views/keybind";
 
 /** Pass-through factory: the composition root builds the instance (it needs the bind table, the rubber
  *  band widget and the entry buttons), the plugin owns what it IS and where it runs. */
@@ -91,11 +91,15 @@ export function createUiKeybindPlugin(s: UiKeybindSystems, entries: Entity[]): P
       // this plugin no longer needs the settings panel to ask it for a tab — and a plugin installed at RUNTIME
       // gets its page (and its entry row) within a frame.
       api.contribute(SLOT_UI_PAGES, [keybindPage]);
+      // The drag's document listeners follow the plugin's lifetime (see views/keybind.ts).
+      rebindKeybindDrag();
       declareUiKeybindSystems(api, s);
     },
     // The page goes down with the plugin (see UiKeybindSystem.close()).
     stop() {
       s.uiKeybind.close();
+      // …and its device listeners go with it.
+      unbindKeybindDrag();
     },
   });
 }

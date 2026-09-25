@@ -49,9 +49,21 @@ export interface BindGestureDeviceDeps {
 
 /** Install the gesture's device listeners. Called ONCE by the view during wiring, so the listeners see the
  *  same state object the system derives its presentation from. */
-export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
+/** Install the listeners and return the DISPOSER that removes them again: a plugin that can be uninstalled
+ *  must not leave its document listeners behind (`ui-keybind`'s stop calls it, its setup re-installs). */
+export function installBindGestureHandlers(deps: BindGestureDeviceDeps): () => void {
+  const offs: (() => void)[] = [];
+  // Generic over the event map, so the callbacks below keep their `MouseEvent`/`KeyboardEvent` types.
+  const on = <K extends keyof DocumentEventMap>(
+    type: K,
+    fn: (ev: DocumentEventMap[K]) => void,
+    options?: AddEventListenerOptions | boolean,
+  ): void => {
+    document.addEventListener(type, fn as EventListener, options);
+    offs.push(() => document.removeEventListener(type, fn as EventListener, options));
+  };
   // Global click shield (capture phase: runs before all elements' own click).
-  document.addEventListener(
+  on(
     "click",
     (ev) => {
       const g = deps.gesture();
@@ -66,7 +78,8 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
 
   // The release: the shield fallback AND the capture-free drag's end in ONE listener (both are "the button
   // came up").
-  document.addEventListener("mouseup", (ev) => {
+  on(
+    "mouseup", (ev) => {
     const g = deps.gesture();
     if (!g) return;
     if (g.shield) {
@@ -96,7 +109,7 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
   // Capture state / capture-free drag in progress: forbid all wheel scrolling (prevents the bind options
   // list drifting under the operation). passive:false must be explicit — Chrome makes document-level wheel
   // listeners passive by default, otherwise preventDefault is ineffective.
-  document.addEventListener(
+  on(
     "wheel",
     (ev) => {
       if (deps.capturing() || deps.gesture()?.drag) {
@@ -109,7 +122,8 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
 
   // Physical key capture. Esc during a drag cancels the drag; with an action selected every key binds
   // (Esc = unbind) without closing the menu.
-  document.addEventListener("keydown", (ev) => {
+  on(
+    "keydown", (ev) => {
     const g = deps.gesture();
     const action = deps.capturing();
     if (!action && g?.drag) {
@@ -143,7 +157,8 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
   // The SAME listener starts a capture-free drag when the press lands on an action chip: the chip is a
   // widget, so this cannot be a per-chip listener — the hit test can already say "this point is the chip
   // whose value is `forward`".
-  document.addEventListener("mousedown", (ev) => {
+  on(
+    "mousedown", (ev) => {
     const g = deps.gesture();
     const action = deps.capturing();
     deps.log(`KBCAP mousedown button=${ev.button} capturing=${action ?? "null"}`);
@@ -175,4 +190,8 @@ export function installBindGestureHandlers(deps: BindGestureDeviceDeps): void {
     deps.queueRebind({ kind: "bindCapture", code });
     deps.log(`KBCAP mousedown bind done (${code})`);
   });
+  return () => {
+    for (const off of offs) off();
+    offs.length = 0;
+  };
 }
