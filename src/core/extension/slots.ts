@@ -13,6 +13,8 @@ import type { Resource } from "../data/resource";
 import type { UiHudElement } from "../../data/globals/ui-hud";
 import type { UiPage } from "../../data/globals/ui-pages";
 import type { BlockEntry } from "../../data/assets/blocks";
+import type { UiActionHandler } from "../../data/globals/actions";
+import type { UiSource } from "../../data/globals/sources";
 import { defineExtensionPoint } from "./point";
 
 /** Systems a plugin wants in the schedule (each carries its own stage/edges/access declaration). */
@@ -44,3 +46,17 @@ export const SLOT_COMMANDS = defineExtensionPoint<{ readonly name: string }>("co
  *  contributed, so the table is a statement about the install rather than a lookup a data module performs
  *  behind everyone's back — see data/assets/blocks.ts and P1.37. */
 export const SLOT_BLOCKS = defineExtensionPoint<BlockEntry>("blocks");
+
+/** UI ACTIONS a plugin brings: the id and the handler, INSTALLED into the action table by the framework at
+ *  install time and REMOVED with the plugin. A plugin used to write into `UI_ACTIONS` by hand from `setup`,
+ *  and then nothing took the entry back out on uninstall — the id stayed claimed (so a re-install threw) and
+ *  a stale handler stayed reachable from a widget that outlived its plugin. See core/plugin/ui-tables.ts. */
+export const SLOT_UI_ACTIONS = defineExtensionPoint<{ readonly id: string; readonly run: UiActionHandler }>(
+  "uiActions",
+);
+
+/** UI SOURCES a plugin brings (`UI_BIND` targets: id -> getter), installed and withdrawn the same way as
+ *  `SLOT_UI_ACTIONS` — a bound widget must never read a source whose plugin is gone. */
+export const SLOT_UI_SOURCES = defineExtensionPoint<{ readonly id: string; readonly read: UiSource }>(
+  "uiSources",
+);

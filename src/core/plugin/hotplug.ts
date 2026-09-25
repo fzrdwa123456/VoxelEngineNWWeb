@@ -30,6 +30,7 @@ import type { SystemDef } from "../flow/schedule";
 import type { World } from "../world";
 import { createPluginApi } from "./api";
 import { runTeardowns } from "./teardown";
+import { installPluginUiTables, removePluginUiTables } from "./ui-tables";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -90,6 +91,8 @@ export function hotInstall(host: HotPlugHost, id: string): HotPlugOutcome {
   // 1. setup — contributions only, which is all the boot lets it do either.
   try {
     plugin.setup(api);
+    // What it filed into the UI tables lands in them now, and an uninstall takes it back out (P1.41).
+    installPluginUiTables(registry, world, id);
   } catch (error) {
     registry.withdraw(id);
     const reason = `setup threw: ${describeError(error)}`;
@@ -174,6 +177,8 @@ export function hotUninstall(host: HotPlugHost, id: string): HotPlugOutcome {
   const torn = runTeardowns(world, id, (line) => host.log(line));
   if (torn > 0) host.log(`PLUGIN ${id} ran ${torn} registered teardown(s)`);
   const withdrawn = registry.withdraw(id);
+  // …and the UI TABLES forget what it filed, so a re-install does not hit a stale claim (P1.41).
+  removePluginUiTables(world, withdrawn);
   const systems: string[] = [];
   for (const entry of withdrawn) {
     if (entry.point === SLOT_SYSTEMS.name && world.hotRemoveSystem(entry.id)) systems.push(entry.id);

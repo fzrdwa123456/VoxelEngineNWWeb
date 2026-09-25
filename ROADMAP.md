@@ -1167,6 +1167,26 @@ Still outstanding:
   idempotent". `Plugin.setup`'s doc now states the contract, `PluginApi` grew `insertResource`
   (once-semantics, so a re-install cannot throw on a resource that outlived its plugin), and the gate asserts
   every plugin's setup SPAWNS nothing (widgets are contributed as DATA and mounted by a host at a barrier).
+- **P1.40 / P1.41 — the catalogue is DISCOVERED, and the UI tables belong to the framework.** `DONE` (plugin
+  priorities: 1 step 1, and the extension-point half of 4). **P1.40**: the plugin list was three
+  hand-maintained blocks in `boot/main.ts` (the boot array, the hot catalogue, and one factory call per
+  optional surface), so a folder nobody wired was invisible and a surface nobody catalogued existed but had no
+  F8-F11 key. `plugins/<id>/plugin.ts` is the opt-in now and `boot/plugin-catalog.ts` globs the tree at BUILD
+  time (`import.meta.glob("../plugins/*/plugin.ts", { eager: true })` — no hand-written list, no runtime disk
+  lookup, no dynamic-import failure mode); `core/plugin/host.ts` publishes host services BY NAME and each
+  plugin's own adapter narrows the ones it needs, so the framework never models a plugin's types. The four
+  optional surfaces opted in and the root no longer constructs them. STILL OPEN: `player`/`render`/`ui`/
+  `diagnostics` cannot move yet — the root USES the handles they construct (their systems and views), which is
+  the same reason the ui systems are declared by the root; the gate now names exactly which folders are still
+  hand-wired, so the remaining migration cannot be forgotten. **P1.41**: `SLOT_UI_ACTIONS` / `SLOT_UI_SOURCES`
+  let a plugin FILE an action or a bound-widget source, and the framework installs it at install time and
+  REMOVES it with the plugin (`core/plugin/ui-tables.ts`). Before this, a plugin that registered an action by
+  hand from `setup` kept the id claimed after an uninstall — a re-install threw `already registered`, and a
+  stale handler stayed reachable from a widget that outlived its plugin.
+- **P1.39 — uninstall teardown is a FRAMEWORK capability.** `DONE` (plugin priority 3). `api.onStop(fn)` files
+  a teardown NEXT TO the surface it undoes; `runTeardowns` runs them at the barrier, in reverse registration
+  order, exactly once, with per-task isolation — and BOTH leave paths run them (an uninstall, and quitting,
+  which no longer skips a plugin that has no `stop` hook). `ui-inventory` migrated its bag closing onto it.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

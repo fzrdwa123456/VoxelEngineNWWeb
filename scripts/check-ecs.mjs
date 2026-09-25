@@ -4059,6 +4059,48 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
   assert(/subtreeOf/.test(hudSys), "…taking the whole SUBTREE down with it (the ECS has no cascade)");
 });
 
+// ===== THE UI TABLES A PLUGIN CONTRIBUTES INTO (P1.41) =====
+check("a plugin's UI actions and sources are installed, and WITHDRAWN with it", () => {
+  // A plugin could always write into UI_ACTIONS by hand from `setup`, and then nothing took the entry back
+  // out: the id stayed claimed (so a re-install threw `already registered`) and a stale handler stayed
+  // reachable from a widget that outlived its plugin. The framework installs what a plugin FILES and removes
+  // it together with the plugin.
+  const S = load("core/extension/slots.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  const { World } = load("core/world.js");
+  const T = load("core/plugin/ui-tables.js");
+  const A = load("data/globals/actions.js");
+  const SO = load("data/globals/sources.js");
+  const world = new World();
+  world.insertResource(A.UI_ACTIONS, A.createUiActions());
+  world.insertResource(SO.UI_SOURCES, SO.createUiSources());
+  const registry = new ExtensionRegistry();
+  const calls = [];
+  registry.contribute(S.SLOT_UI_ACTIONS, "probe", [{ id: "probe.act", run: (v) => calls.push(`act:${v}`) }]);
+  registry.contribute(S.SLOT_UI_SOURCES, "probe", [{ id: "probe.src", read: () => 42 }]);
+  equal(T.installPluginUiTables(registry, world, "probe"), 2, "both filed entries are installed");
+  world.resource(A.UI_ACTIONS).get("probe.act")("x");
+  equal(calls.join(","), "act:x", "…the action is in the table and dispatches");
+  equal(world.resource(SO.UI_SOURCES).get("probe.src")(), 42, "…and the source answers");
+  equal(T.installPluginUiTables(registry, new World(), "probe"), 0, "a world with no UI lane is a no-op");
+  const withdrawn = registry.withdraw("probe");
+  equal(T.removePluginUiTables(world, withdrawn), 2, "the uninstall takes both back out");
+  equal(world.resource(A.UI_ACTIONS).has("probe.act"), false, "…the action id is free again");
+  equal(world.resource(SO.UI_SOURCES).has("probe.src"), false, "…and so is the source id");
+  // …which is what makes a RE-INSTALL work: the same id can be filed again (this used to throw).
+  registry.contribute(S.SLOT_UI_ACTIONS, "probe", [{ id: "probe.act", run: () => {} }]);
+  equal(T.installPluginUiTables(registry, world, "probe"), 1, "a re-install installs again (no stale claim)");
+  // The framework runs both halves.
+  const lc = stripComments(readSource("src/core/plugin/lifecycle.ts"));
+  const hp = stripComments(readSource("src/core/plugin/hotplug.ts"));
+  assert(/installPluginUiTables\(registry, world, plugin\.id\)/.test(lc), "installPlugins installs them");
+  assert(/installPluginUiTables\(registry, world, id\)/.test(hp), "a hot install does too");
+  assert(/removePluginUiTables\(world, withdrawn\)/.test(hp), "…and the uninstall removes them with the plugin");
+  const slots = readSource("src/core/extension/slots.ts");
+  assert(/SLOT_UI_ACTIONS = defineExtensionPoint/.test(slots) && /SLOT_UI_SOURCES = defineExtensionPoint/.test(slots),
+    "…through two extension points of their own, so a plugin never touches the tables by hand");
+});
+
 // ===== THE CATALOGUE IS THE FOLDER TREE (P1.40) =====
 check("a plugin folder JOINS the catalogue by existing - and the two cannot drift", () => {
   // The list used to be hand-maintained in main.ts: a folder nobody wired was invisible, and a surface nobody

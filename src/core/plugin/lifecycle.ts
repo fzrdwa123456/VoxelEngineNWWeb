@@ -13,6 +13,7 @@ import type { World } from "../world";
 import type { ExtensionRegistry } from "../extension/registry";
 import { createPluginApi, type PluginApi } from "./api";
 import { runTeardowns } from "./teardown";
+import { installPluginUiTables } from "./ui-tables";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -98,6 +99,8 @@ export function installPlugins(plugins: readonly Plugin[], options: InstallOptio
     const api = createPluginApi(plugin.id, world, registry, (line) => log(`[${plugin.id}] ${line}`));
     try {
       plugin.setup(api);
+      // What it filed into the UI tables lands in them now, and an uninstall takes it back out (P1.41).
+      installPluginUiTables(registry, world, plugin.id);
       installed.push(plugin.id);
       installedPlugins.push(plugin);
       apis.set(plugin.id, api);
