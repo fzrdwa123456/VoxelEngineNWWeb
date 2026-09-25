@@ -1156,6 +1156,17 @@ Still outstanding:
   disagree. Pinned by the gate end to end (synthetic pack -> real plugin setup -> real build -> real
   `getBlockDef`) plus `tools\blocks-demo.bat` for a hand test. What is STILL not data: the table is not
   consulted by the MESHER (it draws the built-in checker block), and the menu layouts remain un-declared.
+- **P1.38 — the re-install contract is written down AND enforced.** `DONE` (priority 2 of the plugin-system
+  list). Hot-plugging means `setup` runs more than once, and nobody had written down what that implies. The
+  gate now replays the REAL sequence for every hot-pluggable plugin against a real World and a real registry —
+  `setup -> WITHDRAW -> setup` (the uninstall is what clears the owner's filings) — and asserts the system comes
+  back, the resource claims come back, and the resource OBJECT the world holds is the same one (resources are
+  not withdrawn with the plugin, P1.28). It also pins the trap this uncovered: filing an id that is STILL
+  there THROWS, even for the same owner — the first version of the check ran `setup` twice with no withdraw and
+  the registry rejected `pickerState`, so the rule is "the uninstall withdraws first", not "setup is
+  idempotent". `Plugin.setup`'s doc now states the contract, `PluginApi` grew `insertResource`
+  (once-semantics, so a re-install cannot throw on a resource that outlived its plugin), and the gate asserts
+  every plugin's setup SPAWNS nothing (widgets are contributed as DATA and mounted by a host at a barrier).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

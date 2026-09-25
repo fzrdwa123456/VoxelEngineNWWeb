@@ -10,7 +10,24 @@ export interface Plugin {
   readonly id: string;
   /** Plugin ids this one needs installed BEFORE its `setup` runs. A missing dep disables the plugin. */
   readonly deps?: readonly string[];
-  /** Contribute into extension points. Runs once, during install, before `world.start()`. */
+  /** Contribute into extension points. Runs during install — and on EVERY hot RE-INSTALL, which is why the
+   *  sequence it must survive is "setup -> WITHDRAW -> setup", not "setup -> setup":
+   *
+   *    * an uninstall WITHDRAWS everything this owner filed (the registry's job), so the re-install has to
+   *      file it again. Filing an id that is STILL THERE throws — even for the same owner — and that is
+   *      deliberate: it is what catches a plugin that files one id twice inside a single setup;
+   *    * a resource this plugin owns goes in through `api.insertResource` (once-semantics), NEVER through
+   *      `world.insertResource`. Resources are NOT withdrawn with the plugin (P1.28), so the world keeps the
+   *      object across a re-install: an unguarded second insert would throw, and nothing may depend on a
+   *      fresh object after a re-install;
+   *    * a global listener/table registered here must be paired with `stop` (which runs on uninstall), in the
+   *      `installX(...) -> disposer` shape `plugins/input` uses;
+   *    * SPAWNING is not allowed: a setup may not change the entity structure (iron rule 1 — an install is
+   *      not a barrier). A plugin with widgets contributes them as DATA (`SLOT_UI_HUD`, `SLOT_UI_PAGES`) and
+   *      the ui lane's hosts mount them at a barrier.
+   *
+   *  `check:ecs` replays that sequence against a real World and a real registry for every hot-pluggable
+   *  plugin: install, withdraw, re-install, then a duplicate filing that MUST throw. */
   readonly setup: (api: PluginApi) => void;
   /** OPTIONAL: runs AFTER `world.start()` — the schedule is resolved, every resource is in place, so this
    *  is where a plugin may look at the assembled world (and where a future hot-plug round would also

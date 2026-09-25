@@ -4052,6 +4052,90 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
   assert(/subtreeOf/.test(hudSys), "…taking the whole SUBTREE down with it (the ECS has no cascade)");
 });
 
+// ===== THE setup IDEMPOTENCY CONTRACT (P1.38) =====
+check("a hot RE-INSTALL may call `setup` again: the second run changes nothing", () => {
+  // The install path calls `setup` on EVERY (re-)install — the previous filing was WITHDRAWN on uninstall, so
+  // the contributions have to be re-filed — which makes idempotency part of the plugin contract rather than a
+  // nicety, and it is the one thing that turns "installed it again" into a throw at the barrier. This drives
+  // the REAL plugins' setups twice against a REAL World and a REAL registry.
+  const Slot = load("core/extension/slots.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  const { createPluginApi } = load("core/plugin/api.js");
+  const { World } = load("core/world.js");
+  const R = load("data/globals/resources.js");
+  const pickerStub = { step: () => {}, close: () => {} };
+  const toastStub = { step: () => {}, close: () => {} };
+  const cases = [
+    ["ui-debug", () => ({
+      plugin: load("plugins/ui-debug/index.js").createUiDebugPlugin({ uiPicker: pickerStub }),
+      resource: R.PICKER_STATE,
+    })],
+    ["ui-toast", () => ({
+      plugin: load("plugins/ui-toast/index.js").createUiToastPlugin({ uiToast: toastStub }),
+      resource: R.TOAST,
+    })],
+    ["ui-inventory", () => ({
+      plugin: load("plugins/ui-inventory/index.js").createUiInventoryPlugin({
+        uiInventory: { step: () => {} },
+        inv: { buildHotbar: () => 0 },
+        inWorld: () => true,
+      }),
+      resource: null,
+    })],
+  ];
+  for (const [id, make] of cases) {
+    const world = new World();
+    const registry = new ExtensionRegistry();
+    const { plugin, resource } = make();
+    const api = createPluginApi(id, world, registry, () => {});
+    plugin.setup(api);
+    const systems = registry.list(Slot.SLOT_SYSTEMS).length;
+    const claimed = registry.owners(Slot.SLOT_RESOURCES).length;
+    const held = resource ? world.resource(resource) : null;
+    equal(systems, 1, `${id}: its setup files exactly one system`);
+    // THE REAL SEQUENCE: an uninstall WITHDRAWS this owner's filings (the registry's job), and the re-install
+    // files them again. A setup that assumed its entries were still there would throw right here.
+    registry.withdraw(id);
+    equal(registry.list(Slot.SLOT_SYSTEMS).length, 0, `${id}: an uninstall withdraws its system`);
+    plugin.setup(api); // ← the hot re-install
+    equal(registry.list(Slot.SLOT_SYSTEMS).length, systems, `${id}: re-installing files the same system again`);
+    equal(registry.owners(Slot.SLOT_RESOURCES).length, claimed, `${id}: …and re-claims its resources`);
+    if (resource) {
+      equal(world.resource(resource) === held, true, `${id}: …while the world keeps the SAME resource object`);
+    }
+    // …and WITHOUT a withdraw in between, the same setup THROWS — the registry refuses a duplicate id even
+    // from the same owner, which is what catches a plugin that files one id twice in a single setup.
+    let threw = false;
+    try {
+      plugin.setup(api);
+    } catch {
+      threw = true;
+    }
+    equal(threw, true, `${id}: filing the same id twice (no withdraw between) is REFUSED, loudly`);
+  }
+  // The framework half, for a plugin that owns a resource: the api's ONCE-semantics helper.
+  const probe = new World();
+  const probeApi = createPluginApi("probe", probe, new ExtensionRegistry(), () => {});
+  probeApi.insertResource(R.TOAST, R.createToastState());
+  const firstToast = probe.resource(R.TOAST);
+  probeApi.insertResource(R.TOAST, R.createToastState());
+  equal(probe.resource(R.TOAST) === firstToast, true,
+    "api.insertResource inserts ONCE: a re-install keeps the object the world already holds (P1.28)");
+
+  // …and the contract is written where a plugin AUTHOR reads it, plus the two source rules it implies.
+  assert(/hot RE-INSTALL/.test(readSource("src/core/plugin/descriptor.ts")) &&
+    /WITHDRAW/.test(readSource("src/core/plugin/descriptor.ts")),
+    "the re-install contract (setup -> WITHDRAW -> setup) is documented on Plugin.setup");
+  for (const id of ["ui-debug", "ui-toast", "ui-inventory", "ui-keybind", "content-default",
+    "world", "input", "player", "render", "ui", "diagnostics"]) {
+    const src = stripComments(readSource(`src/plugins/${id}/index.ts`));
+    assert(countOf(src, /world\.insertResource/g) <= countOf(src, /hasResource/g),
+      `${id}: every resource it inserts is guarded (or uses api.insertResource, which is once-semantics)`);
+    equal(countOf(src, /world\.spawn\(|spawnPanel\(|spawnButton\(|spawnLabel\(/g), 0,
+      `${id}: a setup SPAWNS nothing — widgets are contributed as DATA and mounted by a host at a barrier`);
+  }
+});
+
 // ===== THE BLOCK TABLE IS PACK-CHAIN DATA TOO (P1.37) =====
 check("a PACK can add a block: the discovered table drives the registry (P1.37)", () => {
   // The same shape as the language check below, one level down: the chain DELIVERS the entries, the content
