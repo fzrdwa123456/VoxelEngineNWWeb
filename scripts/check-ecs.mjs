@@ -1472,7 +1472,13 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   const hotbar = W.spawnPanel(world, null, "inv.hotbar");
   let inWorld = true;
   let inventoryOn = true;
-  const hud = new H.UiHudSystem(world, { crosshair, hotbar, inWorld: () => inWorld, inventoryOn: () => inventoryOn });
+  world.insertResource(load("data/globals/ui-hud.js").UI_HUD_PAINTED, new Map());
+  const hud = new H.UiHudSystem(world, {
+    elements: () => [
+      { id: "crosshair", order: 10, roots: [crosshair], gate: () => inWorld },
+      { id: "hotbar", order: 20, roots: [hotbar], gate: () => inWorld && inventoryOn },
+    ],
+  });
   const shown = (e) => world.get(e, W.UI_STATE).hidden === false;
 
   equal(shown(crosshair) && shown(hotbar), true, "the widgets start visible (that is the spawn default)");
@@ -1494,8 +1500,8 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   // "what may the lane show at all" comes first �?and the composition root hands it the two roots.
   const main = stripComments(readSource("src/boot/main.ts"));
   assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")), "the composition root registers ui.hud");
-  assert(/crosshair: hud\.crosshairEntity/.test(main), "…with the crosshair root");
-  assert(/hotbar: inv\.hotbarEntity/.test(main), "…and the hotbar root");
+  assert(/hud\.crosshairEntity/.test(main), "…with the crosshair root");
+  assert(/inv\.hotbarEntity/.test(main), "…and the hotbar root");
   assert(/inWorld,/.test(main), "…gated on the one definition of \"a world is running\"");
   // The toast is deliberately NOT part of this: a main-menu message is a documented case.
   assert(!/toast/.test(stripComments(readSource("src/plugins/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");
@@ -3920,6 +3926,19 @@ check("the page host DEFERS its structural work to a barrier (P1.29)", () => {
   equal(ran, 1, "…the barrier does, which is the one moment spawn/despawn are legal");
 });
 
+// ===== the HUD element table (P1.32) =====
+check("the HUD is an element TABLE: each element carries its OWN gate", () => {
+  assert(/SLOT_UI_HUD = defineExtensionPoint/.test(readSource("src/core/extension/slots.ts")),
+    "the HUD has an extension point of its own (a plugin can add a HUD element)");
+  assert(/gate: \(\) => boolean/.test(readSource("src/data/globals/ui-hud.ts")),
+    "…an element carries its own gate");
+  const hudSys = stripComments(readSource("src/plugins/ui/systems/hud.ts"));
+  assert(/this\.painted\.delete\(id\)/.test(hudSys),
+    "…and the host TAKES AN ELEMENT DOWN when its contribution disappears (no frozen widget)");
+  assert(!/inventoryOn/.test(hudSys),
+    "…and the host knows nothing about the inventory layer any more: that belongs to the hotbar's own gate");
+});
+
 // ===== report =====
 console.log(`\n=== check-ecs report ===`);
 if (failed) {

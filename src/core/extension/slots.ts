@@ -10,6 +10,7 @@
 // still registered by the views that own them).
 import type { SystemDef } from "../flow/schedule";
 import type { Resource } from "../data/resource";
+import type { UiHudElement } from "../../data/globals/ui-hud";
 import type { UiPage } from "../../data/globals/ui-pages";
 import { defineExtensionPoint } from "./point";
 
@@ -29,6 +30,10 @@ export const SLOT_LANGUAGES = defineExtensionPoint<{ readonly id: string }>("lan
 /** UI PAGES a plugin brings (a settings tab, a panel). Materialized by the ui lane's HOST system, so a page
  *  contributed at RUNTIME appears without a restart — see data/globals/ui-pages.ts and P1.29. */
 export const SLOT_UI_PAGES = defineExtensionPoint<UiPage>("uiPages");
+
+/** HUD ELEMENTS a plugin brings (crosshair, hotbar, armor, xp, boss bar...). Painted by the ui lane's HUD
+ *  host, each from its OWN gate — see data/globals/ui-hud.ts. */
+export const SLOT_UI_HUD = defineExtensionPoint<UiHudElement>("uiHud");
 
 /** Command types a plugin owns. */
 export const SLOT_COMMANDS = defineExtensionPoint<{ readonly name: string }>("commands");

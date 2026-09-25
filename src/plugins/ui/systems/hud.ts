@@ -17,7 +17,7 @@
 // does not touch the toast: a main-menu message is a documented case (the multiplayer placeholder is
 // drawn by the menu frame), so "gameplay UI" here means the HUD that mirrors a running world.
 import type { Entity, SystemAccess, World } from "../../../core/world";
-import { UI_PAINT, type UiHudPaint } from "../../../data/globals/paint";
+import { UI_HUD_PAINTED, type UiHudElement } from "../../../data/globals/ui-hud";
 import { UI_STATE, setUiVisible } from "../components";
 
 /** It writes the two HUD roots' visibility and nothing else. */
@@ -26,52 +26,40 @@ export const UI_HUD_ACCESS: SystemAccess = {
 };
 
 export interface HudDeps {
-  /** The crosshair root (ui/hud.ts) */
-  readonly crosshair: Entity;
-  /** The hotbar strip (ui/inventory.ts) */
-  readonly hotbar: Entity;
-  /** Is a world RUNNING? (the loop mode is `game`) — injected, so this module stays DOM-free and the
-   *  composition root keeps the one definition of "playing" (`inWorld()`), exactly like ui.navigation. */
-  readonly inWorld: () => boolean;
-  /** Is the INVENTORY layer installed (the `ui-backpack` plugin)? The crosshair is the gameplay HUD and
-   *  stays; the hotbar IS that layer's other half (it renders from the same data through the same system),
-   *  so switching that plugin off has to take it down — otherwise it stays on screen, frozen. Injected from
-   *  the root, which is the only place that knows what is installed right now. */
-  readonly inventoryOn: () => boolean;
+  /** Every HUD element in force right now: the ones plugins contributed (`SLOT_UI_HUD`) plus the core's own,
+   *  late-bound through the root's registry getter. Each carries ITS OWN gate — that is the whole point. */
+  readonly elements: () => readonly UiHudElement[];
 }
 
 export class UiHudSystem {
-  /** Both widgets are spawned VISIBLE, so that is the state the first frame starts from. The VALUE lives
-   *  in UI_PAINT.hud (ecs/ui/paint.ts::createUiPaint initialises it to true, matching the spawn). */
-  private readonly paint: UiHudPaint;
-
-  private get shown(): boolean {
-    return this.paint.shown;
-  }
-  private set shown(v: boolean) {
-    this.paint.shown = v;
-  }
+  /** What this host painted last frame, by element id (world data — see UI_HUD_PAINTED). */
+  private readonly painted: Map<string, readonly Entity[]>;
 
   constructor(
     private readonly world: World,
     private readonly deps: HudDeps,
   ) {
-    this.paint = world.resource(UI_PAINT).hud;
+    this.painted = world.resource(UI_HUD_PAINTED);
   }
 
-  /** ui lane, once per frame. TWO gates, not one (P1.32):
-   *    * the CROSSHAIR belongs to the gameplay HUD — a world is running, so it is up, full stop;
-   *    * the HOTBAR is the inventory layer's other half (same data, same reconcile pass), so it also needs
-   *      that layer to be INSTALLED.
-   *  Sharing one `visible` between them is what made switching the inventory plugin off take the crosshair
-   *  with it. The crosshair write is unconditional because it is a single record the reconciler diffs — the
-   *  cache below exists for the hotbar, whose answer changes when a plugin is (un)installed. */
+  /** ui lane, once per frame: paint every element from its own gate, and take down whatever went away.
+   *
+   *  Two loops, in this order, and the second one is the load-bearing half: an element whose contribution
+   *  DISAPPEARED (its plugin was uninstalled) is no longer in the table, so nothing would ever write its
+   *  widgets' visibility again — they would stay on screen, frozen. The host remembers what it painted
+   *  (`UI_HUD_PAINTED`, world data) and hides those once. This is the same residue trap the rubber band and
+   *  the toast taught us, solved once for every HUD element. */
   step(): void {
-    const inWorld = this.deps.inWorld();
-    setUiVisible(this.world, this.deps.crosshair, inWorld);
-    const hotbar = inWorld && this.deps.inventoryOn();
-    if (hotbar === this.shown) return;
-    this.shown = hotbar;
-    setUiVisible(this.world, this.deps.hotbar, hotbar);
+    const live = [...this.deps.elements()].sort((a, b) => a.order - b.order);
+    const present = new Set(live.map((el) => el.id));
+    for (const [id, roots] of [...this.painted]) {
+      if (present.has(id)) continue;
+      for (const root of roots) setUiVisible(this.world, root, false);
+      this.painted.delete(id);
+    }
+    for (const el of live) {
+      for (const root of el.roots) setUiVisible(this.world, root, el.gate());
+      this.painted.set(el.id, el.roots);
+    }
   }
 }

@@ -36,7 +36,8 @@ import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
 import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
-import { SLOT_UI_PAGES } from "../core/extension/slots";
+import { SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
+import { UI_HUD_PAINTED, type UiHudElement } from "../data/globals/ui-hud";
 import { UI_PAGE_HOSTS, UI_PAGES_MOUNTED } from "../data/globals/ui-pages";
 import type { Plugin } from "../core/plugin/descriptor";
 import type { Entity } from "../core/world";
@@ -383,6 +384,7 @@ world.insertResource(TOAST, createToastState());
 // right now (the host system's diff state). Both belong to the ROOT, inserted before any plugin is installed.
 world.insertResource(UI_PAGE_HOSTS, []);
 world.insertResource(UI_PAGES_MOUNTED, new Map());
+world.insertResource(UI_HUD_PAINTED, new Map());
 // The startup screen's state: the boot driver publishes the current stage into it (through the
 // SetLoadingStage command) and `ui.loading` paints it — the loading screen is UI, so it is data like every
 // other surface, and main.ts never builds an element. See ecs/resources.ts.
@@ -542,12 +544,15 @@ const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peek
 // "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain, so F11 is
 // felt immediately: the hotbar and the bag panel are the core's to show, and this is how the core asks.
 const inventoryOn = (): boolean => livePlugins.has("ui-inventory");
-const uiHud = createHudSystem(world, {
-  crosshair: hud.crosshairEntity,
-  hotbar: inv.hotbarEntity,
-  inWorld,
-  inventoryOn,
-});
+// THE HUD TABLE (P1.32): each element carries its own gate. The core contributes the two it owns by name; a
+// plugin may contribute more through `SLOT_UI_HUD` (armor, xp, a boss bar...) without touching this file —
+// which is why the getter merges the registry with the core's pair instead of listing everything here.
+const hudElements = (): readonly UiHudElement[] => [
+  ...registry.list(SLOT_UI_HUD),
+  { id: "crosshair", order: 10, roots: [hud.crosshairEntity], gate: () => inWorld() },
+  { id: "hotbar", order: 20, roots: [inv.hotbarEntity], gate: () => inWorld() && inventoryOn() },
+];
+const uiHud = createHudSystem(world, { elements: hudElements });
 
 // ===== System registration =====
 // Registration order IS the default execution order; `after`/`before` state the constraints that are
