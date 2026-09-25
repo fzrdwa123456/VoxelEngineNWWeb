@@ -4,6 +4,10 @@
 // legal at a barrier and a system may not make one (iron rule 1). That is the whole mechanism, and it is what
 // makes the layout dynamic: a page contributed by a plugin installed at runtime appears within a frame.
 //
+// The deferral itself (`UiLayoutOp`) is DATA now, next to the pages it carries: the same command mounts a page
+// and builds a HUD element (`ui.hud`), so the ui lane has ONE generic layout barrier and not two ways to say
+// "spawn this at the next barrier".
+//
 // It paints the ENTRY rows (up iff their page is mounted). The PANEL's visibility is NOT its business: it runs
 // FIRST in the lane, so it would read the PREVIOUS frame's `UI_MODAL.settings` — and in the frame where ESC
 // steps back (an in-lane write, unlike a button's command) the panel would stay visible while the settings
@@ -14,43 +18,19 @@ import { UI_MODAL } from "../../../data/globals/resources";
 import {
   UI_PAGE_HOSTS,
   UI_PAGES_MOUNTED,
+  UiLayoutOp,
   type UiPage,
   type MountedPage,
   type UiPageHost,
 } from "../../../data/globals/ui-pages";
-import { defineCommand, type Entity, type SystemAccess, type World } from "../../../core/world";
-import { setUiText, setUiVisible, spawnButton, spawnPanel, UI_TREE } from "../components";
+import type { SystemAccess, World } from "../../../core/world";
+import { setUiText, setUiVisible, spawnButton, spawnPanel, subtreeOf, UI_TREE } from "../components";
 
 /** It reads the contributions and the host list, and writes nothing the schedule models (the command applies
  *  the structure). Declared so the report says what it touches. */
 export const UI_PAGES_ACCESS: SystemAccess = {
   readsExternal: ["uiPages", "uiPageHosts"],
 };
-
-/** A deferred layout operation. The ONE generic deferral in the ui lane: its payload is the work, because
- *  the work is plugin-side (spawn a page, wire its action) while the BARRIER is the core's. */
-export const UiLayoutOp = defineCommand<{ apply: (world: World) => void }>("uiLayoutOp", (world, op) => {
-  op.apply(world);
-});
-
-/** Every entity in the subtree rooted at `root` (children first), for a despawn that leaves nothing behind. */
-function subtree(world: World, root: Entity): Entity[] {
-  const children = new Map<Entity, Entity[]>();
-  for (const e of world.query(UI_TREE).entities()) {
-    const parent = world.get(e, UI_TREE)?.parent;
-    if (parent === undefined) continue;
-    const list = children.get(parent);
-    if (list) list.push(e);
-    else children.set(parent, [e]);
-  }
-  const out: Entity[] = [];
-  const walk = (e: Entity): void => {
-    for (const c of children.get(e) ?? []) walk(c);
-    out.push(e);
-  };
-  walk(root);
-  return out;
-}
 
 function mountPage(world: World, host: UiPageHost, page: UiPage): void {
   const actions = world.resource(UI_ACTIONS);
@@ -87,8 +67,8 @@ function unmountPage(world: World, key: string): void {
   // page is no longer in that list — and `dispose` was silently skipped, leaking its global specs.
   m.page.dispose?.();
   // Children first: the ECS has no cascade, so an unmount has to take the whole subtree down itself.
-  for (const e of subtree(world, m.panel)) world.despawn(e);
-  for (const e of subtree(world, m.entry)) world.despawn(e);
+  for (const e of subtreeOf(world, m.panel)) world.despawn(e);
+  for (const e of subtreeOf(world, m.entry)) world.despawn(e);
   mounted.delete(key);
   m.host.log(`PAGE unmounted ${key}`);
 }

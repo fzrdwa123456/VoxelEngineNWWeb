@@ -9,6 +9,14 @@
 // (the INVENTORY_WIDGETS resource) and registers the one bag-click action. Spawning is a structural
 // change, so it belongs to wiring and not to a system (iron rule 1).
 //
+// A HANDLE MAY BE MISSING, and that is normal now (P1.34): the HOTBAR cells belong to a HUD ELEMENT, so
+// they exist only while `ui.hud` has that element mounted — the strip is despawned when the inventory
+// plugin is uninstalled and rebuilt when it comes back. `slots`/`icons`/`counts` are therefore sparse, and
+// every read is guarded: writing to a stale handle is inert (the setters check the component) but reading
+// through one is not, and the slot RANGES have to be skipped as a whole (indices 0..HOTBAR_SLOTS-1 are the
+// strip). `buildHotbar` fills the group again and marks its paint cache dirty, which is what keeps a
+// re-installed hotbar from coming back blank.
+//
 // IT WRITES WIDGET COMPONENTS, SO IT MUST RUN BEFORE THE RECONCILER. That is not a convention: this
 // system declares `writes: [UI_IMAGE, UI_STATE, UI_TEXT, UI_TIP]` and `ui.widgets` reads those same
 // components, so the schedule REFUSES to start unless the edge between them is declared (main.ts
@@ -54,6 +62,9 @@ export const INVENTORY_VIEW_ACCESS: SystemAccess = {
 /** Baked icon size, in px (the hand-written view had an unused `iconSize` field and a dead re-bake path). */
 const ICON_SIZE = 40;
 
+/** One cell's three widgets, or undefined while its GROUP is not mounted (see the header). */
+type CellWidgets = { readonly slot: number; readonly icon: number; readonly count: number } | undefined;
+
 export class UiInventorySystem {
   /** The component this system renders. A record, so the reference is stable (iron rule 2). */
   private readonly inv: InventoryC;
@@ -93,18 +104,32 @@ export class UiInventorySystem {
     const inventory = this.inv;
     this.collectFinishedBakes();
     for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      const cell = this.cell(i);
+      if (!cell) continue; // that group is not mounted: nothing to draw into (and nothing to remember)
       const item = inventory.slots[i];
       const signature = item ? `${item.type}\u0000${item.count}` : "";
       if (signature === this.drawn[i]) continue;
       this.drawn[i] = signature;
-      this.draw(i);
+      this.draw(i, cell);
     }
     if (inventory.selected !== this.drawnSelected) {
       this.drawnSelected = inventory.selected;
       for (let i = 0; i < INVENTORY_SLOTS; i++) {
-        setUiSelected(this.world, this.widgets.slots[i], i === inventory.selected);
+        const cell = this.cell(i);
+        if (!cell) continue;
+        setUiSelected(this.world, cell.slot, i === inventory.selected);
       }
     }
+  }
+
+  /** This cell's three widgets, or undefined while the group it belongs to is not mounted (the hotbar strip
+   *  is a HUD element now: it is despawned when the inventory plugin is uninstalled). */
+  private cell(i: number): CellWidgets {
+    const slot = this.widgets.slots[i];
+    const icon = this.widgets.icons[i];
+    const count = this.widgets.counts[i];
+    if (slot === undefined || icon === undefined || count === undefined) return undefined;
+    return { slot, icon, count };
   }
 
   /** Draw one slot: the placeholder icon, the name as a tooltip, the count as text, and the baked 3D
@@ -118,13 +143,12 @@ export class UiInventorySystem {
    *  one task and the browser never showed it. Two reasons the checker is the better placeholder: it
    *  reads as "no icon yet" instead of as a real item, and it is the same look the world uses for a
    *  block with no texture, so it says the truth about what the slot is showing. */
-  private draw(i: number): void {
-    const widgets = this.widgets;
+  private draw(i: number, cell: NonNullable<CellWidgets>): void {
     const item = this.inv.slots[i];
     if (!item) {
-      setUiImage(this.world, widgets.icons[i], "", false, "transparent");
-      setUiText(this.world, widgets.counts[i], "", true);
-      setUiTip(this.world, widgets.slots[i], "");
+      setUiImage(this.world, cell.icon, "", false, "transparent");
+      setUiText(this.world, cell.count, "", true);
+      setUiTip(this.world, cell.slot, "");
       return;
     }
     const def = getBlockDef(item.type);
@@ -132,9 +156,9 @@ export class UiInventorySystem {
     // reaches a frame (see the method above). Only a first-time bake has to wait, and it says so with the
     // engine's checker rather than with a solid colour that reads as a real item.
     const baked = this.icons.peek(this.bake, item.type, ICON_SIZE);
-    setUiImage(this.world, widgets.icons[i], baked ?? CHECKER_TEXTURE_URL, false);
-    setUiTip(this.world, widgets.slots[i], def?.label ?? item.type); // Tooltip shows the block name
-    setUiText(this.world, widgets.counts[i], item.count > 1 ? `${item.count}` : "", true);
+    setUiImage(this.world, cell.icon, baked ?? CHECKER_TEXTURE_URL, false);
+    setUiTip(this.world, cell.slot, def?.label ?? item.type); // Tooltip shows the block name
+    setUiText(this.world, cell.count, item.count > 1 ? `${item.count}` : "", true);
     this.waiting[i] = baked ? 0 : 1;
     if (!baked) this.icons.request(this.bake, item.type, ICON_SIZE);
   }

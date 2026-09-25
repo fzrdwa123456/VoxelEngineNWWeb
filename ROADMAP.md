@@ -1078,6 +1078,21 @@ Still outstanding:
   because it cannot be: the feedback toast for `ui-toast`'s OWN uninstall is never shown — its painter is what
   was just removed; the `HOT-UNINSTALLED` log line is the trace. Same reasoning applies to any future plugin
   whose resource a core command reads.
+- **P1.34 — the HUD host owns its elements' LIFETIME.** `DONE`. The element table (P1.32) could only show
+  and hide: the crosshair and the hotbar were spawned during wiring by their views and published as handles,
+  so a plugin installed at runtime could not add a HUD element, and an uninstalled one left its widgets on
+  screen with nobody to write them. `UiHudElement` now carries `build`/`dispose` next to `roots`, and
+  `ui.hud` MOUNTS what the table lists and DESPAWNS what left it — the whole subtree, because a despawn does
+  not cascade (`subtreeOf`, shared with the page host). Both are structural changes, so both travel through
+  the ui lane's one deferral, `UiLayoutOp` (moved out of the page host into `data/globals/ui-pages.ts`: one
+  barrier for "spawn this", not two). The two guards the page host taught us are here as well: a `mounting`
+  set (the frames between the send and the barrier would otherwise build the element again) and a `broken`
+  set (a `build` that threw is logged once, never retried, and forgotten when the element disappears so a
+  re-install gets a clean attempt). The hotbar's cells are a HUD element now, so `INVENTORY_WIDGETS` is
+  SPARSE (`Entity | undefined`) and `ui.inventory` skips a group that is not mounted; `buildHotbar` also
+  marks its paint cache dirty, without which a re-installed strip came back blank. Pinned by the gate
+  (deferral, subtree despawn, dispose once, re-install, failure isolation, the adopted `roots` path) and by
+  `docs/TESTING.md`'s F11 leak test.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

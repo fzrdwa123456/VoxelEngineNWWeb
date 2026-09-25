@@ -1,7 +1,13 @@
-// ===== HUD: crosshair + hotbar-adjacent gameplay widgets + the F3 debug panel =====
-// These are WIDGETS now, not DOM: this class spawns four widget trees during wiring and afterwards only
-// writes component data (text, visibility). The elements belong to ecs/ui/system.ts, so there is no
-// createElement, no style string and no CSS literal left in this file.
+// ===== HUD: the crosshair, the F3 debug panel, and the widget trees the host mounts =====
+// These are WIDGETS now, not DOM: this class SPAWNS widget trees and afterwards only writes component data
+// (text, visibility). The elements belong to the ui reconciler, so there is no createElement, no style string
+// and no CSS literal left in this file.
+//
+// WHAT THIS VIEW OWNS vs WHAT THE HOST OWNS (P1.34): the view knows how to BUILD a widget tree — that is local
+// knowledge — and `ui.hud` owns the LIFETIME of the ones that are HUD ELEMENTS. The crosshair is the worked
+// example: it used to be spawned here, during wiring, and its root was published for the host to hide; now the
+// host calls `buildCrosshair` when the element is mounted and despawns the same tree when it goes away, so an
+// element that appears at runtime (a plugin's armor bar) and one the core owns are mounted by ONE mechanism.
 //
 // What is NOT here any more, and where it went: the F3 toggle and its `debugVisible` boolean (the
 // panel's own UI_STATE.hidden is the state, and ecs/ui/picker.ts toggles it), `showToast()` with its
@@ -17,7 +23,6 @@ import type { Entity, World } from "../../../core/world";
 import { spawnLabel, spawnPanel } from "../components";
 
 export class Hud {
-  private readonly crosshair: Entity;
   private readonly debugPanel: Entity;
   private readonly debugBody: Entity;
 
@@ -25,23 +30,26 @@ export class Hud {
   get debugPanelEntity(): Entity {
     return this.debugPanel;
   }
-  /** The crosshair root, for `ui.hud` — the system that hides the GAMEPLAY widgets while no world is
-   *  running. It is spawned VISIBLE, like the hotbar, and nothing else writes its visibility. */
-  get crosshairEntity(): Entity {
-    return this.crosshair;
-  }
 
   constructor(private readonly world: World) {
-    // Crosshair: a centred box with two bars in it (the box centres them for us)
-    const crosshair = spawnPanel(world, null, "hud.crosshair");
-    this.crosshair = crosshair;
-    spawnPanel(world, crosshair, "hud.crosshairH");
-    spawnPanel(world, crosshair, "hud.crosshairV");
-
-    // F3 debug panel: hidden until toggled, one preformatted text block inside it
+    // F3 debug panel: hidden until toggled, one preformatted text block inside it. NOT a HUD element: it is a
+    // game SESSION's panel (F3 was pressed in a world) and `ui.picker` owns when it shows, so it is not in the
+    // element table and the host never touches it.
     this.debugPanel = spawnPanel(world, null, "debug.panel", { hidden: true });
     this.debugBody = spawnLabel(world, this.debugPanel, "debug.line");
 
+  }
+
+  /** THE CROSSHAIR: a centred box with two bars in it (the box centres them for us), built by `ui.hud` when
+   *  the element is MOUNTED and despawned with it. Spawned HIDDEN and never left that way: the host writes the
+   *  element's gate in the same frame (the mount is a barrier command, and the barrier a frame runs before its
+   *  ui lane), so no frame ever paints it in the wrong state — but a widget that is up for one frame is a
+   *  visible flash, and a hidden default cannot leak one. */
+  buildCrosshair(world: World): Entity {
+    const crosshair = spawnPanel(world, null, "hud.crosshair", { hidden: true });
+    spawnPanel(world, crosshair, "hud.crosshairH");
+    spawnPanel(world, crosshair, "hud.crosshairV");
+    return crosshair;
   }
 
   /** The F3 panel and its text line, for the composition root to publish as the F3_PANEL resource

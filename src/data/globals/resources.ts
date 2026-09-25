@@ -364,10 +364,13 @@ export const F3_PANEL = defineResource<F3Panel>("f3Panel");
  *  inventory slot: `0..HOTBAR_SLOTS-1` is the hotbar strip, the rest the bag grid; `icons`/`counts` are the
  *  two children of each slot. Passing the handles as data is what moved the reconcile out of the view and
  *  into the system (the same shape as F3_PANEL above). */
+/** SPARSE, and normal: the HOTBAR cells (indices `0..HOTBAR_SLOTS-1`) are a HUD ELEMENT now, so they exist
+ *  only while `ui.hud` has that element mounted (P1.34) — installing/uninstalling the inventory layer spawns
+ *  and despawns them. A reader must therefore skip a group with no handles instead of writing through them. */
 export interface InventoryWidgets {
-  readonly slots: readonly Entity[];
-  readonly icons: readonly Entity[];
-  readonly counts: readonly Entity[];
+  readonly slots: readonly (Entity | undefined)[];
+  readonly icons: readonly (Entity | undefined)[];
+  readonly counts: readonly (Entity | undefined)[];
 }
 
 export const INVENTORY_WIDGETS = defineResource<InventoryWidgets>("inventoryWidgets");

@@ -329,3 +329,22 @@ run reports the state it booted in:
 EVENT (written whether the switch is off or on), and it is what makes "the switch is off" distinguishable
 from "the probes never registered" when reading a log that has no probe lines in it.
 
+AFTER the HUD HOST and the plugin hot-plug keys (P1.34: F8 ui-debug, F9 ui-keybind, F10 ui-toast,
+F11 ui-inventory; `tools\*.bat` writes each variant of `plugins.json` and `plugins-status.bat` prints the
+lines to look for). Each key must change the RUNNING game with no restart, and `debug.log` must show
+`HOT-INSTALLED` / `HOT-UNINSTALLED` next to `PLUGIN installed N/11`. F11 is the one that proves the HUD is
+DYNAMIC - the crosshair and the hotbar are not spawned during wiring any more, `ui.hud` builds them when
+its element is mounted and despawns them when it goes:
+(1) start with the inventory layer OFF (`tools\plugins-no-ui-inventory.bat`): the CROSSHAIR must be there and
+the hotbar must never appear anywhere - not at the main menu, not on the loading screen, not over the pause
+menu (it was a HUD element that did not exist yet, not a hidden one), and `E` must open nothing;
+(2) press F11 -> the strip appears WITH its items drawn. A strip that comes back blank means the reconcile
+cache was not invalidated when its cells were respawned (`buildHotbar` marks the hotbar range dirty);
+(3) press F11 again -> the strip and the bag are gone and NOTHING is left on screen: a frozen strip is the
+residue the host's deferred unmount exists to prevent (the log says `HUD element unmounted hotbar`);
+(4) F11 off/on five times: no duplicated strip, no `frame error`, the selection highlight still follows the
+1..9 keys, and the items are still drawn every round - this is the leak test: every round must end with
+the same one strip and the same log lines;
+(5) `tools\plugins-no-optional-surfaces.bat` (four surfaces off) -> `PLUGIN installed 7/11`, a plain
+crosshair-only HUD, and no `PAGE`/`HUD element` mount line for the surfaces that are off.
+

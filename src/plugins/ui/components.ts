@@ -310,6 +310,32 @@ export function spawnList(
   return rows;
 }
 
+// ===== a tree walk, for the hosts that MOUNT and UNMOUNT widget trees at runtime =====
+
+/** Every widget in the subtree rooted at `root`, CHILDREN FIRST, for a despawn that leaves nothing behind —
+ *  the ECS has no cascade, so a host taking a HUD element or a page down has to walk it itself.
+ *
+ *  It follows the parent FIELD, not liveness, so a root that is already dead still finds the children it left
+ *  behind: that is exactly the case a deferred unmount meets (the plugin's `stop` and the barrier command may
+ *  both have touched the same tree). Despawning an already-dead entity is a no-op. */
+export function subtreeOf(world: World, root: Entity): Entity[] {
+  const children = new Map<Entity, Entity[]>();
+  for (const e of world.query(UI_TREE).entities()) {
+    const parent = world.get(e, UI_TREE)?.parent;
+    if (parent === undefined) continue;
+    const list = children.get(parent);
+    if (list) list.push(e);
+    else children.set(parent, [e]);
+  }
+  const out: Entity[] = [];
+  const walk = (e: Entity): void => {
+    for (const c of children.get(e) ?? []) walk(c);
+    out.push(e);
+  };
+  walk(root);
+  return out;
+}
+
 // ===== data writers (safe to call from inside a system) =====
 
 export function setUiText(world: World, entity: Entity, text: string, raw = false): void {

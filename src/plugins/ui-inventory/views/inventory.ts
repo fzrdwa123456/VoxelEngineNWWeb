@@ -11,6 +11,13 @@
 // the view stopped being called once per frame at all. Spawning stays here because it is a structural
 // change, which a system may not make (iron rule 1).
 //
+// WHO SPAWNS WHAT (P1.34): the BAG is a modal surface, so it is built here once, during wiring. The HOTBAR
+// is a HUD ELEMENT — `ui.hud` owns its lifetime, which is what makes the inventory layer optional at
+// runtime: uninstalling the plugin takes the strip down, installing it builds a new one. So the hotbar
+// arrives through `buildHotbar` (called at a barrier by the host) instead of in the constructor, and the
+// cells it spawns land in the SAME handle arrays `ui.inventory` writes (a stale handle is inert: every
+// setter checks the component first).
+//
 // WHY THE DATA IS NOT HERE: `interaction` used to ask the UI "is a hand non-empty?" through a callback. It
 // reads the selected slot itself now, so the world and the UI cannot disagree about what is in your hand.
 // Selection and stack moves are COMMANDS (`SelectSlot`, `SwapSlots`), so the UI never writes component
@@ -21,6 +28,7 @@
 import { HOTBAR_SLOTS, INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../../player/components";
 import { SwapSlots } from "../../../core/effect/commands";
 import { UI_MODAL } from "../../../data/globals/resources";
+import { UI_PAINT } from "../../../data/globals/paint";
 import { onUiAction, UI_ACTIONS, ACTION_BAG_CLICK } from "../../../data/globals/actions";
 import { spawnButton, spawnLabel, spawnPanel } from "../../ui/components";
 import type { Entity, World } from "../../../core/world";
@@ -34,8 +42,6 @@ export class Inventory {
   private readonly icons: Entity[] = [];
   private readonly counts: Entity[] = [];
   private readonly panel: Entity;
-  /** The hotbar strip (spawned VISIBLE — `ui.hud` owns whether it is shown, see hotbarEntity) */
-  private readonly hotbar: Entity;
 
   /** Is the backpack up? The state IS the resource (`UI_MODAL.inventory`, flipped by ui.navigation) and
    *  the panel's visibility is painted from it by that system — this view writes neither. */
@@ -48,15 +54,10 @@ export class Inventory {
     return this.panel;
   }
 
-  /** The always-on hotbar strip, for `ui.hud` — the system that hides the GAMEPLAY widgets while no
-   *  world is running. It is spawned VISIBLE (the hand-written HUD had no visibility state at all), so
-   *  something has to own that flag, and it is not this view: a visibility flag is world state. */
-  get hotbarEntity(): Entity {
-    return this.hotbar;
-  }
-
   /** The widget handles `ui.inventory` writes into — published as the INVENTORY_WIDGETS resource by the
-   *  composition root. The arrays are this view's own (nothing else may grow them: spawning is wiring). */
+   *  composition root. The arrays are this view's own and they are MUTATED IN PLACE by `buildHotbar` (a
+   *  re-install fills slots 0..HOTBAR_SLOTS-1 again), which is why the resource gets the arrays and never a
+   *  copy: a fresh array would leave the system writing the dead cells of the previous strip. */
   get widgets(): { slots: readonly Entity[]; icons: readonly Entity[]; counts: readonly Entity[] } {
     return { slots: this.slots, icons: this.icons, counts: this.counts };
   }
@@ -65,10 +66,7 @@ export class Inventory {
     private readonly world: World,
     private readonly entity: Entity,
   ) {
-    const hotbar = spawnPanel(world, null, "inv.hotbar");
-    this.hotbar = hotbar;
-    for (let i = 0; i < HOTBAR_SLOTS; i++) this.addSlot(world, hotbar, i, false);
-
+    // THE BAG (a modal surface: built once, hidden until UI_MODAL.inventory says otherwise).
     this.panel = spawnPanel(world, null, "inv.panel", { hidden: true });
     const inner = spawnPanel(world, this.panel, "inv.inner");
     spawnLabel(world, inner, "inv.title", "inv.title");
@@ -91,6 +89,27 @@ export class Inventory {
     // no gate, so 1..9 also worked at the main menu, on the loading screen and with the pause menu open.
     // The decision is `ui.navigation`'s, taken from the key EDGES the device layer publishes (ecs/ui/
     // navigation.ts), which is also where the inventory key already lived.
+  }
+
+  /** THE HOTBAR STRIP — the HUD element's `build`, called by `ui.hud` at a barrier whenever the element is
+   *  mounted (boot, and again after every hot re-install). It returns the ROOT: the host despawns the whole
+   *  subtree when the element goes away.
+   *
+   *  Spawned HIDDEN: the host writes the element's gate in the same frame (see the hud view's note), and a
+   *  strip that is up for one frame would be a visible flash every time the plugin is installed.
+   *
+   *  THE PAINT CACHE IS INVALIDATED HERE, and that is not an optimisation: `ui.inventory` diffs the component
+   *  against what it last DREW, and those cells are the ones that were just despawned — without this the diff
+   *  would skip every hotbar cell and the strip would come back BLANK after a hot re-install. */
+  buildHotbar(world: World): Entity {
+    const hotbar = spawnPanel(world, null, "inv.hotbar", { hidden: true });
+    for (let i = 0; i < HOTBAR_SLOTS; i++) this.addSlot(world, hotbar, i, false);
+    const paint = world.resource(UI_PAINT).inventory;
+    for (let i = 0; i < HOTBAR_SLOTS; i++) {
+      paint.drawn[i] = "\u0000"; // no real signature equals this: the diff below redraws the cell
+      paint.waiting[i] = 0;
+    }
+    return hotbar;
   }
 
   /** The component this view's widgets mirror. A record, so the reference is stable (iron rule 2). */

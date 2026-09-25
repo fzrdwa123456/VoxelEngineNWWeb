@@ -12,7 +12,15 @@
 // A HOST is registered by the view that owns the container (`buildSettingsPanel`), one per menu: it is the
 // ONLY thing that has to be known at wiring time, and it is generic — it knows nothing about any page.
 import { defineResource } from "../../core/data/resource";
-import type { Entity, World } from "../../core/world";
+import { defineCommand, type Entity, type World } from "../../core/world";
+
+/** A deferred LAYOUT operation: the ui lane's ONE generic deferral. Its payload IS the work, because the work
+ *  is plugin-side (mount a page, build a HUD element) while the BARRIER is the core's — and a system may not
+ *  spawn or despawn (iron rule 1), which is the whole reason this exists. It is DATA (not a ui-pages private)
+ *  because two hosts use it: the page host and `ui.hud`. */
+export const UiLayoutOp = defineCommand<{ apply: (world: World) => void }>("uiLayoutOp", (world, op) => {
+  op.apply(world);
+});
 
 /** Where a page appears. `settings` = a tab inside the settings panel (the only section today); adding
  *  another one is a data change here plus a host registration, not a new mechanism. */

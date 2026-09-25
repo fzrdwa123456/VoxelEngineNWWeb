@@ -538,21 +538,22 @@ const inv = createInventoryView(world, player);
 // and writes these widgets, which is why the view is no longer called once per frame.
 world.insertResource(INVENTORY_WIDGETS, inv.widgets);
 const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon });
-// The GAMEPLAY widgets' visibility: the crosshair and the hotbar exist in every mode (they were spawned
-// visible and nothing wrote their flag), so one system owns that flag and derives it from "is a world
-// running". It needs the hotbar, which is why it is built here rather than with the other UI systems.
+// THE GAMEPLAY HUD — and the host that OWNS it (P1.34): the crosshair and the hotbar used to be spawned
+// during wiring and merely hidden outside a world. Now each one is BUILT by `ui.hud` when its element is
+// mounted and DESPAWNED with it, so the HUD is as dynamic as the plugin set: F11 builds a strip, and
+// uninstalling takes it down. Spawning is a STRUCTURAL change, so it happens at a barrier (the host defers it).
 // "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain, so F11 is
 // felt immediately: the hotbar and the bag panel are the core's to show, and this is how the core asks.
 const inventoryOn = (): boolean => livePlugins.has("ui-inventory");
-// THE HUD TABLE (P1.32): each element carries its own gate. The core contributes the two it owns by name; a
+// THE HUD TABLE (P1.32, build added in P1.34): each element carries its own gate AND its own build. The core
 // plugin may contribute more through `SLOT_UI_HUD` (armor, xp, a boss bar...) without touching this file —
 // which is why the getter merges the registry with the core's pair instead of listing everything here.
 const hudElements = (): readonly UiHudElement[] => [
   ...registry.list(SLOT_UI_HUD),
-  { id: "crosshair", order: 10, roots: [hud.crosshairEntity], gate: () => inWorld() },
-  { id: "hotbar", order: 20, roots: [inv.hotbarEntity], gate: () => inWorld() && inventoryOn() },
+  { id: "crosshair", order: 10, build: (mount) => [hud.buildCrosshair(mount.world)], gate: () => inWorld() },
+  { id: "hotbar", order: 20, build: (mount) => [inv.buildHotbar(mount.world)], gate: () => inWorld() && inventoryOn() },
 ];
-const uiHud = createHudSystem(world, { elements: hudElements });
+const uiHud = createHudSystem(world, { elements: hudElements, log: logDebug });
 
 // ===== System registration =====
 // Registration order IS the default execution order; `after`/`before` state the constraints that are
