@@ -1140,6 +1140,22 @@ Still outstanding:
   argument, one case per row of the table) — the old one constructed an input state the boot cannot produce,
   which is precisely why it passed while the game came up Chinese. Lesson for every future check: build the
   input PRODUCTION builds, not the input that makes the assertion easy.
+- **P1.37 — the BLOCK TABLE is pack-chain data too, and the install declares it.** `DONE` (P1.36's shape, one
+  level down, and the second half of P1.20's "next slice"). `blockregistry.ts` used to read the pack chain
+  ITSELF, in `loadBlockRegistry()` at config time — before the plugins installed — so "which blocks does this
+  install have" could not be a declaration and the content plugin had nothing to say about content. Now
+  `data/assets/blocks.ts` is the DISCOVERY half (merge every `data/blocks.json` layer, keep the empty-chain
+  `missing` fallback with it, report the layer count), the content plugin contributes the entries into the new
+  `SLOT_BLOCKS` at install time, and `buildBlockRegistry(entries)` assembles the engine-side definitions
+  (label / three face textures / the missing-texture flag) from THAT — first build wins, and the registry no
+  longer mentions `resolveAllBytes` at all (the gate asserts that). The reader functions stopped
+  self-loading: `getBlockDef`/`allBlockIds` are plain table lookups, and the build belongs to the install. The
+  one thing that could not move is the STARTING INVENTORY: the player entity is spawned before the install
+  (moving it means moving the whole resource table with it — the deep boot reorder P1.20 describes), so it is
+  seeded from `discoveredBlockIds()`, the same discovery the plugin declares from, which is why the two cannot
+  disagree. Pinned by the gate end to end (synthetic pack -> real plugin setup -> real build -> real
+  `getBlockDef`) plus `tools\blocks-demo.bat` for a hand test. What is STILL not data: the table is not
+  consulted by the MESHER (it draws the built-in checker block), and the menu layouts remain un-declared.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

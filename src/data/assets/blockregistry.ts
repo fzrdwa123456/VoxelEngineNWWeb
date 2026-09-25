@@ -1,13 +1,22 @@
-// ===== Block registry: data-driven (data\blocks.json inside packs, merged across packs) =====
-// "The engine itself is a mod": built-in blocks and user content are on equal footing.
-// A mod (game\mods\<name>\) or resource pack carrying data\blocks.json adds blocks (distinct ids unioned)
-// or overrides existing ones (same id: higher-priority pack wins). Priority (low->high): mods < user resourcepacks
-// (MC semantics: resource packs are the final authority; mods provide the content baseline; players reskin mod blocks via packs).
-// In-pack path (MC taxonomy): assets\<ns>\data\blocks.json (data goes in data\, sibling of textures\/lang\);
-// normalized to the global path data/blocks.json.
-// Entry fields: label (display name, defaults to id) / color (solid material, CSS color) / top/side/bottom (texture paths,
-// pack-root relative) / all (shorthand for all three faces); a referenced texture that no pack in the chain provides sets hasMissingTexture (neighbour faces are then not culled and alphaTest drops the fragments).
-import { packsInstalled, resolveAllBytes, textureMissing } from "./textures";
+// ===== Block registry: the engine-side table, ASSEMBLED from what the install DECLARED (P1.37) =====
+// "The engine itself is a mod": built-in blocks and user content are on equal footing. The blocks come from
+// `assets/<ns>/data/blocks.json` inside the packs (normalized to `data/blocks.json`), merged low->high
+// priority — mods provide the content baseline, user resource packs reskin or override them (same id: the
+// higher-priority pack wins), which is MC's semantics.
+//
+// WHAT CHANGED (P1.37) AND WHY IT MATTERS: this module used to read the pack chain ITSELF, in `loadBlockRegistry()`,
+// at config time — i.e. "which blocks does this install have" was answered by a data module before the plugins
+// were even installed, so content was not something a plugin could declare (the ROADMAP's P1.20 blocker). The
+// TABLE is now assembled from the ENTRIES the content plugin contributed into `SLOT_BLOCKS` (which it
+// discovered from the chain — see `data/assets/blocks.ts`), after the install. Same data, one owner, and the
+// engine's content is a plugin's statement like the language set.
+//
+// Entry fields (as a pack writes them): label (display name, defaults to id) / color (solid material, CSS
+// color) / top/side/bottom (texture paths, pack-root relative) / all (shorthand for all three faces); a
+// referenced texture that no pack in the chain provides sets hasMissingTexture (neighbour faces are then not
+// culled and alphaTest drops the fragments).
+import { textureMissing } from "./textures";
+import { FALLBACK_BLOCK_ENTRIES, type BlockEntry } from "./blocks";
 import { defineResource, type Resource } from "../../core/world";
 
 export interface BlockDef {
@@ -23,12 +32,9 @@ export interface BlockDef {
   hasMissingTexture: boolean;
 }
 
-type RawDef = { label?: unknown; color?: unknown; top?: unknown; side?: unknown; bottom?: unknown; all?: unknown };
-
-/** The registry as DATA: the merged block table and whether it has been built. It used to be a
- *  module-level `const registry` + `let loaded`. The object exists at import time (the packs are loaded
- *  before the World is built) and the composition root INSERTS it as BLOCK_REGISTRY, so the table has a
- *  name and an owner and a system (or a test) can read it instead of calling into this module. */
+/** The registry as DATA: the assembled block table and whether it has been built. The object exists at
+ *  import time and the composition root INSERTS it as BLOCK_REGISTRY, so the table has a name and an owner
+ *  and a system (or a test) can read it instead of calling into this module. */
 export interface BlockRegistryState {
   readonly byId: Map<string, BlockDef>;
   loaded: boolean;
@@ -44,68 +50,45 @@ export function blockRegistryState(): BlockRegistryState {
   return state;
 }
 
-// Fallback: when no pack in the chain has blocks.json (built-in mod deleted), register only the missing block
-// so the inventory/world set always has something usable (the built-in trio moved to mods\defaultmod.zip; the engine no longer bundles it)
-const FALLBACK_DEFS: Record<string, RawDef> = {
-    missing: { label: "Missing Block", side: "block/nonexistent.png" },
-};
-
-function asStr(v: unknown): string | undefined {
-  return typeof v === "string" && v ? v : undefined;
-}
-
-function defFrom(id: string, raw: RawDef): BlockDef {
-  const side = asStr(raw.side) ?? asStr(raw.all);
+function defFrom(entry: BlockEntry): BlockDef {
+  const side = entry.side ?? entry.all;
   const def: BlockDef = {
-    id,
-    label: asStr(raw.label) ?? id,
-    color: asStr(raw.color),
+    id: entry.id,
+    label: entry.label ?? entry.id,
+    color: entry.color,
     side,
-    top: asStr(raw.top) ?? asStr(raw.all) ?? side,
-    bottom: asStr(raw.bottom) ?? asStr(raw.all) ?? side,
+    top: entry.top ?? entry.all ?? side,
+    bottom: entry.bottom ?? entry.all ?? side,
     hasMissingTexture: false,
   };
   def.hasMissingTexture = [def.top, def.side, def.bottom].some((p) => p !== undefined && textureMissing(p));
   return def;
 }
 
-/** Loaded once at startup: merge every pack's blocks.json (low->high priority, later merges win on same
- *  id) and RETURN the line describing what was merged, or null when there was nothing to do.
+/** ASSEMBLE the table from the DECLARED entries (the content plugin's `SLOT_BLOCKS`) and return the line
+ *  describing it. THE FIRST CALL WINS: the table is built once, from what the install declared, and a later
+ *  caller (a test, a second driver) reads the same table instead of rebuilding it.
  *
- *  It does not log it: this is a DATA module, so it has no side effects — the composition root prints the
- *  returned summary. */
-export function loadBlockRegistry(): string | null {
-  if (state.loaded) return null;
-  // Do NOT build and do NOT set `loaded` before the packs are installed — that would cache a registry
-  // holding nothing but FALLBACK_DEFS forever. The original needed no such test (fs is synchronous, the
-  // packs are there when the module is evaluated); a Tauri pack arrives only through `await preloadPacks()`.
-  if (!packsInstalled()) return null;
-  state.loaded = true;
-  const layers = resolveAllBytes("data/blocks.json");
-  let merged: Record<string, RawDef> = {};
-  for (const bytes of layers) {
-    try {
-      const p = JSON.parse(new TextDecoder().decode(bytes));
-      if (p && typeof p === "object") merged = { ...merged, ...p };
-    } catch {
-            /* Bad json: ignore this layer, other layers unaffected */
-    }
+ *  An EMPTY declaration is not an error: it registers the discovery's fallback entry set (`missing`), the
+ *  same rule the module always had for "the chain has no blocks.json" — extended to cover "no content plugin
+ *  declared any block", so the inventory and the world still have something usable. */
+export function buildBlockRegistry(entries: readonly BlockEntry[]): string {
+  if (!state.loaded) {
+    state.loaded = true;
+    const list = entries.length > 0 ? entries : FALLBACK_BLOCK_ENTRIES;
+    for (const entry of list) state.byId.set(entry.id, defFrom(entry));
   }
-  if (!Object.keys(merged).length) merged = FALLBACK_DEFS;  // Empty-chain fallback
-  for (const [id, raw] of Object.entries(merged)) {
-    if (!raw || typeof raw !== "object") continue;
-    state.byId.set(id, defFrom(id, raw as RawDef));
-  }
-  return `BLOCKREG registry loaded: ${state.byId.size} blocks (${layers.length} layers of blocks.json) -> [${[...state.byId.keys()].join(", ")}]`;
+  return `BLOCKREG registry loaded: ${state.byId.size} blocks -> [${[...state.byId.keys()].join(", ")}]`;
 }
 
+/** One block's definition, or undefined when the install has no such block (every caller treats that as
+ *  "unknown block": the inventory shows the checker, the icon baker uses its fallback). */
 export function getBlockDef(id: string): BlockDef | undefined {
-  loadBlockRegistry();
   return state.byId.get(id);
 }
 
-/** All registered block ids (fills the inventory) */
+/** All registered block ids, in declaration order (what the inventory and the starting items are filled
+ *  from). Empty until `buildBlockRegistry` has run — the build is the install's job, not a reader's. */
 export function allBlockIds(): string[] {
-  loadBlockRegistry();
   return [...state.byId.keys()];
 }

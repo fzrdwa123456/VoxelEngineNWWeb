@@ -4052,6 +4052,77 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
   assert(/subtreeOf/.test(hudSys), "…taking the whole SUBTREE down with it (the ECS has no cascade)");
 });
 
+// ===== THE BLOCK TABLE IS PACK-CHAIN DATA TOO (P1.37) =====
+check("a PACK can add a block: the discovered table drives the registry (P1.37)", () => {
+  // The same shape as the language check below, one level down: the chain DELIVERS the entries, the content
+  // plugin DECLARES them, and the registry ASSEMBLES the engine-side definitions from that declaration. It
+  // used to be one function reading the packs itself, at config time, before the install — i.e. content could
+  // not be declared at all. NOTE: `installPacks` REPLACES the whole chain, so this and the language check
+  // below are the last two checks in this file.
+  const Tex = load("data/assets/textures.js");
+  const Blocks = load("data/assets/blocks.js");
+  const Reg = load("data/assets/blockregistry.js");
+  const Slots = load("core/extension/slots.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  Tex.installPacks({
+    builtin: {
+      name: "test-pack",
+      builtin: true,
+      files: {
+        "data/blocks.json": Buffer.from(
+          JSON.stringify({
+            demo: { label: "Demo Block", side: "block/demo.png" }, // a texture NO pack ships
+            plain: { label: "Plain", color: "#123456" },
+          }),
+          "utf8",
+        ).toString("base64"),
+      },
+    },
+    mods: [],
+    resourcepacks: [],
+  });
+  const entries = Blocks.discoverBlockEntries();
+  equal(entries.map((e) => e.id).join(","), "demo,plain", "the chain's entries are discovered, in order");
+  equal(entries[0].label, "Demo Block", "…with the raw fields a pack writes");
+  equal(Blocks.discoveredBlockLayers(), 1, "…and the LAYER count is reported (0 layers is a different problem)");
+
+  // The CONTENT PLUGIN declares them, through the real extension point, in its own setup.
+  const registry = new ExtensionRegistry();
+  load("plugins/content-default/index.js").contentDefaultPlugin.setup({
+    id: "content-default",
+    world: {},
+    registry,
+    contribute: (point, items) => registry.contribute(point, "content-default", items),
+    log: () => {},
+  });
+  const declared = registry.list(Slots.SLOT_BLOCKS);
+  equal(declared.map((b) => b.id).join(","), "demo,plain", "the plugin declares what the pack delivered");
+
+  // …and the REGISTRY assembles the engine-side table FROM the declaration (first build wins).
+  const line = Reg.buildBlockRegistry(declared);
+  assert(/2 blocks/.test(line), `the summary counts the assembled table (got: ${line})`);
+  equal(Reg.allBlockIds().join(","), "demo,plain", "the assembled table is what the readers see");
+  equal(Reg.getBlockDef("demo").label, "Demo Block", "…a label from the pack");
+  equal(Reg.getBlockDef("demo").hasMissingTexture, true, "…and a face texture no pack ships is FLAGGED");
+  equal(Reg.getBlockDef("plain").hasMissingTexture, false, "…while a colour-only block is not");
+  assert(Reg.getBlockDef("missing") === undefined, "the empty-chain fallback is NOT registered on top of it");
+  equal(Reg.buildBlockRegistry([]), line, "a second build is a no-op (the install's table stays)");
+
+  // The SOURCE facts the boot relies on: the root builds from the declarations, BELOW the install, and the
+  // starting items come from the DISCOVERY (that entity is spawned before the install exists).
+  const boot = stripComments(readSource("src/boot/main.ts"));
+  assert(/buildBlockRegistry\(registry\.list\(SLOT_BLOCKS\)\)/.test(boot),
+    "the root assembles the table from SLOT_BLOCKS (no second look at the packs)");
+  assert(boot.indexOf("buildBlockRegistry(") > boot.indexOf("installPlugins("),
+    "…below the install that fills the extension point");
+  assert(/spawnPlayer\(world, SPAWN, discoveredBlockIds\(\)\)/.test(boot),
+    "…and the starting items use the same discovery the plugin declares from");
+  assert(/SLOT_BLOCKS = defineExtensionPoint/.test(readSource("src/core/extension/slots.ts")),
+    "…through a SLOT_BLOCKS extension point of its own");
+  equal(countOf(stripComments(readSource("src/data/assets/blockregistry.ts")), /resolveAllBytes/g), 0,
+    "…and the registry itself no longer reads the packs (that moved to the discovery)");
+});
+
 // ===== THE LANGUAGE SET IS PACK-CHAIN DATA (P1.36) =====
 // The data-ization this pins: "which languages does this install support" is DISCOVERED from what the packs
 // deliver, DECLARED by the content plugin into SLOT_LANGUAGES, and the loader builds one dictionary per

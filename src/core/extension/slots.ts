@@ -12,6 +12,7 @@ import type { SystemDef } from "../flow/schedule";
 import type { Resource } from "../data/resource";
 import type { UiHudElement } from "../../data/globals/ui-hud";
 import type { UiPage } from "../../data/globals/ui-pages";
+import type { BlockEntry } from "../../data/assets/blocks";
 import { defineExtensionPoint } from "./point";
 
 /** Systems a plugin wants in the schedule (each carries its own stage/edges/access declaration). */
@@ -37,3 +38,9 @@ export const SLOT_UI_HUD = defineExtensionPoint<UiHudElement>("uiHud");
 
 /** Command types a plugin owns. */
 export const SLOT_COMMANDS = defineExtensionPoint<{ readonly name: string }>("commands");
+
+/** BLOCKS a plugin brings: the engine's block table, DISCOVERED from the pack chain and declared by the
+ *  content plugin at install time. `blockregistry.ts` assembles the engine-side definitions from what was
+ *  contributed, so the table is a statement about the install rather than a lookup a data module performs
+ *  behind everyone's back — see data/assets/blocks.ts and P1.37. */
+export const SLOT_BLOCKS = defineExtensionPoint<BlockEntry>("blocks");

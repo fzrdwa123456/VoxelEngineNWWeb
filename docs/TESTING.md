@@ -368,3 +368,13 @@ a value the install does not declare at all (`"language": "xx"`, or a number): f
 engine's first-run default (Chinese) — those two must not be confused, because that confusion is what made the
 first fix look right while the game still came up Chinese.
 
+AFTER the block-pack demo (`tools\blocks-demo.bat` writes `assets\voxel\data\blocks.json` into the sample
+resource pack: one NEW block plus an OVERRIDE of a mod block): (1) the boot log must gain
+`BLOCKREG registry loaded: 7 blocks -> [grass, default, missing, ruby, stone, gold, demo]` next to
+`[content-default] content: ... 7 block(s) declared from the pack chain` - six blocks means the declaration
+never reached the registry, eight means the merge ran twice, and `BLOCKREG` appearing BEFORE the
+`PLUGIN installed` line means the build moved back above the install; (2) the inventory must show a seventh
+slot with a CHECKER icon (the pack ships no texture: that is the missing-texture path, not a bug) and the
+tooltips must read the pack's labels - `Demo Block (from the pack)` and the reskinned `Stone`; (3) delete the
+file and relaunch: seven becomes six and the tooltip goes back to the mod's label.
+

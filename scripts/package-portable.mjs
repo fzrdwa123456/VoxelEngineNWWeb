@@ -151,6 +151,7 @@ Plugin toggles (double-click one, then RESTART the game — the manifest is read
   plugins-no-ui-inventory.bat      off: the hotbar element and the backpack
   plugins-no-optional-surfaces.bat off: all FOUR optional surfaces at once
   lang-demo.bat                    write a FOURTH language (fr) into the sample pack, then restart
+  blocks-demo.bat                  add a 7th block (and reskin one) in the sample pack, then restart
 While the game runs, F8 / F10 / F11 / F9 install or uninstall those same surfaces live (the result appears as a
 HUD message and in game\\logs\\debug.log).
 `;
@@ -175,5 +176,5 @@ console.log(`  voxelengine-tauri.exe  ${Math.round(statSync(EXE_SRC).size / 1024
 console.log(`  WebView2Loader.dll     ${Math.round(statSync(LOADER_SRC).size / 1024)} KB  (required)`);
 if (installed.length) console.log(`  sample packs installed under game\\: ${installed.join(", ")}`);
 else console.log("  no resource packs under game\\ (plan A: assets are fully external)");
-if (toggleScripts) console.log(`  ${toggleScripts} plugin-toggle .bat scripts (plugins-default / plugins-no-ui-*)`);
+if (toggleScripts) console.log(`  ${toggleScripts} tool .bat scripts (plugins-* / *-demo)`);
 console.log(`  ${files.length} files, ${(total / 1024 / 1024).toFixed(1)} MB`);

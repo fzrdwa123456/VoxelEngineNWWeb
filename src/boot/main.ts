@@ -36,7 +36,7 @@ import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
 import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
-import { SLOT_LANGUAGES, SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
+import { SLOT_BLOCKS, SLOT_LANGUAGES, SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
 import { UI_HUD_PAINTED, type UiHudElement } from "../data/globals/ui-hud";
 import { UI_PAGE_HOSTS, UI_PAGES_MOUNTED } from "../data/globals/ui-pages";
 import type { Plugin } from "../core/plugin/descriptor";
@@ -86,7 +86,8 @@ import { menuBgKind, menuBgState, MENU_BG_KIND } from "../data/assets/background
 import { resolveAllBytes, resolveTexture } from "../data/assets/textures";
 import { preloadPacks } from "../host/desktop/packs";
 
-import { allBlockIds, blockRegistryState, BLOCK_REGISTRY, loadBlockRegistry } from "../data/assets/blockregistry";
+import { buildBlockRegistry, blockRegistryState, BLOCK_REGISTRY } from "../data/assets/blockregistry";
+import { discoveredBlockIds, discoveredBlockLayers } from "../data/assets/blocks";
 import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // ===== The plugin system =====
 // The registry the plugins contribute into, the manifest that decides which of them are installed, and
@@ -202,12 +203,14 @@ onConfigChange("uiScale", saveSettings);
 onWindowModeChange(saveSettings);
 onConfigChange("binds", saveSettings);
 
-// Block registry: merge every resource pack's blocks.json across the pack chain. Must run
-// before the inventory is constructed (its slots are filled from the registry). The voxel
-// mesher deliberately does not consult it yet — it draws the built-in checker block.
-// (the data module returns the summary line; this root owns the log sink)
-const blockRegistryReport = loadBlockRegistry();
-if (blockRegistryReport) logDebug(blockRegistryReport);
+// Block registry: the engine-side table, built from what the CONTENT PLUGIN declared (P1.37). It used to be
+// merged HERE, in the config phase, before the plugins existed — which is why "which blocks does this install
+// have" could not be content. The build now sits BELOW the plugin block, next to the language load; the voxel
+// mesher still does not consult the table (it draws the built-in checker block).
+// The startup ITEMS are seeded from the same discovery the plugin declares from (see `spawnPlayer` below):
+// the player entity is spawned up here, before the install, so it cannot ask the registry.
+// The registry BUILD moved below the plugin block — see "the block table is the install's statement too".
+// (nothing to log here any more: the registry is built after the install, from the declarations)
 
 // The canvas host: the element the renderer's canvas gets attached to. Like the UI mount root, it is a
 // RESOURCE (ecs/presentation.ts) — the boot driver reads it back from the world rather than closing over
@@ -256,7 +259,9 @@ const world = new World();
 const SPAWN = new THREE.Vector3(0.5, WORLD_SURFACE_Y + HUMANOID_BODY.eyeHeight, 0.5);
 // The starting hotbar comes from the registry (mod blocks appear automatically), so the ECS layer
 // never has to import blockregistry.ts.
-const player = spawnPlayer(world, SPAWN, allBlockIds());
+// The starting items are the pack chain's DISCOVERY, not the registry: this entity is spawned before the
+// plugins install, and the registry is assembled from the DECLARATIONS (P1.37) — one source, two readers.
+const player = spawnPlayer(world, SPAWN, discoveredBlockIds());
 
 // Voxel world: one mesh per visible chunk lives in this group.
 const voxel = new VoxelWorld();
@@ -678,6 +683,14 @@ for (const line of registry.report()) logDebug(`REGISTRY ${line}`);
 // REGISTRY also means "the engine declared it" and "the install declared it" are one statement: turn the
 // content plugin off in the manifest and the locale keeps its own default.
 logDebug(loadLang(locale, readSettings().language, registry.list(SLOT_LANGUAGES).map((l) => l.id)));
+// THE BLOCK TABLE IS THE INSTALL'S STATEMENT TOO (P1.37): the same move as the language set, for the same
+// reason. The content plugin discovered the chain's `data/blocks.json` entries and declared them into
+// `SLOT_BLOCKS`; the engine-side table (label, the three face textures, the missing-texture flag) is assembled
+// from THAT declaration, not from a second look at the packs. Nothing reads the registry before this line any
+// more: the starting items were seeded from the discovery itself (see `spawnPlayer` above).
+logDebug(
+  `${buildBlockRegistry(registry.list(SLOT_BLOCKS))} (${discoveredBlockLayers()} layer(s) of blocks.json)`,
+);
 /** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
 const contributeSystem = (owner: string, def: SystemDef): void => {
   if (!installOutcome.has(owner)) return;
