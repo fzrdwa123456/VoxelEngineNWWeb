@@ -36,7 +36,7 @@ import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
 import { createPickerSystem, createUiDebugPlugin } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
-import { SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
+import { SLOT_LANGUAGES, SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
 import { UI_HUD_PAINTED, type UiHudElement } from "../data/globals/ui-hud";
 import { UI_PAGE_HOSTS, UI_PAGES_MOUNTED } from "../data/globals/ui-pages";
 import type { Plugin } from "../core/plugin/descriptor";
@@ -85,7 +85,7 @@ import { onConfigChange } from "../core/services/bus";
 import { menuBgKind, menuBgState, MENU_BG_KIND } from "../data/assets/background";
 import { resolveAllBytes, resolveTexture } from "../data/assets/textures";
 import { preloadPacks } from "../host/desktop/packs";
-import { DEFAULT_LANGUAGES } from "../plugins/content-default";
+
 import { allBlockIds, blockRegistryState, BLOCK_REGISTRY, loadBlockRegistry } from "../data/assets/blockregistry";
 import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // ===== The plugin system =====
@@ -160,10 +160,11 @@ const keymap = createKeyMap();
 // The data modules RETURN their summaries and this root prints them: a `data/` file has no side effects,
 // and "the packs merged N blocks" is exactly the kind of evidence the composition root owns the sink for.
 // The language SET is CONTENT: it is the content plugin's declaration, not a literal in the i18n module.
-// The plugin's runtime contribution cannot drive this (the install happens after the config phase), so the
-// root passes the declaration itself — and a manifest that disables the plugin leaves the set empty, which
-// keeps the locale's own default (the boot must not depend on content being installed).
-logDebug(loadLang(locale, readSettings().language, DEFAULT_LANGUAGES));
+// It is the content plugin's declaration (discovered from the pack chain, contributed at INSTALL time), so
+// the load cannot happen in this config block — the extension point is still empty here. It sits below the
+// plugin block instead; a manifest that disables the content plugin leaves the set empty, which keeps the
+// locale's own default (the boot must not depend on content being installed). The other loaders stay here:
+// only the language set is content.
 loadFont(font, readSettings().font);
 loadUIScaleMode(uiScale, readSettings().uiScale);
 loadBinds(keymap, readSettings().keybinds);
@@ -669,6 +670,14 @@ const installOutcome = installPlugins(PLUGINS, {
 // reads this list — so it sees the boot's plugins and the runtime ones in one place.
 for (const id of installOutcome.installed) livePlugins.add(id);
 for (const line of registry.report()) logDebug(`REGISTRY ${line}`);
+// THE LANGUAGE SET IS CONTENT, AND THE INSTALL IS WHAT DECLARES IT (P1.36). This used to run in the config
+// block above with a literal set, which is exactly why a pack shipping `lang/fr.json` could never be
+// selected: i18n built its dictionaries for a hard-coded zh/en/ja. It runs HERE, where `SLOT_LANGUAGES` has
+// been filled by the content plugin — the dictionaries are built lazily on the first `t()` anyway, and the
+// first paint (the loading screen) happens after `boot()` runs, further down. Reading the set from the
+// REGISTRY also means "the engine declared it" and "the install declared it" are one statement: turn the
+// content plugin off in the manifest and the locale keeps its own default.
+logDebug(loadLang(locale, readSettings().language, registry.list(SLOT_LANGUAGES).map((l) => l.id)));
 /** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
 const contributeSystem = (owner: string, def: SystemDef): void => {
   if (!installOutcome.has(owner)) return;

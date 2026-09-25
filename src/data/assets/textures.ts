@@ -202,6 +202,21 @@ export function resolveAllBytes(rel: string): Bytes[] {
   return out;
 }
 
+/** Every path the PACK CHAIN delivers under `prefix`, de-duplicated and sorted.
+ *
+ *  `resolveAllBytes`/`resolveBytes` answer "what ARE the bytes of this known path"; this answers the other
+ *  question — **which paths EXIST** — which is what makes a content LIST discoverable instead of hard-coded
+ *  (the language set, P1.36: `lang/<id>.json` in any layer is a language the install supports). It walks
+ *  every layer, built-in included, so a path only the engine's own pack ships still counts. */
+export function listPackPaths(prefix: string): string[] {
+  scanPacks();
+  const out = new Set<string>();
+  for (const layer of packLayers) {
+    for (const rel of layer.keys()) if (rel.startsWith(prefix)) out.add(rel);
+  }
+  return [...out].sort();
+}
+
 // Missing-texture fallback: a procedural 2x2 magenta/black checkerboard PNG (magenta FF00FF and black diagonals), hardcoded data URL.
 // Engine-bundled fallback; deleting resource packs never loses it; cannot be overridden — missing resource = always shows this checkerboard
 export const CHECKER_TEXTURE_URL =

@@ -2494,8 +2494,10 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   assert(/loadBinds\(keymap, readSettings\(\)\.keybinds\)/.test(main), "…seeded from settings.json");
   // The language is seeded from settings.json AND validated against the CONTENT plugin's declaration: the
   // i18n module may not import a plugin, so the root hands the set in (see loadLang).
-  assert(/loadLang\(\s*locale,\s*readSettings\(\)\.language,\s*DEFAULT_LANGUAGES,?\s*\)/.test(main),
-    "…and so is the language (validated against the content plugin's declared set)");
+  assert(/loadLang\(\s*locale,\s*readSettings\(\)\.language,\s*registry\.list\(SLOT_LANGUAGES\)/.test(main),
+    "…and so is the language — validated against the set the content plugin DECLARED (no literal, P1.36)");
+  assert(main.indexOf("loadLang(") > main.indexOf("installPlugins("),
+    "…loaded AFTER the install, which is what fills that extension point (the set IS the content plugin's)");
 
   // The bind table IS the resource: the module seeds its DEFAULTS INTO that object (no private copy).
   const keymap = R.createKeyMap();
@@ -4048,6 +4050,74 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
     "…and an element says how it is BUILT (`roots` stays for a tree that was spawned during wiring)");
   assert(/UiLayoutOp/.test(hudSys), "…and the lifetime is DEFERRED to a barrier (a system may not spawn or despawn)");
   assert(/subtreeOf/.test(hudSys), "…taking the whole SUBTREE down with it (the ECS has no cascade)");
+});
+
+// ===== THE LANGUAGE SET IS PACK-CHAIN DATA (P1.36) =====
+// The data-ization this pins: "which languages does this install support" is DISCOVERED from what the packs
+// deliver, DECLARED by the content plugin into SLOT_LANGUAGES, and the loader builds one dictionary per
+// declared id. Before this it was a literal in two places (the plugin's list AND i18n's `Lang` union), so
+// `lang/fr.json` could sit in a pack forever: nothing ever asked for "fr". The proof is end-to-end — a
+// synthetic pack, the REAL content plugin's setup, the REAL `loadLang`, the REAL `t()`.
+check("a PACK can add a language: the discovered set drives the dictionaries (P1.36)", () => {
+  // It runs LAST on purpose: `installPacks` REPLACES the whole chain, so every earlier check that reads the
+  // packs (blocks, textures, the dictionary counts) has already run.
+  const Tex = load("data/assets/textures.js");
+  const Langs = load("data/assets/languages.js");
+  const I18n = load("data/assets/i18n.js");
+  const R = load("data/globals/resources.js");
+  const Slots = load("core/extension/slots.js");
+  const { ExtensionRegistry } = load("core/extension/registry.js");
+  const dict = { "lang.xx": "Xx", "main.single": "Singleplayer XX" };
+  Tex.installPacks({
+    builtin: {
+      name: "test-pack",
+      builtin: true,
+      files: { "lang/xx.json": Buffer.from(JSON.stringify(dict), "utf8").toString("base64") },
+    },
+    mods: [],
+    resourcepacks: [],
+  });
+  equal(Tex.listPackPaths("lang/").join(","), "lang/xx.json", "the chain reports the paths it really delivers");
+  equal(Langs.declaredLanguages().join(","), "zh,en,ja,xx", "…so the declared set grows by the pack's language");
+
+  // The CONTENT PLUGIN declares it, through the real extension point, in its own setup.
+  const registry = new ExtensionRegistry();
+  load("plugins/content-default/index.js").contentDefaultPlugin.setup({
+    id: "content-default",
+    world: {},
+    registry,
+    contribute: (point, items) => registry.contribute(point, "content-default", items),
+    log: () => {},
+  });
+  const declared = registry.list(Slots.SLOT_LANGUAGES).map((l) => l.id);
+  equal(declared.join(","), "zh,en,ja,xx", "the plugin declares what the pack chain delivered (not a literal)");
+
+  // …and the LOADER builds a dictionary per declared id: the pack's own string is what `t()` answers.
+  const localeState = R.createLocale();
+  const line = I18n.loadLang(localeState, "xx", declared);
+  assert(/xx=2/.test(line), `the summary counts the pack's dictionary (got: ${line})`);
+  equal(localeState.lang, "xx", "a language the install DECLARES is accepted");
+  equal(I18n.getLang(), "xx", "…and is the language in force");
+  equal(I18n.t("main.single"), "Singleplayer XX", "…so the pack's own translation is what the UI shows");
+  equal(I18n.t("no.such.key"), "no.such.key", "a key nobody defines reads as its key");
+
+  // A language NOBODY declares is refused — that is what makes the set meaningful instead of decorative.
+  I18n.loadLang(localeState, "yy", declared);
+  equal(localeState.lang, "xx", "an undeclared language keeps the one in force");
+  I18n.setLang("yy");
+  equal(I18n.getLang(), "xx", "…and cannot be switched to either");
+  I18n.setLang("en");
+  equal(I18n.getLang(), "en", "…while a declared one can");
+
+  // The discovery is a DATA function (no plugin import), and the PICKER reads the same list as the loader —
+  // that shared source is the point: the drift this replaces made a pack's language publishable but
+  // unselectable.
+  assert(/listPackPaths/.test(stripComments(readSource("src/data/assets/languages.ts"))),
+    "the set is discovered from the pack chain, not listed");
+  assert(/declaredLanguages\(\)\.map/.test(stripComments(readSource("src/plugins/ui/views/menu.ts"))),
+    "…and the settings PICKER is built from that same set (a pack's language is selectable, not just loadable)");
+  assert(!/"zh", "en", "ja"\]/.test(stripComments(readSource("src/data/assets/i18n.ts"))),
+    "…and i18n no longer knows any language by name");
 });
 
 // ===== report =====

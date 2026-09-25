@@ -3,31 +3,38 @@
 //
 // Why a plugin: "which languages does this install support" is content, and content is what a player
 // replaces. Turn this plugin off in plugins.json and the engine still boots — it simply has no declared
-// language set of its own.
+// language set of its own (the locale then keeps its own default, and `loadLang` loads nothing).
 //
-// WHAT IT DOES NOT OWN YET, and why (recorded in ROADMAP.md as P1.20): the locale is LOADED before the
-// plugins install (the loading screen's own text needs it), so the contributed set cannot yet drive
-// `loadLang`. Making it do so means moving the install above the config/content phase — a boot-sequence
-// change, not a content change.
+// IT NOW DRIVES THE LOADER (P1.36). Until this round the set was declared here but LOADED from a literal in
+// `boot/main.ts` (`DEFAULT_LANGUAGES`, read before the install), so the contribution could not have any
+// effect even if a pack had added a language. Two things changed: the set is DISCOVERED from the pack chain
+// (`data/assets/languages.ts` reads every `lang/<id>.json` in it), and the root loads the language set AFTER
+// the install, from `SLOT_LANGUAGES` — i.e. from what this plugin declared. That is the shape the rest of
+// the content work needs: the contributions are an INPUT to the config loaders, not a consumer of them.
+import { declaredLanguages, BUILTIN_LANGUAGES } from "../../data/assets/languages";
 import { SLOT_LANGUAGES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
-
-/** The languages the engine ships dictionaries for. A pack may ship more; the engine validates a language
- *  against what the content plugins DECLARED, so this list is data, not a rule in the i18n module. */
-export const DEFAULT_LANGUAGES: readonly string[] = ["zh", "en", "ja"];
 
 export const contentDefaultPlugin = definePlugin({
   id: "content-default",
   deps: [],
   setup(api) {
+    // Discovered at INSTALL time, which is after `preloadPacks()`: a pack that ships `lang/fr.json` is in
+    // the chain by now, so "fr" is declared without anyone editing this file.
     api.contribute(
       SLOT_LANGUAGES,
-      DEFAULT_LANGUAGES.map((id) => ({ id })),
+      declaredLanguages().map((id) => ({ id })),
     );
   },
   /** A content plugin is exactly what `start` is for: by now the pack chain has been scanned, so it can
-   *  report what this install actually has instead of what the code assumes. */
+   *  report what this install actually has instead of what the code assumes — including which languages
+   *  came from a PACK rather than from the engine. */
   start(api) {
-    api.log(`content: ${DEFAULT_LANGUAGES.length} declared language(s) [${DEFAULT_LANGUAGES.join(", ")}]`);
+    const all = declaredLanguages();
+    const fromPacks = all.filter((id) => !BUILTIN_LANGUAGES.includes(id));
+    api.log(
+      `content: ${all.length} declared language(s) [${all.join(", ")}]` +
+        (fromPacks.length > 0 ? ` - ${fromPacks.length} of them from the pack chain [${fromPacks.join(", ")}]` : ""),
+    );
   },
 });

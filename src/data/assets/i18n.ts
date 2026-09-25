@@ -1,13 +1,21 @@
 // ===== i18n: dictionary files (pack lang\*.json merged in layers) + t() + runtime switching =====
-// Dictionaries are no longer hardcoded: at build time src\assets\lang is packed into default.zip (lang/zh.json, lang/en.json),
-// identical-name dictionaries from all packs (default.zip / mods / resource packs) merge layer by layer — a mod/resource pack dropping lang\*.json
-// incrementally adds entries or overrides existing ones (same key: higher-priority layer wins; priority: resource packs > mods > default.zip).
-// Missing words fall back to English (aligning with MC's en_us convention), then to the key itself. Only user-visible UI copy is covered;
-// debug.log diagnostic lines stay Chinese.
+// Dictionaries are data: identical-name dictionaries from all packs (default.zip / mods / resource packs)
+// merge layer by layer — a mod/resource pack dropping lang\*.json incrementally adds entries or overrides
+// existing ones (same key: higher-priority layer wins; priority: resource packs > mods > default.zip).
+// Missing words fall back to the fallback language (en — MC's en_us convention), then to the key itself.
 //
-// The language IN FORCE is a RESOURCE (`LOCALE`, see ecs/resources.ts): the reconciler re-derives every
-// widget's text from it every frame, so it is read on the tick and every reader declares it. The
-// DICTIONARIES are assets — loaded once from the pack chain, never changed — and stay module-private.
+// ===== WHICH languages exist is a DECLARED SET, not a literal (P1.36) =====
+// It used to be a `Lang = "zh" | "en" | "ja"` union, i.e. a language a pack shipped could never be loaded:
+// `dicts()` built exactly those three, so `lang/fr.json` was a file no code path knew the name of. The set
+// now arrives as an ARGUMENT (`loadLang`, from the content plugin's `SLOT_LANGUAGES` contribution, which
+// `data/assets/languages.ts` discovers from the pack chain) and the dictionaries are built PER DECLARED ID.
+// The built set is the CACHE KEY, so a different install rebuilds instead of answering with the previous
+// one's dictionaries. This module still imports no plugin: content is handed in.
+//
+// The language IN FORCE is a RESOURCE (`LOCALE`): the reconciler re-derives every widget's text from it
+// every frame, so it is read on the tick and every reader declares it. The DICTIONARIES are assets — loaded
+// once from the pack chain, never changed — and live in the I18N_STRINGS resource (one object, inserted by
+// the composition root, so the cache has a name and an owner instead of being module-private state).
 //
 // ===== One Tauri-side change: the dictionaries are built **lazily** =====
 // The original built them at module scope:
@@ -26,9 +34,15 @@ import { defineResource, type Resource } from "../../core/world";
 // (`logic/host/config-bus.ts`) — this module keeps the VALUE and nothing else.
 import { notifyConfigChange } from "../../core/services/bus";
 
-export type Lang = "zh" | "en" | "ja";
+/** A language id is the name of its `lang/<id>.json`, so it is DATA — see `data/assets/languages.ts`. */
+export type Lang = string;
 
 type Dict = Record<string, string>;
+
+/** The language the engine starts in when nothing else is declared or stored, and the one `t()` falls back
+ *  to when a key is missing in the language in force (MC's `en_us` convention). */
+const DEFAULT_LANGUAGE: Lang = "zh";
+const FALLBACK_LANGUAGE: Lang = "en";
 
 /** Merge the whole pack chain's dictionary: lang/{lang}.json merged layer by layer (low->high priority, later layers win on same key);
   *  a mod's bundled language works through this — new entries are added, same keys override engine entries */
@@ -45,52 +59,72 @@ function loadPackDict(lang: Lang): Dict {
   return merged;
 }
 
-const EMPTY: Dict = {};
 /** Stand-in used while the packs are not installed: it allocates nothing and caches nothing */
-const NOTHING: Record<Lang, Dict> = { zh: EMPTY, en: EMPTY, ja: EMPTY };
+const NOTHING: Map<Lang, Dict> = new Map();
 
-/** The three built dictionaries, as DATA. They are built lazily (only once the packs are installed) and
- *  cached — the cache used to be a module-level `let`. The object exists at import time, because a
- *  dictionary may be asked for before the World does, and the composition root INSERTS it as
- *  I18N_STRINGS: the cache has a name, an owner and a reader that is not this module. */
+/** The built dictionaries, as DATA. They are built lazily (only once the packs are installed) and cached —
+  *  the cache used to be a module-level `let`. The object exists at import time, because a dictionary may be
+  *  asked for before the World does, and the composition root INSERTS it as I18N_STRINGS: the cache has a
+  *  name, an owner and a reader that is not this module. */
 export interface I18nStringsState {
-  strings: Record<Lang, Dict> | null;
+  /** The DECLARED language set in force — the content plugin's contribution, which `loadLang` re-declares.
+   *  It is also the cache key of `strings`: a set that changed means a different install. */
+  declared: readonly Lang[];
+  /** The set the dictionaries below were built from (`declared.join`), so a re-declaration rebuilds. */
+  builtFrom: string;
+  /** The dictionaries in force, by language id; null until the first build. */
+  strings: Map<Lang, Dict> | null;
 }
 
 export const I18N_STRINGS: Resource<I18nStringsState> =
   defineResource<I18nStringsState>("i18nStrings");
 
-const state: I18nStringsState = { strings: null };
+const i18nState: I18nStringsState = { declared: [], builtFrom: "", strings: null };
 
 /** The one instance, for the composition root to insert. */
 export function i18nStringsState(): I18nStringsState {
-  return state;
+  return i18nState;
 }
 
-function dicts(): Record<Lang, Dict> {
+/** The declared set in force, re-declared by `loadLang` (the content plugin's contribution). */
+export function declaredLangs(): readonly Lang[] {
+  return i18nState.declared;
+}
+
+function dicts(): Map<Lang, Dict> {
   if (!packsInstalled()) return NOTHING;
-  if (!state.strings) {
-    state.strings = { zh: loadPackDict("zh"), en: loadPackDict("en"), ja: loadPackDict("ja") };
+  const signature = i18nState.declared.join("\u0000");
+  if (!i18nState.strings || i18nState.builtFrom !== signature) {
+    const built = new Map<Lang, Dict>();
+    for (const id of i18nState.declared) built.set(id, loadPackDict(id));
+    i18nState.strings = built;
+    i18nState.builtFrom = signature;
   }
-  return state.strings;
+  return i18nState.strings;
 }
 
 /** The LOCALE resource, adopted at boot. Null only before `loadLang` (a unit test with no World), in
- *  which case the default language answers — which is what the module starts with anyway. */
+  *  which case the declared default answers — which is what the module starts with anyway. */
 let locale: LocaleState | null = null;
 
-/** The language in force, validated: anything the resource holds that is not a known language reads as
- *  the default (the resource is typed `string` because ecs/resources.ts knows no unions). */
+/** The language in force, validated against the DECLARED set: a stored language this install does not
+  *  declare (a pack that was removed, a hand-edited settings.json) reads as the default, then as the
+  *  fallback language, then as whatever the install does declare. */
 function langOf(): Lang {
   const l = locale?.lang;
-  return l === "zh" || l === "en" || l === "ja" ? l : "zh";
+  const declared = i18nState.declared;
+  if (typeof l === "string" && declared.includes(l)) return l;
+  if (declared.includes(DEFAULT_LANGUAGE)) return DEFAULT_LANGUAGE;
+  if (declared.includes(FALLBACK_LANGUAGE)) return FALLBACK_LANGUAGE;
+  return declared[0] ?? DEFAULT_LANGUAGE;
 }
 
-/** Copy for the current language; missing words fall back to English, then to the key itself */
+/** Copy for the current language; a missing word falls back to the fallback language, then to the key itself */
 export function t(key: string): string {
-  const lang = langOf();
   const s = dicts();
-  return s[lang][key] ?? s.en[key] ?? key;
+  const here = s.get(langOf());
+  const fallback = s.get(FALLBACK_LANGUAGE);
+  return here?.[key] ?? fallback?.[key] ?? key;
 }
 
 export function getLang(): Lang {
@@ -98,8 +132,10 @@ export function getLang(): Lang {
 }
 
 /** Switch language: writes the RESOURCE and announces it (it does not persist — the composition root
- *  subscribes through the host's config bus to save) */
+  *  subscribes through the host's config bus to save). A language the install does not declare is refused:
+  *  the set is content, and the picker is built from it. */
 export function setLang(l: Lang): void {
+  if (!i18nState.declared.includes(l)) return;
   if (l === langOf()) return;
   if (!locale) adoptLocale({ lang: l });
   else locale.lang = l;
@@ -107,28 +143,30 @@ export function setLang(l: Lang): void {
 }
 
 /** Adopt the LOCALE resource (idempotent); exposed so the gate can drive this module standalone. */
-export function adoptLocale(state: LocaleState): void {
-  locale = state;
+export function adoptLocale(target: LocaleState): void {
+  locale = target;
 }
 
 /** Load the language from config at startup into the LOCALE resource (an invalid value falls back to the
- *  resource's own default) and RETURN the line that says what the pack chain produced.
- *
- *  `langs` is the set the CONTENT PLUGIN declares (`plugins/content-default`, `SLOT_LANGUAGES`), handed in
- *  by the composition root: which languages an install has is content, and this DATA module may not import
- *  a plugin to learn it. That is why it is an argument and not a literal here any more.
- *
- *  It does not log: this is a DATA module, so it has no side effects — the composition root (which owns
- *  the log sink) prints the returned summary. */
-export function loadLang(state: LocaleState, l: unknown, langs: readonly string[]): string {
-  adoptLocale(state);
-  if (typeof l === "string" && langs.includes(l)) state.lang = l;
+  *  resource's own default) and RETURN the line that says what the pack chain produced.
+  *
+  *  `langs` is the set the CONTENT PLUGIN declares (`plugins/content-default`, `SLOT_LANGUAGES`, discovered
+  *  from the pack chain), handed in by the composition root: which languages an install has is content, and
+  *  this DATA module may not import a plugin to learn it. It is BOTH the validation set and the list the
+  *  dictionaries are built for — that is what makes a pack's new language actually load (P1.36).
+  *
+  *  It does not log: this is a DATA module, so it has no side effects — the composition root (which owns
+  *  the log sink) prints the returned summary. */
+export function loadLang(localeState: LocaleState, l: unknown, langs: readonly string[]): string {
+  adoptLocale(localeState);
+  // The declared set is the cache KEY of the dictionaries, so it lands before anything is built.
+  i18nState.declared = [...langs];
+  if (typeof l === "string" && langs.includes(l)) localeState.lang = l;
   // Read the dictionaries once here: the packs are installed by now, so the build really happens.
   const s = dicts();
   // One count per DECLARED language (a pack may add one): the summary reports the set actually in force.
-  const byId = s as Record<string, Dict>;
-  const counts = langs.map((id) => `${id}=${Object.keys(byId[id] ?? {}).length}`).join(" ");
-  const total = langs.reduce((n, id) => n + Object.keys(byId[id] ?? {}).length, 0);
+  const counts = langs.map((id) => `${id}=${Object.keys(s.get(id) ?? {}).length}`).join(" ");
+  const total = langs.reduce((n, id) => n + Object.keys(s.get(id) ?? {}).length, 0);
   return (
     `I18N dictionaries loaded (lang/*.json layered merge): ${counts} entries ` +
     `(${resolveAllBytes("lang/zh.json").length} layer(s) of zh.json)` +

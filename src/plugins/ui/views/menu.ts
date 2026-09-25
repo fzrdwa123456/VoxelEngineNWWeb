@@ -44,6 +44,7 @@
 // the click shield, the drag's mousedown/mouseup, the wheel block and the key-capture handler, all of them
 // decisions that can only be taken inside the event that must be cancelled (see the contract above).
 import { t, getLang, setLang } from "../../../data/assets/i18n";
+import { declaredLanguages } from "../../../data/assets/languages";
 import { getUIScaleMode, setUIScaleMode, getCurrentScale } from "../../../data/globals/uiscale";
 import { getFontId, setFontId } from "../../../data/globals/fonts";
 import { listPacks } from "../../../data/assets/textures";
@@ -242,7 +243,12 @@ export function buildSettingsPanel(
   const choiceWrap = spawnPanel(world, panels.lang, "settings.columns");
   const langCol = spawnPanel(world, choiceWrap, "settings.column");
   spawnLabel(world, langCol, "settings.columnLabel", "settings.language");
-  const langChoices = (["zh", "en", "ja"] as const).map((lang) => ({
+  // THE CHOICES ARE THE DECLARED SET (P1.36), discovered from the pack chain — the same list the content
+  // plugin contributes and `loadLang` builds dictionaries from, so a pack shipping `lang/fr.json` gets a
+  // picker entry instead of a file nobody can select. The label is the `lang.<id>` key, which the pack's own
+  // dictionary is expected to hold (a missing one shows the raw key: a missing TRANSLATION, not a missing
+  // language). Spawning happens during wiring, i.e. after `preloadPacks()`.
+  const langChoices = declaredLanguages().map((lang) => ({
     key: lang,
     entity: spawnButton(world, langCol, "settings.choice", `${id}.lang`, lang, `lang.${lang}`),
   }));
@@ -253,7 +259,7 @@ export function buildSettingsPanel(
     entity: spawnButton(world, fontCol, "settings.choice", `${id}.font`, font, `fonts.${font}`),
   }));
   spawnButton(world, panels.lang, "settings.btn", `${id}.langBack`, "", "menu.back");
-  onUiAction(actions, `${id}.lang`, (value) => setLang(value as "zh" | "en" | "ja"));
+  onUiAction(actions, `${id}.lang`, (value) => setLang(value as string));
   onUiAction(actions, `${id}.font`, (value) => setFontId(value as "pixel" | "system"));
   onUiAction(actions, `${id}.langBack`, () => show("settings"));
 

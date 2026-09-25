@@ -1104,6 +1104,20 @@ Still outstanding:
   `INVENTORY_WIDGETS` are the live path instead of latent code. The core contributes exactly ONE element by
   name now (the crosshair), which is what makes `SLOT_UI_HUD` the only way a HUD element gets in. Pinned by
   the gate (the plugin contributes it; the core's table no longer declares `id: "hotbar"`).
+- **P1.36 — the language set is PACK-CHAIN DATA, and it DRIVES the loaders.** `DONE` (the first slice of
+  P1.20's "next"; blocks and menu layouts follow the same shape). "Which languages does this install support"
+  was a literal in TWO places — the content plugin's `["zh","en","ja"]` and i18n's `Lang` union — so a pack's
+  `lang/fr.json` was a file no code path knew the name of. Now `data/assets/languages.ts` DISCOVERS the set
+  (`BUILTIN_LANGUAGES` plus every `lang/<id>.json` the chain delivers — a new `listPackPaths()` in
+  textures.ts answers "which paths EXIST", the missing half of `resolveAllBytes`), the content plugin
+  declares it into `SLOT_LANGUAGES` at INSTALL time, `loadLang` moved BELOW the plugin block and builds one
+  dictionary per DECLARED id (the set is the cache key, so a different install rebuilds), and the settings
+  panel's language PICKER is built from the same function — one source for contribution, loader and picker,
+  which is exactly the drift that made a pack's language publishable-but-unselectable. `setLang` refuses an
+  undeclared language. The gate proves it end to end (synthetic pack -> real plugin setup -> real `loadLang`
+  -> real `t()`), and `tools\lang-demo.bat` writes a fourth-language pack for a hand test. STILL OPEN from
+  P1.20: the same treatment for BLOCKS (the registry is built before the install, and the mesher still
+  ignores it) and for the menu layouts.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
@@ -1160,7 +1174,7 @@ gone with the kiosk path, `plugins/ui/views/inventory.ts`'s never-called `refres
 # 6. The verification loop (there are no tests)
 
 1. `node ./node_modules/typescript/bin/tsc --noEmit` — the type gate.
-2. `npm run check:ecs` — the ECS invariant gate (`scripts/check-ecs.mjs`, 54 assertion groups,
+2. `npm run check:ecs` — the ECS invariant gate (`scripts/check-ecs.mjs`, 63 assertion groups,
    `RESULT: OK|FAILED`). Run it after touching the ECS, a component, a command, a resource, a recipe,
    a stage or a system's access declaration. It compiles into git-ignored `node_modules/.cache/`, so it
    writes nothing tracked. Two of its groups read SOURCE TEXT (with comments stripped), and its batch

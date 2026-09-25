@@ -349,3 +349,16 @@ the same one strip and the same log lines;
 (5) `tools\plugins-no-optional-surfaces.bat` (four surfaces off) -> `PLUGIN installed 7/11`, a plain
 crosshair-only HUD, and no `PAGE`/`HUD element` mount line for the surfaces that are off.
 
+AFTER the language-pack demo (`tools\lang-demo.bat` writes `lang/fr.json` into the sample resource pack, so
+the pack ships a FOURTH language): (1) the boot log must gain it and say so twice -
+`content: 4 declared language(s) [zh, en, ja, fr] - 1 of them from the pack chain [fr]` and
+`I18N dictionaries loaded (lang/*.json layered merge): zh=NN en=NN ja=NN fr=9 entries` - a set of three, or an
+`fr=0`, means the discovery or the build did not happen; (2) pause menu -> Settings -> Language/Font must list
+FOUR choices, the new one labelled `Francais (FROM THE PACK)`: that label is looked up in the pack's OWN
+dictionary (a raw `lang.fr` there means the label key is missing from it); (3) pick it -> the pause menu, the
+main menu and the settings rows the pack defines turn into its text, and `settings.json` gains
+`"language": "fr"`; (4) quit and relaunch -> it comes back in the pack's language (an UNDECLARED value is the
+case the repair pass would rewrite, so this is what proves the declared set is what validates it); (5) delete
+`lang\fr.json` and relaunch -> back to three choices, and a `settings.json` still saying `fr` falls back to
+the default language instead of painting raw keys.
+
