@@ -48,6 +48,9 @@ export interface NavigationDeps {
   readonly trees: NavigationTrees;
   /** The key that toggles the inventory (a BIND CODE, so a mouse button bound to "inventory" works too) */
   readonly inventoryCode: () => string;
+  /** Is the INVENTORY layer installed? Its panel belongs to this painter (see the ui conventions), so this
+   *  is what makes "the plugin is off" mean "there is no bag", instead of a panel nothing updates. */
+  readonly inventoryOn: () => boolean;
   /** A rebind capture owns the keyboard: it must not also open a menu (see ui/menu.ts) */
   readonly capturing: () => boolean;
   /** Is a world actually RUNNING? The two actions below open a UI that only means something in a world
@@ -158,7 +161,7 @@ export class UiNavigationSystem {
         // The E key and a mouse button bound to "inventory" are the SAME code, which is what makes this
         // one branch: a rebind capture owns the keyboard, and a menu owns the inventory key. A world
         // must be RUNNING as well — the backpack belongs to a world, not to a loading screen.
-        if (!this.deps.capturing() && !ui.mainMenu && !ui.menu && this.deps.inWorld()) {
+        if (!this.deps.capturing() && !ui.mainMenu && !ui.menu && this.deps.inWorld() && this.deps.inventoryOn()) {
           this.setInventory(!ui.inventory);
         }
         return;
@@ -258,7 +261,7 @@ export class UiNavigationSystem {
     setUiVisible(this.world, t.backdrop, isModalUi(ui) && !mainMenuHome);
     setUiVisible(this.world, t.pauseRoot, ui.menu);
     setUiVisible(this.world, t.mainRoot, ui.mainMenu);
-    setUiVisible(this.world, t.inventoryPanel, ui.inventory);
+    setUiVisible(this.world, t.inventoryPanel, ui.inventory && this.deps.inventoryOn());
     // The settings panels are shared by both menus (only one menu is ever up), and the main panel of a
     // menu is up exactly when no settings sub-panel and no world-type picker is.
     for (const id of Object.keys(t.pausePanels) as SettingsPanelId[]) {

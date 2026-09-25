@@ -33,6 +33,11 @@ export interface HudDeps {
   /** Is a world RUNNING? (the loop mode is `game`) — injected, so this module stays DOM-free and the
    *  composition root keeps the one definition of "playing" (`inWorld()`), exactly like ui.navigation. */
   readonly inWorld: () => boolean;
+  /** Is the INVENTORY layer installed (the `ui-backpack` plugin)? The crosshair is the gameplay HUD and
+   *  stays; the hotbar IS that layer's other half (it renders from the same data through the same system),
+   *  so switching that plugin off has to take it down — otherwise it stays on screen, frozen. Injected from
+   *  the root, which is the only place that knows what is installed right now. */
+  readonly inventoryOn: () => boolean;
 }
 
 export class UiHudSystem {
@@ -58,7 +63,7 @@ export class UiHudSystem {
    *  reconciler diffes, but writing it every frame would be noise (and `setUiVisible` is write-only,
    *  so it could not even notice). */
   step(): void {
-    const visible = this.deps.inWorld();
+    const visible = this.deps.inWorld() && this.deps.inventoryOn();
     if (visible === this.shown) return;
     this.shown = visible;
     setUiVisible(this.world, this.deps.crosshair, visible);

@@ -539,10 +539,14 @@ const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peek
 // The GAMEPLAY widgets' visibility: the crosshair and the hotbar exist in every mode (they were spawned
 // visible and nothing wrote their flag), so one system owns that flag and derives it from "is a world
 // running". It needs the hotbar, which is why it is built here rather than with the other UI systems.
+// "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain, so F11 is
+// felt immediately: the hotbar and the bag panel are the core's to show, and this is how the core asks.
+const inventoryOn = (): boolean => livePlugins.has("ui-backpack");
 const uiHud = createHudSystem(world, {
   crosshair: hud.crosshairEntity,
   hotbar: inv.hotbarEntity,
   inWorld,
+  inventoryOn,
 });
 
 // ===== System registration =====
@@ -672,6 +676,7 @@ const navigation = createNavigationSystem(world, {
     return navTrees;
   },
   inventoryCode: () => getBind("inventory"),
+  inventoryOn,
   capturing: isCapturing,
   // "A world is running" — the pause menu and the backpack are refused while the loading screen is up
   // (the startup, and the world being built behind it during an entry).
