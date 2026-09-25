@@ -48,8 +48,13 @@ import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loadin
 import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
 import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "../plugins/ui/systems/navigation";
 import { LoadingScreen } from "../plugins/ui/views/loading";
-import { Inventory } from "../plugins/ui/views/inventory";
-import { INVENTORY_VIEW_ACCESS, UiInventorySystem } from "../plugins/ui/systems/inventory";
+// The INVENTORY layer is its own plugin (P1.31): the bag, the hotbar they share data with, and their system.
+import {
+  createInventorySystem,
+  createInventoryView,
+  createUiBackpackPlugin,
+  declareUiBackpackSystems,
+} from "../plugins/ui-backpack";
 import { Menu, spawnMenuBackdrop } from "../plugins/ui/views/menu";
 // The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
 // them from THERE: the ui plugin exports none of it any more.
@@ -99,12 +104,10 @@ import {
   createRenderSystem,
   createBindingSystem,
   createLoadingSystem,
-  createInventorySystem,
   createHudSystem,
   createPagesSystem,
   createNavigationSystem,
   createDelaySystem,
-  createInventoryView,
   createMainMenu,
   createPauseMenu,
   createUiViews,
@@ -595,7 +598,8 @@ const uiToastPlugin = createUiToastPlugin({ uiToast });
 const uiKeybindPlugin = createUiKeybindPlugin({ uiKeybind }, keybindEntries);
 // The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
 // the core's slot anchors encode; the list itself is only what may be installed at runtime.
-const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiKeybindPlugin];
+const uiBackpackPlugin = createUiBackpackPlugin({ uiInventory });
+const hotCatalog: readonly Plugin[] = [uiDebugPlugin, uiToastPlugin, uiBackpackPlugin, uiKeybindPlugin];
 const livePlugins = new Set<string>();
 const hotHost: HotPlugHost = {
   world,
@@ -625,6 +629,7 @@ const PLUGINS = [
   uiPlugin,
   uiDebugPlugin,
   uiToastPlugin,
+  uiBackpackPlugin,
   uiKeybindPlugin,
   inputPlugin,
 ];
@@ -986,9 +991,16 @@ const uiApi = installOutcome.apiOf("ui");
 if (!uiApi) {
   logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
 } else {
-  declareUiSystems(uiApi, {
-  uiPages, uiHud, uiLoading, uiInventory, uiBindings, navigation, delays, uiRender,
-});
+  declareUiSystems(uiApi, { uiPages, uiHud, uiLoading, uiBindings, navigation, delays, uiRender });
+
+// The backpack + hotbar system belongs to the ui-backpack plugin; the views and the crosshair gate stay wired
+// by the root (they are instantiated here, the plugin says what they are).
+const backpackApi = installOutcome.apiOf("ui-backpack");
+if (!backpackApi) {
+  logDebug("PLUGIN ui-backpack is not installed - the backpack and the hotbar are off (the crosshair stays)");
+} else {
+  declareUiBackpackSystems(backpackApi, { uiInventory });
+}
 }
 
 // The DEBUG surface's system is declared by the plugin itself now (`createUiDebugPlugin`), which is what makes

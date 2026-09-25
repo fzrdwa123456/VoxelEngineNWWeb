@@ -39,7 +39,7 @@ import {
   UI_STATE,
   UI_TEXT,
   UI_TIP,
-} from "../components";
+} from "../../ui/components";
 
 /** Declared access: a view of the player's INVENTORY component that WRITES WIDGET DATA and nothing
  *  else. No DOM target: the only code that touches an element is the reconciler. It also READS the item

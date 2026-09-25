@@ -22,7 +22,7 @@ import { HOTBAR_SLOTS, INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../..
 import { SwapSlots } from "../../../core/effect/commands";
 import { UI_MODAL } from "../../../data/globals/resources";
 import { onUiAction, UI_ACTIONS, ACTION_BAG_CLICK } from "../../../data/globals/actions";
-import { spawnButton, spawnLabel, spawnPanel } from "../components";
+import { spawnButton, spawnLabel, spawnPanel } from "../../ui/components";
 import type { Entity, World } from "../../../core/world";
 
 /** The action id a bag slot dispatches is DATA (`ACTION_BAG_CLICK`); its VALUE is the absolute slot index.

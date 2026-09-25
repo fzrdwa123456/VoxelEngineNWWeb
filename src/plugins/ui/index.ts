@@ -10,12 +10,10 @@ import { Hud } from "./views/hud";
 import { UiRenderSystem } from "./systems/reconcile";
 import { UiBindingSystem } from "./systems/bindings";
 import { UiLoadingSystem } from "./systems/loading";
-import { UiInventorySystem } from "./systems/inventory";
 import { UiHudSystem } from "./systems/hud";
 import { UiNavigationSystem } from "./systems/navigation";
 import { DelaySystem } from "./systems/delays";
 import { UiPagesSystem } from "./systems/ui-pages";
-import { Inventory } from "./views/inventory";
 import { Menu, type MenuCallbacks } from "./views/menu";
 import { MainMenu, type MainMenuCallbacks } from "./views/mainmenu";
 import { LoadingScreen } from "./views/loading";
@@ -25,7 +23,6 @@ import { UI_BINDING_ACCESS } from "./systems/bindings";
 import { UI_PAGES_ACCESS } from "./systems/ui-pages";
 import { DELAYS_ACCESS } from "./systems/delays";
 import { UI_HUD_ACCESS } from "./systems/hud";
-import { INVENTORY_VIEW_ACCESS } from "./systems/inventory";
 import { UI_LOADING_ACCESS } from "./systems/loading";
 import { UI_NAVIGATION_ACCESS } from "./systems/navigation";
 import { UI_RENDER_ACCESS } from "./systems/reconcile";
@@ -79,10 +76,6 @@ export function createUiViews(world: World): UiViews {
 /** The three views whose construction needs wiring the root assembles (the player handle, and the panels'
  *  callbacks). The root still decides WHEN they are built — the resource order around them is load-bearing
  *  — but the plugin owns what they ARE and how they are constructed. */
-export function createInventoryView(world: World, player: Entity): Inventory {
-  return new Inventory(world, player);
-}
-
 export function createPauseMenu(world: World, cb: MenuCallbacks): Menu {
   return new Menu(world, cb);
 }
@@ -106,10 +99,6 @@ export function createLoadingSystem(...args: ConstructorParameters<typeof UiLoad
   return new UiLoadingSystem(...args);
 }
 
-export function createInventorySystem(...args: ConstructorParameters<typeof UiInventorySystem>): UiInventorySystem {
-  return new UiInventorySystem(...args);
-}
-
 export function createHudSystem(...args: ConstructorParameters<typeof UiHudSystem>): UiHudSystem {
   return new UiHudSystem(...args);
 }
@@ -130,7 +119,6 @@ export function createDelaySystem(...args: ConstructorParameters<typeof DelaySys
 export interface UiSystems {
   readonly uiHud: { step(): void };
   readonly uiLoading: { step(): void };
-  readonly uiInventory: { step(): void };
   readonly uiBindings: { step(): void };
   readonly navigation: { step(): void };
   readonly delays: { step(): void };
@@ -169,15 +157,9 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // before the surfaces it hides behind it".
   name: "ui.loading",
   stage: "ui",
-  before: ["ui.inventory"],
+  before: ["ui.slot.bag"],
   ...UI_LOADING_ACCESS,
   run: () => s.uiLoading.step(),
-  });
-  api.system({
-  name: "ui.inventory",
-  stage: "ui",
-  ...INVENTORY_VIEW_ACCESS,
-  run: () => s.uiInventory.step(),
   });
   api.system({
   // Bound widget values (a slider that shows shared state), resolved before the reconciler reads them.
@@ -187,7 +169,7 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   ...UI_BINDING_ACCESS,
   run: () => s.uiBindings.step(),
   });
-  // ===== The optional ui surfaces' SLOT ANCHORS (P1.27) =====
+  // ===== The optional ui surfaces' SLOT ANCHORS (P1.27, extended in P1.31) =====
   // A surface that may be DISABLED cannot be named in another surface's order list: the name would dangle
   // the moment that plugin is turned off, and the boot refuses an unknown name. But two widget WRITERS still
   // have to be ordered (the conflict model is per COMPONENT, not per entity), so the order needs something
@@ -198,9 +180,20 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // `reads: [UI_STATE]` is not decoration: it makes an anchor CONFLICT with every writer, which is what keeps
   // it in a batch of its own instead of being batched with an unrelated system (edges alone would allow it).
   api.system({
+  name: "ui.slot.bag",
+  stage: "ui",
+  after: ["ui.loading"],
+  before: ["ui.slot.debug"],
+  reads: [UI_STATE],
+  run: () => {},
+  });
+  api.system({
+  // THE BAG SLOT (P1.31): the inventory layer became an OPTIONAL plugin, and the anchors used to name its
+  // system ("ui.inventory") — a name that would dangle the moment that plugin is off. This anchor is the
+  // core-owned thing both the bag and the picker order against instead.
   name: "ui.slot.debug",
   stage: "ui",
-  after: ["ui.inventory"],
+  after: ["ui.slot.bag"],
   before: ["ui.slot.toast"],
   reads: [UI_STATE],
   run: () => {},
@@ -243,7 +236,7 @@ export function declareUiSystems(api: PluginApi, s: UiSystems): void {
   // is the other half of the guarantee: everything `diagnostics` wrote this frame is already in place.
   name: "ui.widgets",
   stage: "ui",
-  after: ["ui.inventory", "ui.bindings", "ui.navigation"],
+  after: ["ui.bindings", "ui.navigation"],
   ...UI_RENDER_ACCESS,
   run: () => s.uiRender.step(),
   });
@@ -258,7 +251,7 @@ export const uiPlugin = definePlugin({
     ]);
     api.contribute(SLOT_RESOURCES, [
       UI_MOUNT, UI_PAINT, UI_THEME, UI_ACTIONS, UI_SOURCES, UI_ORDER, UI_MODAL, UI_SCALE, LOCALE, FONT,
-      LOADING_STATE, DELAYED_INTENTS, INVENTORY_WIDGETS, F3_PANEL, KEY_EVENTS,
+      LOADING_STATE, DELAYED_INTENTS, F3_PANEL, KEY_EVENTS,
       VIEWPORT,
     ]);
     api.contribute(SLOT_COMMANDS, [ShowToast, SetLoadingStage, SetFpsCap]);
