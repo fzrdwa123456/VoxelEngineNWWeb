@@ -4101,21 +4101,31 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
   equal(I18n.t("main.single"), "Singleplayer XX", "…so the pack's own translation is what the UI shows");
   equal(I18n.t("no.such.key"), "no.such.key", "a key nobody defines reads as its key");
 
-  // A language NOBODY declares is refused — that is what makes the set meaningful instead of decorative.
-  I18n.loadLang(localeState, "yy", declared);
-  equal(localeState.lang, "xx", "an undeclared language keeps the one in force");
+  // A language NOBODY declares is REFUSED by setLang (nothing changes) — that is what makes the set
+  // meaningful instead of decorative. `loadLang` is deliberately the other half: it is the boot's entry point
+  // and must always leave a language in force, so it RESOLVES an undeclared value to the fallback — the
+  // `booted(...)` table below pins that case by case, from the object shape the boot really builds.
   I18n.setLang("yy");
-  equal(I18n.getLang(), "xx", "…and cannot be switched to either");
+  equal(I18n.getLang(), "xx", "an undeclared language cannot be switched to");
   I18n.setLang("en");
   equal(I18n.getLang(), "en", "…while a declared one can");
 
-  // THE UNDECLARED CASE (P1.36a): a stored language the install no longer declares — its pack was deleted —
-  // reads as the FALLBACK language, the same `en` a missing KEY falls back to. It used to read as the
-  // first-run default (`zh`), so removing a pack's dictionary silently switched a French install to Chinese.
-  const gone = R.createLocale("xx"); // what settings.json still says after the pack is gone
-  I18n.loadLang(gone, "xx", ["zh", "en", "ja"]);
-  equal(gone.lang, "xx", "an undeclared value is left in the FILE (loadLang does not rewrite it)");
-  equal(I18n.getLang(), "en", "…while the language in force falls back to the fallback (en), not to zh");
+  // THE REAL SHAPE (P1.36b). The locale object comes from `createLocale()` — it already holds the first-run
+  // default — and the FILE's value is only an argument. The first version of this check built the object WITH
+  // the undeclared value, a state the boot never produces, so it passed while the game came up Chinese:
+  // `loadLang` left the default in place, the default was DECLARED, and the reader-side fallback could never
+  // fire. Both halves are pinned from the default object now, the way the boot does it.
+  const booted = (fileValue) => {
+    const loc = R.createLocale(); // main.ts: `const locale = createLocale()` — "zh" before the file is read
+    I18n.loadLang(loc, fileValue, ["zh", "en", "ja"]);
+    return `${loc.lang}/${I18n.getLang()}`;
+  };
+  equal(booted("fr"), "en/en", "a value whose PACK was deleted resolves to the fallback (en), not to zh");
+  equal(booted("xx"), "en/en", "…and a hand-edited bogus value is the same case (not declared)");
+  equal(booted(42), "en/en", "…and so is a value of the wrong type");
+  equal(booted("en"), "en/en", "a declared value is used as it is");
+  equal(booted("ja"), "ja/ja", "…whichever declared one it is");
+  equal(booted(undefined), "zh/zh", "NO stored value (a first run) keeps the engine's default — it must not move");
   equal(I18n.t("main.single"), "main.single", "…and with no dictionary behind it, a key reads as its key");
 
   // The discovery is a DATA function (no plugin import), and the PICKER reads the same list as the loader —

@@ -362,5 +362,9 @@ case the repair pass would rewrite, so this is what proves the declared set is w
 `lang\fr.json` and relaunch -> back to three choices, and a `settings.json` still saying `fr` comes up in
 ENGLISH: an undeclared language reads as the fallback language (the same one a missing WORD uses), the boot
 log gains a `SETTINGS repaired: language` line, and the file is rewritten to `"language": "en"`. The
-removed-pack case must not paint raw keys, and must not silently turn the install Chinese.
+removed-pack case must not paint raw keys, and must not silently turn the install Chinese. The same holds for
+a value the install does not declare at all (`"language": "xx"`, or a number): fallback language,
+`SETTINGS repaired: language`, file rewritten. DELETING the `language` key is the other case and must keep the
+engine's first-run default (Chinese) — those two must not be confused, because that confusion is what made the
+first fix look right while the game still came up Chinese.
 

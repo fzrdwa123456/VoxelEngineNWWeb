@@ -1128,6 +1128,18 @@ Still outstanding:
   (`createLocale`). The settings repair still rewrites the file with the value in force, so it now writes
   `en` where it used to write `zh`; the report that lists the fixed keys is unchanged, i.e. P1.36's option B
   (a per-install REASON in the log — "this install does not declare fr") is still open. Pinned by the gate.
+- **P1.36b — the fallback is resolved in the LOADER, and the reader shares the rule.** `DONE`. P1.36a fixed
+  the READER (`langOf` trying `en` before `zh`) and did NOT fix the game: `createLocale()` hands the loader an
+  object that ALREADY holds the first-run default, so "do not write when the stored value is undeclared" left
+  `zh` — a DECLARED language — in place, and the reader never saw the undeclared value at all. Reproduced
+  read-only against the compiled modules before touching anything: `fr` and `xx` gave `locale.lang=zh
+  getLang()=zh`, `en` gave `en`, a missing key gave `zh`. `loadLang` now RESOLVES the value in force (declared
+  -> as it is; undeclared or wrong type -> the fallback; no value at all -> the default the object came with)
+  through ONE `fallbackLang()` that the reader uses too, so the repair writes `en` where it used to write `zh`.
+  The gate check was rewritten to drive the REAL shape (a `createLocale()` object plus the file value as an
+  argument, one case per row of the table) — the old one constructed an input state the boot cannot produce,
+  which is precisely why it passed while the game came up Chinese. Lesson for every future check: build the
+  input PRODUCTION builds, not the input that makes the assertion easy.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

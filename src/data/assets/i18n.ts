@@ -108,21 +108,27 @@ function dicts(): Map<Lang, Dict> {
   *  which case the declared default answers — which is what the module starts with anyway. */
 let locale: LocaleState | null = null;
 
-/** The language in force, validated against the DECLARED set: a stored language this install does not
-  *  declare (a pack that was removed, a hand-edited settings.json) reads as the FALLBACK language, and a
-  *  declared one is used as it is — see the note inside. */
+/** The language a value the install does not declare resolves to: the FALLBACK language (en) when it is
+ *  declared, else the first-run default, else whatever the install does declare.
+ *
+ *  ONE function, used by the READER (`langOf`) and by the LOADER (`loadLang`), because letting the two
+ *  answer separately is what shipped as "I deleted the pack's `lang/fr.json` and the game came back
+ *  Chinese": the loader left the DEFAULT in place and the reader never saw the undeclared value at all, so
+ *  the reader-side fallback could not fire (P1.36b). */
+function fallbackLang(langs: readonly string[]): Lang {
+  if (langs.includes(FALLBACK_LANGUAGE)) return FALLBACK_LANGUAGE;
+  if (langs.includes(DEFAULT_LANGUAGE)) return DEFAULT_LANGUAGE;
+  return langs[0] ?? FALLBACK_LANGUAGE;
+}
+
+/** The language in force, validated against the DECLARED set. An undeclared value is a MISSING LANGUAGE,
+ *  not a missing WORD: it reads as the fallback (`en`), the same one a missing KEY uses. `DEFAULT_LANGUAGE`
+ *  (zh) is only what a fresh install with NO stored value starts in. */
 function langOf(): Lang {
   const l = locale?.lang;
   const declared = i18nState.declared;
   if (typeof l === "string" && declared.includes(l)) return l;
-  // AN UNDECLARED LANGUAGE IS A MISSING LANGUAGE, NOT A MISSING WORD (P1.36a): it reads as the FALLBACK
-  // language — the same `en` a missing KEY falls back to. It used to read as the first-run default (`zh`),
-  // so "the pack that shipped `lang/fr.json` was deleted" turned a French install Chinese while the very
-  // next lookup for a missing WORD would have gone to English: one rule, two answers. `DEFAULT_LANGUAGE`
-  // is only what a fresh install with no stored value starts in, and the last resort below.
-  if (declared.includes(FALLBACK_LANGUAGE)) return FALLBACK_LANGUAGE;
-  if (declared.includes(DEFAULT_LANGUAGE)) return DEFAULT_LANGUAGE;
-  return declared[0] ?? FALLBACK_LANGUAGE;
+  return fallbackLang(declared);
 }
 
 /** Copy for the current language; a missing word falls back to the fallback language, then to the key itself */
@@ -167,7 +173,17 @@ export function loadLang(localeState: LocaleState, l: unknown, langs: readonly s
   adoptLocale(localeState);
   // The declared set is the cache KEY of the dictionaries, so it lands before anything is built.
   i18nState.declared = [...langs];
+  // THE VALUE IN FORCE IS RESOLVED HERE, in the loader (P1.36b). `localeState` arrives from
+  // `createLocale()`, so it ALREADY holds the first-run default ("zh") — which means "do not write when the
+  // stored value is undeclared" did not leave the stored value in place, it left the DEFAULT in place. And
+  // the default is a DECLARED language, so every reader (and the settings repair, which compares the file
+  // with the value in force) agreed on Chinese while the file said `fr`. Three cases, and they stay apart:
+  //   * a declared value        -> the language in force (what the user picked);
+  //   * a value this install does NOT declare (its pack was deleted, a hand-edit, a wrong type) -> the
+  //     fallback (`en`), so the repair writes `en` rather than silently `zh`;
+  //   * NO value at all         -> the default the object came with (a first run has no key in the file).
   if (typeof l === "string" && langs.includes(l)) localeState.lang = l;
+  else if (l !== undefined) localeState.lang = fallbackLang(langs);
   // Read the dictionaries once here: the packs are installed by now, so the build really happens.
   const s = dicts();
   // One count per DECLARED language (a pack may add one): the summary reports the set actually in force.
