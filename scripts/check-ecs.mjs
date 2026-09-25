@@ -1862,14 +1862,12 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["ui.pages", "ui.hud", "ui.bindings"],
     ["ui.loading"],
     ["ui.slot.bag"],
-    ["ui.picker"],
-    // The optional surfaces sit between the core's SLOT ANCHORS, which are what orders them without any
-    // surface naming another (see plugins/ui/index.ts).
-    ["ui.slot.debug"],
-    ["ui.toast"],
-    ["ui.slot.toast"],
-    ["ui.keybind"],
-    ["ui.slot.keybind"],
+    ["ui.slot.debug"],
+    ["ui.picker"],
+    ["ui.slot.toast"],
+    ["ui.toast"],
+    ["ui.slot.keybind"],
+    ["ui.keybind"],
     ["ui.navigation"],
     // The delayed intents are applied right after the systems that decide them and before the frame is
     // painted. It writes ui.navigation's two targets (`pointerLock` / `cursor`), so the conflict rule

@@ -993,13 +993,12 @@ if (!uiApi) {
 } else {
   declareUiSystems(uiApi, { uiPages, uiHud, uiLoading, uiBindings, navigation, delays, uiRender });
 
-// The backpack + hotbar system belongs to the ui-backpack plugin; the views and the crosshair gate stay wired
-// by the root (they are instantiated here, the plugin says what they are).
-const backpackApi = installOutcome.apiOf("ui-backpack");
-if (!backpackApi) {
+// The backpack + hotbar system belongs to the ui-backpack plugin, and the PLUGIN declares it in its own `setup`
+// — the shape that makes a plugin self-installing and hot-pluggable. The ROOT must not declare it again: the
+// registry refuses a duplicate id, and doing it twice threw `"ui.inventory" is already contributed by
+// "ui-backpack"` during boot, which took the whole window down (the game never appeared).
+if (!installOutcome.has("ui-backpack")) {
   logDebug("PLUGIN ui-backpack is not installed - the backpack and the hotbar are off (the crosshair stays)");
-} else {
-  declareUiBackpackSystems(backpackApi, { uiInventory });
 }
 }
 

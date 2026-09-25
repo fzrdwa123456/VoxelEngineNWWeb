@@ -37,11 +37,11 @@ export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
     // other's) and it costs the ui lane its only parallel pair.
     name: "ui.picker",
     stage: "ui",
-    after: ["ui.slot.bag"],
+    after: ["ui.slot.debug"],
     // The slot anchor replaces the edges that used to name `ui.toast`/`ui.widgets` (P1.27): a system another
     // OPTIONAL plugin owns must never appear here, and the core's anchor gives the same total order while
     // surviving any subset of surfaces being disabled.
-    before: ["ui.slot.debug"],
+    before: ["ui.slot.toast"],
     ...UI_PICKER_ACCESS,
     run: () => s.uiPicker.step(),
   });

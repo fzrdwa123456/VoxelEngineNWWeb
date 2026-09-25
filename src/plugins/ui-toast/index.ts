@@ -31,8 +31,8 @@ export function declareUiToastSystems(api: PluginApi, s: UiToastSystems): void {
     // against another optional surface's system: that name would dangle the moment that plugin is off.
     name: "ui.toast",
     stage: "ui",
-    after: ["ui.slot.debug"],
-    before: ["ui.slot.toast"],
+    after: ["ui.slot.toast"],
+    before: ["ui.slot.keybind"],
     ...UI_TOAST_ACCESS,
     run: () => s.uiToast.step(),
   });

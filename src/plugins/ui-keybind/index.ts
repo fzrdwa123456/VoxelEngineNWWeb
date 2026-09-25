@@ -38,10 +38,10 @@ export function declareUiKeybindSystems(api: PluginApi, s: UiKeybindSystems): vo
     // it follows the toast and precedes the painter and the reconciler.
     name: "ui.keybind",
     stage: "ui",
-    after: ["ui.slot.toast"],
+    after: ["ui.slot.keybind"],
     // The edges that used to name `ui.toast`/`ui.navigation`/`ui.widgets` are the core's anchors now (P1.27):
     // a surface may only be ordered against systems that EXIST whatever else is turned off.
-    before: ["ui.slot.keybind"],
+    before: ["ui.navigation"],
     ...UI_KEYBIND_ACCESS,
     run: () => s.uiKeybind.step(),
   });
