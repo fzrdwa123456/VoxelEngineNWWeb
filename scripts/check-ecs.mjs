@@ -1872,6 +1872,7 @@ check("the real schedule resolves into the batches the docs claim", () => {
     ["ui.pages", "ui.hud", "ui.bindings"],
     ["ui.loading"],
     ["ui.slot.bag"],
+    ["ui.inventory"],
     ["ui.slot.debug"],
     ["ui.picker"],
     ["ui.slot.toast"],
