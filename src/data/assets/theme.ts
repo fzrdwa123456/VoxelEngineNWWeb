@@ -130,9 +130,10 @@ export function defaultUiTheme(): UiTheme {
       btnTextShadow: "0 0.125rem 0 rgba(0,0,0,.5)",
       accentBg: "#4a9eff",
       accentBgHover: "#3b83d6",
-      // P1.49w: TRANSLUCENT, so the key faces let the board (and the frosted screen) behind them show
-      // through - they used to be an opaque grey, which read as plastic stuck on the frosted panel.
-      keyBg: "rgba(255,255,255,0.08)",
+      // P1.49w: a translucent DARKENING, not a white tint - the key faces darken the board behind them
+      // (which still shows through) instead of lightening it, so the keys read as recessed and the bound
+      // blue is the only thing that looks lit.
+      keyBg: "rgba(0,0,0,0.3)",
       slotBg: "rgba(0,0,0,.35)",
       slotBgSelected: "rgba(255,255,255,.2)",
       slotEdge: "rgba(255,255,255,.25)",
