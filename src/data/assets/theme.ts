@@ -170,8 +170,11 @@ export function defaultUiTheme(): UiTheme {
       // instead of in the 1.25rem gutter. An `::after` of the group, absolutely positioned at 50%, lands in
       // the middle of the gutter at ANY column widths, and `pointer-events:none` keeps the 1px line out of
       // the way of a click that happens to land on the column boundary.
-      '[data-ui-recipe="settings.columns"]::after{content:"";position:absolute;left:50%;top:0.75rem;' +
-      'bottom:0.75rem;width:0.0625rem;pointer-events:none;background:rgba(255,255,255,0.1)}' +
+      // P1.49k: the line runs the FULL height of the board. It used to be inset by 0.75rem (the board is own
+      // vertical padding), which read as a gap rather than a divider - and the reason for the inset was wrong:
+      // a board is rounded corners sit at its LEFT and RIGHT ends, so a line at 50% cannot reach one.
+      '[data-ui-recipe="settings.columns"]::after{content:"";position:absolute;left:50%;top:0;' +
+      'bottom:0;width:0.0625rem;pointer-events:none;background:rgba(255,255,255,0.1)}' +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
       // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
       // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
