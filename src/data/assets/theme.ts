@@ -104,7 +104,7 @@ export function defaultUiTheme(): UiTheme {
   const scrollThumb = "#444";
   /** The scrollable roles. ONE list feeds three things: the reconciler's "back to the top on appearance"
    *  edge, their scrollbar rules (generated into the stylesheet below) and their documentation. */
-  const scrollRoles: UiRecipe[] = ["kb.chips", "settings.scrollArea"];
+  const scrollRoles: UiRecipe[] = ["kb.chips", "settings.scrollArea", "settings.content"];
   return {
     color: {
       text: "#ffffff",
@@ -293,6 +293,23 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
   const settingsPanel = (width: string): string =>
     `width:${width};background:${settingsPanelBg};border-radius:0.625rem;padding:1.25rem;` +
     `text-align:center;color:${c.text};font:1rem ${theme.font.ui};box-shadow:0 0.25rem 1.25rem rgba(0,0,0,.5);`;
+  // THE OPTION SURFACES (P1.49f). With no card of its own the settings screen has to say "this is a
+  // control" some other way, so an option is a DARKENED TRANSLUCENT strip: it darkens whatever the frost
+  // blurred behind it instead of painting an opaque grey chip, and the SELECTED state is the accent colour
+  // with alpha, so the backdrop still shows through it. Deliberately NOT tokens: this is the settings
+  // screens own three-state palette, while `c.*` stays the general one (the pause card keeps using it).
+  const option = "rgba(0,0,0,0.28)";
+  const optionHover = "rgba(0,0,0,0.45)";
+  const optionOn = "rgba(74,158,255,0.5)";
+  const optionOnHover = "rgba(59,131,214,0.65)";
+  // THE SCREEN ITSELF: `position:absolute;inset:0` fills `menu.root` / `menu.backdrop` (both are fixed,
+  // full-screen flex containers). The scrim is deliberately NEARLY transparent - the frost already blurs
+  // and darkens the whole viewport - and the option strips carry the rest of the darkening. The screen is
+  // a COLUMN: title, split (flex:1), Back - with `overflow:hidden`, so the screen can never scroll.
+  const settingsScreenBg = "rgba(10,10,14,0.12)";
+  const settingsScreen =
+    `position:absolute;inset:0;background:${settingsScreenBg};padding:0.75rem 1.5rem 1rem;` +
+    `text-align:center;color:${c.text};font:1rem ${theme.font.ui};display:flex;flex-direction:column;overflow:hidden;`;
   switch (recipe) {
     case "text.label":
       return `color:${c.text};text-shadow:${c.shadow};`;
@@ -405,16 +422,18 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return settingsPanel("34rem");
     case "settings.panelXl":
       return settingsPanel("40rem");
-    // A DYNAMIC box (P1.49c): the sections differ wildly in width - the key bind page needs the keyboard
-    // board PLUS its 11rem chip column, and its bottom grids alone are ~30rem - so the box takes what the
-    // content wants up to a viewport-relative cap, and scrolls instead of overflowing on a small window.
-    // `overflow:auto` is the LAST RESORT, and P1.49d shrank the CONTENT instead of leaning on it (see the
-    // kb.* recipes below): the key bind page compresses, so this only ever fires below the 320x240 window
-    // floor. 96vh rather than 86vh is the headroom that buys - at that floor the page needs ~216px while
-    // 86vh gave 206, i.e. a scrollbar for six pixels. The box is centred in `menu.root` and shorter than
-    // either cap at every ordinary window, so the normal look is untouched.
+    // THE SETTINGS SCREEN (P1.49f): not a floating card any more. It fills the menu root, so it has no
+    // width to choose and no cap to hit, and being the viewport it CANNOT overflow - it can never grow a
+    // scrollbar. The two columns scroll inside themselves instead (settings.content), which is what keeps
+    // the title at the top and Back at the bottom while a long page moves.
+    // The history explains the shape: P1.49c made this box `min(64rem,94vw)` with its own `overflow:auto`
+    // (a card that scrolled on a small window) and P1.49d then made the key bind page compress so that
+    // card could never actually grow one. Both are superseded here.
+    // `ui.frost` still does the BLURRING (one full-screen layer, up behind every menu), so this surface
+    // adds only a hint of scrim and must NOT repeat the `backdrop-filter`: a second blur over the same
+    // area is a second blur pass for no visual gain.
     case "settings.panelAuto":
-      return settingsPanel("min(64rem, 94vw)") + "max-height:96vh;overflow:auto;";
+      return settingsScreen;
     case "settings.title":
       return "font-size:1.375rem;margin-bottom:0.875rem;";
     case "settings.label":
@@ -423,14 +442,19 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return "text-align:center;font-size:1.25rem;font-weight:600;margin:0.125rem 0 0.375rem;";
     case "settings.range":
       return `width:100%;margin:0 0 0.625rem;accent-color:${c.accentBg};cursor:pointer;`;
-    // THE SPLIT (P1.49): ONE settings panel with a LEFT section nav and a RIGHT content area. It replaced
+    // THE SPLIT (P1.49): ONE settings screen with a LEFT section nav and a RIGHT content area. It replaced
     // the sub-panel chain (a list that navigated into sibling panels, each with its own Back button).
+    // P1.49f: `flex:1;min-height:0` makes it FILL the screen between the title and Back, and
+    // `align-items:stretch` gives both columns the full height so each one scrolls on its own.
     case "settings.split":
-      return "display:flex;gap:1.25rem;align-items:flex-start;text-align:left;";
+      return "display:flex;gap:1.25rem;align-items:stretch;flex:1;min-height:0;text-align:left;";
     case "settings.nav":
       return "display:block;flex:0 0 11rem;";
+    // The CONTENT column is the scroll container of the screen (P1.49f): a long page (the key bind one)
+    // moves HERE, so the title, the nav and Back stay where they are. `min-height:0` is what lets a flex
+    // item actually scroll instead of stretching its parent.
     case "settings.content":
-      return "flex:1;min-width:0;";
+      return "flex:1;min-width:0;min-height:0;overflow-y:auto;";
     case "settings.columns":
       return "display:flex;gap:1.25rem;margin-bottom:0.875rem;";
     case "settings.column":
@@ -440,7 +464,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // The bar-style button every settings entry uses.
     case "settings.btn":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
-        `color:${c.btnText};background:${state.hovered || state.pressed ? c.btnBgHover : c.btnBg};border:none;` +
+        `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : option};border:none;` +
         `border-radius:0.375rem;cursor:pointer;`;
     case "settings.btnRow":
       return "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
@@ -469,13 +493,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "settings.choice":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
         `color:${c.btnText};background:${
-          state.selected ? (state.hovered ? c.accentBgHover : c.accentBg) : state.hovered ? c.btnBgHover : c.btnBg
+          state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : option
         };border:none;border-radius:0.375rem;cursor:pointer;text-align:center;`;
     case "settings.scrollArea":
       return "max-height:12.5rem;overflow-y:auto;margin-bottom:0.375rem;";
     case "settings.row":
       return `display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.625rem;` +
-        `margin:0.25rem 0;background:${c.menuRow};border-radius:0.375rem;font-size:${theme.size.label};`;
+        `margin:0.25rem 0;background:${option};border-radius:0.375rem;font-size:${theme.size.label};`;
     case "settings.rowName":
       return "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
     case "settings.rowMeta":
@@ -498,7 +522,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // under the 8px FONT_MIN floor - where the page would otherwise be taller than the box and scroll.
     case "kb.side":
       return "width:11rem;flex-shrink:0;max-height:min(20rem,45vh);display:flex;flex-direction:column;gap:0.375rem;" +
-        `background:${c.menuSide};border-radius:0.5rem;padding:0.625rem;overflow:hidden;`;
+        `background:${option};border-radius:0.5rem;padding:0.625rem;overflow:hidden;`;
     case "kb.sideTitle":
       return `font-size:${theme.size.btn};color:${c.textDim};text-align:center;`;
     case "kb.chips":
@@ -512,7 +536,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "kb.chip":
       return `width:100%;padding:0.4375rem 0.625rem;font:0.8125rem ${theme.font.ui};color:${c.btnText};border:none;` +
         `border-radius:0.3125rem;cursor:pointer;background:${
-          state.selected ? c.accentBg : state.hovered ? c.btnBgHover : c.btnBg
+          state.selected ? optionOn : state.hovered ? optionHover : option
         };text-align:center;`;
     case "kb.row":
       return "display:flex;gap:0.125rem;margin-bottom:0.125rem;";

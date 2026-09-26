@@ -799,7 +799,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   // the real system against a minimal DOM stub and asserts the two halves of the rule.
   const W = load("plugins/ui/components.js");
   const { UiRenderSystem } = load("plugins/ui/systems/reconcile.js");
-  const { defaultUiTheme, UI_THEME } = load("data/assets/theme.js");
+  const { defaultUiTheme, UI_THEME, recipeStyle } = load("data/assets/theme.js");
   const { createUiActions, onUiAction, UI_ACTIONS } = load("data/globals/actions.js");
   const P = loadPresentation();
 
@@ -924,7 +924,15 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     const elOf = (recipe) => made.find((el) => el.dataset.uiRecipe === recipe);
     const plainEl = elOf("settings.btn");
     assert(!!plainEl, "the button was mounted");
-    assert(/background:#444444/.test(plainEl.style.cssText), "its recipe background is on the element");
+    // Ask the THEME for the value instead of pinning a literal: P1.49f replaced the solid #444444 chip
+    // with a darkened translucent tint (the settings screen has no card behind its options any more),
+    // and the RULE under test is that the recipe background survives the longhand writes below - not
+    // which colour the palette happens to use.
+    const plainBg = /(?:^|;)background:([^;]+)/.exec(recipeStyle("settings.btn", {}, defaultUiTheme()))[1];
+    assert(
+      plainEl.style.cssText.includes("background:" + plainBg),
+      "its recipe background is on the element",
+    );
     // The write must not have happened at all for a widget with no image slot. `undefined` is the
     // stub's way of saying "never assigned"; a real element would keep the shorthand's colour.
     equal(plainEl.style.backgroundColor, undefined, "no backgroundColor was written over it");
@@ -939,7 +947,12 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
     equal(choiceEl.style.backgroundColor, "#123456", "the tint is written");
     W.setUiSelected(world, choice, true); // changes the recipe's style -> cssText is rewritten
     system.step();
-    assert(/background:#4a9eff/.test(choiceEl.style.cssText), "the selected style was rewritten");
+    // Same rule for the SELECTED face: ask the theme, because P1.49f turned the accent into an alpha
+    // tint (rgba) so the frosted backdrop keeps showing through the selected option.
+    const selBg = /(?:^|;)background:([^;]+)/.exec(
+      recipeStyle("settings.choice", { selected: true }, defaultUiTheme()),
+    )[1];
+    assert(choiceEl.style.cssText.includes("background:" + selBg), "the selected style was rewritten");
     equal(choiceEl.style.backgroundColor, "#123456", "…and the data tint was re-applied after it");
 
     // …and the image URL itself, with the theme's scrim on top of it.
