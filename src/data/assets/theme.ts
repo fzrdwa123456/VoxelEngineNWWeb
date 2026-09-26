@@ -231,6 +231,7 @@ export type UiRecipe =
   | "settings.split"
   | "settings.nav"
   | "settings.content"
+  | "settings.panelAuto"
   | "ui.frost"
   | "settings.choice"
   | "settings.scrollArea"
@@ -404,6 +405,11 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return settingsPanel("34rem");
     case "settings.panelXl":
       return settingsPanel("40rem");
+    // A DYNAMIC box (P1.49c): the sections differ wildly in width - the key bind page needs the keyboard
+    // board PLUS its 11rem chip column, and its bottom grids alone are ~30rem - so the box takes what the
+    // content wants up to a viewport-relative cap, and scrolls instead of overflowing on a small window.
+    case "settings.panelAuto":
+      return settingsPanel("min(64rem, 94vw)") + "max-height:86vh;overflow:auto;";
     case "settings.title":
       return "font-size:1.375rem;margin-bottom:0.875rem;";
     case "settings.label":
