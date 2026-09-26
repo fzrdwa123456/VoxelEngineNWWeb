@@ -130,7 +130,9 @@ export function defaultUiTheme(): UiTheme {
       btnTextShadow: "0 0.125rem 0 rgba(0,0,0,.5)",
       accentBg: "#4a9eff",
       accentBgHover: "#3b83d6",
-      keyBg: "#3a3a3a",
+      // P1.49w: TRANSLUCENT, so the key faces let the board (and the frosted screen) behind them show
+      // through - they used to be an opaque grey, which read as plastic stuck on the frosted panel.
+      keyBg: "rgba(255,255,255,0.14)",
       slotBg: "rgba(0,0,0,.35)",
       slotBgSelected: "rgba(255,255,255,.2)",
       slotEdge: "rgba(255,255,255,.25)",
@@ -679,7 +681,10 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // `style.background` / `style.outline`.
     case "kb.keycap":
       return "padding:0.0625rem;color:" + c.text + ";border:none;border-radius:0.25rem;cursor:pointer;" +
-        `background:${state.active ? c.accentBg : c.keyBg};display:flex;align-items:center;justify-content:center;overflow:hidden;` +
+        // The BOUND key keeps the accent hue but gains alpha, for the same reason: one translucent face per
+        // state, so a bound key and a free key are the same material in two colours.
+        `background:${state.active ? "rgba(74,158,255,0.55)" : c.keyBg};` +
+        `display:flex;align-items:center;justify-content:center;overflow:hidden;` +
         `outline:${state.selected ? `2px solid ${c.text}` : "none"};`;
     case "kb.keyLegend":
       return `font-family:${theme.font.ui};font-size:0.6875rem;line-height:1.15;white-space:nowrap;` +
