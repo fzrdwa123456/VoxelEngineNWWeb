@@ -168,6 +168,11 @@ export function buildSettingsPanel(
   // A DYNAMIC width (P1.49c): the box holds a nav COLUMN plus the content, and the sections differ wildly -
   // the key bind page wants the keyboard board plus its chip column, which a fixed 40rem could not give it.
   const settingsRoot = spawnPanel(world, root, "settings.panelAuto", { hidden: true });
+  // THE BOX TITLE IS SPAWNED FIRST - not cosmetic. Creation order IS render order (the reconciler only
+  // appends children, it never re-orders), so a label spawned after `split` renders BELOW the nav plus
+  // content block, i.e. at the bottom of the box next to Back. P1.49 introduced the split at the top of
+  // this function while this line stayed where it was, which is how the title ended up down there.
+  spawnLabel(world, settingsRoot, "settings.title", "menu.settings");
   const split = spawnPanel(world, settingsRoot, "settings.split");
   const nav = spawnPanel(world, split, "settings.nav");
   const content = spawnPanel(world, split, "settings.content");
@@ -209,7 +214,6 @@ export function buildSettingsPanel(
   const hideAll = (): void => show(null);
 
   // --- FPS cap slider: 30..240, maxed = unlimited (0) ---
-  spawnLabel(world, settingsRoot, "settings.title", "menu.settings");
   spawnLabel(world, panels.settings, "settings.label", "settings.fpsCap");
   const capValue = spawnLabel(world, panels.settings, "settings.value", "", { raw: true });
   const capSlider = spawnSlider(
