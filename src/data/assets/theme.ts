@@ -448,8 +448,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // `align-items:stretch` gives both columns the full height so each one scrolls on its own.
     case "settings.split":
       return "display:flex;gap:1.25rem;align-items:stretch;flex:1;min-height:0;text-align:left;";
+    // P1.49g: the nav column gets its own BACKPLATE. Without one the section buttons floated on the
+    // translucent screen and the left side read as four loose strips with nothing behind them. The block
+    // is a shade DARKER than the options (option = rgba(0,0,0,0.28)) so the strips sit ON something.
+    // It is FULL HEIGHT because `settings.split` uses `align-items:stretch`; an `align-self:flex-start`
+    // here would shrink it to hug the buttons instead.
     case "settings.nav":
-      return "display:block;flex:0 0 11rem;";
+      return "display:block;flex:0 0 11rem;background:rgba(0,0,0,0.34);border-radius:0.5rem;padding:0.5rem;";
     // The CONTENT column is the scroll container of the screen (P1.49f): a long page (the key bind one)
     // moves HERE, so the title, the nav and Back stay where they are. `min-height:0` is what lets a flex
     // item actually scroll instead of stretching its parent.
