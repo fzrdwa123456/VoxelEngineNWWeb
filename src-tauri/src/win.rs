@@ -114,8 +114,16 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     // "clip != warp", and warping here is what used to make the cursor jump into the middle and vanish.
     // It is also unnecessary: raw input deltas do not depend on where the cursor is, and the centre lock
     // keeps it on the crosshair by itself.
-    let clip = decide(&m, &p).clip;
-    apply_clip(&mut m, clip);
+    let plan = decide(&m, &p);
+    let held = apply_clip(&mut m, plan.clip);
+    if !plan.confined || !held {
+        // Nothing visible to clip to (the window is off the screen) or Windows refused the rectangle: do NOT
+        // pretend to be capturing. The front end sees `false` and falls back, instead of the cursor escaping
+        // the window while the game still processes clicks.
+        apply_clip(&mut m, Some(ClipRect::ZERO));
+        m.relative = false;
+        return false;
+    }
     true
 }
 
@@ -143,7 +151,9 @@ pub fn reclip_mouse_capture() -> bool {
     // The SAME decision the reconciler makes: a window that is not the foreground gets the clip RELEASED,
     // not recomputed from a stale (or minimized) rectangle.
     let clip = decide(&m, &p).clip;
-    apply_clip(&mut m, clip)
+    apply_clip(&mut m, clip);
+    // "Did it really re-clip": a refused rectangle means we hold NOTHING (see `apply_clip`).
+    !rect_is_zero(m.clipped)
 }
 
 /// Release capture unconditionally (the safety net for losing focus / exiting; repeated calls are
@@ -306,11 +316,22 @@ fn probe_of(m: &CursorModel) -> CursorProbe {
     } else {
         unsafe { client_rect_on_screen(m.hwnd) }.map(as_clip_rect).unwrap_or_default()
     };
+    let screen = unsafe {
+        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        ClipRect {
+            left: x,
+            top: y,
+            right: x + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            bottom: y + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        }
+    };
     CursorProbe {
         focused,
         showing,
         client,
         remote_session: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
+        screen,
     }
 }
 
@@ -322,20 +343,25 @@ fn apply_clip(m: &mut CursorModel, clip: Option<ClipRect>) -> bool {
         None => return false,
     };
     if rect == m.clipped {
-        return false;
+        return !rect_is_zero(rect); // already applied: report whether we really hold one
     }
     let release = rect_is_zero(rect) || rect_is_empty(rect);
-    unsafe {
+    let ok = unsafe {
         if release {
-            ClipCursor(std::ptr::null());
+            ClipCursor(std::ptr::null()) != 0
         } else {
             let win = as_win_rect(rect);
-            ClipCursor(&win);
+            ClipCursor(&win) != 0
         }
+    };
+    // **Honour the result.** ClipCursor REFUSES a rectangle that is not on the screen, and the first version
+    // of this recorded the clip anyway - so the model believed it held the mouse while the cursor was free to
+    // walk out of a half off-screen window (and clicks still reached the page). A refused clip is no clip.
+    m.clipped = if release || !ok { ClipRect::ZERO } else { rect };
+    if ok {
+        m.enforced = m.enforced.wrapping_add(1);
     }
-    m.clipped = if release { ClipRect::ZERO } else { rect };
-    m.enforced = m.enforced.wrapping_add(1);
-    true
+    ok && !release
 }
 
 /// Apply the shape. `SetCursor` belongs to the thread that owns the window, so this is only ever called
@@ -388,6 +414,12 @@ const CURSOR_SHOWING: u32 = 0x0000_0001;
 const IDC_ARROW: *const u16 = 32512 as *const u16;
 /// `SM_REMOTESESSION`: a remote desktop session needs a larger centre lock (SDL adds the same 2px).
 const SM_REMOTESESSION: i32 = 0x1000;
+/// The VIRTUAL SCREEN (every monitor): `ClipCursor` refuses a rectangle that is not on it, so the model
+/// intersects every clip target with this.
+const SM_XVIRTUALSCREEN: i32 = 76;
+const SM_YVIRTUALSCREEN: i32 = 77;
+const SM_CXVIRTUALSCREEN: i32 = 78;
+const SM_CYVIRTUALSCREEN: i32 = 79;
 
 /// Whether the cursor is visible at the system level: `hCursor == 0` (a NULL shape) means hidden.
 fn cursor_visible_now() -> bool {

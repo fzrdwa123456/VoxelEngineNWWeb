@@ -80,6 +80,9 @@ pub struct CursorProbe {
     pub client: ClipRect,
     /// a remote-desktop session needs a slightly larger centre lock (SDL does the same)
     pub remote_session: bool,
+    /// the VIRTUAL SCREEN bounds: `ClipCursor` refuses a rectangle that is not on the screen, so every clip
+    /// target is intersected with this (a window half off the screen is the normal way to hit it).
+    pub screen: ClipRect,
 }
 
 /// The DECISION - data again. `clip: None` = leave the clip alone; `Some(ZERO)` = release it.
@@ -87,6 +90,10 @@ pub struct CursorProbe {
 pub struct CursorPlan {
     pub clip: Option<ClipRect>,
     pub shape: CursorShape,
+    /// Can the mouse really be HELD? `false` = the clip cannot apply (the window is off the screen), so the
+    /// caller must not believe it is capturing - that belief is what let the cursor walk out of a half
+    /// off-screen window while the game still processed clicks.
+    pub confined: bool,
 }
 
 pub fn rect_is_zero(r: ClipRect) -> bool {
@@ -97,43 +104,78 @@ pub fn rect_is_empty(r: ClipRect) -> bool {
     r.right <= r.left || r.bottom <= r.top
 }
 
-/// The rect to confine the cursor to. PURE (the remote-session flag arrives in the probe).
-pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
-    if !m.centre_lock {
-        return p.client;
-    }
-    let adjust = if p.remote_session { 2 } else { 0 };
-    let cx = (p.client.left + p.client.right) / 2;
-    let cy = (p.client.top + p.client.bottom) / 2;
+/// The overlap of two rectangles (`rect_is_empty` reports the "they do not touch" case).
+pub fn intersect(a: ClipRect, b: ClipRect) -> ClipRect {
     ClipRect {
-        left: cx - adjust,
-        top: cy,
-        right: cx + 1 + adjust,
-        bottom: cy + 1,
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
     }
+}
+
+/// Put `r` inside `bounds`: a rect that FITS slides (keeping its size), one that is too big is SHRUNK to the
+/// bounds - sliding cannot help there, and ClipCursor needs a rectangle that is really on the screen.
+/// `bounds` must be non-empty.
+pub fn fit_into(r: ClipRect, bounds: ClipRect) -> ClipRect {
+    let w = (r.right - r.left).min(bounds.right - bounds.left).max(1);
+    let h = (r.bottom - r.top).min(bounds.bottom - bounds.top).max(1);
+    let left = r.left.clamp(bounds.left, (bounds.right - w).max(bounds.left));
+    let top = r.top.clamp(bounds.top, (bounds.bottom - h).max(bounds.top));
+    ClipRect { left, top, right: left + w, bottom: top + h }
+}
+
+/// The rect to confine the cursor to. PURE (the remote-session flag and the screen bounds arrive in the
+/// probe). Returns `ZERO` when NOTHING can be confined (the window is off the screen).
+pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
+    // **Only the VISIBLE part of the client area can be clipped to**: `ClipCursor` refuses a rectangle that
+    // is not on the screen (SDL says so in its own comment: "ClipCursor may fail if rect beyond screen").
+    let visible = intersect(p.client, p.screen);
+    if rect_is_empty(visible) {
+        return ClipRect::ZERO;
+    }
+    let target = if m.centre_lock {
+        let adjust = if p.remote_session { 2 } else { 0 };
+        let cx = (p.client.left + p.client.right) / 2;
+        let cy = (p.client.top + p.client.bottom) / 2;
+        ClipRect { left: cx - adjust, top: cy, right: cx + 1 + adjust, bottom: cy + 1 }
+    } else {
+        p.client
+    };
+    // A 1px rect whose centre is off the screen cannot be clipped to, and for relative mode it does not
+    // matter WHERE inside the window the cursor sits - so the target slides into the visible part.
+    fit_into(target, visible)
 }
 
 /// The whole rule set. PURE: no Win32, no globals - this is what the table test drives.
 pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     if m.hwnd == 0 {
-        return CursorPlan { clip: None, shape: CursorShape::Unknown };
+        return CursorPlan { clip: None, shape: CursorShape::Unknown, confined: false };
     }
     if !p.focused {
         // Rule 1.
         return CursorPlan {
             clip: if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
             shape: CursorShape::Arrow,
+            confined: false,
         };
     }
     if m.relative {
-        // Rule 2.
-        return CursorPlan { clip: Some(clip_target(m, p)), shape: CursorShape::Hidden };
+        // Rule 2. `confined` is false when the window has no visible area left: the caller then DROPS
+        // capture instead of pretending to hold the mouse.
+        let target = clip_target(m, p);
+        return CursorPlan {
+            clip: Some(target),
+            shape: CursorShape::Hidden,
+            confined: !rect_is_zero(target),
+        };
     }
     // No capture: nothing is confined, and the arrow is right - unless the front end asked for hidden
     // (a loading screen draws its own progress and wants no pointer on top of it).
     CursorPlan {
         clip: if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
         shape: if m.want == 2 { CursorShape::Hidden } else { CursorShape::Arrow },
+        confined: false,
     }
 }
 
@@ -158,8 +200,12 @@ mod tests {
         }
     }
 
+    fn screen() -> ClipRect {
+        ClipRect { left: 0, top: 0, right: 1920, bottom: 1080 }
+    }
+
     fn probe(focused: bool) -> CursorProbe {
-        CursorProbe { focused, showing: true, client: client(), remote_session: false }
+        CursorProbe { focused, showing: true, client: client(), remote_session: false, screen: screen() }
     }
 
     #[test]
@@ -215,6 +261,44 @@ mod tests {
         let plan = decide(&m, &probe(true));
         assert_eq!(plan.clip, None);
         assert_eq!(plan.shape, CursorShape::Unknown);
+    }
+
+    #[test]
+    fn a_half_offscreen_window_is_still_confined() {
+        // The reported bug: the centre (and the 1px target) lands off the screen, ClipCursor refuses the
+        // rectangle, and a client that believed it held a clip let the cursor walk out of the window.
+        let mut p = probe(true);
+        p.client = ClipRect { left: 600, top: 100, right: 1400, bottom: 700 }; // centre x = 1000 = the edge
+        p.screen = ClipRect { left: 0, top: 0, right: 1000, bottom: 1080 };
+        let plan = decide(&model(true, ClipRect::ZERO), &p);
+        assert!(plan.confined, "the visible half can still be clipped to");
+        let clip = plan.clip.expect("a clip");
+        assert!(!rect_is_empty(clip));
+        assert!(clip.right <= 1000 && clip.bottom <= 1080, "inside the screen: {clip:?}");
+    }
+
+    #[test]
+    fn a_window_entirely_off_the_screen_cannot_be_confined() {
+        let mut p = probe(true);
+        p.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };
+        let plan = decide(&model(true, ClipRect::ZERO), &p);
+        assert!(!plan.confined, "nothing can be held");
+        assert_eq!(plan.clip, Some(ClipRect::ZERO), "and whatever we held is released");
+        assert_eq!(plan.shape, CursorShape::Hidden, "the intent is still capture");
+    }
+
+    #[test]
+    fn the_visible_part_wins_over_the_whole_client() {
+        let mut m = model(true, ClipRect::ZERO);
+        m.centre_lock = false;
+        let mut p = probe(true);
+        p.client = ClipRect { left: 800, top: 100, right: 1800, bottom: 700 };
+        p.screen = ClipRect { left: 0, top: 0, right: 1000, bottom: 1080 };
+        assert_eq!(
+            decide(&m, &p).clip,
+            Some(ClipRect { left: 800, top: 100, right: 1000, bottom: 700 }),
+            "the client is intersected with the screen"
+        );
     }
 
     #[test]
