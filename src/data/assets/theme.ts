@@ -164,6 +164,14 @@ export function defaultUiTheme(): UiTheme {
             `[data-ui-recipe="${role}"]::-webkit-scrollbar-track{background:transparent}`,
         )
         .join("") +
+      // P1.49j: the SEAM between the language and font columns. It cannot be an inline style: a recipe is
+      // per-ROLE and both columns share one, so "the second column only" would need an adjacent-sibling
+      // selector - and drawing it on a column would put the line hard against that column is own padding
+      // instead of in the 1.25rem gutter. An `::after` of the group, absolutely positioned at 50%, lands in
+      // the middle of the gutter at ANY column widths, and `pointer-events:none` keeps the 1px line out of
+      // the way of a click that happens to land on the column boundary.
+      '[data-ui-recipe="settings.columns"]::after{content:"";position:absolute;left:50%;top:0.75rem;' +
+      'bottom:0.75rem;width:0.0625rem;pointer-events:none;background:rgba(255,255,255,0.1)}' +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
       // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
       // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
@@ -464,9 +472,12 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // content column, and that is deliberate: alpha STACKS, so this block still reads clearly darker than
     // the content backplate it sits on, while the options inside it (0.28) stay the LIGHTER strips - the
     // exact relationship the nav column already has. Same colour on same colour is the layering here.
+    // P1.49j: `position:relative` is for the SEAM below - the divider is an absolute `::after` of this
+    // block (see the stylesheet), so it needs a positioned ancestor. The two columns stay EXACTLY as they
+    // were: equal `flex:1` halves with a 1.25rem gap, whose midpoint is this block is 50%.
     case "settings.columns":
       return "display:flex;gap:1.25rem;margin-bottom:0.875rem;background:rgba(0,0,0,0.34);" +
-        "border-radius:0.5rem;padding:0.75rem 1rem;";
+        "border-radius:0.5rem;padding:0.75rem 1rem;position:relative;";
     case "settings.column":
       return "flex:1;text-align:left;";
     case "settings.columnLabel":
