@@ -378,3 +378,24 @@ slot with a CHECKER icon (the pack ships no texture: that is the missing-texture
 tooltips must read the pack's labels - `Demo Block (from the pack)` and the reskinned `Stone`; (3) delete the
 file and relaunch: seven becomes six and the tooltip goes back to the mod's label.
 
+
+AFTER the explicit-only capture (P1.58 - the Win-key focus FLAP, cured at the root). The flap is a Windows
+behaviour, so walk it with both logs open (`logs\boot.log` for the `[cursor]` probes, `logs\debug.log` for
+`WINFOCUS`/`LOCK`):
+(1) **the Win key, in a world**: enter a world (mouse captured, view turns), press Win once and move the
+pointer around the Start menu for a few seconds. The cursor must stay VISIBLE and must NOT blink. `boot.log`
+may show `[cursor] focus LOST` / `focus GAIN` pairs, but a `[cursor] capture on=true` line after a
+`focus GAIN` is the bug back; `debug.log` must show one `WINFOCUS blur` + `-> pause menu` and NO
+`FOCUS focused -> relock` line at all (that line does not exist any more);
+(2) **coming back**: click into the window - the pause menu is up, the cursor is visible, the world is
+frozen; Resume captures again (one `LOCK request [menu resume]`). Alt-Tab away and back WITHOUT resuming:
+the mouse must stay free every time (no capture, no hidden cursor, no view rotation) - Alt+Tab never takes
+the mouse back on its own any more;
+(3) **the pathological case** (a blur whose pause menu does not appear): the cursor still must not be
+hidden - check that no `capture on=true` follows the `focus GAIN` in `boot.log`, and that clicking the
+canvas in the world re-grabs the mouse (`LOCK click grab`) and hides the cursor again;
+(4) **the drag flood is gone**: drag the title bar or a border for a second - `boot.log` must now hold a
+handful of `capture on=false` lines (one per real release) instead of one per geometry event;
+(5) the standing regressions: ESC -> pause menu -> Resume (cursor back, view live); the backpack (E) opens
+with a visible cursor and closing it re-captures at once; fullscreen/windowed from the settings panel does
+NOT pause; the menu/Apps key still produces no cursor flash.

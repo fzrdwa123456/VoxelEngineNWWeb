@@ -142,6 +142,26 @@ pub fn release_mouse_capture() {
     apply_clip(&mut m, Some(ClipRect::ZERO));
 }
 
+/// **THE FOREGROUND WAS LOST — the cursor SESSION is over** (P1.58). This is the ONE thing both paths that
+/// detect "we are not the foreground window any more" call: the window event in `lib.rs`
+/// (`WindowEvent::Focused(false)`) and `capture_foreground_check`'s ~32 ms backstop.
+///
+/// It does two things, and the SECOND one is the root cure of the focus-flap report:
+///   1. the capture request goes and the clip we hold is released (`release_mouse_capture`), so a background
+///      window never confines the cursor over another application's screen area;
+///   2. the front end's HIDDEN INTENT is FORGOTTEN (`cursor_model::forget_intent`, rule 4). It used to
+///      survive, and `decide`'s no-capture branch hides the cursor for `want == 2` - so the 8 ms sentinel put
+///      the arrow away again on EVERY "focus gained" while Windows flip-flopped the foreground (press the Win
+///      key: `focus LOST` -> `focus GAIN` -> `focus LOST` …). Forgetting it means a regained foreground
+///      changes NOTHING until the front end says what it wants, and the front end no longer re-requests
+///      capture on a focus event either (main.ts::onWinFocus) - the mouse is only captured when the PLAYER
+///      asks for it.
+pub fn on_foreground_lost() {
+    release_mouse_capture();
+    let mut m = model();
+    forget_intent(&mut m);
+}
+
 /// **Capture is only allowed to stay on in the foreground — this is the system-level backstop.**
 ///
 /// Why this is required: `ClipCursor` does **not** look at whether the window is in the
@@ -185,7 +205,9 @@ pub fn capture_foreground_check(app: &tauri::AppHandle) -> bool {
         }
         m.fg_mismatch_ticks = 0;
     }
-    release_mouse_capture();
+    // The whole "we are not the foreground" treatment, including forgetting the hidden intent (P1.58): a
+    // background window must not re-hide the cursor the moment it is foreground again.
+    on_foreground_lost();
     // Put the ARROW back with it: releasing the clip does not touch the shape, and the pointer is over
     // another application now (SDL_RedrawCursor: with no mouse focus the DEFAULT cursor is the answer).
     reconcile(app);
@@ -254,7 +276,8 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    decide, rect_is_empty, rect_is_zero, ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
+    decide, forget_intent, rect_is_empty, rect_is_zero, ClipPos, ClipRect, CursorModel, CursorProbe,
+    CursorShape,
 };
 
 /// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
@@ -560,8 +583,16 @@ pub fn set_cursor_intent(app: &tauri::AppHandle, hwnd: isize, visible: bool) {
 /// and the intent disagree" is to ask. Rule 3 of the model is what makes that safe: a tick that changes
 /// nothing makes NO Win32 call, so it neither fights the system nor touches anybody is cursor.
 pub fn cursor_sentinel(app: &tauri::AppHandle) {
-    if model().want == 0 {
-        return;
+    {
+        let m = model();
+        // **A LIVE CAPTURE IS HEALED EVEN WHEN THE INTENT IS UNKNOWN (P1.58).** Losing the foreground clears
+        // `want` (`on_foreground_lost`), and the front end may not have spoken again yet - but if a capture is
+        // running, rule 2 still has to put the hidden shape back when the system drops it (Alt menu mode, a
+        // dropped `SetCursor`). Cost of asking: nothing, because a tick whose plan changes nothing makes no
+        // Win32 call (rule 3).
+        if m.want == 0 && !m.relative {
+            return;
+        }
     }
     reconcile(app);
 }

@@ -2777,6 +2777,22 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/if \(winFocused\(\)\) \{[\s\S]{0,120}relock\("world entered"\)/.test(main),
     "the world entry captures only in the foreground (otherwise it pauses)");
   assert(/onCaptureLost\(/.test(main), "…and a rust-side teardown is handled as a lost window");
+  // **A FOCUS EVENT NEVER RE-REQUESTS CAPTURE (P1.58).** The root cure of the Win-key flap the boot.log
+  // pinned: `focus LOST` -> `focus GAIN` several times per keypress, and the handler re-opened the native
+  // capture (which HIDES the cursor, P1.57) on every one of them. Capture is EXPLICIT-only now - a click,
+  // Resume, ESC, the backpack key, the world entry - never an event the OS is free to repeat; a focus event
+  // re-asserts the cursor INTENT instead.
+  const focusHandler = /onWinFocus\(\(\) => \{([\s\S]*?)\n\}\);/.exec(main);
+  assert(focusHandler !== null, "the focus handler is read as one block");
+  assert(!/relock\(/.test(focusHandler[1]), "…and a focus event never re-requests the capture");
+  assert(/reassertCursor\(\)/.test(focusHandler[1]), "…it re-asserts the cursor intent instead");
+  // …and the other half of the flap: a hidden INTENT must not outlive the foreground session, or the 8ms
+  // sentinel hides the cursor again on every "focus gained" with nobody asking.
+  const winSrc = stripComments(readSource("src-tauri/src/win.rs"));
+  assert(/pub fn on_foreground_lost\(\)/.test(winSrc) && /forget_intent\(&mut m\)/.test(winSrc),
+    "a foreground loss releases the capture AND forgets the hidden intent (win.rs)");
+  assert(/on_foreground_lost\(\);/.test(stripComments(readSource("src-tauri/src/lib.rs"))),
+    "…which the window-focus-lost event calls too");
   const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");

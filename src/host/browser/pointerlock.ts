@@ -38,20 +38,24 @@ export interface PointerLockDeps {
    *  `setTimeout(tryLock, 1300)` — a timer owned by this module alone, invisible to the schedule, still
    *  running while paused, and impossible to list in the log. */
   scheduleRetry: (delayMs: number, source: string) => void;
-  /** Write the cursor once more (`reapplyCursor`'s two extra writes at 0 / 120 ms): likewise a delayed
-   *  intent, not a timer owned by this module. */
-  scheduleCursor: (delayMs: number) => void;
 }
 
 // relock() STILL **requires the window to be foreground** (deps.focused). The old comment said "no focus
 // gate is needed" because the browser's requestPointerLock refuses anyway; the Tauri version goes through
 // native ClipCursor, which does not look at the foreground — that assumption no longer holds.
+//
+// **AND IT IS EXPLICIT-ONLY NOW (P1.58).** `relock` is called by the paths where the PLAYER asks for the mouse
+// (Resume, ESC out of a menu, the backpack key, entering a world) and by nothing else: the focus handler used
+// to call it too, and the Windows key's `focus LOST` / `focus GAIN` flap re-opened the capture — which hides
+// the cursor — several times per keypress. A focus event re-asserts the cursor INTENT instead
+// (main.ts::onWinFocus -> reassertCursor), and Rust's foreground rule is what takes a background capture
+// away (win.rs::on_foreground_lost, which also forgets the hidden intent).
 
 export class PointerLock {
   constructor(private readonly deps: PointerLockDeps) {}
 
   relock(source: string): void {
-        this.deps.logDebug(`LOCK request [${source}]`);
+    this.deps.logDebug(`LOCK request [${source}]`);
     this.attempt(source);
   }
 
@@ -63,23 +67,23 @@ export class PointerLock {
   }
 
   private attempt(source: string): void {
-      if (this.deps.isUiModal()) return;
-      if (!this.deps.focused()) {
-        this.deps.logDebug(`LOCK skipped [${source}]: window is not foreground`);
-        return;
-      }
-      const p = this.deps.input.lock();
-      if (p) {
-        p.catch(() => {
-                    this.deps.logDebug(`LOCK rejected [${source}], retrying in 1300ms`);
-          this.deps.scheduleRetry(1300, source);
-        });
-      }
+    if (this.deps.isUiModal()) return;
+    if (!this.deps.focused()) {
+      this.deps.logDebug(`LOCK skipped [${source}]: window is not foreground`);
+      return;
+    }
+    const p = this.deps.input.lock();
+    if (p) {
+      p.catch(() => {
+        this.deps.logDebug(`LOCK rejected [${source}], retrying in 1300ms`);
+        this.deps.scheduleRetry(1300, source);
+      });
+    }
   }
 
-    // Cursor: hidden ONLY while the player actually controls the mouse (a world running, no modal UI
-    // up). Visible on the loading screen, at the main menu, in the pause menu and in the backpack.
-    // (It used to read `isUiModal` inverted, which made the loading screen hide the cursor.)
+  // Cursor: hidden ONLY while the player actually controls the mouse (a world running, no modal UI
+  // up). Visible on the loading screen, at the main menu, in the pause menu and in the backpack.
+  // (It used to read `isUiModal` inverted, which made the loading screen hide the cursor.)
   /** Re-assert the cursor shape after the window regained focus (or after the menu/Apps key).
    *
    *  It used to write a DIFFERENT CSS value first (`auto`, then the target) to force Chromium to recompute

@@ -253,6 +253,25 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     plan(clip, shape, false, warp, disagrees(p, shape))
 }
 
+/// **Rule 4 (P1.58): a HIDDEN intent does not outlive the FOREGROUND SESSION.**
+///
+/// `want` is a statement about a PLAYING session ("the mouse belongs to the game"), and a playing session
+/// does not continue while another application is in the foreground. Forgetting it here is HALF of the root
+/// cure for the Windows focus FLAP (press Win: `focus LOST` -> `focus GAIN` several times in a row). With the
+/// intent still standing, the sentinel applied `Hidden` again on every "focus gained" - the no-capture branch
+/// of `decide` hides for `want == 2` - so the arrow blinked in and out for as long as the system kept
+/// flip-flopping, whether or not the front end asked for anything. The other half is in the front end: it no
+/// longer RE-REQUESTS capture on a focus event either (main.ts::onWinFocus), and the pause menu the blur
+/// raises is what keeps the game paused until the player resumes.
+///
+/// Clearing it is safe because the front end speaks again on the way back: `reassertCursor()` (the focus
+/// handler, the menu/Apps key guard) sends the intent unconditionally, and `applyCursor()` sends it whenever
+/// the CSS value changes. So a window that has just regained focus does NOTHING to the cursor until the front
+/// end says what it wants - which is exactly the right state for that gap.
+pub fn forget_intent(m: &mut CursorModel) {
+    m.want = 0;
+}
+
 /// Does the SYSTEM disagree with the shape we want? (`showing` is `GetCursorInfo` - reality - not our record,
 /// which is the whole point: a `SetCursor` push can be dropped and Chromium can answer from a stale cache.)
 fn disagrees(p: &CursorProbe, shape: CursorShape) -> bool {
@@ -480,5 +499,53 @@ mod tests {
         // never collapse (the tests above pin the exact 1px rect).
         let t = clip_target(&model(false, ClipRect::ZERO), &probe(true));
         assert!(!rect_is_empty(t));
+    }
+
+    #[test]
+    fn a_background_window_hands_the_arrow_back_exactly_once() {
+        // "Press Win / Alt+Tab and the cursor stays gone until I jiggle the mouse": WE hid it, so the model
+        // has to hand the arrow back itself (Windows only re-decides a shape when the pointer moves). Once
+        // pushed, the record says Arrow and a background window stops fighting the foreground app for it.
+        let mut m = model(true, client());
+        m.shape = CursorShape::Hidden;
+        assert!(decide(&m, &probe(false)).force_shape, "we are the reason it was hidden");
+        m.shape = CursorShape::Arrow; // what apply_shape recorded
+        assert!(
+            !decide(&m, &probe(false)).force_shape,
+            "…and never again while we are in the background"
+        );
+    }
+
+    #[test]
+    fn a_stale_hidden_intent_is_what_used_to_re_hide_the_cursor_on_focus_gain() {
+        // The flap in ONE line, pinned so it cannot come back: an intent that survived the foreground loss
+        // hides the cursor again the moment the window is foreground again - with no capture behind it.
+        let mut m = model(false, ClipRect::ZERO);
+        m.want = 2;
+        m.shape = CursorShape::Hidden;
+        assert_eq!(decide(&m, &probe(true)).shape, CursorShape::Hidden);
+        assert_eq!(decide(&m, &probe(true)).clip, None, "and with no capture behind it");
+    }
+
+    #[test]
+    fn a_foreground_loss_forgets_the_hidden_intent() {
+        // Rule 4. `win.rs::on_foreground_lost()` is the platform half (drop the capture request + release
+        // the clip we hold); the intent is what this pins.
+        let mut m = model(true, client());
+        m.want = 2;
+        m.shape = CursorShape::Hidden;
+        m.relative = false; // release_mouse_capture()
+        forget_intent(&mut m);
+        // The clip itself is released by the platform half (`apply_clip(ZERO)`, which records ZERO): while
+        // that is still recorded, the plan releases it and shows the arrow - and NOTHING is confined.
+        let releasing = decide(&m, &probe(true));
+        assert_eq!(releasing.clip, Some(ClipRect::ZERO));
+        assert_eq!(releasing.shape, CursorShape::Arrow);
+        m.clipped = ClipRect::ZERO; // what apply_clip(ZERO) records
+        // Coming back must now touch the cursor not at all: no clip (nothing is confined without a capture
+        // request) and no hidden shape. That is the Win-key flap, cured.
+        let back = decide(&m, &probe(true));
+        assert_eq!(back.shape, CursorShape::Arrow);
+        assert_eq!(back.clip, None);
     }
 }

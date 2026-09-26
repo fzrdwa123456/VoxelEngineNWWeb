@@ -614,8 +614,9 @@ Still outstanding:
   native capture is `ClipCursor`, which does NOT look at the foreground (unlike the browser's
   `requestPointerLock`), so the NW.js version could drop its focus gate — this port cannot. The gate now
   exists in three layers: the NORMAL path (`PointerLockDeps.focused`, shipped from `winFocused`, so `relock`
-  refuses to capture out of the foreground — and the focus-regained relock still works because `win-focus`
-  sets the flag first), the AUTOMATIC path (`enterWorld` captures only when focused; otherwise it shows the
+  refuses to capture out of the foreground; the focus-regained relock this sentence used to justify is GONE
+  in P1.58 - capture is explicit-only now, so no automatic path wants the mouse out of the foreground at
+  all), the AUTOMATIC path (`enterWorld` captures only when focused; otherwise it shows the
   pause menu, so "not foreground ⇒ paused" stays closed), and the SYSTEM-level net
   (`win::capture_foreground_check`, two consecutive ticks with a foreign foreground → release + restore the
   cursor + emit `capture-lost`, which the frontend handles exactly like a blur).
@@ -1239,6 +1240,28 @@ Still outstanding:
   that the element mechanism carries a surface end to end. `boot/main.ts` contributes NO element of its own any
   more: the table is entirely plugin-contributed, and the gate asserts that. `tools/plugins-no-ui-crosshair.bat`
   and F5 are the two ways to try it.
+- **P1.58 - capture is EXPLICIT-only: the Win-key focus FLAP is cured at the root.** `DONE`. The boot.log
+  pinned it exactly: the Windows key produces `focus LOST` -> `focus GAIN` several times in a row, and every
+  `focus GAIN` ran `onWinFocus`'s `relock("window focus")` - which re-opens the native capture, and since
+  P1.57 that same command HIDES the cursor, so the arrow blinked in and out while the pointer was over the
+  Start menu. The requests were never the bug; the REQUESTING was: a capture re-issued on an event the
+  operating system is free to repeat can never be stable. Two halves, both small:
+  (1) **the front end never re-requests the capture on a focus event** (`main.ts::onWinFocus` calls
+  `reassertCursor()` and nothing else). The mouse is captured when the PLAYER asks for it - a canvas click,
+  Resume, ESC out of a menu, the backpack key, the world entry - and given back on every real loss (a modal
+  UI opening, the window leaving the foreground, a geometry change). Coming back from Alt+Tab therefore does
+  NOT steal the mouse back: the blur raised the pause menu and the player resumes it, or - with no UI up - a
+  click on the canvas grabs it.
+  (2) **the hidden INTENT does not outlive the foreground session** (`cursor_model.rs::forget_intent`, rule
+  4, called by `win.rs::on_foreground_lost` from BOTH foreground-loss paths: the window event and the ~32 ms
+  `capture_foreground_check`). Without it the 8 ms sentinel re-hid the cursor on every "focus gained" all by
+  itself, with nobody asking - the flap had a second engine.
+  The rules are pinned by four new pure table tests (21 total: `rustc --test src-tauri/src/cursor_model.rs`)
+  and by the gate, which reads the focus handler's own body (no `relock(`, a `reassertCursor()`) and the two
+  Rust functions. Two riders from the same log: `releaseCapture()` is IDEMPOTENT now (it invoked the native
+  release per DEVICE event, so one title-bar drag wrote 30+ `[cursor] capture on=false` round-trips, each one
+  a main-thread ClipCursor+SetCursor pass), and the lock manager's dead `scheduleCursor` dep (the 0/120 ms
+  focus re-assert of P1.11) went with the mechanism it belonged to.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

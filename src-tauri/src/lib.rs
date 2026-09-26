@@ -273,7 +273,11 @@ pub fn run() {
                             // an Alt-Tab the user's cursor is shut inside the window by ClipCursor and
                             // cannot get out. This is a safety net: the frontend's onWinBlur releases
                             // it too, so both sides do it, idempotently.
-                            win::release_mouse_capture();
+                            // **…and it must also FORGET the hidden intent** (P1.58): with the intent
+                            // still standing, the 8 ms sentinel re-hid the cursor on every "focus
+                            // gained", which is the Win-key focus flap (see
+                            // win.rs::on_foreground_lost).
+                            win::on_foreground_lost();
                             game::append_boot(
                                 &diag_root,
                                 &format!("[cursor] focus LOST  after ={}", win::cursor_probe()),

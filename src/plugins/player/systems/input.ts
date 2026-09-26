@@ -601,9 +601,18 @@ export class PlayerInputSystem {
    *  prepareUnlock(). A native capture has no pointerlockchange to wait for, so the state has to be
    *  settled here itself; on the fallback path releaseMouse() also calls document.exitPointerLock(). */
   releaseCapture(): void {
+    // **IDEMPOTENT (P1.58).** This used to invoke the native release unconditionally, and its callers fire
+    // per DEVICE event - `onWinGeometry` runs on every pixel of a window drag - so one boot.log held 30+
+    // `[cursor] capture on=false` round-trips for a single title-bar drag, every one of them a main-thread
+    // ClipCursor + SetCursor pass. Releasing something we do not hold is not a state change.
+    const held = this.state.locked || document.pointerLockElement === this.dom;
     if (this.state.locked) this.log("MOUSE CAPTURE off (native ClipCursor released)");
     this.state.locked = false;
     this.state.freeMouseActive = false;
+    // The FLAGS are always settled (the free-mouse fallback has to end even when no lock was held); only the
+    // native release is skipped - and `held` covers the browser path too, where the LOCK, not the state, is
+    // what has to go.
+    if (!held) return;
     this.mouse.release();
   }
 

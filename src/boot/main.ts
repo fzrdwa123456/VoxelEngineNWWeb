@@ -802,10 +802,10 @@ pointerLock = new PointerLock({
   // requestPointerLock refuses on its own anyway).
   focused: winFocused,
   logDebug,
-  // Both of these are **delayed intents**, not timers of this module: the deadline goes into
-  // DELAYED_INTENTS and is applied by `ui.delays`.
-  scheduleRetry: (delayMs, source) => delayedIntents.schedule("lockRetry", delayMs, source),
-  scheduleCursor: (delayMs) => delayedIntents.schedule("cursor", delayMs),
+  // A REJECTED LOCK IS RETRIED through a **delayed intent**, not a timer of this module: the deadline goes
+  // into DELAYED_INTENTS and is applied by `ui.delays`. (The old `scheduleCursor` - the two extra cursor
+  // writes 0/120 ms after the window regained focus - went with the focus-gain relock in P1.58.)
+  scheduleRetry: (delayMs, source) => delayedIntents.schedule("lockRetry", delayMs, source),
 });
 
 // The window-level guards (pointerlockchange log, ESC/contextmenu preventDefault, the Space shield) are
@@ -1117,21 +1117,38 @@ const onWindowLost = (reason: string): void => {
 };
 onWinBlur(() => onWindowLost("WINFOCUS blur"));
 onCaptureLost(() => onWindowLost("CAPTURELOST not foreground"));
-onWinFocus(() => {
-  // Diagnostics: record it once, **unconditionally**
-  logDebug(`WINFOCUS focus inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
-  // On switching back, re-assert the cursor first: Chromium's cached cursor may still be the NULL from
-  // before the blur, and the system may have revealed it while we were away (see reassertCursor).
-  // Re-assert the cursor - but ONLY when we are NOT about to take the mouse back: re-asserting first shows
-  // the arrow for a frame and the capture then hides it again, which is the "Alt+Tab flashes" report (P1.56).
-  const willRelock = inWorld() && !uiOpen() && !input.locked;
-  if (!willRelock) pointerLock.reassertCursor();
-  if (willRelock) {
-        pointerLock.relock("window focus");
-        logDebug("FOCUS focused -> relock");
-  }
-});
-
+
+// **A FOCUS EVENT NEVER TOUCHES THE MOUSE CAPTURE (P1.58 - the root cure of the Win-key flap).**
+//
+// What it used to do: on regaining focus, if a world ran and no UI was up, it RE-REQUESTED the mouse
+// (`relock("window focus")`). The boot.log shows what the Windows key does to that: `focus LOST` -> `focus
+// GAIN` -> `focus LOST` several times per keypress - and every `focus GAIN` re-opened the native capture,
+// which HIDES the cursor, so the arrow blinked in and out while the pointer was over the Start menu. The
+// requests were never the problem; the REQUESTING was: a capture re-issued on an event the operating system
+// is free to repeat can never be stable.
+//
+// The model is EXPLICIT-ONLY now: the mouse is captured when the PLAYER asks for it (a click on the canvas,
+// Resume, ESC out of a menu, the backpack key, entering a world) and it is given back on every real loss (a
+// modal UI opening, the window leaving the foreground, a geometry change). A focus event only re-asserts
+// what the cursor SHOULD be - the INTENT, not the capture - and Rust's own foreground rule
+// (win.rs::on_foreground_lost) keeps the two halves honest while nobody is asking: the clip is released and
+// the ARROW handed back the moment the window stops being foreground, and the hidden intent is FORGOTTEN
+// there as well (cursor_model.rs::forget_intent), so a "focus gained" cannot re-hide a cursor nobody asked
+// to hide.
+//
+// The consequence is deliberate and MC-like: coming back from Alt+Tab does NOT steal the mouse back. The
+// blur raised the pause menu and the player resumes it - or, with no UI up, a click on the canvas grabs the
+// mouse. Nothing may capture in the background either way: `PointerLock` refuses without the foreground.
+
+onWinFocus(() => {
+  // Diagnostics: record it once, unconditionally
+  logDebug(`WINFOCUS focus inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
+  // Re-assert the cursor, and ONLY the cursor. Chromium's cached shape is still the NULL from the blur (it
+  // answers WM_SETCURSOR from that cache) and Rust has just FORGOTTEN the intent, so one repeated intent is
+  // what puts the right shape back on screen.
+  pointerLock.reassertCursor();
+});
+
 // Window GEOMETRY changed (resized / moved / DPI scale). **This is not "the mouse left the app":** dragging
 // a border or the title bar keeps the window focused and the cursor inside its rect (over the NON-CLIENT
 // area), so neither blur nor mouseleave fires — while the native capture's ClipCursor rectangle quietly goes
