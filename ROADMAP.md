@@ -1277,6 +1277,34 @@ Still outstanding:
   measures; `lib.rs::boot_line` is the one helper that keeps the log paths in the command bus.
   `docs\TESTING.md` (P1.59) has the decoding table: `want=2 relative=false showing=false` = the intent,
   `want=1 relative=false showing=false` = Chromium's cache, `showing=true` + invisible = the repaint.
+- **P1.60 - the invisible cursor after the Win key: the ARROW GUARD + Chromium's cached NULL.** `DONE`.
+  P1.59's diagnostics settled it. The log showed the capture/release/focus handling was already correct
+  (`want=1 relative=false`, no capture, the front end ordering nothing hidden) and that EVERY re-capture
+  was the player's own `LOCK request [menu resume]` - but that after the release handed the arrow back
+  ONCE, the system reported `showing=false hCursor=0` again ~0.2 s later with `enforced` unchanged, and
+  then sat there: four consecutive `RAWMON … cursorFix=0 desired=1 showing=0` windows, ended only by a
+  real mouse move. Two independent causes, two fixes:
+  (1) **The model stopped comparing with reality.** Rule 1 (not our foreground) forced the arrow only when
+  OUR RECORD said Hidden, so a NULL that came back afterwards was never corrected. The ARROW GUARD
+  (`CursorModel::arrow_guard`, ~125 ticks = 1 s, armed by `release_mouse_capture`/`on_foreground_lost`)
+  makes \"we owe the player an arrow\" a bounded state: while it runs, a system that reports no cursor
+  gets the arrow pushed again. Bounded, so a foreground application that hides the cursor for its own
+  reasons is not fought forever - which is why rule 1 compared with our own record in the first place.
+  `cursor_sentinel` also runs while the guard is armed (the front end may never speak again after a
+  release), and the release now pushes the arrow IN THE SAME CALL (`win::restore_arrow`, the symmetric of
+  P1.57's \"hide in the same call\" - the `focus LOST after=` probe used to read `shape=Hidden`).
+  (2) **Chromium's cache is the pusher, and it can only be invalidated through the CSS.** The pointer sits
+  on WebView2's render child, which belongs to `msedgewebview2.exe`, so Chromium answers `WM_SETCURSOR`
+  from the NULL it cached while we were capturing - a repeated intent, and even Rust's `SetCursor`, does
+  not turn that back into an arrow. So: `win::refresh_cursor` now judges ownership by the ROOT window
+  (`GetAncestor(under, GA_ROOT)`), which is our HWND - the old process test refused every window we
+  actually own, i.e. that path NEVER ran in this app - and it reports whether it fired; and the front end
+  has `PointerLock.nudgeCursor`, a two-step CSS write (`auto` now, the real value on the next frame, which
+  the ui lane's per-frame `applyCursor` performs - no timer, no new resource). `auto` and `default` both
+  draw the standard arrow, so the intermediate value is invisible. Called from both \"we owe an arrow\"
+  paths (foreground lost, focus regained) and NEVER while we hold the mouse.
+  Three new table tests (24 total) pin the guard: it corrects a NULL that came back, it never pushes a
+  cursor the system already shows, it expires, and arming it twice is idempotent.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

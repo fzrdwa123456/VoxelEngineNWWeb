@@ -1119,6 +1119,11 @@ const onWindowLost = (reason: string): void => {
     pointerLock.applyCursor();
     logDebug(`${reason} -> pause menu`);
   }
+  // **We owe the player an arrow** (P1.60): giving the mouse back is exactly the moment Chromium can keep
+  // answering `WM_SETCURSOR` from the NULL it cached while we were capturing. Rust pushes an arrow and arms
+  // its guard, but Chromium's CACHE only turns back into an arrow when the CSS value CHANGES under it — see
+  // `PointerLock.nudgeCursor`. Never fires while we still hold the mouse, and `auto` is an arrow too.
+  pointerLock.nudgeCursor(`${reason} winlost`);
 };
 // ===== CURSOR DIAGNOSTICS (P1.59) =====
 // The Win-key report ("the cursor is invisible after the Win key") has three causes that look identical
@@ -1202,6 +1207,7 @@ onWinFocus(() => {
   // answers WM_SETCURSOR from that cache) and Rust has just FORGOTTEN the intent, so one repeated intent is
   // what puts the right shape back on screen.
   pointerLock.reassertCursor("focus gain");
+  pointerLock.nudgeCursor("focus gain");
   probeCursorTimeline("wingain");
 });
 

@@ -78,6 +78,33 @@ pub struct CursorModel {
     /// WARP PLAN that implements it - and only on a hidden -> visible transition, applied while still
     /// hidden, and skipped entirely when the cursor is already there (the centre lock usually means it is).
     pub centre_on_show: bool,
+    /// **THE ARROW GUARD (P1.60)**: ticks left of "we have just GIVEN THE MOUSE BACK, so we owe the player an
+    /// arrow - and if the system reports none, it is ours to undo". Armed by `arm_arrow_guard` on every
+    /// release and on every foreground loss, decremented once per reconciler tick.
+    ///
+    /// Why it exists (boot.log, P1.60): after a release the model handed the arrow back EXACTLY ONCE
+    /// (`m.shape == Hidden` -> force), the system answered `showing=true` - and ~0.2 s later it was hidden
+    /// again (`showing=false hCursor=0`) with `enforced` unchanged, i.e. nobody pushed it. From then on the
+    /// model did NOTHING for four seconds (`RAWMON … cursorFix=0 desired=1 showing=0`) because rule 1 only
+    /// compared the plan with OUR OWN RECORD, and our record already said Arrow. A real mouse move was the
+    /// only thing that brought it back. The guard makes "we owe an arrow" a BOUNDED state instead: while it
+    /// runs, a system that reports no cursor gets the arrow pushed again. Bounded, so a foreground
+    /// application that legitimately hides the cursor is not fought forever - which is the reason rule 1
+    /// compares against our own record in the first place.
+    pub arrow_guard: u8,
+}
+
+/// How long the ARROW GUARD stays armed, in reconciler ticks (the sentinel ticks every 8 ms, so ~1 s).
+pub const ARROW_GUARD_TICKS: u8 = 125;
+
+/// Arm the guard: we have just given the mouse back (see the field for why that needs a bounded state).
+pub fn arm_arrow_guard(m: &mut CursorModel) {
+    m.arrow_guard = ARROW_GUARD_TICKS;
+}
+
+/// One reconciler tick of the guard. `decide` is pure and never does this itself.
+pub fn tick_arrow_guard(m: &mut CursorModel) {
+    m.arrow_guard = m.arrow_guard.saturating_sub(1);
 }
 
 /// What we OBSERVED - the model's INPUT. Every field is gathered by the platform layer.
@@ -220,12 +247,21 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
         // that hid it, so the arrow is handed back EXACTLY ONCE (`m.shape == Hidden`): that is the
         // "press Win / Alt+Tab and the cursor stays gone until I jiggle the mouse" report. Once pushed, the
         // record says Arrow, so a background window never keeps fighting the foreground app for the cursor.
+        //
+        // **…AND THEN THE ARROW GUARD (P1.60): "exactly once" is not enough.** A NULL cursor comes back
+        // after that single push (Chromium answers `WM_SETCURSOR` from the cache it filled while we were
+        // capturing), and because the plan is compared with OUR OWN RECORD - which now says Arrow - the model
+        // then sat still while the system reported `showing=false`: a real boot.log had four consecutive
+        // `RAWMON … cursorFix=0 desired=1 showing=0` windows, and only a mouse move restored it. While the
+        // guard runs we keep pushing; after ~1 s we are back to comparing with our own record, so a
+        // foreground application that hides the cursor for its own reasons is not fought forever.
+        let force = m.shape == CursorShape::Hidden || (m.arrow_guard > 0 && !p.showing);
         return plan(
             if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
             CursorShape::Arrow,
             false,
             None,
-            m.shape == CursorShape::Hidden,
+            force,
         );
     }
     if m.relative {
@@ -307,6 +343,7 @@ mod tests {
             enforced: 0,
             fg_mismatch_ticks: 0,
             centre_on_show: true,
+            arrow_guard: 0,
         }
     }
 
@@ -529,7 +566,7 @@ mod tests {
 
     #[test]
     fn a_foreground_loss_forgets_the_hidden_intent() {
-        // Rule 4. `win.rs::on_foreground_lost()` is the platform half (drop the capture request + release
+        // Rule 4. win.rs::on_foreground_lost() is the platform half (drop the capture request + release
         // the clip we hold); the intent is what this pins.
         let mut m = model(true, client());
         m.want = 2;
@@ -547,5 +584,57 @@ mod tests {
         let back = decide(&m, &probe(true));
         assert_eq!(back.shape, CursorShape::Arrow);
         assert_eq!(back.clip, None);
+    }
+
+    #[test]
+    fn the_arrow_guard_corrects_a_null_that_came_back_after_our_single_push() {
+        // The P1.60 report, exactly as boot.log showed it: we released, the arrow was pushed, and then the
+        // system reported NO cursor again while our own record still said Arrow. "Compare with our own
+        // record" is what left the cursor invisible for four seconds; the guard is the bounded fix.
+        let mut m = model(false, ClipRect::ZERO);
+        m.want = 1;
+        m.shape = CursorShape::Arrow; // what apply_shape recorded when we handed it back
+        let mut p = probe(false);
+        p.showing = false; // …and the system says nothing is on screen
+        assert!(
+            !decide(&m, &p).force_shape,
+            "without the guard this is a no-op - the bug"
+        );
+        arm_arrow_guard(&mut m);
+        assert!(decide(&m, &p).force_shape, "the guard pushes the arrow again");
+    }
+
+    #[test]
+    fn the_arrow_guard_expires_and_never_fights_a_shown_cursor() {
+        let mut m = model(false, ClipRect::ZERO);
+        m.arrow_guard = ARROW_GUARD_TICKS;
+        // A system that already shows the cursor is never pushed at (the guard is about a MISSING arrow).
+        assert!(!decide(&m, &probe(false)).force_shape);
+        // …and it runs out: after ~1 s we are back to the old, bounded behaviour (a foreground application
+        // that hides the cursor for its own reasons must not be fought forever).
+        let mut p = probe(false);
+        p.showing = false;
+        assert!(decide(&m, &p).force_shape);
+        for _ in 0..ARROW_GUARD_TICKS {
+            tick_arrow_guard(&mut m);
+        }
+        assert_eq!(m.arrow_guard, 0);
+        assert!(!decide(&m, &p).force_shape, "the guard is over");
+    }
+
+    #[test]
+    fn arming_the_guard_is_idempotent_and_counts_down_to_zero() {
+        let mut m = model(false, ClipRect::ZERO);
+        arm_arrow_guard(&mut m);
+        arm_arrow_guard(&mut m);
+        assert_eq!(m.arrow_guard, ARROW_GUARD_TICKS);
+        let mut ticks = 0;
+        while m.arrow_guard > 0 && ticks < 1000 {
+            tick_arrow_guard(&mut m);
+            ticks += 1;
+        }
+        assert_eq!(ticks, ARROW_GUARD_TICKS as i32);
+        tick_arrow_guard(&mut m); // saturating: never wraps around into "armed again"
+        assert_eq!(m.arrow_guard, 0);
     }
 }

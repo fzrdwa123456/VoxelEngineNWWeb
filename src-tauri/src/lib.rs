@@ -296,6 +296,12 @@ pub fn run() {
                             // gained", which is the Win-key focus flap (see
                             // win.rs::on_foreground_lost).
                             win::on_foreground_lost();
+                            // **…and hand the ARROW back in the same breath** (P1.60). `on_foreground_lost`
+                            // releases the clip but does not touch the shape, so the cursor stayed NULL
+                            // until the 8 ms sentinel got to it — the `after` probe below used to read
+                            // `shape=Hidden showing=false`, i.e. one tick of "no cursor" on exactly the path
+                            // the Win-key report is about. Main thread: this is the window-event handler.
+                            win::restore_arrow();
                             game::append_boot(
                                 &diag_root,
                                 &format!("[cursor] focus LOST  after =[{}]", win::cursor_trace()),
@@ -308,7 +314,11 @@ pub fn run() {
                             // Only **after** focus returns does the webview get to decide the cursor
                             // shape again (by sending WM_SETCURSOR) — it must come after the focus,
                             // otherwise the system discards it just like the one at focus loss.
-                            win::refresh_cursor();
+                            // Diagnostics (P1.60): the ROOT-window ownership test means this now really
+                            // fires in a WebView2 app (it never did while it compared PROCESS ids, because
+                            // the child window under the pointer belongs to msedgewebview2.exe) — so the
+                            // line says whether Chromium was actually asked to re-decide the shape.
+                            let refreshed = win::refresh_cursor();
                             // One more kick to force the system to **repaint the cursor on screen**
                             // (the case where the system state is right but the picture was not
                             // redrawn)
@@ -316,6 +326,10 @@ pub fn run() {
                             game::append_boot(
                                 &diag_root,
                                 &format!("[cursor] focus GAIN  after =[{}]", win::cursor_trace()),
+                            );
+                            game::append_boot(
+                                &diag_root,
+                                &format!("[cursor] refresh sent={refreshed} (WM_SETCURSOR -> Chromium)"),
                             );
                         }
                         let name = if *focused { "win-focus" } else { "win-blur" };

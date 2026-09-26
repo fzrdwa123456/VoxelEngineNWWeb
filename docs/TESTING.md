@@ -433,3 +433,23 @@ showing=true and still invisible      the state is right and the desktop did not
 
 Report back: the `boot.log` block around the Win press, plus whether the cursor was visibly gone at the
 moment the last `RUST` line said `showing=true`.
+
+AFTER the arrow guard and the CSS nudge (P1.60 - the invisible cursor after the Win key). The check is
+smooth: enter a world (captured), press Win, and **watch the cursor while the pointer is NOT moved**.
+```
+(1) the cursor must stay VISIBLE on the Start menu and must not blink; move it afterwards - it must
+    still be visible (this is the case that used to need the movement to come back)
+(2) boot.log must show, right after the Win press:
+      [cursor] focus LOST  after =[… shape=Arrow … showing=true …]   <- the arrow is back IN THE SAME CALL
+      [cursor] JS nudge [… winlost] auto -> default                  <- the CSS two-step
+      [cursor] intent visible=true want->1 […]
+    and in debug.log the RAWMON line of that second must read desired=1 showing=1 (it used to sit at
+    desired=1 showing=0 for four windows). If `showing` stays 0, look at `[cursor] apply …` lines: a
+    repeating `forced=true` means the guard is pushing and the system keeps refusing (tell me, that is a
+    different disease); NO apply lines at all means the guard was not armed
+(3) on the way back in, the focus gain must log `[cursor] refresh sent=true` - it used to be silent
+    because the ownership test compared PROCESS ids while the window under the pointer belongs to
+    WebView2 (a different process). `sent=false` means the pointer is genuinely over another app
+(4) while playing (captured), nothing new may appear: no nudge lines (the nudge must refuse to run while
+    we hold the mouse) and no `[cursor] apply … forced=true` storm
+```

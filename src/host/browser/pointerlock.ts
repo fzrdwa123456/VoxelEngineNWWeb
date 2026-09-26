@@ -63,6 +63,10 @@ export interface PointerLockDeps {
 // away (win.rs::on_foreground_lost, which also forgets the hidden intent).
 
 export class PointerLock {
+  /** A nudge is waiting for its SECOND step (see `nudgeCursor`): the next `applyCursor()` — which the ui lane
+   *  calls every frame — completes it. A field, not a timer: the process already owns exactly one loop. */
+  private nudgePending = false;
+
   constructor(private readonly deps: PointerLockDeps) {}
 
   relock(source: string): void {
@@ -97,19 +101,45 @@ export class PointerLock {
   // (It used to read `isUiModal` inverted, which made the loading screen hide the cursor.)
   /** Re-assert the cursor shape after the window regained focus (or after the menu/Apps key).
    *
-   *  It used to write a DIFFERENT CSS value first (`auto`, then the target) to force Chromium to recompute
-   *  its cached cursor. That is gone (P1.55): **Rust owns the real shape**, and one repeated INTENT is all it
-   *  takes, because the Rust reconciler compares the plan with the SYSTEM (`GetCursorInfo`) instead of with
-   *  its own record - in BOTH directions. So there is one writer of the CSS value and one mechanism for the
-   *  shape, and never a frame in which a value nobody asked for is on screen. */
+   *  **It WRITES the CSS value again**, even when it has not changed — that is what "re-assert" means, and it
+   *  is half of the two-step nudge below (P1.60). The INTENT is sent unconditionally for the same reason: it
+   *  is the "apply it again, right now" ping. */
   reassertCursor(reason = "unspecified"): void {
-    this.applyCursor(); // keeps the CSS value in sync (idempotent)
+    this.writeCursor(true); // force the write: see `nudgeCursor`
     // **Diagnostics (P1.59): the intent is logged even though the value did not change** — this is the call
     // that can ORDER a hidden cursor while nothing is captured, so the line right after it in boot.log
     // decides whether the report "the cursor is invisible after the Win key" is a stale intent or a repaint.
     cursorBoot(`JS reassert [${reason}] ${this.stateLine()}`);
     // The intent is sent even though the value did not change: it is the "apply it again, right now" ping.
     void invoke("cursor_intent", { visible: !this.deps.canControl() }).catch(() => {});
+  }
+
+  /** **THE TWO-STEP CURSOR NUDGE (P1.60)** — write a DIFFERENT value now, the real one on the next frame.
+   *
+   *  It is the ONE cure for "Chromium's cached cursor is still the NULL it pushed while we were capturing":
+   *  Chromium answers `WM_SETCURSOR` from that cache, so a repeated *intent*, and even a `SetCursor` from
+   *  Rust, does not turn it back into an arrow — **the CSS value has to CHANGE under it**. The boot.log of
+   *  the Win-key report shows the whole thing: right after the release the arrow was pushed and
+   *  `showing=true`; ~0.2 s later the system reported `showing=false hCursor=0` with no push from us, and
+   *  then four consecutive `RAWMON … cursorFix=0 desired=1 showing=0` windows — four seconds of an invisible
+   *  cursor that only a real mouse move brought back.
+   *
+   *  P1.55 deleted the old `reapplyCursor` (writes at 0 / 120 ms) in favour of Rust's sentinel; the log
+   *  proved the sentinel cannot do this job, so it comes back NARROWLY: never while we hold the mouse (the
+   *  first write would show an arrow), and the second write is the ordinary per-frame `applyCursor()` the ui
+   *  lane already calls — no timer, no queue, no new resource.
+   *
+   *  `auto` and `default` both draw the standard arrow, so the intermediate value is invisible to the
+   *  player; what matters is that it is a DIFFERENT computed value for Blink. */
+  nudgeCursor(reason: string): void {
+    if (this.deps.canControl() || this.deps.state.appliedCursor === "none") {
+      // We hold the mouse, or we still WANT it hidden: a nudge would put an arrow on screen for a frame.
+      return;
+    }
+    this.nudgePending = true;
+    this.deps.logDebug(`CURSOR nudge [${reason}] auto -> default`);
+    cursorBoot(`JS nudge [${reason}] auto -> default ${this.stateLine()}`);
+    document.body.style.setProperty("cursor", "auto", "important");
   }
 
   /** The front end's own cursor facts, as one appended fragment. Everything that decides the intent, plus
@@ -130,12 +160,23 @@ export class PointerLock {
   }
 
   applyCursor(): void {
+    // The second half of a pending nudge arrives HERE (the ui lane calls this every frame), which is what
+    // completes the two-step without a timer of this module's own.
+    const forced = this.nudgePending;
+    this.nudgePending = false;
+    this.writeCursor(forced);
+  }
+
+  /** The ONE writer of the CSS value. `force` writes it even when the value did not change (the re-assert
+   *  and the nudge's second step need that; the per-frame call does not). */
+  private writeCursor(force: boolean): void {
     const can = this.deps.canControl();
     const value: "none" | "default" = can ? "none" : "default";
     // Diagnostics: the last CSS value written, logged only when it **changes** (so it does not flood every
     // frame). The VALUE lives in INPUT_STATE.appliedCursor — a fact about the window, not a private field
     // of this manager — so the gate and the log can read it.
-    if (value !== this.deps.state.appliedCursor) {
+    const changed = value !== this.deps.state.appliedCursor;
+    if (changed) {
       this.deps.state.appliedCursor = value;
       // Diagnostics: the decision on the CSS side. Read together with the system-side [cursor] probes in
       // boot.log, it pinpoints the moment an inconsistency like "CSS says visible, the system says
@@ -149,10 +190,15 @@ export class PointerLock {
       // vulnerable to Windows being dragged into menu mode by Alt.
       void invoke("cursor_intent", { visible: value !== "none" }).catch(() => {});
     }
-    // **Important: it must be written as an important inline value.** The theme's global stylesheet has
-    // a `*{cursor:inherit !important}` (to wipe out the controls' hand cursor), and body matches `*`
-    // itself — only "inline important" beats "stylesheet important", letting body keep the game's policy
-    // value while every other element inherits from body.
-    document.body.style.setProperty("cursor", value, "important");
+    // The write happens when the TARGET changed, when a re-assert or a nudge asked for it, **or when the
+    // element does not carry the value any more** — the third case is the nudge's `auto` waiting to be
+    // replaced, and reading it back is what keeps this the single owner of the element's value.
+    if (changed || force || document.body.style.cursor !== value) {
+      // **Important: it must be written as an important inline value.** The theme's global stylesheet has
+      // a `*{cursor:inherit !important}` (to wipe out the controls' hand cursor), and body matches `*`
+      // itself — only "inline important" beats "stylesheet important", letting body keep the game's policy
+      // value while every other element inherits from body.
+      document.body.style.setProperty("cursor", value, "important");
+    }
   }
 }

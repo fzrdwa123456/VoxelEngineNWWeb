@@ -2806,6 +2806,24 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/probeCursorTimeline\(/.test(main), "…and walks a 0/120/500/1500 ms timeline on a focus gain");
   assert(/cursorBoot/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
     "the lock manager logs WHICH call sent a hidden intent, and with which inputs");
+  // **P1.60 — THE ARROW GUARD AND THE CHROMIUM CACHE.** The Win-key report's last cause was that a NULL
+  // cursor came BACK after our single arrow push, and the model then sat still because rule 1 compared the
+  // plan with its own record. Three mechanisms are pinned here, because dropping any of them brings the
+  // four-second invisible cursor back.
+  const modelSrc = stripComments(readSource("src-tauri/src/cursor_model.rs"));
+  assert(/pub arrow_guard: u8/.test(modelSrc),
+    "the model carries the arrow guard (a BOUNDED \"we owe an arrow\")");
+  assert(/m\.arrow_guard > 0 && !p\.showing/.test(modelSrc),
+    "…and the unfocused branch keeps pushing while it runs");
+  assert(/arm_arrow_guard/.test(winSrc) && /win::restore_arrow\(\);/.test(libSrc),
+    "a release also hands the arrow back IN THE SAME CALL (P1.57, symmetrically)");
+  assert(/GetAncestor\(under, GA_ROOT\)/.test(winSrc),
+    "\"our window\" is judged by its ROOT: WebView2 is multi-process, so the process test never matched");
+  const plSrc = stripComments(readSource("src/host/browser/pointerlock.ts"));
+  assert(/nudgeCursor\(reason: string\)/.test(plSrc) && /nudgePending/.test(plSrc),
+    "the TWO-STEP CSS nudge exists (the only cure for Chromium's cached cursor) and the next applyCursor completes it");
+  assert(/nudgeCursor\(/.test(main),
+    "…and both \"we owe an arrow\" paths call it (foreground lost, focus regained)");
   const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");

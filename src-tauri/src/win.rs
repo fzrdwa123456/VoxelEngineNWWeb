@@ -94,6 +94,8 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
         // the window while the game still processes clicks.
         apply_clip(&mut m, Some(ClipRect::ZERO));
         m.relative = false;
+        // A refused capture still gives the mouse BACK, so it owes an arrow exactly like a release does.
+        arm_arrow_guard(&mut m);
         return false;
     }
     // **Hide IN THE SAME CALL** (P1.57). The log showed `capture on=true` arriving while `showing=true`:
@@ -140,6 +142,10 @@ pub fn release_mouse_capture() {
     m.relative = false;
     // Rule 1 of the model: only a clip WE hold is cleared, so another application is clip is never touched.
     apply_clip(&mut m, Some(ClipRect::ZERO));
+    // **…and we now OWE the player an arrow** (P1.60): the ARROW GUARD goes up, so a system that reports no
+    // cursor within the next second gets the arrow pushed back at it (see `CursorModel::arrow_guard` for the
+    // boot.log that made "hand it back exactly once" insufficient).
+    arm_arrow_guard(&mut m);
 }
 
 /// **THE FOREGROUND WAS LOST — the cursor SESSION is over** (P1.58). This is the ONE thing both paths that
@@ -160,6 +166,29 @@ pub fn on_foreground_lost() {
     release_mouse_capture();
     let mut m = model();
     forget_intent(&mut m);
+}
+
+/// **Hand the arrow back RIGHT NOW** (P1.60) — the symmetric of P1.57's "opening the capture hides the cursor
+/// in the SAME call".
+///
+/// Why: releasing the clip does NOT touch the shape, so the cursor stayed NULL until the 8 ms sentinel got
+/// to it — the boot.log line `[cursor] focus LOST after =[… shape=Hidden … showing=false …]` was taken with
+/// the pointer still invisible, one tick before the arrow came back. That tick is a visible flash of "no
+/// cursor" on the exact path the Win-key report is about.
+///
+/// **MAIN THREAD ONLY**: `SetCursor` belongs to the thread that owns the window (see `apply_shape`), so this
+/// is called from the window-event path in `lib.rs`; the raw-input path (`capture_foreground_check`) lets
+/// `reconcile` marshal it instead.
+pub fn restore_arrow() {
+    let mut m = model();
+    m.shape = CursorShape::Unknown; // force `apply_shape` to push even when our record already says Arrow
+    let (showing, _) = cursor_info();
+    if showing {
+        // The system already shows one: nothing to do, and the record is right again.
+        m.shape = CursorShape::Arrow;
+        return;
+    }
+    apply_shape(&mut m, CursorShape::Arrow);
 }
 
 /// **Capture is only allowed to stay on in the foreground — this is the system-level backstop.**
@@ -279,8 +308,8 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    decide, forget_intent, rect_is_empty, rect_is_zero, ClipPos, ClipRect, CursorModel, CursorProbe,
-    CursorShape,
+    arm_arrow_guard, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard, ClipPos,
+    ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 
 /// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
@@ -295,6 +324,7 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     enforced: 0,
     fg_mismatch_ticks: 0,
     centre_on_show: true,
+    arrow_guard: 0,
 });
 
 fn model() -> std::sync::MutexGuard<'static, CursorModel> {
@@ -509,6 +539,9 @@ fn reconcile(app: &tauri::AppHandle) {
             m.shape = CursorShape::Unknown;
         }
         apply_shape(&mut m, plan.shape);
+        // The ARROW GUARD counts down once per reconciler tick (P1.60). It lives here, not in `decide`, so
+        // that the rule set stays pure.
+        tick_arrow_guard(&mut m);
         // **WHAT THE RECONCILER REALLY DID (P1.59).** Only ticks that CHANGED something are logged (rule 3:
         // a tick whose plan changes nothing makes no Win32 call either), so this line answers "who pushed the
         // cursor away, and how many times". `forced=true` is the disagreement loop - the system keeps showing
@@ -697,12 +730,11 @@ pub fn set_cursor_intent(app: &tauri::AppHandle, hwnd: isize, visible: bool) {
 pub fn cursor_sentinel(app: &tauri::AppHandle) {
     {
         let m = model();
-        // **A LIVE CAPTURE IS HEALED EVEN WHEN THE INTENT IS UNKNOWN (P1.58).** Losing the foreground clears
-        // `want` (`on_foreground_lost`), and the front end may not have spoken again yet - but if a capture is
-        // running, rule 2 still has to put the hidden shape back when the system drops it (Alt menu mode, a
-        // dropped `SetCursor`). Cost of asking: nothing, because a tick whose plan changes nothing makes no
-        // Win32 call (rule 3).
-        if m.want == 0 && !m.relative {
+        // **A LIVE CAPTURE IS HEALED EVEN WHEN THE INTENT IS UNKNOWN (P1.58)**, and so is the ARROW GUARD
+        // (P1.60) - that is the whole point of it: after a release the front end may never speak again, and
+        // the arrow must still be pushed until it sticks (or the guard runs out). Cost of asking: nothing,
+        // because a tick whose plan changes nothing makes no Win32 call (rule 3).
+        if m.want == 0 && !m.relative && m.arrow_guard == 0 {
             return;
         }
     }
@@ -729,8 +761,16 @@ pub fn capture_active() -> bool {
     model().relative
 }
 
-/// Make WebView2 **decide the cursor shape once more** — send a `WM_SETCURSOR` to the window under
-/// the cursor.
+/// **Make WebView2 decide the cursor shape once more** — send a `WM_SETCURSOR` to the window under the
+/// cursor. Returns whether it was really sent (for diagnostics).
+///
+/// **The ownership test is by ROOT WINDOW, not by process (P1.60).** The old version asked whether the window
+/// under the pointer belongs to OUR process, and in this application it never does: WebView2 is
+/// **multi-process**, so the render child window under the pointer belongs to `msedgewebview2.exe`. The
+/// boot.log probes show it plainly (`under=other` on every trace taken with the pointer over the game, and
+/// the only `under=ours` one at a point that happened to be over the host window) — which means this whole
+/// path, the documented cure for "Chromium answers `WM_SETCURSOR` from its stale NULL cache", **never ran**.
+/// The child's ROOT window is our top-level HWND, and that is what identifies our content.
 ///
 /// This is what Windows does **before handling real mouse input**, so Chromium takes exactly the
 /// same path (read the current CSS → `SetCursor`), and this call happens **after the window has
@@ -750,26 +790,29 @@ pub fn capture_active() -> bool {
 /// pressing Alt into menu mode, which also forces a cursor reset). The ESC-first case is fine,
 /// because there the CSS change happens while the window still has focus and takes effect
 /// immediately.
-pub fn refresh_cursor() {
+pub fn refresh_cursor() -> bool {
     unsafe {
         let mut p = Point { x: 0, y: 0 };
         if GetCursorPos(&mut p) == 0 {
-            return;
+            return false;
         }
         let under = WindowFromPoint(p);
         if under == 0 {
-            return;
+            return false;
         }
-        // Only for our own window — if the cursor is over another program there is nothing to
-        // refresh
+        // **OUR content is identified by the ROOT window** (see the note above): WebView2's render child
+        // belongs to another process, so the old `pid == GetCurrentProcessId()` test refused every window we
+        // actually own. A foreign application's window still has a foreign root - the test stays honest.
+        let root = GetAncestor(under, GA_ROOT);
         let mut pid: u32 = 0;
-        GetWindowThreadProcessId(under, &mut pid);
-        if pid == 0 || pid != GetCurrentProcessId() {
-            return;
+        GetWindowThreadProcessId(root, &mut pid);
+        if root == 0 || pid == 0 || pid != GetCurrentProcessId() {
+            return false;
         }
         // lParam = MAKELPARAM(HTCLIENT, WM_MOUSEMOVE): exactly the payload of a real mouse move
         let lparam = ((WM_MOUSEMOVE as isize) << 16) | (HTCLIENT as isize);
         SendMessageW(under, WM_SETCURSOR, under as usize, lparam);
+        true
     }
 }
 
@@ -777,6 +820,8 @@ pub fn refresh_cursor() {
 const WM_SETCURSOR: u32 = 0x0020;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const HTCLIENT: u32 = 1;
+/// `GetAncestor`'s `GA_ROOT`: the top-level window a child belongs to.
+const GA_ROOT: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
@@ -800,6 +845,7 @@ extern "system" {
     fn GetCursorPos(point: *mut Point) -> i32;
     fn GetCursorInfo(info: *mut CursorInfo) -> i32;
     fn GetForegroundWindow() -> isize;
+    fn GetAncestor(hwnd: isize, flags: u32) -> isize;
 fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
