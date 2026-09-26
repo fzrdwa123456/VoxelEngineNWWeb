@@ -572,7 +572,9 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return `display:inline-block;width:auto;padding:0.375rem 0.75rem;margin:0;font:0.875rem ${theme.font.ui};` +
         `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : "transparent"};border:none;` +
         `border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
-    // One ENTRY of a dropdown list: a FULL-WIDTH menu ROW, so the popup reads as a vertical list.
+    // One ENTRY of a dropdown list: a FULL-WIDTH menu ROW with CENTRED text, so the popup reads as a
+    // vertical list under its button (the button above it is centred too - a left-aligned entry looked
+    // like a stray label).
     //   * `display` lives HERE and not in a stylesheet rule beside the popup, because a recipe writes its
     //     style as an INLINE style and inline beats the stylesheet - a rule saying `display:block` for the
     //     entries silently lost to this `inline-block`, which is exactly why the first version of the popup
@@ -580,7 +582,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     //   * the language/font page does NOT use this role (it uses `settings.choice`), so a vertical entry is
     //     safe here.
     case "settings.rowChoice":
-      return `display:block;width:100%;text-align:left;padding:0.4375rem 0.625rem;margin:0;font:0.8125rem ${theme.font.ui};` +
+      return `display:block;width:100%;text-align:center;padding:0.4375rem 0.625rem;margin:0;font:0.8125rem ${theme.font.ui};` +
         `color:${c.btnText};background:${
           state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
         };border:none;border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
