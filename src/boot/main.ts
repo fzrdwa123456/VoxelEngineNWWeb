@@ -84,7 +84,12 @@ import { loadBinds, getBind, getBindsAll, getCapturing, isCapturing, buttonToAct
 // behaviour; the values live under data/). The root subscribes to persist each one.
 import { onConfigChange } from "../core/services/bus";
 import { menuBgKind, menuBgState, MENU_BG_KIND } from "../data/assets/background";
-import { resolveAllBytes, resolveTexture } from "../data/assets/textures";
+import {
+  getDisabledPacks,
+  resolveAllBytes,
+  resolveTexture,
+  setDisabledPacks,
+} from "../data/assets/textures";
 import { preloadPacks } from "../host/desktop/packs";
 
 import { allBlockIds, buildBlockRegistry, blockRegistryState, BLOCK_REGISTRY } from "../data/assets/blockregistry";
@@ -198,6 +203,9 @@ const saveSettings = (fpsCapOverride?: number): void => {
   // the next barrier: persisting the resource here would write the PREVIOUS value to disk. Every other
   // setting is a config singleton, so it is already settled when this runs.
   s.fpsCap = fpsCapOverride ?? world.resource(FPS_CAP).cap;
+  // The switched-off resource packs travel with every save (P1.49aa): the value in force is the one the
+  // chain was installed with, so a save can never lose it.
+  s.disabledPacks = getDisabledPacks();
   writeSettings(s);
 };
 onConfigChange("lang", saveSettings);
@@ -863,6 +871,16 @@ const onSetWindowMode = (mode: WindowMode): void => {
     logDebug(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
 };
 
+/** The resource packs the user switched OFF (P1.49aa). Written to settings.json AT ONCE and applied when
+ *  the pack chain is installed, i.e. at the next launch: the chain is built once at boot and every asset
+ *  (dictionaries, block registry, textures, menu background) is derived from it, so swapping it while the
+ *  game runs is the "pack hot reload" item in ROADMAP, not this. The section says so on screen. */
+const onSetPacks = (names: readonly string[]): void => {
+  setDisabledPacks(names);
+  saveSettings();
+  logDebug(`PACKS disabled: ${getDisabledPacks().join(", ") || "none"} (takes effect on the next launch)`);
+};
+
 const menu = createPauseMenu(world, {
   // The three platform capabilities a view may not import itself (see SettingsCallbacks).
   log: logDebug,
@@ -884,6 +902,7 @@ const menu = createPauseMenu(world, {
   getFpsCap: () => frameCap.cap,
   getWindowMode: () => getWindowMode(),
   onSetWindowMode,
+  onSetPacks,
   onToMainMenu: () => {
         // Back to main menu: leave the game loop for the MENU mode (which also clears to black and
         // restarts the panorama — setLoopMode owns all three), then show the menu.
@@ -1015,6 +1034,7 @@ const mainMenu = createMainMenu(world, {
   onToggleDiagLog,
   getWindowMode,
   onSetWindowMode,
+  onSetPacks,
 });
 
 // ===== ui.navigation's widget trees (registered above, wired here) =====
@@ -1427,6 +1447,7 @@ function checkSettingsAtBoot(): { noteKey: string; noteValue: string } {
     fpsCap: frameCap.cap,
     keybinds: getBindsAll(),
     diagLog: isDiagLogEnabled(),
+    disabledPacks: getDisabledPacks(),
   };
   const checked = readSettingsChecked();
   if (checked.problem) {

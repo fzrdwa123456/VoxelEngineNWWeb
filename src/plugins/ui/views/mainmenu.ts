@@ -91,6 +91,7 @@ export class MainMenu {
       onToggleDiagLog: cb.onToggleDiagLog,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,
+  onSetPacks: cb.onSetPacks,
       onBack: () => this.panels.hideAll(),
     });
   }

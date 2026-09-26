@@ -64,7 +64,6 @@ import {
   setUiVisible,
   spawnButton,
   spawnLabel,
-  spawnList,
   spawnPanel,
   spawnSlider,
 } from "../components";
@@ -93,6 +92,10 @@ export interface SettingsCallbacks {
   onToggleDiagLog: (on: boolean) => boolean;
   getWindowMode: () => WindowMode;
   onSetWindowMode: (mode: WindowMode) => void;
+  /** The resource packs the user switched OFF (P1.49aa) and the way to change them. The change is written
+   *  to settings.json at once and applied when the pack chain is installed, i.e. on the NEXT LAUNCH - the
+   *  section says so on screen, and the columns re-split immediately so the click has visible feedback. */
+  onSetPacks: (names: readonly string[]) => void;
   /** The platform's log sink and the two config subscriptions, INJECTED: a plugin may not import
    *  `host/` (the layer rule in check:ecs). */
   log: (line: string) => void;
@@ -186,7 +189,7 @@ export function buildSettingsPanel(
     // The language/font section FILLS the plate (P1.49z): its backplate is meant to read as a panel, not as a
     // card that stops halfway down. The other sections keep the layout-neutral block container.
     lang: spawnPanel(world, content, "settings.pageFill", { hidden: true }),
-    pack: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
+    pack: spawnPanel(world, content, "settings.pageFill", { hidden: true }),
   };
   // THE LEFT NAV: one row per section, and the PAGE host mounts its rows into this SAME column (P1.49), so a
   // page a plugin contributes (the key bind page) becomes a nav item instead of an entry button.
@@ -358,37 +361,87 @@ export function buildSettingsPanel(
   onUiAction(actions, `${id}.lang`, (value) => setLang(value as string));
   onUiAction(actions, `${id}.font`, (value) => setFontId(value as "pixel" | "system"));
 
-  // --- Resource packs: a SECTION now, listing game\resourcepacks\ ---
-
+  // --- Resource packs: TWO COLUMNS (P1.49aa) - LEFT = switched off, RIGHT = in the chain --------------
+  // The engine had no notion of an enabled pack at all: the chain was built once at boot from whatever the
+  // folder held. Switching one off is written to settings.json and takes effect at the NEXT LAUNCH (the
+  // chain is what the dictionaries, the block registry, the textures and the menu background are derived
+  // from), which is what the hint under the columns says. The split itself updates at once.
   spawnLabel(world, panels.pack, "settings.title", "settings.resourcepacks");
-  const packScroll = spawnPanel(world, panels.pack, "settings.scrollArea");
-  const packRows = spawnList(world, packScroll, "settings.row", PACK_LIST_CAPACITY);
-  const packCells = packRows.map((row) => ({
-    row,
-    name: spawnLabel(world, row, "settings.rowName", "", { raw: true }),
-    meta: spawnLabel(world, row, "settings.rowMeta", "", { raw: true }),
-  }));
-  const packEmpty = spawnLabel(world, panels.pack, "settings.empty", "settings.packsEmpty");
+  const packWrap = spawnPanel(world, panels.pack, "settings.columns");
+  const offCol = spawnPanel(world, packWrap, "settings.column");
+  spawnLabel(world, offCol, "settings.columnLabel", "settings.packsOff");
+  const offList = spawnPanel(world, offCol, "settings.scrollArea");
+  const onCol = spawnPanel(world, packWrap, "settings.column");
+  spawnLabel(world, onCol, "settings.columnLabel", "settings.packsOn");
+  const onList = spawnPanel(world, onCol, "settings.scrollArea");
+  spawnLabel(world, panels.pack, "settings.empty", "settings.packsRestart");
+
+  /** One column of pack rows. A row is a BUTTON (ghost + ring, like every other option) whose text is a raw
+   *  CHILD label: a pack NAME is not an i18n key, and the reconciler refuses text on a widget with children. */
+  const spawnPackColumn = (parent: Entity, action: string) =>
+    Array.from({ length: PACK_LIST_CAPACITY }, (_, i) => {
+      const row = spawnButton(world, parent, "settings.choice", action, String(i), undefined);
+      return {
+        row,
+        name: spawnLabel(world, row, "settings.rowName", "", { raw: true }),
+        meta: spawnLabel(world, row, "settings.rowMeta", "", { raw: true }),
+      };
+    });
+  const offCells = spawnPackColumn(offList, `${id}.packOff`);
+  const onCells = spawnPackColumn(onList, `${id}.packOn`);
+  const offNone = spawnLabel(world, offList, "settings.empty", "settings.packsNone");
+  const onNone = spawnLabel(world, onList, "settings.empty", "settings.packsNone");
+  /** Which pack each ROW currently shows. The action VALUE is the row INDEX: a button is value is component
+   *  data and only systems write components, so the view cannot re-point it every frame - the handler maps
+   *  the index back through these two view-local lists instead. */
+  let offShown: string[] = [];
+  let onShown: string[] = [];
 
   const renderPacks = (): void => {
     const packs = listPacks();
-    if (packs.length > PACK_LIST_CAPACITY) {
-      opts.log(`PACKS ${packs.length} installed, only ${PACK_LIST_CAPACITY} rows exist (fixed capacity)`);
-    }
-    setUiVisible(world, packEmpty, packs.length === 0);
-    packCells.forEach((cell, i) => {
-      const pack = packs[i];
-      setUiVisible(world, cell.row, pack !== undefined);
-      if (!pack) return;
-      setUiText(world, cell.name, pack.name, true);
-      setUiText(
-        world,
-        cell.meta,
-        `${pack.builtin ? t("settings.packsBuiltin") + " · " : ""}${pack.fileCount}`,
-        true,
+    const off = packs.filter((p) => !p.builtin && !p.enabled);
+    const on = packs.filter((p) => p.builtin || p.enabled);
+    if (off.length + on.length > PACK_LIST_CAPACITY * 2) {
+      opts.log(
+        `PACKS ${off.length + on.length} listed, only ${PACK_LIST_CAPACITY} rows per column exist (fixed capacity)`,
       );
-    });
+    }
+    offShown = off.map((p) => p.name);
+    onShown = on.map((p) => p.name);
+    const fill = (
+      cells: { row: Entity; name: Entity; meta: Entity }[],
+      list: readonly { name: string; builtin: boolean; fileCount: number }[],
+    ): void => {
+      cells.forEach((cell, i) => {
+        const pack = list[i];
+        setUiVisible(world, cell.row, pack !== undefined);
+        if (!pack) return;
+        setUiText(world, cell.name, pack.name, true);
+        // A switched-off pack was never decoded, so it has no file count: the count IS the cost of using it.
+        const meta = pack.builtin ? t("settings.packsBuiltin") : pack.fileCount >= 0 ? String(pack.fileCount) : "";
+        setUiText(world, cell.meta, meta, true);
+      });
+    };
+    fill(offCells, off);
+    fill(onCells, on);
+    setUiVisible(world, offNone, off.length === 0);
+    setUiVisible(world, onNone, on.length === 0);
   };
+
+  /** Move one pack across the split. The built-in is the chain is floor (the engine fallback sits below
+   *  IT), so it is not switchable: clicking it does nothing, and its row says built-in instead of a count. */
+  const togglePack = (name: string | undefined): void => {
+    if (!name) return;
+    const pack = listPacks().find((p) => p.name === name);
+    if (!pack || pack.builtin) return;
+    const off = new Set(listPacks().filter((p) => !p.builtin && !p.enabled).map((p) => p.name));
+    if (off.has(name)) off.delete(name);
+    else off.add(name);
+    opts.onSetPacks([...off]);
+    renderPacks();
+  };
+  onUiAction(actions, `${id}.packOff`, (value) => togglePack(offShown[Number(value)]));
+  onUiAction(actions, `${id}.packOn`, (value) => togglePack(onShown[Number(value)]));
 
   // --- THE PAGE HOST (P1.29): this panel does not know which pages exist. It registers WHERE a page may be
   //     mounted (this list, this root, this action-id prefix, this `show`), and `ui.pages` materializes every
@@ -563,6 +616,7 @@ export class Menu {
       onToggleDiagLog: cb.onToggleDiagLog,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,
+  onSetPacks: cb.onSetPacks,
       onBack: () => this.panels.hideAll(),
     });
   }

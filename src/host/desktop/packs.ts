@@ -8,7 +8,7 @@
 // magenta/black checkerboard), which is why this only logs.
 import { invoke } from "@tauri-apps/api/core";
 import { adoptWarningSink, installPacks, type PackSnapshotPayload } from "../../data/assets/textures";
-import { logDebug } from "./shell";
+import { logDebug, readSettings } from "./shell";
 
 // The data module writes no log of its own: it calls the sink it was handed (this boundary owns the sink).
 adoptWarningSink(logDebug);
@@ -18,7 +18,9 @@ adoptWarningSink(logDebug);
 export async function preloadPacks(): Promise<void> {
   try {
     const snap = await invoke<PackSnapshotPayload>("preload_packs");
-    logDebug(installPacks(snap));
+    // The DISABLED list comes from settings.json (P1.49aa). That is why the boot loads the SHELL before the
+    // packs: the chain has to know what the user switched off before anything derives an asset from it.
+    logDebug(installPacks(snap, readSettings().disabledPacks));
   } catch (e) {
     logDebug(`PACKS preload failed (engine fallbacks only): ${String(e)}`);
   }

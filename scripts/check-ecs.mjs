@@ -2433,6 +2433,24 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   const empty = diffSettings({}, inForce);
   equal(empty.fixed.length + empty.unknown.length, 0, "an ABSENT key is not a fault (a first run)");
 
+  // A LIST-valued setting (P1.49aa, `disabledPacks`): two arrays are never identical by REFERENCE, so the
+  // plain `!==` would have called the user is own list unusable and rewritten it from the value in force on
+  // every boot. The repair compares element-wise, and a wrong TYPE is still repaired.
+  const listSame = diffSettings({ disabledPacks: ["a"] }, { ...inForce, disabledPacks: ["a"] });
+  equal(listSame.fixed.join(","), "", "an unchanged pack list is NOT reported as repaired");
+  const listDiff = diffSettings({ disabledPacks: ["a", "b"] }, { ...inForce, disabledPacks: ["a"] });
+  equal(listDiff.fixed.join(","), "disabledPacks", "a DIFFERENT pack list is repaired");
+  equal(listDiff.merged.disabledPacks.join(","), "a", "?to the list in force");
+  const listBad = diffSettings({ disabledPacks: "a" }, { ...inForce, disabledPacks: ["a"] });
+  equal(listBad.fixed.join(","), "disabledPacks", "a pack list of the wrong TYPE is repaired too");
+
+  // ?and the pack store NORMALISES whatever the file held: only non-empty strings, no duplicates, so a
+  // hand-edited `[1, "", " a ", "a"]` cannot take a pack out of the chain twice or crash the filter.
+  const Tex = load("data/assets/textures.js");
+  equal(Tex.normalizeDisabledPacks([1, "", "  ", "a", "a", "b "]).join(","), "a,b", "the disabled list is normalised");
+  equal(Tex.normalizeDisabledPacks("a").length, 0, "a non-array disabled list is ignored");
+  equal(Tex.normalizeDisabledPacks(undefined).length, 0, "?including an absent one");
+
   // …and the composition root actually runs it, before anything it could disagree with is used.
   const main = stripComments(readSource("src/boot/main.ts"));
   assert(/readSettingsChecked\(\)/.test(main), "the boot check uses the read that can report a fault");
@@ -2440,7 +2458,7 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   assert(/writeSettings\(report\.merged\)/.test(main), "…and writes the repaired file back");
   assert(/backupSettingsFile\(\)/.test(main), "an UNREADABLE file is backed up before being rebuilt");
   assert(/writeSettings\(\{ \.\.\.inForce \}\)/.test(main), "…and rebuilt from the values in force");
-  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds", "diagLog"]) {
+  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds", "diagLog", "disabledPacks"]) {
     assert(new RegExp(`\\n    ${key}:`).test(main), `the schema lists "${key}"`);
   }
   // The "Diagnostic log" switch (the settings panel's `diagLog` toggle) is a plain boolean in the same
@@ -2528,6 +2546,10 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
       "settings.on",
       "settings.off",
       "settings.restartHint",
+      "settings.packsOff",
+      "settings.packsOn",
+      "settings.packsNone",
+      "settings.packsRestart",
     ]) {
       assert(typeof dict[key] === "string" && dict[key].length > 0, `${key} is translated (${lang})`);
     }

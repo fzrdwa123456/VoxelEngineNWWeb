@@ -45,6 +45,39 @@ const packLayers: Map<string, Bytes>[] = [];
  *  directory too) */
 const resourcepackInfos: PackInfo[] = [];
 let builtinInfo: PackInfo | null = null;
+/** The resource packs the user switched OFF (P1.49aa). The filter is applied when the chain is INSTALLED,
+ *  i.e. at the next launch: the chain is built once and every asset (dictionaries, the block registry, the
+ *  textures, the menu background) is derived from it, so a runtime swap would have to invalidate all of
+ *  them - that is the documented "pack hot reload" item, not this. */
+let disabledPacks: readonly string[] = [];
+
+/** Whatever settings.json holds, as a clean list of pack names. PURE (the gate drives it directly):
+ *  anything that is not a non-empty string is dropped and duplicates are folded. */
+export function normalizeDisabledPacks(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (name.length > 0 && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+/** The list the chain was installed with. */
+export function getDisabledPacks(): readonly string[] {
+  return disabledPacks;
+}
+
+/** Re-flag the listed packs WITHOUT touching the chain: the settings screen has to show the new split at
+ *  once, while the bytes only change at the next install (see `disabledPacks`). */
+export function setDisabledPacks(raw: unknown): void {
+  disabledPacks = normalizeDisabledPacks(raw);
+  for (let i = 0; i < resourcepackInfos.length; i++) {
+    const info = resourcepackInfos[i];
+    resourcepackInfos[i] = { ...info, enabled: !disabledPacks.includes(info.name) };
+  }
+}
 let warnedNotInstalled = false;
 /** Lines this module would have logged; the boundary (logic/host/window/packs.ts) drains and prints them. */
 let warnSink: ((line: string) => void) | null = null;
@@ -120,7 +153,9 @@ function installEntry(entry: PackEntryPayload, listInfos: boolean): void {
   const layer = decodePack(entry);
   for (const [rel, bytes] of layer) overrides.set(rel, bytes);
   packLayers.push(layer);
-  if (listInfos) resourcepackInfos.push({ name: entry.name, builtin: false, fileCount: layer.size });
+  if (listInfos) {
+    resourcepackInfos.push({ name: entry.name, builtin: false, fileCount: layer.size, enabled: true });
+  }
 }
 
 /** Install one directory's entries. Rust hands them over in **ascending name order** and this walks them
@@ -134,7 +169,8 @@ function installDir(entries: PackEntryPayload[]): void {
  *  It does not read anything and does not log: the I/O lives in `logic/host/window/packs.ts` (which calls
  *  Rust and then calls this) and the returned summary is printed by whoever owns the log sink. This
  *  module stays a pure data store: bytes in, resolvers out. */
-export function installPacks(snap: PackSnapshotPayload): string {
+export function installPacks(snap: PackSnapshotPayload, disabled: unknown = disabledPacks): string {
+  disabledPacks = normalizeDisabledPacks(disabled);
   for (const layer of packLayers) layer.clear();
   packLayers.length = 0;
   overrides.clear();
@@ -147,21 +183,31 @@ export function installPacks(snap: PackSnapshotPayload): string {
   if (snap.builtin) {
     builtin = decodePack(snap.builtin);
     packLayers.push(builtin);
-    builtinInfo = { name: snap.builtin.name, builtin: true, fileCount: builtin.size };
+    builtinInfo = { name: snap.builtin.name, builtin: true, fileCount: builtin.size, enabled: true };
   }
   installDir(snap.mods);  // mods directory (middle priority: content baseline, provides blocks.json/own textures)
-  for (let i = snap.resourcepacks.length - 1; i >= 0; i--) installEntry(snap.resourcepacks[i], false);
-  // Entry info for resourcepacks (used by listPacks): ascending name order in, so walk it backwards
+  // The resourcepack chain, HIGH priority first: a switched-off pack is left out entirely (that is what
+  // switching it off means) and listed afterwards as enabled:false, with no file count.
+  let disabledCount = 0;
   for (let i = snap.resourcepacks.length - 1; i >= 0; i--) {
     const e = snap.resourcepacks[i];
-    const layer = packLayers[packLayers.length - (snap.resourcepacks.length - i)];
-    if (layer) resourcepackInfos.push({ name: e.name, builtin: false, fileCount: layer.size });
+    if (disabledPacks.includes(e.name)) {
+      disabledCount++;
+      continue;
+    }
+    installEntry(e, true);
+  }
+  for (let i = snap.resourcepacks.length - 1; i >= 0; i--) {
+    const e = snap.resourcepacks[i];
+    if (!disabledPacks.includes(e.name)) continue;
+    resourcepackInfos.push({ name: e.name, builtin: false, fileCount: -1, enabled: false });
   }
   installed = true;
   scanned = true;
   return (
     `PACKS installed: builtin=${snap.builtin ? 1 : 0} mods=${snap.mods.length} ` +
-    `resourcepacks=${snap.resourcepacks.length} files=${overrides.size}`
+    `resourcepacks=${snap.resourcepacks.length - disabledCount} disabled=${disabledCount} ` +
+    `files=${overrides.size}`
   );
 }
 
@@ -255,6 +301,10 @@ export interface PackInfo {
   name: string;
   builtin: boolean;
   fileCount: number;
+  /** Is this pack IN the chain? A switched-off pack is still LISTED (P1.49aa, so the settings screen can
+   *  offer it back) but contributes no bytes, and its `fileCount` is -1: counting it would mean decoding
+   *  it, which is the work switching it off is meant to save. The built-in is always enabled. */
+  enabled: boolean;
 }
 
 /** List packs in the resource pack directory (built-in default.zip fixed last, user packs reverse-name order = priority high to low) */
