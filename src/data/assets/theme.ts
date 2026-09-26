@@ -259,6 +259,7 @@ export type UiRecipe =
   | "settings.btnSolid"
   | "settings.btnRow"
   | "settings.pageRows"
+  | "settings.pageFill"
   | "settings.split"
   | "settings.nav"
   | "settings.content"
@@ -522,8 +523,17 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // P1.49j: `position:relative` is for the SEAM below - the divider is an absolute `::after` of this
     // block (see the stylesheet), so it needs a positioned ancestor. The two columns stay EXACTLY as they
     // were: equal `flex:1` halves with a 1.25rem gap, whose midpoint is this block is 50%.
+    // A page that FILLS its plate VERTICALLY (P1.49z). `settings.pageRows` above is deliberately a plain
+    // block, and it must stay one for the sections whose rows rely on margin collapsing - so the two
+    // sections that want to fill get their OWN container instead of changing it for everyone. `min-height`
+    // and not `height`: the page then fills the plate when its content is short, and still GROWS (and lets
+    // the plate scroll) when it is tall, which a fixed `height:100%` could not do.
+    case "settings.pageFill":
+      return "display:flex;flex-direction:column;min-height:100%;margin:0;padding:0;border:0;";
     case "settings.columns":
-      return "display:flex;gap:1.25rem;margin-bottom:0.875rem;background:rgba(0,0,0,0.34);" +
+      // `flex:1` makes the board take the rest of the FILL page (P1.49z) - the buttons stay at the top of
+      // their columns, the board is what stretches to the bottom of the plate.
+      return "display:flex;flex:1;gap:1.25rem;margin-bottom:0.875rem;background:rgba(0,0,0,0.34);" +
         "border-radius:0.5rem;padding:0.75rem 1rem;position:relative;";
     case "settings.column":
       return "flex:1;text-align:left;";

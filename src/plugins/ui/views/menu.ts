@@ -183,7 +183,9 @@ export function buildSettingsPanel(
   // a section must not draw a second border of its own.
   const panels: Record<SettingsPanelId, Entity> = {
     settings: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
-    lang: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
+    // The language/font section FILLS the plate (P1.49z): its backplate is meant to read as a panel, not as a
+    // card that stops halfway down. The other sections keep the layout-neutral block container.
+    lang: spawnPanel(world, content, "settings.pageFill", { hidden: true }),
     pack: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
   };
   // THE LEFT NAV: one row per section, and the PAGE host mounts its rows into this SAME column (P1.49), so a

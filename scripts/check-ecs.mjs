@@ -698,6 +698,7 @@ check("every recipe resolves to a style, and state changes it", () => {
     "settings.columns",
     "settings.column",
     "settings.columnLabel",
+    "settings.pageFill",
     "settings.btn",
     "settings.btnSolid",
     "settings.btnRow",
