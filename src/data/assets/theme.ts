@@ -329,13 +329,27 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
   const optionHover = "rgba(0,0,0,0.45)";
   const optionOn = "rgba(74,158,255,0.5)";
   const optionOnHover = "rgba(59,131,214,0.65)";
+  // THE SELECTION RING (P1.49r): every text-only option wears a thin INSET ring, so a control with no fill
+  // still reads as something selectable. An inset shadow and NOT a border: a border adds 2px to the box
+  // (content-box) and would shift the row it sits in, while an inset ring costs no layout and follows the
+  // border radius. Three weights - visible at rest, brighter under the pointer, brightest when chosen.
+  const ring = "inset 0 0 0 0.0625rem rgba(255,255,255,0.12)";
+  const ringHover = "inset 0 0 0 0.0625rem rgba(255,255,255,0.28)";
+  const ringOn = "inset 0 0 0 0.0625rem rgba(255,255,255,0.4)";
   // THE SCREEN ITSELF: `position:absolute;inset:0` fills `menu.root` / `menu.backdrop` (both are fixed,
   // full-screen flex containers). The scrim is deliberately NEARLY transparent - the frost already blurs
   // and darkens the whole viewport - and the option strips carry the rest of the darkening. The screen is
   // a COLUMN: title, split (flex:1), Back - with `overflow:hidden`, so the screen can never scroll.
   const settingsScreenBg = "rgba(10,10,14,0.12)";
   const settingsScreen =
-    `position:absolute;inset:0;background:${settingsScreenBg};padding:0.75rem 1.5rem 1rem;` +
+    // THE CONTENT BAND (P1.49r): the screen is full-bleed, but its CONTENT is capped at 56rem and centred.
+    // Without this the rows were as wide as the window (62.75rem at 1280, the same in rem on a 1920 screen),
+    // and a name-left/control-right row then had an empty middle a thousand pixels wide - the same missing
+    // cap that made the value buttons look impossibly long. `max(1.5rem, ...)` keeps the old behaviour on a
+    // window too narrow for the band, and because the PADDING does it, the title, the nav, the sections and
+    // Back all sit in the same band.
+    `position:absolute;inset:0;background:${settingsScreenBg};` +
+    `padding:0.75rem max(1.5rem, calc((100% - 56rem) / 2)) 1rem;` +
     `text-align:center;color:${c.text};font:1rem ${theme.font.ui};display:flex;flex-direction:column;overflow:hidden;`;
   switch (recipe) {
     case "text.label":
@@ -512,7 +526,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "settings.btn":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
         `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : "transparent"};border:none;` +
-        `border-radius:0.375rem;cursor:pointer;`;
+        `border-radius:0.375rem;box-shadow:${state.hovered || state.pressed ? ringHover : ring};cursor:pointer;`;
     case "settings.btnRow":
       return "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
     // The container PAGE ROWS are mounted into (P1.29). It must be LAYOUT-NEUTRAL, and the reason is subtler
@@ -548,7 +562,9 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
         `color:${c.btnText};background:${
           state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
-        };border:none;border-radius:0.375rem;cursor:pointer;text-align:center;`;
+        };border:none;border-radius:0.375rem;box-shadow:${
+          state.selected ? ringOn : state.hovered ? ringHover : ring
+        };cursor:pointer;text-align:center;`;
     case "settings.scrollArea":
       return "max-height:12.5rem;overflow-y:auto;margin-bottom:0.375rem;";
     case "settings.row":
@@ -572,7 +588,8 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "settings.rowBtn":
       return `display:inline-block;width:auto;padding:0.375rem 0.75rem;margin:0;font:0.875rem ${theme.font.ui};` +
         `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : "transparent"};border:none;` +
-        `border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
+        `border-radius:0.3125rem;box-shadow:${state.hovered || state.pressed ? ringHover : ring};` +
+        `cursor:pointer;white-space:nowrap;`;
     // One ENTRY of a dropdown list: a FULL-WIDTH menu ROW with CENTRED text, so the popup reads as a
     // vertical list under its button (the button above it is centred too - a left-aligned entry looked
     // like a stray label).
@@ -586,7 +603,9 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return `display:block;width:100%;text-align:center;padding:0.4375rem 0.625rem;margin:0;font:0.8125rem ${theme.font.ui};` +
         `color:${c.btnText};background:${
           state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
-        };border:none;border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
+        };border:none;border-radius:0.3125rem;box-shadow:${
+          state.selected ? ringOn : state.hovered ? ringHover : ring
+        };cursor:pointer;white-space:nowrap;`;
     // THE DROPDOWN POPUP (P1.49n): it is a child of its ROW and absolutely positioned under it, so it is a
     // real dropdown - opening one does NOT reflow the rows below it. `top:100%;right:0` puts it flush under
     // the row and aligns its right edge with the row is (i.e. with the value button). Its visibility is
