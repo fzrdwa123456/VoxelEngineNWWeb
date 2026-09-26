@@ -184,6 +184,13 @@ export function defaultUiTheme(): UiTheme {
       '[data-ui-recipe="settings.range"]{opacity:0;pointer-events:none;transition:opacity 120ms ease}' +
       '[data-ui-recipe="settings.optRow"]:hover [data-ui-recipe="settings.range"],' +
       '[data-ui-recipe="settings.range"]:focus-visible{opacity:1;pointer-events:auto}' +
+      // P1.49s: the WHOLE ROW answers the pointer (an option is ring only covers the option is own box, so
+      // the blank between the name and its control used to be inert). It has to be CSS `:hover`: the
+      // reconciler tracks hover ONLY for widgets that carry a UI_ACTION (reconcile.ts, `tracksPointer`), so
+      // a row panel - a plain div - never receives `state.hovered`, and no ancestor of it does either.
+      // `:hover` matches while the pointer is over any DESCENDANT, which is exactly "the name, the control,
+      // or the blank in between". The radius matches the option rings so the band reads as one row.
+      '[data-ui-recipe="settings.optRow"]:hover{background:rgba(0,0,0,0.45);border-radius:0.375rem}' +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
       // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
       // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
