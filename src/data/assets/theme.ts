@@ -506,7 +506,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // It is FULL HEIGHT because `settings.split` uses `align-items:stretch`; an `align-self:flex-start`
     // here would shrink it to hug the buttons instead.
     case "settings.nav":
-      return "display:block;flex:0 0 11rem;background:rgba(0,0,0,0.34);border-radius:0.5rem;padding:0.5rem;";
+      return "display:block;flex:0 0 11rem;background:rgba(0,0,0,0.45);border-radius:0.5rem;padding:0.5rem;";
     // The CONTENT column is the scroll container of the screen (P1.49f): a long page (the key bind one)
     // moves HERE, so the title, the nav and Back stay where they are. `min-height:0` is what lets a flex
     // item actually scroll instead of stretching its parent.
