@@ -8,7 +8,8 @@
 //   win.setAlwaysOnTop(false)         -> not needed: NW.js kiosk force-topped itself and had to
 //                                        be undone, Tauri does not
 //   cursor.exe / setCursorPos(x, y)   -> compute the window centre here + SetCursorPos
-use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Mutex;
 
 use tauri::WebviewWindow;
 
@@ -17,17 +18,27 @@ use tauri::WebviewWindow;
 /// The original was "JS computes the coordinates -> hands them to cursor.exe / a NAPI plugin";
 /// here it is one step: the window geometry comes straight from Tauri.
 pub fn center_cursor(window: &WebviewWindow) -> bool {
-    let pos = match window.outer_position() {
-        Ok(p) => p,
-        Err(_) => return false,
+    let hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+    if hwnd == 0 || unsafe { GetForegroundWindow() } != hwnd {
+        // SDL: "SetCursorPos outside of the bounds of the focus window appears not to do anything" - and
+        // moving the cursor of whatever application the player switched to is the bug we just fixed.
+        return false;
+    }
+    // The CLIENT area, not the outer rect: the outer one includes the title bar and borders, so the old
+    // version centred on a point below the real crosshair.
+    let rc = match unsafe { client_rect_on_screen(hwnd) } {
+        Some(r) => r,
+        None => return false,
     };
-    let size = match window.outer_size() {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let x = pos.x + (size.width as i32) / 2;
-    let y = pos.y + (size.height as i32) / 2;
-    unsafe { crate::rawinput::SetCursorPos(x, y) != 0 }
+    let x = (rc.left + rc.right) / 2;
+    let y = (rc.top + rc.bottom) / 2;
+    // JITTERED (x, x+1, x): Windows coalesces and caches identical warps and then ignores them - SDL does
+    // exactly this in WIN_SetCursorPos (SDL_windowsmouse.c).
+    unsafe {
+        let ok = crate::rawinput::SetCursorPos(x, y) != 0;
+        let _ = crate::rawinput::SetCursorPos(x + 1, y);
+        crate::rawinput::SetCursorPos(x, y) != 0 && ok
+    }
 }
 
 /// Window mode switch (the original's kiosk fullscreen toggle, no restart at runtime)
@@ -77,34 +88,35 @@ unsafe fn client_rect_on_screen(hwnd: isize) -> Option<Rect> {
 /// Turn native mouse capture on/off. Returns whether it worked (on failure the front end falls
 /// back to the browser's requestPointerLock).
 pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
-    unsafe {
-        if !on {
-            CAPTURE_HWND.store(0, Ordering::Relaxed);
-            return ClipCursor(std::ptr::null()) != 0;
-        }
-        if hwnd == 0 {
-            return false;
-        }
-        let rc = match client_rect_on_screen(hwnd) {
-            Some(r) => r,
-            None => return false,
-        };
-        if rc.right <= rc.left || rc.bottom <= rc.top {
-            return false;
-        }
-        let ok = ClipCursor(&rc) != 0;
-        if ok {
-            CAPTURE_HWND.store(hwnd, Ordering::Relaxed);
-        }
-        // **The cursor position is deliberately left alone**. Capture is the "go hidden" step, and
-        // the rule is that **the hiding path does not centre and does not move the cursor** —
-        // this used to call SetCursorPos(window centre), so on entering a world / clicking "back
-        // to game" the player saw the cursor jump towards the middle of the window and then
-        // vanish (the "hidden but centred" defect).
-        // It is also entirely unnecessary: raw input's relative deltas do not depend on the cursor
-        // position, and ClipCursor confines the cursor to the rectangle by itself.
-        ok
+    if !on {
+        release_mouse_capture();
+        return true;
     }
+    if hwnd == 0 {
+        return false;
+    }
+    let mut m = model();
+    m.hwnd = hwnd;
+    // Capture while NOT the foreground window is refused: the clip would sit over somebody else is screen
+    // area and the cursor would be hidden globally (see `capture_foreground_check`). The front end has the
+    // same gate; this is the backstop. (SDL puts the same condition in WIN_UpdateClipCursor.)
+    if unsafe { GetForegroundWindow() } != hwnd {
+        return false;
+    }
+    m.relative = true;
+    let p = probe_of(&m);
+    if rect_is_empty(p.client) {
+        m.relative = false;
+        return false;
+    }
+    // The CLIP only. The shape (hidden) arrives through the cursor INTENT, because SetCursor has to run on
+    // the thread that owns the window - and the POSITION is deliberately left alone: SDL calls this
+    // "clip != warp", and warping here is what used to make the cursor jump into the middle and vanish.
+    // It is also unnecessary: raw input deltas do not depend on where the cursor is, and the centre lock
+    // keeps it on the crosshair by itself.
+    let clip = decide(&m, &p).clip;
+    apply_clip(&mut m, clip);
+    true
 }
 
 /// **The window geometry changed: recompute the clip rectangle.**
@@ -123,29 +135,24 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
 /// by another program and other geometry changes. Returns whether it really re-clipped (for
 /// diagnostics).
 pub fn reclip_mouse_capture() -> bool {
-    let hwnd = CAPTURE_HWND.load(Ordering::Relaxed);
-    if hwnd == 0 {
+    let mut m = model();
+    if m.hwnd == 0 {
         return false;
     }
-    unsafe {
-        let rc = match client_rect_on_screen(hwnd) {
-            Some(r) => r,
-            None => return false,
-        };
-        if rc.right <= rc.left || rc.bottom <= rc.top {
-            return false;
-        }
-        ClipCursor(&rc) != 0
-    }
+    let p = probe_of(&m);
+    // The SAME decision the reconciler makes: a window that is not the foreground gets the clip RELEASED,
+    // not recomputed from a stale (or minimized) rectangle.
+    let clip = decide(&m, &p).clip;
+    apply_clip(&mut m, clip)
 }
 
 /// Release capture unconditionally (the safety net for losing focus / exiting; repeated calls are
 /// harmless)
 pub fn release_mouse_capture() {
-    CAPTURE_HWND.store(0, Ordering::Relaxed);
-    unsafe {
-        ClipCursor(std::ptr::null());
-    }
+    let mut m = model();
+    m.relative = false;
+    // Rule 1 of the model: only a clip WE hold is cleared, so another application is clip is never touched.
+    apply_clip(&mut m, Some(ClipRect::ZERO));
 }
 
 /// **Capture is only allowed to stay on in the foreground — this is the system-level backstop.**
@@ -174,24 +181,27 @@ pub fn release_mouse_capture() {
 /// thread (the `SetCursor`/`ShowCursor`/`ClipCursor` rule; this function itself runs on the
 /// raw-input push thread).
 pub fn capture_foreground_check(app: &tauri::AppHandle) -> bool {
-    let hwnd = CAPTURE_HWND.load(Ordering::Relaxed);
-    if hwnd == 0 {
-        FG_MISMATCH_TICKS.store(0, Ordering::Relaxed);
-        return false;
+    {
+        let mut m = model();
+        if !m.relative || m.hwnd == 0 {
+            m.fg_mismatch_ticks = 0;
+            return false;
+        }
+        if unsafe { GetForegroundWindow() } == m.hwnd {
+            m.fg_mismatch_ticks = 0;
+            return false;
+        }
+        // A foreground switch is briefly inconsistent anyway: act after two ticks in a row.
+        m.fg_mismatch_ticks = m.fg_mismatch_ticks.saturating_add(1);
+        if m.fg_mismatch_ticks < 2 {
+            return false;
+        }
+        m.fg_mismatch_ticks = 0;
     }
-    if unsafe { GetForegroundWindow() } == hwnd {
-        FG_MISMATCH_TICKS.store(0, Ordering::Relaxed);
-        return false;
-    }
-    if FG_MISMATCH_TICKS.fetch_add(1, Ordering::Relaxed) + 1 < 2 {
-        return false; // a foreground switch is briefly inconsistent anyway: act only after two in a row (≈32ms)
-    }
-    FG_MISMATCH_TICKS.store(0, Ordering::Relaxed);
-    let h = app.clone();
-    let _ = h.run_on_main_thread(move || {
-        release_mouse_capture();
-        apply_cursor(true); // release the cursor with it, do not leave it in the hidden state
-    });
+    release_mouse_capture();
+    // Put the ARROW back with it: releasing the clip does not touch the shape, and the pointer is over
+    // another application now (SDL_RedrawCursor: with no mouse focus the DEFAULT cursor is the answer).
+    reconcile(app);
     true
 }
 
@@ -254,16 +264,116 @@ pub fn kick_cursor_repaint() {
 // This only corrects at the "visibility" level (`hCursor == 0` counts as hidden) and **never
 // overrides Chromium's pointer shape** — the hand cursor shown while the mouse rests on a button
 // is non-NULL, and the sentinel does nothing when it sees "visible".
-static DESIRED_CURSOR: AtomicU8 = AtomicU8::new(0); // 0=unknown 1=visible 2=hidden
-static CURSOR_HWND: AtomicIsize = AtomicIsize::new(0);
-static CURSOR_ENFORCED: AtomicU32 = AtomicU32::new(0); // correction count (diagnostics)
-/// The window that currently **has** capture open (0 = no capture). `set_mouse_capture` records
-/// it and `release_mouse_capture` clears it, so "does the clip have to be recomputed after a
-/// geometry change" has a cheap answer (see `reclip_mouse_capture`).
-static CAPTURE_HWND: AtomicIsize = AtomicIsize::new(0);
-/// How many ticks in a row found "capture is open but the window is not in the foreground"
-/// (debounce: a foreground switch is briefly inconsistent anyway)
-static FG_MISMATCH_TICKS: AtomicU8 = AtomicU8::new(0);
+// The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
+// file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
+use crate::cursor_model::{
+    decide, rect_is_empty, rect_is_zero, ClipRect, CursorModel, CursorProbe, CursorShape,
+};
+
+/// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
+/// commands all touch it, and "who owns the cursor" has to be one answer.
+static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
+    hwnd: 0,
+    want: 0,
+    relative: false,
+    centre_lock: true,
+    clipped: ClipRect::ZERO,
+    shape: CursorShape::Unknown,
+    enforced: 0,
+    fg_mismatch_ticks: 0,
+});
+
+fn model() -> std::sync::MutexGuard<'static, CursorModel> {
+    // A poisoned lock must not wedge the game: the table is plain data, so take it anyway.
+    MODEL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The Win32 RECT becomes the model own ClipRect here, at the boundary (and back again for ClipCursor).
+fn as_clip_rect(r: Rect) -> ClipRect {
+    ClipRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
+fn as_win_rect(c: ClipRect) -> Rect {
+    Rect { left: c.left, top: c.top, right: c.right, bottom: c.bottom }
+}
+
+/// Win32 reads only. Thread-agnostic.
+fn probe_of(m: &CursorModel) -> CursorProbe {
+    let (showing, _) = cursor_info();
+    let focused = m.hwnd != 0 && unsafe { GetForegroundWindow() } == m.hwnd;
+    let client = if m.hwnd == 0 {
+        ClipRect::ZERO
+    } else {
+        unsafe { client_rect_on_screen(m.hwnd) }.map(as_clip_rect).unwrap_or_default()
+    };
+    CursorProbe {
+        focused,
+        showing,
+        client,
+        remote_session: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
+    }
+}
+
+/// Apply the clip. **The only place that calls ClipCursor**, and it never touches another application is
+/// clip: it clears one only when the current one is the rect WE recorded (SDL WIN_UnclipCursorForWindow).
+fn apply_clip(m: &mut CursorModel, clip: Option<ClipRect>) -> bool {
+    let rect = match clip {
+        Some(r) => r,
+        None => return false,
+    };
+    if rect == m.clipped {
+        return false;
+    }
+    let release = rect_is_zero(rect) || rect_is_empty(rect);
+    unsafe {
+        if release {
+            ClipCursor(std::ptr::null());
+        } else {
+            let win = as_win_rect(rect);
+            ClipCursor(&win);
+        }
+    }
+    m.clipped = if release { ClipRect::ZERO } else { rect };
+    m.enforced = m.enforced.wrapping_add(1);
+    true
+}
+
+/// Apply the shape. `SetCursor` belongs to the thread that owns the window, so this is only ever called
+/// from the main thread (`reconcile`) or from the window event path.
+fn apply_shape(m: &mut CursorModel, shape: CursorShape) -> bool {
+    if shape == CursorShape::Unknown || shape == m.shape {
+        return false;
+    }
+    apply_cursor(shape == CursorShape::Arrow);
+    m.shape = shape;
+    m.enforced = m.enforced.wrapping_add(1);
+    true
+}
+
+/// Gather, decide, apply - ON THE MAIN THREAD. Idempotent: a tick that changes nothing makes no call.
+fn reconcile(app: &tauri::AppHandle) {
+    let (plan, system_disagrees) = {
+        let m = model();
+        let p = probe_of(&m);
+        let plan = decide(&m, &p);
+        // **The system can disagree with our own record.** `SetCursor` pushes are dropped while another
+        // application owns the cursor, and Chromium answers NULL from its cached cursor for a while after
+        // focus returns (both were caught by the boot.log probes) - so when we WANT the arrow, are focused,
+        // and the system still reports a hidden cursor, the push has to be REPEATED: the plan alone would be
+        // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
+        // never fight the foreground application for the cursor (rule 1 of the model).
+        let system_disagrees = p.focused && !p.showing && plan.shape == CursorShape::Arrow;
+        (plan, system_disagrees)
+    };
+    let _ = app.run_on_main_thread(move || {
+        let mut m = model();
+        apply_clip(&mut m, plan.clip);
+        if system_disagrees {
+            m.shape = CursorShape::Unknown; // force the push through the idempotence check
+        }
+        apply_shape(&mut m, plan.shape);
+    });
+}
 
 #[repr(C)]
 struct CursorInfo {
@@ -276,6 +386,8 @@ struct CursorInfo {
 const CURSOR_SHOWING: u32 = 0x0000_0001;
 /// MAKEINTRESOURCE(32512)
 const IDC_ARROW: *const u16 = 32512 as *const u16;
+/// `SM_REMOTESESSION`: a remote desktop session needs a larger centre lock (SDL adds the same 2px).
+const SM_REMOTESESSION: i32 = 0x1000;
 
 /// Whether the cursor is visible at the system level: `hCursor == 0` (a NULL shape) means hidden.
 fn cursor_visible_now() -> bool {
@@ -304,7 +416,6 @@ fn apply_cursor(visible: bool) {
         } else {
             SetCursor(0); // NULL shape = not visible
         }
-        CURSOR_ENFORCED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -388,95 +499,38 @@ pub fn install_menu_suppressor(hwnd: isize) -> bool {
     }
 }
 
-/// Put the cursor back at the centre of the window's client area (the original "opening a
-/// menu/backpack lands the cursor on the crosshair" behaviour)
-unsafe fn center_on(hwnd: isize) {
-    let mut rc = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-    if GetClientRect(hwnd, &mut rc) == 0 {
-        return;
-    }
-    let mut tl = Point { x: rc.left, y: rc.top };
-    let mut br = Point { x: rc.right, y: rc.bottom };
-    if ClientToScreen(hwnd, &mut tl) == 0 || ClientToScreen(hwnd, &mut br) == 0 {
-        return;
-    }
-    let _ = crate::rawinput::SetCursorPos((tl.x + br.x) / 2, (tl.y + br.y) / 2);
-}
-
-/// Called by the front end when the **desired value changes** (inside
-/// `pointerlock.applyCursor()`): record the desire + correct once immediately; on switching to
-/// "visible" it also puts the cursor back at the window centre (this is the "does not centre"
-/// clause).
+/// Called by the front end when the **desired value changes** (inside `pointerlock.applyCursor()`): record
+/// the intent, then hand the whole question to the model.
 ///
-/// **`SetCursor` must run on the thread that owns the window (the main thread)**, and Tauri
-/// commands execute on a thread pool by default — hence the marshal back with
-/// `run_on_main_thread`.
+/// **Nothing is MOVED here** (P1.51). This used to centre the cursor on the hidden -> visible transition,
+/// which is part of how "press Win / Alt+Tab and the mouse snaps to the middle of the game window"
+/// happened. With the centre lock the cursor never left the crosshair, so the product feel ("opening a
+/// menu lands on the crosshair") follows from the CLIP instead of from a warp - and the explicit
+/// `center_cursor` command still exists for the paths that really do want a move.
 pub fn set_cursor_intent(app: &tauri::AppHandle, hwnd: isize, visible: bool) {
-    let prev = DESIRED_CURSOR.swap(if visible { 1 } else { 2 }, Ordering::Relaxed);
-    CURSOR_HWND.store(hwnd, Ordering::Relaxed);
-    // **Centre only on the "hidden -> visible" transition** — that is, the moment "capture is
-    // dropped and the menu opens", matching the original feel of "opening a menu/backpack lands
-    // the cursor on the crosshair".
-    //
-    // **Centring on every switch to visible is not allowed**: the applyCursor() at the end of
-    // boot() on startup (the main menu has just appeared) reaches here too, and at that point
-    // prev == 0 (no intent has ever been set) — the result is the mouse being yanked to the middle
-    // of the screen the instant you double-click the exe. Only prev == 2 means "the last state was
-    // hidden", i.e. we really did leave the game.
-    let was_hidden = prev == 2;
-    // **Centring needs the player to be LOOKING at us** (P1.50): it exists so that "opening a menu or the
-    // backpack lands the cursor on the crosshair". The blur path reaches this call as well - losing focus
-    // releases the capture, which flips the intent to visible - and centring there moved the cursor of
-    // whatever application the player had just switched to (the reported "the mouse jumps to the middle
-    // while I am typing in the browser"). Queried OUTSIDE the closure: it is a plain Win32 query.
-    let ours = unsafe { crate::rawinput::foreground_is_ours() };
-    let _ = app.run_on_main_thread(move || {
-        apply_cursor(visible);
-        if visible && was_hidden && hwnd != 0 && ours {
-            unsafe { center_on(hwnd) };
-        }
-    });
+    {
+        let mut m = model();
+        m.hwnd = hwnd;
+        m.want = if visible { 1 } else { 2 };
+    }
+    reconcile(app);
 }
 
-/// The sentinel: correct the cursor whenever the desire and the reality disagree. Called by
-/// rawinput's 4ms thread on every second tick (≈8ms).
+/// The RECONCILER: gather, decide, apply - and call nothing when the plan matches what is already there.
 ///
-/// It handles three things:
-///   * Windows is pushed into menu mode by Alt during capture and sets the arrow → **press it back
-///     to NULL immediately** ("disable Alt summoning the mouse");
-///   * the cursor is stuck hidden during pause/menu → set it to the arrow immediately;
-///   * any moment some other timing path missed.
-///
-/// Polling `GetCursorInfo` is thread-agnostic, so any thread will do; it marshals back to the main
-/// thread **only when they really disagree**, so there is no extra cost in the steady state.
+/// Called by rawinput on every second tick (8ms) as the self-healing path: SDL gets this for free from
+/// `WM_SETCURSOR` on every mouse move, but Chromium owns our window, so the only way to notice "the system
+/// and the intent disagree" is to ask. Rule 3 of the model is what makes that safe: a tick that changes
+/// nothing makes NO Win32 call, so it neither fights the system nor touches anybody is cursor.
 pub fn cursor_sentinel(app: &tauri::AppHandle) {
-    let want = DESIRED_CURSOR.load(Ordering::Relaxed);
-    if want == 0 {
+    if model().want == 0 {
         return;
     }
-    // **NOT OUR FOREGROUND = NOT OUR CURSOR** (P1.50). This used to keep correcting while the player was in
-    // another application. The cursor belongs to the FOREGROUND thread, so a correction there is at best
-    // ignored, and this path also CENTRED the cursor on every correction while the desire was visible
-    // (the next comment) - which is exactly the reported "the mouse snaps to the middle of the game window
-    // while I am typing in the browser", and it fired 1-6 times a second (RAWMON cursorFix) because a
-    // background window disagrees with `GetCursorInfo` constantly. The shape is repaired when the player
-    // comes back (the focus-GAIN path and the frontend reapplyCursor), and the sentinel resumes on its
-    // very next tick, so standing down costs nothing.
-    if !unsafe { crate::rawinput::foreground_is_ours() } {
-        return;
-    }
-    let visible = want == 1;
-    if cursor_visible_now() == visible {
-        return;
-    }
-    // **A CORRECTION NEVER CENTRES** (P1.50). Centring belongs to the hidden -> visible INTENT transition
-    // (see set_cursor_intent, guarded by was_hidden AND by the foreground). Doing it here, unguarded, made
-    // every disagreement between the desire and the system an unconditional SetCursorPos(window centre).
-    let _ = app.run_on_main_thread(move || apply_cursor(visible));
+    reconcile(app);
 }
 
 pub fn cursor_enforced_count() -> u32 {
-    CURSOR_ENFORCED.load(Ordering::Relaxed)
+    model().enforced
 }
 
 /// Diagnostics (RAWMON line): the desired cursor state (0 unknown / 1 visible / 2 hidden) and
@@ -486,12 +540,13 @@ pub fn cursor_enforced_count() -> u32 {
 /// pressing it back — every round marshals to the main thread, and the main thread is the one
 /// running rendering.
 pub fn cursor_state() -> (u8, bool) {
-    (DESIRED_CURSOR.load(Ordering::Relaxed), cursor_visible_now())
+    (model().want, cursor_visible_now())
 }
 
 /// Diagnostics (RAWMON line): whether mouse capture (ClipCursor) is currently on
 pub fn capture_active() -> bool {
-    CAPTURE_HWND.load(Ordering::Relaxed) != 0
+    // The REQUEST (relative mode), which is what RAWMON needs to spot "capturing while backgrounded".
+    model().relative
 }
 
 /// Make WebView2 **decide the cursor shape once more** — send a `WM_SETCURSOR` to the window under
@@ -569,6 +624,7 @@ const WM_SETCURSOR: u32 = 0x0020;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const HTCLIENT: u32 = 1;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
 struct Rect {
     left: i32,
@@ -590,6 +646,7 @@ extern "system" {
     fn GetCursorPos(point: *mut Point) -> i32;
     fn GetCursorInfo(info: *mut CursorInfo) -> i32;
     fn GetForegroundWindow() -> isize;
+fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
     // These two are also declared in rawinput.rs (not pub there, so they are declared again here;

@@ -24,6 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
+mod cursor_model;
 mod game;
 mod packs;
 mod rawinput;
