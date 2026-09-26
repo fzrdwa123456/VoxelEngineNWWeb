@@ -264,6 +264,7 @@ export type UiRecipe =
   | "settings.rowBtn"
   | "settings.rowChoice"
   | "settings.list"
+  | "settings.catcher"
   | "settings.empty"
   // --- visual keyboard (key bind panel) -----------------------------------------------
   | "kb.board"
@@ -592,6 +593,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // DATA (`UI_MODAL.settingsList`), painted by ui.navigation like every other panel.
     // It is a COLUMN of full-width entries - the stylesheet below turns the chips into menu rows when they
     // sit in here, which is why one entry recipe can serve both the popup and an inline choice.
+    // THE CLICK CATCHER (P1.49q): a transparent, full-VIEWPORT button that exists only while its dropdown
+    // is open, so a click anywhere else dismisses the list (the standard dropdown behaviour). It is a
+    // button because that is what carries a UI_ACTION, and `position:fixed` because that also makes it
+    // escape the content column is scroll clipping. `z-index:4` puts it above every row and below the
+    // popup (5), so an entry is still clickable; nothing is drawn - no background, border or padding.
+    case "settings.catcher":
+      return "position:fixed;inset:0;z-index:4;background:transparent;border:none;padding:0;";
     case "settings.list":
       return "position:absolute;top:100%;right:0;z-index:5;display:block;min-width:7.5rem;" +
         "background:rgba(12,12,16,0.94);border:0.0625rem solid rgba(255,255,255,0.14);" +

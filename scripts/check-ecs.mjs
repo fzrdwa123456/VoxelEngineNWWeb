@@ -711,6 +711,7 @@ check("every recipe resolves to a style, and state changes it", () => {
     "settings.rowBtn",
     "settings.rowChoice",
     "settings.list",
+    "settings.catcher",
     "settings.empty",
     "kb.board",
     "kb.hint",
@@ -1680,7 +1681,11 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
     inventoryPanel: mkPanel("inv.panel"),
     // The DROPDOWNS (P1.49m): one list, so the painter is exercised - not just the ESC rung.
     pauseLists: [{ id: "pause.uiScale", entity: mkPanel("settings.list") }],
-    mainLists: [{ id: "main.uiScale", entity: mkPanel("settings.list") }],
+    // TWO entries under ONE id: the popup and its click catcher (P1.49q) - the real registration shape.
+    mainLists: [
+      { id: "main.uiScale", entity: mkPanel("settings.list") },
+      { id: "main.uiScale", entity: mkPanel("settings.catcher") },
+    ],
   };
   const effects = [];
   /** "Is a world running?" �?the ESC/inventory gate. false is the LOADING-SCREEN state (the startup and
@@ -1720,6 +1725,7 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   Object.assign(ui, { mainMenu: true, menu: false, settings: "settings", settingsList: "main.uiScale" });
   nav.step();
   assert(shown(trees.mainLists[0].entity), "the open row list is painted while settingsList names it");
+  assert(shown(trees.mainLists[1].entity), "?and its CLICK CATCHER, registered under the same id");
   assert(!shown(trees.pauseLists[0].entity), "?and the other menu is list is not");
   esc();
   equal(ui.settingsList, null, "ESC closes the DROPDOWN first");

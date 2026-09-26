@@ -243,7 +243,13 @@ export function buildSettingsPanel(
     // A child of the ROW: that is what makes `top:100%;right:0` anchor the popup under this row is button
     // (an absolutely positioned child is out of the flex flow, so it changes no row layout).
     const list = spawnPanel(world, row, "settings.list", { hidden: true });
-    lists.push({ id: key2, entity: list });
+    // The CATCHER goes in under the SAME id, so the ONE painting rule shows and hides both, and "a click
+    // anywhere else dismisses" needs no state of its own. It must be a BUTTON: that is what carries a
+    // UI_ACTION.
+    const catcher = spawnButton(world, row, "settings.catcher", `${id}.closeList`, "", undefined, {
+      hidden: true,
+    });
+    lists.push({ id: key2, entity: list }, { id: key2, entity: catcher });
     return { row, ctl, meta, list, value };
   };
   /** Opening a dropdown is ONE write; picking an entry closes it again (a list is a menu, not a mode). */
@@ -254,6 +260,10 @@ export function buildSettingsPanel(
     const ui = world.resource(UI_MODAL);
     ui.settingsList = ui.settingsList === value ? null : value;
   });
+
+  /** A click anywhere OUTSIDE the popup lands on that row is CATCHER and dismisses the list (P1.49q), so
+   *  the popup behaves like a menu: it does not need the value button pressed a second time. */
+  onUiAction(actions, `${id}.closeList`, () => closeList());
 
   // 1. FPS cap: 30..240, maxed = unlimited (0). The slider is IN the row and invisible until hovered.
   const capCtl = spawnPanel(world, spawnRow("settings.fpsCap"), "settings.rowCtl");
