@@ -1700,7 +1700,6 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
     inventoryOn: () => true,
     prepareUnlock: () => effects.push("prepareUnlock"),
     exitPointerLock: () => effects.push("exit"),
-    centerCursor: () => effects.push("center"),
     relock: (r) => effects.push(`relock:${r}`),
     relockSoon: (r) => effects.push(`relockSoon:${r}`),
     applyCursor: () => {},
@@ -1769,7 +1768,7 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   effects.length = 0;
   esc();
   equal(ui.menu, true, "ESC in game opens the pause menu");
-  equal(effects.join(","), "prepareUnlock,exit,center", "…releasing the mouse and centring the cursor");
+  equal(effects.join(","), "prepareUnlock,exit", "…releasing the mouse (the crosshair centring is the model is job now, not a navigation effect)");
 
   // ── …but NOT while a loading screen is up: the startup and a world entry spend seconds in the
   // `load` mode with no modal open and no world running, and both of these used to fire there (ESC

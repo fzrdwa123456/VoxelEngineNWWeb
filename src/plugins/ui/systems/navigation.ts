@@ -78,7 +78,6 @@ export interface NavigationDeps {
   /** Cancel that drag: clear the gesture and end a rebind capture. `reason` is for the log. */
   readonly cancelDrag?: (reason: string) => void;
   readonly exitPointerLock: () => void;
-  readonly centerCursor: () => void;
   readonly relock: (reason: string) => void;
   readonly relockSoon: (reason: string) => void;
   readonly applyCursor: () => void;
@@ -210,7 +209,6 @@ export class UiNavigationSystem {
         this.deps.prepareUnlock();
         this.deps.log("UNLOCK request (inventory)");
         this.deps.exitPointerLock();
-        this.deps.centerCursor();
       } else {
         this.deps.relockSoon("inventory E");
       }
@@ -258,7 +256,6 @@ export class UiNavigationSystem {
     this.deps.log("UNLOCK request (menu)");
     this.deps.exitPointerLock();
     ui.menu = true;
-    this.deps.centerCursor();
   }
 
   /** The one painter of the modal trees: a surface changes STATE, this puts it on screen. */

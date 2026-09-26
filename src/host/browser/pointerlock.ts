@@ -80,33 +80,17 @@ export class PointerLock {
     // Cursor: hidden ONLY while the player actually controls the mouse (a world running, no modal UI
     // up). Visible on the loading screen, at the main menu, in the pause menu and in the backpack.
     // (It used to read `isUiModal` inverted, which made the loading screen hide the cursor.)
-  /** After the window regains focus, force Chromium to **recompute** the cursor and push it down.
+  /** Re-assert the cursor shape after the window regained focus (or after the menu/Apps key).
    *
-   *  Why it is needed (probe evidence): at the moment focus is lost the CSS goes from `none` to
-   *  `default`, but that push was dropped by the system (the window was deactivating); and Chromium's
-   *  **cached "current cursor" is still NULL** — so asking it afterwards (the `WM_SETCURSOR` the Rust
-   *  side sends) it answers NULL as well:
-   *      `[cursor] focus GAIN before=showing=false hCursor=0` → `after` is still 0
-   *  Only making the CSS **really change once** gets it to recompute. The trick: first write a string
-   *  that differs from the target but is equivalent (both `auto` and `default` are an arrow, no visible
-   *  difference), and in the next macrotask write the target value back.
-   *  `applyCursor()` writes the same value every frame, and Chromium does not push when "the value did
-   *  not change" — so it has to change once first. */
-  reapplyCursor(): void {
-    const target: "none" | "default" = this.deps.canControl() ? "none" : "default";
-    if (target === "none") {
-      // When hiding, this dance is not needed (the failure mode is "should be visible but stays hidden")
-      this.applyCursor();
-      return;
-    }
-    // Likewise it must be important: the theme's `*{cursor:inherit !important}` would beat a plain
-    // inline value, that "forced change" would become a no-op, and Chromium would not push the cursor
-    // again. (`auto` and `default` are both an arrow, no visible difference, but the value really did
-    // change.)
-    document.body.style.setProperty("cursor", "auto", "important");
-    this.deps.scheduleCursor(0);
-    // The render process may lag by one beat; write it once more
-    this.deps.scheduleCursor(120);
+   *  It used to write a DIFFERENT CSS value first (`auto`, then the target) to force Chromium to recompute
+   *  its cached cursor. That is gone (P1.55): **Rust owns the real shape**, and one repeated INTENT is all it
+   *  takes, because the Rust reconciler compares the plan with the SYSTEM (`GetCursorInfo`) instead of with
+   *  its own record - in BOTH directions. So there is one writer of the CSS value and one mechanism for the
+   *  shape, and never a frame in which a value nobody asked for is on screen. */
+  reassertCursor(): void {
+    this.applyCursor(); // keeps the CSS value in sync (idempotent)
+    // The intent is sent even though the value did not change: it is the "apply it again, right now" ping.
+    void invoke("cursor_intent", { visible: !this.deps.canControl() }).catch(() => {});
   }
 
   applyCursor(): void {

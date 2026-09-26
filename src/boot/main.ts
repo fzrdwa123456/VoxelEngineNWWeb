@@ -68,7 +68,7 @@ import { loadUIScaleMode, getUIScaleMode, currentRootFontPx } from "../data/glob
 import { loadFont, getFontId, currentFontCss } from "../data/globals/fonts";
 import { preloadShell, bootReport, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
-import { startRawInput, centerCursor } from "../host/browser/rawinput";
+import { startRawInput } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
 // The platform halves the PLUGINS are not allowed to import: the composition root hands them in as
 // the injected dependencies of the two systems that need them (input capture, icon baking).
@@ -743,7 +743,6 @@ const navigation = createNavigationSystem(world, {
   cancelDrag: (reason) => cancelKeybindDrag(reason, logDebug),
   // Native capture: does NOT go through `document.exitPointerLock` (see platform/mousecapture.ts)
   exitPointerLock: () => input.releaseCapture(),
-  centerCursor,
   relock: (reason) => pointerLock.relock(reason),
   // "Relock, but not in this key dispatch": the DEADLINE goes into the world and `ui.delays` applies it
   // (it used to be a `setTimeout(…, 0)` here — a timer owned by the composition root).
@@ -758,7 +757,7 @@ const navigation = createNavigationSystem(world, {
 const delays = createDelaySystem(world, {
   relock: (reason) => pointerLock.relock(reason),
   lockRetry: (source) => pointerLock.retry(source),
-  cursor: () => pointerLock.applyCursor(),
+  cursor: () => pointerLock.reassertCursor(),
   log: logDebug,
 });
 // The size the draw last applied to the renderer — this system's own state (it owns the framebuffer).
@@ -1121,9 +1120,9 @@ onCaptureLost(() => onWindowLost("CAPTURELOST not foreground"));
 onWinFocus(() => {
   // Diagnostics: record it once, **unconditionally**
   logDebug(`WINFOCUS focus inWorld=${inWorld()} uiOpen=${uiOpen()} locked=${input.locked}`);
-  // On switching back, restore the cursor first: Chromium's cached cursor may still be the NULL from
-  // before the blur (see the note on reapplyCursor).
-  pointerLock.reapplyCursor();
+  // On switching back, re-assert the cursor first: Chromium's cached cursor may still be the NULL from
+  // before the blur, and the system may have revealed it while we were away (see reassertCursor).
+  pointerLock.reassertCursor();
   if (inWorld() && !uiOpen() && !input.locked) {
         pointerLock.relock("window focus");
         logDebug("FOCUS focused -> relock");

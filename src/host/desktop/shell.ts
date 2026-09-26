@@ -205,11 +205,6 @@ export { diffSettings } from "../../core/services/settings-diff";
 export type { SettingsDiff } from "../../core/services/settings-diff";
 
 // ===== Cursor / window =====
-// Put the cursor back on the crosshair position when a menu or the backpack opens (the original spawned
-// a cursor.exe child process; here Rust computes it in one step)
-export function centerCursor(): void {
-  void invoke("center_cursor").catch(() => {});
-}
 
 // Show window: "visible": false in the config -> only show it after the first frame is rendered (avoids a
 // white startup screen)

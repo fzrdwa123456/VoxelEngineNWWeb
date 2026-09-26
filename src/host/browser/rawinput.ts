@@ -177,9 +177,3 @@ export function rawInputStats(): Promise<RawStats> {
   return invoke<RawStats>("rawinput_stats");
 }
 
-/** Center the cursor on the window center (the original went through the plugin's in-process
- *  SetCursorPos). Here Rust takes the window geometry straight from Tauri and then calls SetCursorPos,
- *  so the coordinates never have to make a detour into JS. */
-export function centerCursor(): void {
-  void invoke("center_cursor").catch(() => {});
-}

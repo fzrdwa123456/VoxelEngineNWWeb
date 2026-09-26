@@ -39,6 +39,13 @@ impl ClipRect {
     pub const ZERO: ClipRect = ClipRect { left: 0, top: 0, right: 0, bottom: 0 };
 }
 
+/// A point in SCREEN coordinates (the cursor position). Its own type for the same reason as `ClipRect`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ClipPos {
+    pub x: i32,
+    pub y: i32,
+}
+
 /// The shape we want on screen. `Unknown` = we have pushed nothing yet (so nothing is compared against it).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorShape {
@@ -67,6 +74,10 @@ pub struct CursorModel {
     pub enforced: u32,
     /// debounce for "capture asked for while backgrounded": act after two ticks in a row
     pub fg_mismatch_ticks: u8,
+    /// P1.55: the product wants the cursor on the crosshair when a menu opens (the original feel). It is the
+    /// WARP PLAN that implements it - and only on a hidden -> visible transition, applied while still
+    /// hidden, and skipped entirely when the cursor is already there (the centre lock usually means it is).
+    pub centre_on_show: bool,
 }
 
 /// What we OBSERVED - the model's INPUT. Every field is gathered by the platform layer.
@@ -80,6 +91,8 @@ pub struct CursorProbe {
     pub client: ClipRect,
     /// a remote-desktop session needs a slightly larger centre lock (SDL does the same)
     pub remote_session: bool,
+    /// where the cursor is right now (screen coordinates)
+    pub pos: ClipPos,
     /// the VIRTUAL SCREEN bounds: `ClipCursor` refuses a rectangle that is not on the screen, so every clip
     /// target is intersected with this (a window half off the screen is the normal way to hit it).
     pub screen: ClipRect,
@@ -94,6 +107,12 @@ pub struct CursorPlan {
     /// caller must not believe it is capturing - that belief is what let the cursor walk out of a half
     /// off-screen window while the game still processed clicks.
     pub confined: bool,
+    /// P1.55: the applier must WARP to here **while the cursor is hidden**, then show it. `Some` only on a
+    /// hidden -> visible transition that wants the crosshair and is not already there.
+    pub warp: Option<ClipPos>,
+    /// P1.55: push the shape even though our RECORD already matches, because the SYSTEM disagrees with it
+    /// (a dropped `SetCursor`, or Chromium answering `WM_SETCURSOR` from a stale cache). Both directions.
+    pub force_shape: bool,
 }
 
 pub fn rect_is_zero(r: ClipRect) -> bool {
@@ -177,36 +196,74 @@ pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
     fit_into(target, region)
 }
 
+/// The centre of a rect - where "opening a menu" wants the cursor (the crosshair).
+pub fn centre_of(r: ClipRect) -> ClipPos {
+    ClipPos { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }
+}
+
+/// Is the cursor already where the centre lock keeps it? While capturing it is confined to a 1px rect at
+/// the client centre, so this is normally TRUE and no warp is ever planned (which is the point: a move the
+/// player cannot see is still a move the compositor can show between messages).
+pub fn is_at_centre(m: &CursorModel, p: &CursorProbe) -> bool {
+    let t = clip_target(m, p);
+    rect_is_empty(t) || p.pos == centre_of(t)
+}
+
 /// The whole rule set. PURE: no Win32, no globals - this is what the table test drives.
 pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     if m.hwnd == 0 {
-        return CursorPlan { clip: None, shape: CursorShape::Unknown, confined: false };
+        return plan(None, CursorShape::Unknown, false, None, false);
     }
     if !p.focused {
         // Rule 1.
-        return CursorPlan {
-            clip: if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
-            shape: CursorShape::Arrow,
-            confined: false,
-        };
+        // Not our foreground: no shape of ours belongs on the screen (rule 1), so nothing is forced either.
+        return plan(
+            if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
+            CursorShape::Arrow,
+            false,
+            None,
+            false,
+        );
     }
     if m.relative {
         // Rule 2. `confined` is false when the window has no visible area left: the caller then DROPS
         // capture instead of pretending to hold the mouse.
         let target = clip_target(m, p);
-        return CursorPlan {
-            clip: Some(target),
-            shape: CursorShape::Hidden,
-            confined: !rect_is_zero(target),
-        };
+        // We want it HIDDEN, so a system that still shows it is the disagreement to correct.
+        return plan(Some(target), CursorShape::Hidden, !rect_is_zero(target), None, p.showing);
     }
     // No capture: nothing is confined, and the arrow is right - unless the front end asked for hidden
     // (a loading screen draws its own progress and wants no pointer on top of it).
-    CursorPlan {
-        clip: if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
-        shape: if m.want == 2 { CursorShape::Hidden } else { CursorShape::Arrow },
-        confined: false,
-    }
+    let shape = if m.want == 2 { CursorShape::Hidden } else { CursorShape::Arrow };
+    let clip = if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) };
+    // **THE CROSSHAIR WARP (P1.55)**: only on hidden -> visible, only when the product wants it, and only
+    // when the cursor is not already at the centre. The applier hides first, so the move is never visible.
+    let warp = if shape == CursorShape::Arrow
+        && m.shape == CursorShape::Hidden
+        && m.centre_on_show
+        && !is_at_centre(m, p)
+    {
+        Some(centre_of(clip_target(m, p)))
+    } else {
+        None
+    };
+    plan(clip, shape, false, warp, disagrees(p, shape))
+}
+
+/// Does the SYSTEM disagree with the shape we want? (`showing` is `GetCursorInfo` - reality - not our record,
+/// which is the whole point: a `SetCursor` push can be dropped and Chromium can answer from a stale cache.)
+fn disagrees(p: &CursorProbe, shape: CursorShape) -> bool {
+    shape != CursorShape::Unknown && p.showing != (shape == CursorShape::Arrow)
+}
+
+fn plan(
+    clip: Option<ClipRect>,
+    shape: CursorShape,
+    confined: bool,
+    warp: Option<ClipPos>,
+    force_shape: bool,
+) -> CursorPlan {
+    CursorPlan { clip, shape, confined, warp, force_shape }
 }
 
 #[cfg(test)]
@@ -227,6 +284,7 @@ mod tests {
             shape: CursorShape::Unknown,
             enforced: 0,
             fg_mismatch_ticks: 0,
+            centre_on_show: true,
         }
     }
 
@@ -234,8 +292,71 @@ mod tests {
         ClipRect { left: 0, top: 0, right: 1920, bottom: 1080 }
     }
 
+    /// A probe with the cursor already at the client centre (what the centre lock produces while capturing).
     fn probe(focused: bool) -> CursorProbe {
-        CursorProbe { focused, showing: true, client: client(), remote_session: false, screen: screen() }
+        CursorProbe {
+            focused,
+            showing: true,
+            client: client(),
+            remote_session: false,
+            screen: screen(),
+            pos: ClipPos { x: 500, y: 400 },
+        }
+    }
+
+    #[test]
+    fn becoming_visible_at_the_centre_does_not_move_anything() {
+        // The centre lock keeps the cursor there while capturing, so opening a menu has nothing to move -
+        // which is the only way a move can never be seen (P1.55).
+        let mut m = model(false, ClipRect::ZERO);
+        m.shape = CursorShape::Hidden;
+        assert_eq!(decide(&m, &probe(true)).warp, None);
+    }
+
+    #[test]
+    fn becoming_visible_elsewhere_plans_a_warp() {
+        let mut m = model(false, ClipRect::ZERO);
+        m.shape = CursorShape::Hidden;
+        let mut p = probe(true);
+        p.pos = ClipPos { x: 120, y: 120 };
+        assert_eq!(decide(&m, &p).warp, Some(ClipPos { x: 500, y: 400 }));
+    }
+
+    #[test]
+    fn an_already_visible_cursor_is_never_warped() {
+        let mut m = model(false, ClipRect::ZERO);
+        m.shape = CursorShape::Arrow;
+        let mut p = probe(true);
+        p.pos = ClipPos { x: 120, y: 120 };
+        assert_eq!(decide(&m, &p).warp, None, "only hidden -> visible moves the cursor");
+    }
+
+    #[test]
+    fn centring_can_be_switched_off() {
+        let mut m = model(false, ClipRect::ZERO);
+        m.shape = CursorShape::Hidden;
+        m.centre_on_show = false;
+        let mut p = probe(true);
+        p.pos = ClipPos { x: 120, y: 120 };
+        assert_eq!(decide(&m, &p).warp, None);
+    }
+
+    #[test]
+    fn the_shape_is_re_pushed_when_the_system_disagrees() {
+        let mut p = probe(true);
+        p.showing = false; // we want the arrow, the system shows nothing
+        assert!(decide(&model(false, ClipRect::ZERO), &p).force_shape);
+        let mut m = model(false, ClipRect::ZERO);
+        m.want = 2; // we want it hidden, the system shows the arrow
+        assert!(decide(&m, &probe(true)).force_shape);
+        assert!(
+            !decide(&model(false, ClipRect::ZERO), &probe(true)).force_shape,
+            "agreement is not a disagreement"
+        );
+        // A background window never fights for the shape (rule 1), not even when the system disagrees.
+        let mut bg = probe(false);
+        bg.showing = false;
+        assert!(!decide(&model(false, ClipRect::ZERO), &bg).force_shape);
     }
 
     #[test]

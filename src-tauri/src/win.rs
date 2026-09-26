@@ -11,54 +11,7 @@
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 
-use tauri::{Manager, WebviewWindow};
-
-/// Put the system cursor at the exact centre of the window (so opening a menu/backpack returns
-/// the cursor to the crosshair position).
-/// The original was "JS computes the coordinates -> hands them to cursor.exe / a NAPI plugin";
-/// here it is one step: the window geometry comes straight from Tauri.
-pub fn center_cursor(window: &WebviewWindow) -> bool {
-    let hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
-    if hwnd == 0 || unsafe { GetForegroundWindow() } != hwnd {
-        // SDL: "SetCursorPos outside of the bounds of the focus window appears not to do anything" - and
-        // moving the cursor of whatever application the player switched to is the bug we just fixed.
-        return false;
-    }
-    // The CLIENT area, not the outer rect: the outer one includes the title bar and borders, so the old
-    // version centred on a point below the real crosshair.
-    let rc = match unsafe { client_rect_on_screen(hwnd) } {
-        Some(r) => r,
-        None => return false,
-    };
-    let x = (rc.left + rc.right) / 2;
-    let y = (rc.top + rc.bottom) / 2;
-    // **HIDE -> WARP -> RESTORE** (P1.54). The warp used to happen with the cursor on screen, so the player
-    // saw it flash from wherever it was to the middle (reported on closing the backpack). Nothing about the
-    // move is visible if the shape is NULL while it happens.
-    //
-    // The shape to restore is the MODEL record (the last shape we pushed): if the intent is still "hidden"
-    // - which is the case when this runs in the same frame the backpack opens, BEFORE the front end sends
-    // the visible intent - the cursor stays hidden and the following intent makes it visible at the centre.
-    // `SetCursor` belongs to the thread that owns the window, so the whole sequence is marshalled there.
-    let shape = model().shape;
-    let app = window.app_handle().clone();
-    let _ = app.run_on_main_thread(move || unsafe {
-        apply_cursor(false); // 1. hide, so the warp is invisible
-        // 2. warp, JITTERED (x, x+1, x): Windows coalesces and caches identical warps and then ignores them
-        //    - SDL does exactly this in WIN_SetCursorPos (SDL_windowsmouse.c).
-        let _ = crate::rawinput::SetCursorPos(x, y);
-        let _ = crate::rawinput::SetCursorPos(x + 1, y);
-        let _ = crate::rawinput::SetCursorPos(x, y);
-        // 3. restore. `Unknown` means nothing has ever been pushed, and a menu wants the arrow.
-        if shape != CursorShape::Hidden {
-            apply_cursor(true);
-            model().shape = CursorShape::Arrow;
-        }
-    });
-    // Queued on the window thread; whether the warp happened is not knowable here (and the caller - the
-    // front end - ignores the answer, it only logs a failure).
-    true
-}
+use tauri::WebviewWindow;
 
 /// Window mode switch (the original's kiosk fullscreen toggle, no restart at runtime)
 pub fn set_fullscreen(window: &WebviewWindow, fullscreen: bool) -> bool {
@@ -269,9 +222,9 @@ pub fn kick_cursor_repaint() {
         }
         // Then toggle the visibility once more: showing↔hiding itself forces a repaint, and
         // stacking the two means is the most reliable.
-        // The reference count's net change is 0, so nothing else is affected.
-        ShowCursor(0);
-        ShowCursor(1);
+        // **ONE mechanism for the shape** (P1.55): this used to also toggle `ShowCursor(0)/(1)`, a SECOND,
+        // counter-based hide mechanism next to `SetCursor` - two ways to say "hidden" is one too many. The
+        // symmetric 1px jog above is what forces the repaint, and the shape is re-applied by the reconciler.
     }
 }
 
@@ -296,7 +249,7 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    decide, rect_is_empty, rect_is_zero, ClipRect, CursorModel, CursorProbe, CursorShape,
+    decide, rect_is_empty, rect_is_zero, ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 
 /// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
@@ -310,6 +263,7 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     shape: CursorShape::Unknown,
     enforced: 0,
     fg_mismatch_ticks: 0,
+    centre_on_show: true,
 });
 
 fn model() -> std::sync::MutexGuard<'static, CursorModel> {
@@ -345,12 +299,28 @@ fn probe_of(m: &CursorModel) -> CursorProbe {
             bottom: y + GetSystemMetrics(SM_CYVIRTUALSCREEN),
         }
     };
+    // Where the cursor is right now: the model needs it to decide whether becoming visible has anything to
+    // move (P1.55 - the centre lock normally means it does not).
+    let mut pt = Point { x: 0, y: 0 };
+    let _ = unsafe { GetCursorPos(&mut pt) };
     CursorProbe {
         focused,
         showing,
         client,
         remote_session: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
         screen,
+        pos: ClipPos { x: pt.x, y: pt.y },
+    }
+}
+
+/// Move the cursor, JITTERED (x, x+1, x): Windows coalesces and caches identical warps and then ignores
+/// them (SDL does exactly this in WIN_SetCursorPos). **Callers must have the cursor HIDDEN**: that is what
+/// makes the move invisible (P1.55).
+fn warp_to(x: i32, y: i32) {
+    unsafe {
+        let _ = crate::rawinput::SetCursorPos(x, y);
+        let _ = crate::rawinput::SetCursorPos(x + 1, y);
+        let _ = crate::rawinput::SetCursorPos(x, y);
     }
 }
 
@@ -397,24 +367,35 @@ fn apply_shape(m: &mut CursorModel, shape: CursorShape) -> bool {
 
 /// Gather, decide, apply - ON THE MAIN THREAD. Idempotent: a tick that changes nothing makes no call.
 fn reconcile(app: &tauri::AppHandle) {
-    let (plan, system_disagrees) = {
+    let plan = {
         let m = model();
         let p = probe_of(&m);
-        let plan = decide(&m, &p);
+        decide(&m, &p)
         // **The system can disagree with our own record.** `SetCursor` pushes are dropped while another
         // application owns the cursor, and Chromium answers NULL from its cached cursor for a while after
         // focus returns (both were caught by the boot.log probes) - so when we WANT the arrow, are focused,
         // and the system still reports a hidden cursor, the push has to be REPEATED: the plan alone would be
         // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
         // never fight the foreground application for the cursor (rule 1 of the model).
-        let system_disagrees = p.focused && !p.showing && plan.shape == CursorShape::Arrow;
-        (plan, system_disagrees)
     };
     let _ = app.run_on_main_thread(move || {
         let mut m = model();
         apply_clip(&mut m, plan.clip);
-        if system_disagrees {
-            m.shape = CursorShape::Unknown; // force the push through the idempotence check
+        // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
+        // crosshair", and the only way to make that move invisible is to do it with a NULL shape. It is also
+        // why the old separate `center_cursor` command could still flash: it raced the visible intent through
+        // the IPC thread pool, so the arrow could be back on screen before the warp happened.
+        if let Some(pos) = plan.warp {
+            if m.shape != CursorShape::Hidden {
+                apply_cursor(false);
+                m.shape = CursorShape::Hidden;
+            }
+            warp_to(pos.x, pos.y);
+        }
+        // The model compared the plan with the SYSTEM (`GetCursorInfo`), not with our own record: a dropped
+        // push or a stale Chromium cache has to be corrected in BOTH directions.
+        if plan.force_shape {
+            m.shape = CursorShape::Unknown;
         }
         apply_shape(&mut m, plan.shape);
     });
@@ -704,7 +685,6 @@ fn GetSystemMetrics(index: i32) -> i32;
     // separate modules declaring the same Win32 symbol is legal and links to the same import)
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
     fn GetCurrentProcessId() -> u32;
-    fn ShowCursor(show: i32) -> i32;
     fn SetCursor(cursor: isize) -> isize;
     fn LoadCursorW(hinst: isize, name: *const u16) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;

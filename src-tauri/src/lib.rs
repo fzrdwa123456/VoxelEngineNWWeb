@@ -127,11 +127,6 @@ fn quit_app(app: AppHandle) {
 }
 
 #[tauri::command]
-fn center_cursor(window: tauri::WebviewWindow) -> bool {
-    win::center_cursor(&window)
-}
-
-#[tauri::command]
 fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
     win::set_fullscreen(&window, fullscreen)
 }
@@ -225,7 +220,6 @@ pub fn run() {
             show_window,
             focus_window,
             quit_app,
-            center_cursor,
             set_window_mode,
             mouse_capture,
             cursor_intent,
