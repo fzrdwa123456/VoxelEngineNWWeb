@@ -132,7 +132,7 @@ export function defaultUiTheme(): UiTheme {
       accentBgHover: "#3b83d6",
       // P1.49w: TRANSLUCENT, so the key faces let the board (and the frosted screen) behind them show
       // through - they used to be an opaque grey, which read as plastic stuck on the frosted panel.
-      keyBg: "rgba(255,255,255,0.14)",
+      keyBg: "rgba(255,255,255,0.08)",
       slotBg: "rgba(0,0,0,.35)",
       slotBgSelected: "rgba(255,255,255,.2)",
       slotEdge: "rgba(255,255,255,.25)",
