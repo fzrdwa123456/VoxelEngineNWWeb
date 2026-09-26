@@ -459,7 +459,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // moves HERE, so the title, the nav and Back stay where they are. `min-height:0` is what lets a flex
     // item actually scroll instead of stretching its parent.
     case "settings.content":
-      return "flex:1;min-width:0;min-height:0;overflow-y:auto;";
+      return "flex:1;min-width:0;min-height:0;overflow-y:auto;background:rgba(0,0,0,0.34);border-radius:0.5rem;padding:0.75rem 1rem;";
     case "settings.columns":
       return "display:flex;gap:1.25rem;margin-bottom:0.875rem;";
     case "settings.column":
