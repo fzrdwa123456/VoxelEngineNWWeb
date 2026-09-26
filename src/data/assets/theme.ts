@@ -460,8 +460,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // item actually scroll instead of stretching its parent.
     case "settings.content":
       return "flex:1;min-width:0;min-height:0;overflow-y:auto;background:rgba(0,0,0,0.34);border-radius:0.5rem;padding:0.75rem 1rem;";
+    // P1.49i: the language + font GROUP has a backplate of its own. It is the same 0.34 as the nav and the
+    // content column, and that is deliberate: alpha STACKS, so this block still reads clearly darker than
+    // the content backplate it sits on, while the options inside it (0.28) stay the LIGHTER strips - the
+    // exact relationship the nav column already has. Same colour on same colour is the layering here.
     case "settings.columns":
-      return "display:flex;gap:1.25rem;margin-bottom:0.875rem;";
+      return "display:flex;gap:1.25rem;margin-bottom:0.875rem;background:rgba(0,0,0,0.34);" +
+        "border-radius:0.5rem;padding:0.75rem 1rem;";
     case "settings.column":
       return "flex:1;text-align:left;";
     case "settings.columnLabel":
