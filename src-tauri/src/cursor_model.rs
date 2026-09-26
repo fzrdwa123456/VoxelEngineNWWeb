@@ -114,6 +114,32 @@ pub fn intersect(a: ClipRect, b: ClipRect) -> ClipRect {
     }
 }
 
+/// How far the cursor is kept away from a MONITOR EDGE. Windows reveals an auto-hidden taskbar (and can
+/// trigger edge app-switching) when the pointer reaches the outermost rows of a monitor - and a clip that is
+/// allowed to touch the screen edge parks the cursor exactly there: reported as "with the window more than
+/// half below the screen, the cursor wakes the hidden taskbar". 2px is the margin SDL uses for the same
+/// class of problem (its remote-desktop centre lock).
+const SCREEN_EDGE_MARGIN: i32 = 2;
+
+/// Pull `visible` away from the sides where it actually COINCIDES with the screen boundary. A window that
+/// does not touch an edge is returned unchanged, so this costs nothing in the ordinary case.
+pub fn away_from_screen_edges(visible: ClipRect, screen: ClipRect, margin: i32) -> ClipRect {
+    let mut r = visible;
+    if r.left <= screen.left {
+        r.left += margin;
+    }
+    if r.top <= screen.top {
+        r.top += margin;
+    }
+    if r.right >= screen.right {
+        r.right -= margin;
+    }
+    if r.bottom >= screen.bottom {
+        r.bottom -= margin;
+    }
+    r
+}
+
 /// Put `r` inside `bounds`: a rect that FITS slides (keeping its size), one that is too big is SHRUNK to the
 /// bounds - sliding cannot help there, and ClipCursor needs a rectangle that is really on the screen.
 /// `bounds` must be non-empty.
@@ -134,6 +160,10 @@ pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
     if rect_is_empty(visible) {
         return ClipRect::ZERO;
     }
+    // The cursor may only live a couple of pixels inside a monitor edge (see SCREEN_EDGE_MARGIN). A visible
+    // sliver thinner than the margin keeps its own (tiny) area: refusing to capture would be worse.
+    let safe = away_from_screen_edges(visible, p.screen, SCREEN_EDGE_MARGIN);
+    let region = if rect_is_empty(safe) { visible } else { safe };
     let target = if m.centre_lock {
         let adjust = if p.remote_session { 2 } else { 0 };
         let cx = (p.client.left + p.client.right) / 2;
@@ -144,7 +174,7 @@ pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
     };
     // A 1px rect whose centre is off the screen cannot be clipped to, and for relative mode it does not
     // matter WHERE inside the window the cursor sits - so the target slides into the visible part.
-    fit_into(target, visible)
+    fit_into(target, region)
 }
 
 /// The whole rule set. PURE: no Win32, no globals - this is what the table test drives.
@@ -278,6 +308,25 @@ mod tests {
     }
 
     #[test]
+    fn a_window_off_the_bottom_keeps_the_cursor_off_the_screen_edge() {
+        // The second report: the clip was allowed to reach the last row of the monitor, and a clipped cursor
+        // parked there wakes the auto-hidden taskbar. The visible part is pulled 2px away from that edge.
+        let mut p = probe(true);
+        p.client = ClipRect { left: 100, top: 500, right: 900, bottom: 1400 };
+        let plan = decide(&model(true, ClipRect::ZERO), &p);
+        assert!(plan.confined);
+        let clip = plan.clip.expect("a clip");
+        assert!(clip.bottom <= 1080 - SCREEN_EDGE_MARGIN, "away from the taskbar edge: {clip:?}");
+        assert!(clip.top >= 500, "and still inside the window: {clip:?}");
+    }
+
+    #[test]
+    fn a_window_that_touches_no_edge_is_left_alone() {
+        let p = probe(true); // client (100,100,900,700) inside screen (0,0,1920,1080)
+        assert_eq!(away_from_screen_edges(p.client, p.screen, SCREEN_EDGE_MARGIN), p.client);
+    }
+
+    #[test]
     fn a_window_entirely_off_the_screen_cannot_be_confined() {
         let mut p = probe(true);
         p.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };
@@ -296,8 +345,8 @@ mod tests {
         p.screen = ClipRect { left: 0, top: 0, right: 1000, bottom: 1080 };
         assert_eq!(
             decide(&m, &p).clip,
-            Some(ClipRect { left: 800, top: 100, right: 1000, bottom: 700 }),
-            "the client is intersected with the screen"
+            Some(ClipRect { left: 800, top: 100, right: 1000 - SCREEN_EDGE_MARGIN, bottom: 700 }),
+            "the client is intersected with the screen, and pulled off its right edge"
         );
     }
 
