@@ -165,7 +165,9 @@ export function buildSettingsPanel(
   // THE BOX (P1.49): one panel, a LEFT nav column and a RIGHT content area. There are no sub-panels any
   // more - a nav button SELECTS a section (it writes `UI_MODAL.settings`, the same state as before), and
   // `ui.navigation` paints the box plus whichever section that value names.
-  const settingsRoot = spawnPanel(world, root, "settings.panel", { hidden: true });
+  // WIDE, because the box holds a nav COLUMN plus the content: at the old 17.5rem the content area had
+  // about 5rem left and every row wrapped. `settings.panelXl` (40rem) is the same box the pages used.
+  const settingsRoot = spawnPanel(world, root, "settings.panelXl", { hidden: true });
   const split = spawnPanel(world, settingsRoot, "settings.split");
   const nav = spawnPanel(world, split, "settings.nav");
   const content = spawnPanel(world, split, "settings.content");

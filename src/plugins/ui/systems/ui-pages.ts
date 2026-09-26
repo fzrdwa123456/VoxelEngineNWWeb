@@ -40,7 +40,9 @@ function mountPage(world: World, host: UiPageHost, page: UiPage): void {
   // of rows is the data's.
   const entry = spawnButton(world, host.rowContainer, "settings.btn", action, "", page.titleKey);
   setUiVisible(world, entry, false); // the host shows it on the next frame
-  const panel = spawnPanel(world, host.root, "settings.panelXl", { hidden: true });
+  // LAYOUT-NEUTRAL: the page panel is a SECTION of the settings box now (P1.49), so it must not impose a
+  // width of its own - the box and the content area decide.
+  const panel = spawnPanel(world, host.root, "settings.pageRows", { hidden: true });
   // RECORDED BEFORE ANYTHING CAN THROW: an unrecorded mount is retried every frame (that is how one bad line
   // became a flood of `frame error`s and a hidden entry row leaked per frame).
   world.resource(UI_PAGES_MOUNTED).set(key, { host, pageId: page.id, page, panel, entry });
