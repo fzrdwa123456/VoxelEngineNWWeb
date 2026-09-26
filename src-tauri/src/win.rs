@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
 
 /// Put the system cursor at the exact centre of the window (so opening a menu/backpack returns
 /// the cursor to the crosshair position).
@@ -32,13 +32,32 @@ pub fn center_cursor(window: &WebviewWindow) -> bool {
     };
     let x = (rc.left + rc.right) / 2;
     let y = (rc.top + rc.bottom) / 2;
-    // JITTERED (x, x+1, x): Windows coalesces and caches identical warps and then ignores them - SDL does
-    // exactly this in WIN_SetCursorPos (SDL_windowsmouse.c).
-    unsafe {
-        let ok = crate::rawinput::SetCursorPos(x, y) != 0;
+    // **HIDE -> WARP -> RESTORE** (P1.54). The warp used to happen with the cursor on screen, so the player
+    // saw it flash from wherever it was to the middle (reported on closing the backpack). Nothing about the
+    // move is visible if the shape is NULL while it happens.
+    //
+    // The shape to restore is the MODEL record (the last shape we pushed): if the intent is still "hidden"
+    // - which is the case when this runs in the same frame the backpack opens, BEFORE the front end sends
+    // the visible intent - the cursor stays hidden and the following intent makes it visible at the centre.
+    // `SetCursor` belongs to the thread that owns the window, so the whole sequence is marshalled there.
+    let shape = model().shape;
+    let app = window.app_handle().clone();
+    let _ = app.run_on_main_thread(move || unsafe {
+        apply_cursor(false); // 1. hide, so the warp is invisible
+        // 2. warp, JITTERED (x, x+1, x): Windows coalesces and caches identical warps and then ignores them
+        //    - SDL does exactly this in WIN_SetCursorPos (SDL_windowsmouse.c).
+        let _ = crate::rawinput::SetCursorPos(x, y);
         let _ = crate::rawinput::SetCursorPos(x + 1, y);
-        crate::rawinput::SetCursorPos(x, y) != 0 && ok
-    }
+        let _ = crate::rawinput::SetCursorPos(x, y);
+        // 3. restore. `Unknown` means nothing has ever been pushed, and a menu wants the arrow.
+        if shape != CursorShape::Hidden {
+            apply_cursor(true);
+            model().shape = CursorShape::Arrow;
+        }
+    });
+    // Queued on the window thread; whether the warp happened is not knowable here (and the caller - the
+    // front end - ignores the answer, it only logs a failure).
+    true
 }
 
 /// Window mode switch (the original's kiosk fullscreen toggle, no restart at runtime)
