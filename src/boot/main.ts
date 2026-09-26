@@ -556,11 +556,12 @@ const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peek
 // does not need to be asked about at all.
 const inventoryOn = (): boolean => livePlugins.has("ui-inventory");
 // THE HUD TABLE (P1.32/P1.34, plugin-owned elements in P1.35): each element carries its own gate AND its own
-// build. The core contributes ONE by name (the crosshair); everything else — the HOTBAR included — arrives
-// through `SLOT_UI_HUD` (armor, xp, a boss bar...), which is why the getter merges the registry with the core's.
+// build. The core contributes NO element of its own any more (P1.48): every one of them - the crosshair and
+// the HOTBAR included - arrives through `SLOT_UI_HUD` (armor, xp, a boss bar...), which is why the getter
+// simply lists what the registry holds.
 const hudElements = (): readonly UiHudElement[] => [
   ...registry.list(SLOT_UI_HUD),
-  { id: "crosshair", order: 10, build: (mount) => [hud.buildCrosshair(mount.world)], gate: () => inWorld() },
+  // NO core element: the crosshair is the ui-crosshair plugin now (P1.48), like every other HUD element.
   // NO hotbar row: it is contributed by the `ui-inventory` plugin (SLOT_UI_HUD, order 20), which is what makes
   // uninstalling that layer DESPAWN the strip instead of leaving hidden widgets behind.
 ];

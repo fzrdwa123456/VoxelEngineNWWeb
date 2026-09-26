@@ -8,5 +8,5 @@ if not exist "%PACK%" mkdir "%PACK%"
 echo [plugins] ui-toast OFF: no HUD message at all - no settings toasts, no multiplayer placeholder, and the
 echo [plugins] hot-plug keys F8/F9/F10/F11 report only in debug.log. Everything else is unaffected.
 type "%PACK%\plugins.json"
-echo [next]    start the game; the log should say: PLUGIN installed 10/11 ...
+echo [next]    start the game; the log should say: PLUGIN installed 11/12 ...
 pause

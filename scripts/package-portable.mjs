@@ -149,7 +149,8 @@ Plugin toggles (double-click one, then RESTART the game — the manifest is read
   plugins-no-ui-toast.bat          off: every HUD message (including the F8/F9/F10 feedback)
   plugins-no-ui-keybind.bat        off: the key bind page in both menus
   plugins-no-ui-inventory.bat      off: the hotbar element and the backpack
-  plugins-no-optional-surfaces.bat off: all FOUR optional surfaces at once
+  plugins-no-ui-crosshair.bat      off: the aiming reticle
+  plugins-no-optional-surfaces.bat off: all FIVE optional surfaces at once
   lang-demo.bat                    write a FOURTH language (fr) into the sample pack, then restart
   blocks-demo.bat                  add a 7th block (and reskin one) in the sample pack, then restart
 While the game runs, F8 / F10 / F11 / F9 install or uninstall those same surfaces live (the result appears as a

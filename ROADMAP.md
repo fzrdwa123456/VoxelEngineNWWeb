@@ -1232,6 +1232,13 @@ Still outstanding:
   Whole-file work therefore goes through **Node** (`fs.readFileSync`/`writeFileSync` with a per-step "did this
   replacement land" check so a missed anchor fails loudly), and a NEW file is written as an ASCII temporary
   copy rather than through `Set-Content`.
+- **P1.48 - the CROSSHAIR is a plugin, and the core table is empty.** `DONE`. `plugins/ui-crosshair/` owns the
+  reticle: ONE HUD element (`SLOT_UI_HUD`, `order: 10`, gate "a world is running"), mounted by `ui.hud` and
+  despawned with its whole subtree on uninstall; F5 toggles it while the game runs. It needs nothing from the
+  host but `inWorld`, owns no resource and declares no system - the smallest possible HUD plugin, and the proof
+  that the element mechanism carries a surface end to end. `boot/main.ts` contributes NO element of its own any
+  more: the table is entirely plugin-contributed, and the gate asserts that. `tools/plugins-no-ui-crosshair.bat`
+  and F5 are the two ways to try it.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

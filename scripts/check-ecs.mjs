@@ -1503,13 +1503,15 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   // "what may the lane show at all" comes first �?and the composition root hands it the two roots.
   const main = stripComments(readSource("src/boot/main.ts"));
   assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")), "the composition root registers ui.hud");
-  assert(/build: \(mount\) => \[hud\.buildCrosshair\(mount\.world\)\]/.test(main),
+  const crossSrc = stripComments(readSource("src/plugins/ui-crosshair/index.ts"));
+  assert(/build: \(mount\) => \[spawnCrosshair\(mount\.world\)\]/.test(crossSrc),
     "…which BUILDS the crosshair when the element is mounted (not at wiring)");
   const invPlugin = stripComments(readSource("src/plugins/ui-inventory/index.ts"));
   assert(/api\.contribute\(SLOT_UI_HUD, \[hotbar\]\)/.test(invPlugin),
     "…and the HOTBAR is the inventory plugin's OWN element (that is what makes F11 a real despawn)");
   assert(!/id: "hotbar"/.test(main), "…so the core's table no longer declares it");
-  assert(/gate: \(\) => inWorld\(\)/.test(main), "…each gated on the one definition of \"a world is running\"");
+  assert(!/id: "crosshair"/.test(main), "the CORE table declares no HUD element of its own any more (P1.48)");
+  assert(/gate: \(\) => deps\.inWorld\(\)/.test(crossSrc), "…each gated on the one definition of \"a world is running\"");
   // The toast is deliberately NOT part of this: a main-menu message is a documented case.
   assert(!/toast/.test(stripComments(readSource("src/plugins/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");
 });
@@ -3586,7 +3588,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(outcome.has("ui"), false, "…including the manifest's veto");
 
   // 3. The manifest is DATA the pack chain can override, and it can never break the boot.
-  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-debug,ui-toast,ui-inventory,ui-keybind,input",
+  equal(M.DEFAULT_PLUGINS.join(","), "content-default,world,player,render,diagnostics,ui,ui-crosshair,ui-debug,ui-toast,ui-inventory,ui-keybind,input",
     "the built-in plugin list (the content plugin comes first: it declares what the install HAS)");
   equal(M.isEnabled(M.defaultManifest(), "ui"), true, "an unmentioned plugin follows the default list");
   const off = M.parseManifest({ plugins: [{ id: "diagnostics", enabled: false }] });
@@ -4169,6 +4171,14 @@ check("a plugin folder JOINS the catalogue by existing - and the two cannot drif
   assert(!/createUiDebugPlugin\(\{ uiPicker \}\)/.test(boot),
     "…so no optional surface is constructed by the root any more");
   assert(opted.length >= 4, `at least the four optional surfaces opted in (found: ${opted.join(", ")})`);
+  // A DISCOVERED plugin must be in DEFAULT_PLUGINS: "add a folder and forget the default list" is a plugin that
+  // exists, compiles, passes every other check and is never installed - which is how the crosshair plugin first
+  // shipped. The default list is the one place that decides what a fresh install runs.
+  const manifestMod = load("boot/manifest.js");
+  for (const name of opted) {
+    assert(manifestMod.DEFAULT_PLUGINS.includes(name),
+      `${name}: discovered, so it must be in DEFAULT_PLUGINS (or it would never be installed)`);
+  }
   for (const name of opted) {
     const src = stripComments(readSource(`src/plugins/${name}/plugin.ts`));
     assert(/export function createPlugin\(host: PluginHost\): DiscoveredPlugin/.test(src),

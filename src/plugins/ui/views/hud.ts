@@ -3,11 +3,10 @@
 // (text, visibility). The elements belong to the ui reconciler, so there is no createElement, no style string
 // and no CSS literal left in this file.
 //
-// WHAT THIS VIEW OWNS vs WHAT THE HOST OWNS (P1.34): the view knows how to BUILD a widget tree — that is local
-// knowledge — and `ui.hud` owns the LIFETIME of the ones that are HUD ELEMENTS. The crosshair is the worked
-// example: it used to be spawned here, during wiring, and its root was published for the host to hide; now the
-// host calls `buildCrosshair` when the element is mounted and despawns the same tree when it goes away, so an
-// element that appears at runtime (a plugin's armor bar) and one the core owns are mounted by ONE mechanism.
+// WHAT THIS VIEW OWNS: the F3 debug panel, and nothing else. It used to spawn the crosshair as well — that
+// tree belongs to the `ui-crosshair` PLUGIN now (P1.48), which contributes it as a HUD element and lets
+// `ui.hud` mount and despawn it. That is the mechanism every element uses, the hotbar included, and it is what
+// makes "turn the reticle off" a plugin decision instead of a core one.
 //
 // What is NOT here any more, and where it went: the F3 toggle and its `debugVisible` boolean (the
 // panel's own UI_STATE.hidden is the state, and ecs/ui/picker.ts toggles it), `showToast()` with its
@@ -38,18 +37,6 @@ export class Hud {
     this.debugPanel = spawnPanel(world, null, "debug.panel", { hidden: true });
     this.debugBody = spawnLabel(world, this.debugPanel, "debug.line");
 
-  }
-
-  /** THE CROSSHAIR: a centred box with two bars in it (the box centres them for us), built by `ui.hud` when
-   *  the element is MOUNTED and despawned with it. Spawned HIDDEN and never left that way: the host writes the
-   *  element's gate in the same frame (the mount is a barrier command, and the barrier a frame runs before its
-   *  ui lane), so no frame ever paints it in the wrong state — but a widget that is up for one frame is a
-   *  visible flash, and a hidden default cannot leak one. */
-  buildCrosshair(world: World): Entity {
-    const crosshair = spawnPanel(world, null, "hud.crosshair", { hidden: true });
-    spawnPanel(world, crosshair, "hud.crosshairH");
-    spawnPanel(world, crosshair, "hud.crosshairV");
-    return crosshair;
   }
 
   /** The F3 panel and its text line, for the composition root to publish as the F3_PANEL resource

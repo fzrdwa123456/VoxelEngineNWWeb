@@ -18,6 +18,7 @@ export interface HotPlugSurface {
 }
 
 export const HOT_PLUG_SURFACES: readonly HotPlugSurface[] = [
+  { id: "ui-crosshair", key: "F5", label: "ui-crosshair (the aiming reticle)" },
   { id: "ui-debug", key: "F8", label: "ui-debug (F3/F4 debug surface)" },
   { id: "ui-toast", key: "F10", label: "ui-toast (HUD message)" },
   { id: "ui-inventory", key: "F11", label: "ui-inventory (inventory + hotbar)" },
