@@ -184,9 +184,6 @@ export function defaultUiTheme(): UiTheme {
       '[data-ui-recipe="settings.range"]{opacity:0;pointer-events:none;transition:opacity 120ms ease}' +
       '[data-ui-recipe="settings.optRow"]:hover [data-ui-recipe="settings.range"],' +
       '[data-ui-recipe="settings.range"]:focus-visible{opacity:1;pointer-events:auto}' +
-      // P1.49n: a dropdown ENTRY is a full-width menu row (the same recipe serves an inline chip elsewhere,
-      // and a recipe cannot see its parent - hence a stylesheet rule rather than a second role).
-      '[data-ui-recipe="settings.list"] [data-ui-recipe="settings.rowChoice"]{display:block;width:100%;text-align:left}' +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
       // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
       // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
@@ -575,9 +572,15 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return `display:inline-block;width:auto;padding:0.375rem 0.75rem;margin:0;font:0.875rem ${theme.font.ui};` +
         `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : "transparent"};border:none;` +
         `border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
-    // One ENTRY of a dropdown list. (The language/font page still shows its choices inline.)
+    // One ENTRY of a dropdown list: a FULL-WIDTH menu ROW, so the popup reads as a vertical list.
+    //   * `display` lives HERE and not in a stylesheet rule beside the popup, because a recipe writes its
+    //     style as an INLINE style and inline beats the stylesheet - a rule saying `display:block` for the
+    //     entries silently lost to this `inline-block`, which is exactly why the first version of the popup
+    //     laid its entries out side by side.
+    //   * the language/font page does NOT use this role (it uses `settings.choice`), so a vertical entry is
+    //     safe here.
     case "settings.rowChoice":
-      return `display:inline-block;width:auto;padding:0.3125rem 0.625rem;margin:0;font:0.8125rem ${theme.font.ui};` +
+      return `display:block;width:100%;text-align:left;padding:0.4375rem 0.625rem;margin:0;font:0.8125rem ${theme.font.ui};` +
         `color:${c.btnText};background:${
           state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
         };border:none;border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
