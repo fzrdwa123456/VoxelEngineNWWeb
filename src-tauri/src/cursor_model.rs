@@ -216,13 +216,16 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     }
     if !p.focused {
         // Rule 1.
-        // Not our foreground: no shape of ours belongs on the screen (rule 1), so nothing is forced either.
+        // Not our foreground: no shape of ours belongs on the screen (rule 1) - EXCEPT that we are the one
+        // that hid it, so the arrow is handed back EXACTLY ONCE (`m.shape == Hidden`): that is the
+        // "press Win / Alt+Tab and the cursor stays gone until I jiggle the mouse" report. Once pushed, the
+        // record says Arrow, so a background window never keeps fighting the foreground app for the cursor.
         return plan(
             if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
             CursorShape::Arrow,
             false,
             None,
-            false,
+            m.shape == CursorShape::Hidden,
         );
     }
     if m.relative {
