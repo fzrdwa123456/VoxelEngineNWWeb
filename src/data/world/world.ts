@@ -22,7 +22,7 @@
 // READS DO NOT GENERATE. getBlock() on a chunk that was never ensured returns AIR. Callers that
 // need a populated neighbourhood (the mesher) must ensure it first — chunkstream.ts does that.
 import { AIR, CHUNK_SIZE, Chunk, SOLID } from "./chunk";
-import { paletteValueOf } from "./palette";
+import { FALLBACK_PALETTE, idIn, valueIn } from "./palette";
 
 /** Torus period along X/Z, in chunks: 32 * 32 = 1024 blocks before the world repeats */
 export const WORLD_CHUNKS_X = 32;
@@ -45,9 +45,6 @@ export const WORLD_SURFACE_Y = TERRAIN_TOP_Y;
 
 /** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. */
 const SURFACE_LAYERS = 4;
-const GRASS_VALUE = paletteValueOf("grass") || SOLID;
-const DIRT_VALUE = paletteValueOf("dirt") || SOLID;
-const STONE_VALUE = paletteValueOf("stone") || SOLID;
 
 /** Block coordinate -> local coordinate inside its chunk (negative-safe) */
 function localOf(block: number): number {
@@ -73,22 +70,27 @@ export function nearestWrap(c: number, pc: number, period: number): number {
  *  Everything strictly below TERRAIN_TOP_Y is SOLID, everything at/above it is AIR. Because
  *  TERRAIN_TOP_Y sits on a chunk boundary the default world is made only of uniform chunks,
  *  which allocate nothing until edited. */
-function generateChunk(chunk: Chunk): void {
+function generateChunk(chunk: Chunk, palette: readonly string[]): void {
   const bottom = chunk.cy * CHUNK_SIZE;
   const top = bottom + CHUNK_SIZE;
+  // The layer values in the palette IN FORCE. An install that names none of them falls back to 1 ? the first
+  // block of any palette ? rather than to 0, because 0 is AIR and a generator that writes air leaves a hole.
+  const stone = valueIn(palette, "stone") || 1;
+  const dirt = valueIn(palette, "dirt") || stone;
+  const grass = valueIn(palette, "grass") || dirt;
   if (bottom >= TERRAIN_TOP_Y) {
     chunk.fill(AIR); // entirely build space
     return;
   }
   if (top <= TERRAIN_TOP_Y - SURFACE_LAYERS) {
-    chunk.fill(STONE_VALUE); // entirely deep ground: ONE value, so this chunk allocates nothing
+    chunk.fill(stone); // entirely deep ground: ONE value, so this chunk allocates nothing
     return;
   }
   // The surface band: grass on top, dirt under it, stone below. Only chunks in this band materialise.
   for (let ly = 0; ly < CHUNK_SIZE; ly++) {
     const y = bottom + ly;
     if (y >= TERRAIN_TOP_Y) continue; // above the surface is air
-    const value = y === TERRAIN_TOP_Y - 1 ? GRASS_VALUE : y >= TERRAIN_TOP_Y - SURFACE_LAYERS ? DIRT_VALUE : STONE_VALUE;
+    const value = y === TERRAIN_TOP_Y - 1 ? grass : y >= TERRAIN_TOP_Y - SURFACE_LAYERS ? dirt : stone;
     for (let lz = 0; lz < CHUNK_SIZE; lz++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) chunk.set(lx, ly, lz, value);
     }
@@ -101,6 +103,27 @@ export class VoxelWorld {
   /** Chunk identities whose MESH is stale because a block was written (see setBlock).
    *  The render layer drains this with takeDirty(); the voxel layer never touches meshes. */
   private readonly dirty = new Set<string>();
+
+  /** The block ids a voxel value names, in value order (1..N). DERIVED: the composition root hands the block
+   *  registry ids in right after it builds them (P1.47), so every block an install ships is both placeable and
+   *  drawable. Until that call (a gate test, a world without the content plugin) it is FALLBACK_PALETTE. */
+  private palette: readonly string[] = FALLBACK_PALETTE;
+
+  /** Install the palette in force. The root calls this during boot: chunks generated before it keep the values
+   *  they were built with, and there are none before the world is entered. */
+  setPalette(ids: readonly string[]): void {
+    if (ids.length > 0) this.palette = [...ids];
+  }
+
+  /** The value a block id has in the palette in force: 0 when it is not named there (place nothing). */
+  valueOf(id: string): number {
+    return valueIn(this.palette, id);
+  }
+
+  /** The block id a voxel value names, or null for air and for a value the palette does not cover. */
+  idOf(value: number): string | null {
+    return idIn(this.palette, value);
+  }
 
   static key(cx: number, cy: number, cz: number): string {
     return `${cx},${cy},${cz}`;
@@ -125,7 +148,7 @@ export class VoxelWorld {
     let chunk = this.chunks.get(k);
     if (!chunk) {
       chunk = new Chunk(wx, cy, wz);
-      generateChunk(chunk);
+      generateChunk(chunk, this.palette);
       this.chunks.set(k, chunk);
     }
     return chunk;

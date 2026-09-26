@@ -87,7 +87,7 @@ import { menuBgKind, menuBgState, MENU_BG_KIND } from "../data/assets/background
 import { resolveAllBytes, resolveTexture } from "../data/assets/textures";
 import { preloadPacks } from "../host/desktop/packs";
 
-import { buildBlockRegistry, blockRegistryState, BLOCK_REGISTRY } from "../data/assets/blockregistry";
+import { allBlockIds, buildBlockRegistry, blockRegistryState, BLOCK_REGISTRY } from "../data/assets/blockregistry";
 import { discoveredBlockIds, discoveredBlockLayers } from "../data/assets/blocks";
 import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // ===== The plugin system =====
@@ -702,6 +702,10 @@ logDebug(loadLang(locale, readSettings().language, registry.list(SLOT_LANGUAGES)
 logDebug(
   `${buildBlockRegistry(registry.list(SLOT_BLOCKS))} (${discoveredBlockLayers()} layer(s) of blocks.json)`,
 );
+// THE PALETTE IS THE REGISTRY ID LIST (P1.47): from here on a voxel value names a real block, so every
+// block this install ships can be placed and drawn (texture, else colour, else the engine checker). The
+// generator reads the same list for the layers of the default world.
+voxel.setPalette(allBlockIds());
 /** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
 const contributeSystem = (owner: string, def: SystemDef): void => {
   if (!installOutcome.has(owner)) return;

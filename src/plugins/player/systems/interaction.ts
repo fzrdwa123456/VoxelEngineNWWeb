@@ -41,7 +41,6 @@ import {
 import { getBind } from "../../input/keybinds";
 import { viewDirection } from "../../../shared/math/view";
 import { AIR, SOLID } from "../../../data/world/chunk";
-import { paletteValueOf } from "../../../data/world/palette";
 import { raycastVoxel, type RayHit } from "../../../shared/math/raycast";
 import type { VoxelWorld } from "../../../data/world/world";
 import { canControl, INPUT_STATE, LOCAL_PLAYER, UI_MODAL, VOXEL, type InputState, type UiModalState } from "../../../data/globals/resources";
@@ -159,9 +158,12 @@ export class BlockInteractionSystem {
     if (this.intersectsBody(index, x, y, z)) return; // never seal the entity inside a block
     const held = this.blockInHand(index);
     if (held === null) return;
-    // P1.46: the voxel value IS the palette index of the block in hand. An id no palette names falls back to
-    // the engine checker block, so a pack with unknown blocks stays placeable.
-    this.voxel.setBlock(x, y, z, paletteValueOf(held) || SOLID);
+    // P1.46/P1.47: the voxel value is the palette index of the block in hand, and the palette IS the block
+    // registry id list ? so a pack own block places and draws. A value of 0 means the palette does not name
+    // that id, and 0 is AIR, so nothing is placed rather than the WRONG block.
+    const value = this.voxel.valueOf(held);
+    if (value === 0) return;
+    this.voxel.setBlock(x, y, z, value);
   }
 
   /** Block type in the entity's selected slot, or null for an empty hand. Read straight from the

@@ -43,7 +43,6 @@ import {
 import { CORNER_UVS, FACES, type Face } from "../../data/globals/faces";
 import { AIR, CHUNK_SIZE, type Chunk } from "../../data/world/chunk";
 import type { VoxelWorld } from "../../data/world/world";
-import { paletteIdOf } from "../../data/world/palette";
 import { getBlockDef } from "../../data/assets/blockregistry";
 import { CHECKER_TEXTURE_URL, resolveTexture } from "../../data/assets/textures";
 
@@ -83,9 +82,8 @@ export function getChunkMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec
 /** The look of one (voxel value, face kind): the definition's face texture, else its flat colour, else the
  *  engine checker. `kind` is 0 top, 1 bottom, 2 side — the registry has already defaulted top/bottom to the
  *  side texture, so a definition that sets only `all` (or only `side`) answers for every kind. */
-function specFor(value: number, kind: number): ChunkFaceSpec {
-  const id = paletteIdOf(value);
-  const def = id === null ? undefined : getBlockDef(id);
+function specFor(id: string, kind: number): ChunkFaceSpec {
+  const def = getBlockDef(id);
   const path = kind === 0 ? def?.top : kind === 1 ? def?.bottom : def?.side;
   if (path !== undefined) {
     const url = resolveTexture(path);
@@ -206,14 +204,16 @@ export class ChunkGeometry {
   }
 
   /** The look slot for one face, created on first use (so `specs`/`slotFaces` grow in first-seen order). */
-  private slotFor(value: number, face: Face): number {
+  private slotFor(voxel: VoxelWorld, value: number, face: Face): number {
     const kind = face.dir[1] === 1 ? 0 : face.dir[1] === -1 ? 1 : 2;
     const key = (value << 2) | kind;
     const hit = this.slotOf.get(key);
     if (hit !== undefined) return hit;
     const slot = this.specs.length;
     this.slotOf.set(key, slot);
-    this.specs.push(specFor(value, kind));
+    // The palette lives on the world (P1.47), and an id it does not name falls back to the engine untextured
+    // block, which resolves to the checker below ? a value outside the palette still draws SOMETHING.
+    this.specs.push(specFor(voxel.idOf(value) ?? "missing", kind));
     this.slotFaces[slot] = 0;
     return slot;
   }
@@ -253,7 +253,7 @@ export class ChunkGeometry {
 
           for (const face of FACES) {
             if (solidAt(lx + face.dir[0], ly + face.dir[1], lz + face.dir[2])) continue;
-            const slot = this.slotFor(value, face);
+            const slot = this.slotFor(voxel, value, face);
             if (counting) this.slotFaces[slot]++;
             else this.writeFace(this.slotCursor[slot]++, lx, ly, lz, face);
           }
