@@ -587,8 +587,14 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // the stylesheet possible: the FPS slider lives INSIDE the row that owns it.
     // `position:relative` is the ANCHOR of this row is dropdown popup (P1.49n).
     case "settings.optRow":
+      // P1.49t: the horizontal padding and margin are a PAIR. The row band is what lights up on hover, and at
+      // `padding:0.25rem` its edge sat 4px from the name and from the control ring, which read as the band
+      // cutting into the text. Raising the padding alone would have shifted every name 8px right, out of line
+      // with the other sections, so the negative margin gives the band its room OUTWARD instead: the text and
+      // the controls stay at exactly the x they were at, and only the band grows (into the plate is 1rem
+      // padding, i.e. it still stops 0.5rem short of the plate edge).
       return "position:relative;display:flex;justify-content:space-between;align-items:center;gap:0.75rem;" +
-        "padding:0.3125rem 0.25rem;margin:0.0625rem 0;";
+        "padding:0.4375rem 0.75rem;margin:0.0625rem -0.5rem;";
     case "settings.rowCtl":
       return "display:flex;align-items:center;gap:0.5rem;flex-shrink:0;";
     // The row is VALUE button: compact, ghost, and it is what OPENS a dropdown list.
