@@ -237,6 +237,7 @@ export type UiRecipe =
   | "settings.column"
   | "settings.columnLabel"
   | "settings.btn"
+  | "settings.btnSolid"
   | "settings.btnRow"
   | "settings.pageRows"
   | "settings.split"
@@ -485,10 +486,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return "flex:1;text-align:left;";
     case "settings.columnLabel":
       return `font-size:0.9375rem;color:${c.textDim};margin-bottom:0.5rem;`;
-    // The bar-style button every settings entry uses.
+    // The bar-style button every settings entry uses - a GHOST since P1.49l: no box until the pointer is on
+    // it (hover/press) or the value is chosen (selected). The hit area is UNCHANGED, because the padding
+    // that drew the box is also what pads the text - only the fill is gone. The pause card keeps a filled
+    // face of its own (settings.btnSolid) so the change stays inside the settings screen.
     case "settings.btn":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
-        `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : option};border:none;` +
+        `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : "transparent"};border:none;` +
         `border-radius:0.375rem;cursor:pointer;`;
     case "settings.btnRow":
       return "display:flex;gap:0.375rem;margin:0 0 0.375rem;";
@@ -513,11 +517,18 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "ui.frost":
       return "position:fixed;left:0;top:0;right:0;bottom:0;z-index:1;pointer-events:none;" +
         "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);background:rgba(0,0,0,0.25);";
-    // A CHOICE: one of a small set (language, font, world type). Blue while selected.
+    // P1.49l: the FILLED button is its own role now. `settings.btn` went ghost for the settings screen, and
+    // the pause card - the one surface outside it - keeps exactly the face it has today through this role.
+    case "settings.btnSolid":
+      return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
+        `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : option};border:none;` +
+        `border-radius:0.375rem;cursor:pointer;`;
+    // A CHOICE: one of a small set (language, font, world type). Blue while selected - and since P1.49l
+    // boxed around the TEXT only while hovered or selected, so the list reads as text, not as blocks.
     case "settings.choice":
       return `display:block;width:100%;padding:0.625rem;margin:0.375rem 0;font:${theme.size.btn} ${theme.font.ui};` +
         `color:${c.btnText};background:${
-          state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : option
+          state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
         };border:none;border-radius:0.375rem;cursor:pointer;text-align:center;`;
     case "settings.scrollArea":
       return "max-height:12.5rem;overflow-y:auto;margin-bottom:0.375rem;";
@@ -560,7 +571,7 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "kb.chip":
       return `width:100%;padding:0.4375rem 0.625rem;font:0.8125rem ${theme.font.ui};color:${c.btnText};border:none;` +
         `border-radius:0.3125rem;cursor:pointer;background:${
-          state.selected ? optionOn : state.hovered ? optionHover : option
+          state.selected ? optionOn : state.hovered ? optionHover : "transparent"
         };text-align:center;`;
     case "kb.row":
       return "display:flex;gap:0.125rem;margin-bottom:0.125rem;";

@@ -462,9 +462,9 @@ export class Menu {
     spawnLabel(world, this.mainPanel, "settings.title", "menu.paused");
 
     const actions = world.resource(UI_ACTIONS);
-    spawnButton(world, this.mainPanel, "settings.btn", "pause.resume", "", "menu.resume");
-    spawnButton(world, this.mainPanel, "settings.btn", "pause.openSettings", "", "menu.settings");
-    spawnButton(world, this.mainPanel, "settings.btn", "pause.toMainMenu", "", "menu.toMainMenu");
+    spawnButton(world, this.mainPanel, "settings.btnSolid", "pause.resume", "", "menu.resume");
+    spawnButton(world, this.mainPanel, "settings.btnSolid", "pause.openSettings", "", "menu.settings");
+    spawnButton(world, this.mainPanel, "settings.btnSolid", "pause.toMainMenu", "", "menu.toMainMenu");
     onUiAction(actions, "pause.resume", () => {
       this.hide();
       this.onResume();
