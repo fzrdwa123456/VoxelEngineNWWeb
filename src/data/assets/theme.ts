@@ -175,6 +175,15 @@ export function defaultUiTheme(): UiTheme {
       // a board is rounded corners sit at its LEFT and RIGHT ends, so a line at 50% cannot reach one.
       '[data-ui-recipe="settings.columns"]::after{content:"";position:absolute;left:50%;top:0;' +
       'bottom:0;width:0.0625rem;pointer-events:none;background:rgba(255,255,255,0.1)}' +
+      // P1.49m: the FPS slider is INVISIBLE until its ROW is hovered. This is CSS `:hover`, not the
+      // reconciler is hover DATA, and deliberately: `:hover` also matches while the pointer is over a
+      // DESCENDANT, which is exactly the relation wanted here, and it costs no frame of latency.
+      // `pointer-events:none` while hidden is what keeps an invisible slider from being draggable; the
+      // moment the pointer enters the row it fades in AND becomes interactive. `:focus-visible` is the
+      // keyboard is way in (an invisible-but-focusable control must not be a trap).
+      '[data-ui-recipe="settings.range"]{opacity:0;pointer-events:none;transition:opacity 120ms ease}' +
+      '[data-ui-recipe="settings.optRow"]:hover [data-ui-recipe="settings.range"],' +
+      '[data-ui-recipe="settings.range"]:focus-visible{opacity:1;pointer-events:auto}' +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
       // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
       // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
@@ -250,6 +259,11 @@ export type UiRecipe =
   | "settings.row"
   | "settings.rowName"
   | "settings.rowMeta"
+  | "settings.optRow"
+  | "settings.rowCtl"
+  | "settings.rowBtn"
+  | "settings.rowChoice"
+  | "settings.list"
   | "settings.empty"
   // --- visual keyboard (key bind panel) -----------------------------------------------
   | "kb.board"
@@ -451,9 +465,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "settings.label":
       return "text-align:left;font-size:0.9375rem;margin:0.5rem 0 0.25rem;";
     case "settings.value":
-      return "text-align:center;font-size:1.25rem;font-weight:600;margin:0.125rem 0 0.375rem;";
+      // Compact and right-aligned since P1.49m: it is the LAST thing in its row, and `min-width` is what
+      // keeps the slider (which sits to its left) from moving as the text goes 60 FPS -> Unlimited.
+      return "text-align:right;font-size:0.9375rem;font-weight:600;margin:0;min-width:4.5rem;";
     case "settings.range":
-      return `width:100%;margin:0 0 0.625rem;accent-color:${c.accentBg};cursor:pointer;`;
+      // NARROW and inline now: the slider lives INSIDE its row, and the stylesheet below hides it until
+      // that row is hovered (P1.49m).
+      return `width:11rem;margin:0;accent-color:${c.accentBg};cursor:pointer;`;
     // THE SPLIT (P1.49): ONE settings screen with a LEFT section nav and a RIGHT content area. It replaced
     // the sub-panel chain (a list that navigated into sibling panels, each with its own Back button).
     // P1.49f: `flex:1;min-height:0` makes it FILL the screen between the title and Back, and
@@ -539,6 +557,30 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
     case "settings.rowMeta":
       return `flex-shrink:0;margin-left:0.5rem;color:${c.textFainter};font-size:${theme.size.small};`;
+    // --- a settings ROW (P1.49m): the NAME on the left, the CONTROL on the right -------------------
+    // The section used to STACK a label, a value and a control, so one option was three lines tall and the
+    // page read as a form. A row says the same thing in one line - and it is also what makes the reveal in
+    // the stylesheet possible: the FPS slider lives INSIDE the row that owns it.
+    case "settings.optRow":
+      return "display:flex;justify-content:space-between;align-items:center;gap:0.75rem;" +
+        "padding:0.3125rem 0.25rem;margin:0.0625rem 0;";
+    case "settings.rowCtl":
+      return "display:flex;align-items:center;gap:0.5rem;flex-shrink:0;";
+    // The row is VALUE button: compact, ghost, and it is what OPENS a dropdown list.
+    case "settings.rowBtn":
+      return `display:inline-block;width:auto;padding:0.375rem 0.75rem;margin:0;font:0.875rem ${theme.font.ui};` +
+        `color:${c.btnText};background:${state.hovered || state.pressed ? optionHover : "transparent"};border:none;` +
+        `border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
+    // One ENTRY of a dropdown list. (The language/font page still shows its choices inline.)
+    case "settings.rowChoice":
+      return `display:inline-block;width:auto;padding:0.3125rem 0.625rem;margin:0;font:0.8125rem ${theme.font.ui};` +
+        `color:${c.btnText};background:${
+          state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
+        };border:none;border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
+    // THE DROPDOWN LIST: a wrapping row of chips, spawned right AFTER its row and hidden until picked. Its
+    // visibility is DATA (`UI_MODAL.settingsList`), painted by ui.navigation like every other panel.
+    case "settings.list":
+      return "display:flex;flex-wrap:wrap;gap:0.375rem;padding:0.125rem 0.25rem 0.4375rem;";
     case "settings.empty":
       return `font-size:${theme.size.btn};color:${c.textFaint};padding:0.5rem 0;`;
 

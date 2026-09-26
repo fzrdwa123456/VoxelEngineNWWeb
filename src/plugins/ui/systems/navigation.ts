@@ -28,6 +28,12 @@ import { UI_STATE, setUiVisible } from "../components";
 /** The settings sub-panel ids, as data. `ui/menu.ts` owns the panel list; this is the same four. */
 export type SettingsPanelId = "settings" | "lang" | "pack";
 
+/** One settings row is DROPDOWN list (P1.49m): the row it belongs to, and the list widget it opens. */
+export interface SettingsListTree {
+  readonly id: string;
+  readonly entity: Entity;
+}
+
 export interface NavigationTrees {
   /** The pause menu: its root, its main panel and its four settings panels */
   readonly pauseRoot: Entity;
@@ -44,6 +50,10 @@ export interface NavigationTrees {
   readonly mainPanels: Readonly<Record<SettingsPanelId | "root", Entity>>;
   /** The inventory/backpack panel (the hotbar is always up, so it is not navigation) */
   readonly inventoryPanel: Entity;
+  /** The settings rows that open a DROPDOWN list, one array per menu (P1.49m). OPTIONAL on purpose: a
+   *  driver that models no dropdown (the gate is stub) simply leaves them out and nothing is painted. */
+  readonly pauseLists?: readonly SettingsListTree[];
+  readonly mainLists?: readonly SettingsListTree[];
 }
 
 export interface NavigationDeps {
@@ -89,7 +99,10 @@ export const UI_NAVIGATION_ACCESS: SystemAccess = {
  *  so ESC on the settings LIST was a no-op (`settings` was already `"settings"`) and ESC on a sub-page
  *  skipped a level (straight to the container panel). */
 export function stepBackSettings(ui: UiModalState): void {
-  if (ui.gen) ui.gen = false;
+  // The most LOCAL rung first (P1.49m): an open DROPDOWN closes before anything else does. It is data, so
+  // ESC can see it without asking the view that drew it.
+  if (ui.settingsList != null) ui.settingsList = null;
+  else if (ui.gen) ui.gen = false;
   // ONE RUN, not a ladder (P1.49): the settings box is a single panel with a section nav, so there is no
   // "back to the list" rung any more - stepping back CLOSES the box.
   else if (ui.settings !== null) ui.settings = null;
@@ -277,6 +290,14 @@ export class UiNavigationSystem {
     // content area. The sections above are its children, so ONE value drives the box and its contents.
     setUiVisible(this.world, t.pausePanels.root, ui.menu && ui.settings !== null);
     setUiVisible(this.world, t.mainPanels.root, ui.mainMenu && ui.settings !== null);
+    // THE DROPDOWNS (P1.49m): a row is list is up only while `settingsList` names it. The lists live INSIDE
+    // the section panel, so this adds the one thing that panel cannot say by itself - whether it is open.
+    for (const list of t.pauseLists ?? []) {
+      setUiVisible(this.world, list.entity, ui.menu && ui.settings !== null && ui.settingsList === list.id);
+    }
+    for (const list of t.mainLists ?? []) {
+      setUiVisible(this.world, list.entity, ui.mainMenu && ui.settings !== null && ui.settingsList === list.id);
+    }
     // THE PAGES a plugin contributed (P1.29): their panels belong to this painter, exactly like the four
     // settings panels above. `ui.pages` owns the widgets; WHERE they are shown is decided HERE, in the same
     // pass and from the same state as everything else — painting them from the host (which runs earlier in

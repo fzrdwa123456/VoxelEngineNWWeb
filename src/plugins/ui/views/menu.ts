@@ -52,7 +52,7 @@ import type { WindowMode } from "../../../data/globals/shell";
 import { onConfigChange } from "../../../core/services/bus";
 import type { Entity, World } from "../../../core/world";
 import { CAP_MAX, CAP_MIN, CAP_STEP, sanitizeFrameCap, UI_MODAL, type UiModalState } from "../../../data/globals/resources";
-import { stepBackSettings } from "../systems/navigation";
+import { stepBackSettings, type SettingsListTree } from "../systems/navigation";
 import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
 import { onUiSource, SOURCE_FPS_CAP, UI_SOURCES, type UiSource } from "../../../data/globals/sources";
 import { PACK_LIST_CAPACITY } from "../../../data/globals/paint";
@@ -146,6 +146,9 @@ export interface SettingsPanels {
   /** One entry per SECTION, plus `root` - the settings BOX itself (P1.49), up whenever a section is
    *  selected. `ui.navigation` paints both from `UI_MODAL.settings`, so the box and its sections agree. */
   readonly entities: Readonly<Record<SettingsPanelId | "root", Entity>>;
+  /** The settings rows that open a DROPDOWN list (P1.49m), for the painter: it turns
+   *  `UI_MODAL.settingsList` into their visibility, exactly as it turns UI_MODAL.settings into sections. */
+  readonly lists: readonly SettingsListTree[];
 }
 
 // Shared settings panel: FPS cap slider + vsync toggle + language collection + resource pack
@@ -200,7 +203,11 @@ export function buildSettingsPanel(
   // panels from it and the ESC step-back reads it, so there is one answer. These two functions only
   // write that state (and refresh the PUSHED labels, whose strings are composed rather than bound).
   const show = (which: SettingsPanelId | null): void => {
-    world.resource(UI_MODAL).settings = which;
+    const ui = world.resource(UI_MODAL);
+    ui.settings = which;
+    // A DROPDOWN never survives the section it was opened in (P1.49m): the list is PAINTED from this
+    // field, so leaving it set would reopen that list the next time the section is entered.
+    ui.settingsList = null;
     renderNav();
     // The panel's PUSHED text (the cap label, whose string is composed rather than bound) is refreshed when
     // its section opens. The bound slider needs no such thing: it tracks the value in force every frame.
@@ -213,12 +220,44 @@ export function buildSettingsPanel(
   };
   const hideAll = (): void => show(null);
 
-  // --- FPS cap slider: 30..240, maxed = unlimited (0) ---
-  spawnLabel(world, panels.settings, "settings.label", "settings.fpsCap");
-  const capValue = spawnLabel(world, panels.settings, "settings.value", "", { raw: true });
+  // --- THE ROWS (P1.49m): the NAME on the left, the CONTROL on the right ---------------------------
+  // The section used to STACK a label, a value and a control, so one option was three lines tall and the
+  // page read as a form. A row says the same in one line - and it is also what lets the FPS slider hide
+  // inside the row that owns it: the reveal is a stylesheet rule (`settings.optRow:hover settings.range`).
+  const spawnRow = (labelKey: string): Entity => {
+    const row = spawnPanel(world, panels.settings, "settings.optRow");
+    spawnLabel(world, row, "settings.rowName", labelKey);
+    return row;
+  };
+  /** The DROPDOWN lists this panel owns, for the painter (ui.navigation turns `UI_MODAL.settingsList`
+   *  into their visibility). A click only WRITES that field - no view ever touches a component. */
+  const lists: SettingsListTree[] = [];
+  /** A row whose control is ONE BUTTON that opens its list of choices underneath (P1.49m). The list is
+   *  spawned right AFTER the row, because creation order IS render order and nothing ever re-orders. */
+  const spawnDropdown = (key: string, labelKey: string, initial: string) => {
+    const row = spawnRow(labelKey);
+    const ctl = spawnPanel(world, row, "settings.rowCtl");
+    const meta = spawnLabel(world, ctl, "settings.rowMeta", "", { raw: true });
+    const key2 = `${id}.${key}`;
+    const value = spawnButton(world, ctl, "settings.rowBtn", `${id}.openList`, key2, initial);
+    const list = spawnPanel(world, panels.settings, "settings.list", { hidden: true });
+    lists.push({ id: key2, entity: list });
+    return { row, ctl, meta, list, value };
+  };
+  /** Opening a dropdown is ONE write; picking an entry closes it again (a list is a menu, not a mode). */
+  const closeList = (): void => {
+    world.resource(UI_MODAL).settingsList = null;
+  };
+  onUiAction(actions, `${id}.openList`, (value) => {
+    const ui = world.resource(UI_MODAL);
+    ui.settingsList = ui.settingsList === value ? null : value;
+  });
+
+  // 1. FPS cap: 30..240, maxed = unlimited (0). The slider is IN the row and invisible until hovered.
+  const capCtl = spawnPanel(world, spawnRow("settings.fpsCap"), "settings.rowCtl");
   const capSlider = spawnSlider(
     world,
-    panels.settings,
+    capCtl,
     "settings.range",
     `${id}.fpsCap`,
     "",
@@ -234,12 +273,23 @@ export function buildSettingsPanel(
     SOURCE_FPS_CAP, // BOUND: every settings instance shows the value in force, not its own copy
   );
   registerFpsSource(world.resource(UI_SOURCES), opts.getFpsCap);
+  // Spawned AFTER the slider, so it is the right-hand end of the row.
+  const capValue = spawnLabel(world, capCtl, "settings.value", "", { raw: true });
 
-  // --- GPU vsync toggle ---
+  // 2. GPU vsync: a two-state button on the right, with the restart note beside it.
+  const gpuCtl = spawnPanel(world, spawnRow("settings.vsync"), "settings.rowCtl");
+  spawnLabel(world, gpuCtl, "settings.rowMeta", "settings.restartHint");
   let gpuVsyncDisabled = opts.isGpuVsyncDisabled();
-  const gpuBtn = spawnButton(world, panels.settings, "settings.btn", `${id}.vsync`, "", "settings.vsyncOff");
+  const gpuBtn = spawnButton(
+    world,
+    gpuCtl,
+    "settings.rowBtn",
+    `${id}.vsync`,
+    "",
+    gpuVsyncDisabled ? "settings.off" : "settings.on",
+  );
   const renderGpu = (): void => {
-    setUiText(world, gpuBtn, gpuVsyncDisabled ? "settings.vsyncOff" : "settings.vsyncOn");
+    setUiText(world, gpuBtn, gpuVsyncDisabled ? "settings.off" : "settings.on");
   };
   onUiAction(actions, `${id}.vsync`, () => {
     const next = !gpuVsyncDisabled;
@@ -251,20 +301,22 @@ export function buildSettingsPanel(
 
   // --- "Diagnostic log": whether the FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE# lines
   //     reach debug.log. On by default; off keeps only the real event records — no restart needed. ---
+  // 3. Diagnostic log
+  const diagCtl = spawnPanel(world, spawnRow("settings.diagLog"), "settings.rowCtl");
   let diagLog = opts.isDiagLogEnabled();
   const diagBtn = spawnButton(
     world,
-    panels.settings,
-    "settings.btn",
+    diagCtl,
+    "settings.rowBtn",
     `${id}.diagLog`,
     "",
-    diagLog ? "settings.diagLogOn" : "settings.diagLogOff",
+    diagLog ? "settings.on" : "settings.off",
   );
   onUiAction(actions, `${id}.diagLog`, () => {
     const next = !diagLog;
     if (opts.onToggleDiagLog(next)) {
       diagLog = next;
-      setUiText(world, diagBtn, diagLog ? "settings.diagLogOn" : "settings.diagLogOff");
+      setUiText(world, diagBtn, diagLog ? "settings.on" : "settings.off");
     }
   });
 
@@ -342,23 +394,28 @@ export function buildSettingsPanel(
     log: opts.log,
   });
 
-  // --- UI scale: small/normal/large/auto (MC-style GUI Scale) ---
-  const scaleLabel = spawnLabel(world, panels.settings, "settings.label", "", { raw: true });
-  const scaleRow = spawnPanel(world, panels.settings, "settings.btnRow");
+  // --- 4. UI scale: small/normal/large/auto (MC-style GUI Scale) - a DROPDOWN (P1.49m) ---
+  const scaleDrop = spawnDropdown("uiScale", "settings.uiScale", `uiScale.${getUIScaleMode()}`);
+  const scaleLabel = scaleDrop.meta;
   const scaleChoices = (["small", "normal", "large", "auto"] as const).map((key) => ({
     key,
-    entity: spawnButton(world, scaleRow, "settings.choice", `${id}.uiScale`, key, `uiScale.${key}`),
+    entity: spawnButton(world, scaleDrop.list, "settings.rowChoice", `${id}.uiScale`, key, `uiScale.${key}`),
   }));
-  onUiAction(actions, `${id}.uiScale`, (value) => setUIScaleMode(value as "small" | "normal" | "large" | "auto"));
+  onUiAction(actions, `${id}.uiScale`, (value) => {
+    setUIScaleMode(value as "small" | "normal" | "large" | "auto");
+    closeList();
+  });
 
-  // --- Window mode: windowed / fullscreen (NW.js runtime switch, no restart) ---
-  spawnLabel(world, panels.settings, "settings.label", "settings.windowMode");
-  const wmRow = spawnPanel(world, panels.settings, "settings.btnRow");
+  // --- 5. Window mode: windowed / fullscreen (a runtime switch, no restart) - a DROPDOWN too ---
+  const wmDrop = spawnDropdown("windowMode", "settings.windowMode", `windowMode.${opts.getWindowMode()}`);
   const wmChoices = (["windowed", "fullscreen"] as const).map((key) => ({
     key,
-    entity: spawnButton(world, wmRow, "settings.choice", `${id}.windowMode`, key, `windowMode.${key}`),
+    entity: spawnButton(world, wmDrop.list, "settings.rowChoice", `${id}.windowMode`, key, `windowMode.${key}`),
   }));
-  onUiAction(actions, `${id}.windowMode`, (value) => opts.onSetWindowMode(value as WindowMode));
+  onUiAction(actions, `${id}.windowMode`, (value) => {
+    opts.onSetWindowMode(value as WindowMode);
+    closeList();
+  });
 
   spawnButton(world, settingsRoot, "settings.btn", `${id}.back`, "", "menu.back");
   onUiAction(actions, `${id}.back`, () => {
@@ -372,6 +429,9 @@ export function buildSettingsPanel(
     for (const choice of wmChoices) setUiSelected(world, choice.entity, opts.getWindowMode() === choice.key);
     for (const choice of langChoices) setUiSelected(world, choice.entity, getLang() === choice.key);
     for (const choice of fontChoices) setUiSelected(world, choice.entity, getFontId() === choice.key);
+    // The two DROPDOWN faces show the value IN FORCE, as keys, so the language switch reaches them too.
+    setUiText(world, scaleDrop.value, `uiScale.${getUIScaleMode()}`);
+    setUiText(world, wmDrop.value, `windowMode.${opts.getWindowMode()}`);
   };
   /** The FPS cap label. It reads the value IN FORCE (not the widget), and it is a PUSH rather than a
    *  binding because its text is composed — "60 FPS" is a literal, "unlimited" is a translated key —
@@ -387,13 +447,10 @@ export function buildSettingsPanel(
     const unlimited = cap === 0;
     setUiText(world, capValue, unlimited ? "settings.unlimited" : `${cap} FPS`, !unlimited);
   };
+  /** The scale row is only the MULTIPLIER: the row already says which mode is on (the value button shows
+   *  it, as a key, so a language switch re-derives it). A literal number, hence raw. */
   const renderScaleLabel = (): void => {
-    setUiText(
-      world,
-      scaleLabel,
-      `${t("settings.uiScale")}: ${t(`uiScale.${getUIScaleMode()}`)} (${getCurrentScale().toFixed(2)}x)`,
-      true,
-    );
+    setUiText(world, scaleLabel, `(${getCurrentScale().toFixed(2)}x)`, true);
   };
 
   onUiAction(actions, `${id}.fpsCap`, (value) => {
@@ -433,6 +490,7 @@ export function buildSettingsPanel(
     show,
     hideAll,
     entities: { ...panels, root: settingsRoot },
+    lists,
   };
 }
 
@@ -531,5 +589,8 @@ export class Menu {
   }
   get panelEntities(): Readonly<Record<SettingsPanelId | "root", Entity>> {
     return this.panels.entities;
+  }
+  get listEntities(): readonly SettingsListTree[] {
+    return this.panels.lists;
   }
 }

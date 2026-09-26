@@ -1023,11 +1023,13 @@ navTrees = {
   pauseRoot: menu.rootEntity,
   pauseMain: menu.mainPanelEntity,
   pausePanels: menu.panelEntities,
+  pauseLists: menu.listEntities,
   mainRoot: mainMenu.rootEntity,
   mainMain: mainMenu.mainPanelEntity,
   genPanel: mainMenu.genPanelEntity,
   backdrop: menuBackdrop,
   mainPanels: mainMenu.panelEntities,
+  mainLists: mainMenu.listEntities,
   inventoryPanel: inv.panelEntity,
 };
 

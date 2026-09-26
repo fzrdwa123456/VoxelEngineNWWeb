@@ -147,4 +147,7 @@ export class MainMenu {
   get panelEntities() {
     return this.panels.entities;
   }
+  get listEntities() {
+    return this.panels.lists;
+  }
 }

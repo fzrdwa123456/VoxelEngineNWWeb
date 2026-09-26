@@ -706,6 +706,11 @@ check("every recipe resolves to a style, and state changes it", () => {
     "settings.row",
     "settings.rowName",
     "settings.rowMeta",
+    "settings.optRow",
+    "settings.rowCtl",
+    "settings.rowBtn",
+    "settings.rowChoice",
+    "settings.list",
     "settings.empty",
     "kb.board",
     "kb.hint",
@@ -1673,6 +1678,9 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
     genPanel: mkPanel("menu.panel"),
     mainPanels: Object.fromEntries([...ids, "root"].map((id) => [id, mkPanel("settings.panel")])),
     inventoryPanel: mkPanel("inv.panel"),
+    // The DROPDOWNS (P1.49m): one list, so the painter is exercised - not just the ESC rung.
+    pauseLists: [{ id: "pause.uiScale", entity: mkPanel("settings.list") }],
+    mainLists: [{ id: "main.uiScale", entity: mkPanel("settings.list") }],
   };
   const effects = [];
   /** "Is a world running?" �?the ESC/inventory gate. false is the LOADING-SCREEN state (the startup and
@@ -1707,6 +1715,19 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   esc();
   equal(ui.settings, null, "ESC closes the settings box in ONE step (P1.49: there is no list rung to land on)");
   assert(!shown(trees.mainPanels.root) && !shown(trees.mainPanels.lang), "and the box is DOWN again, with its section");
+  // A DROPDOWN is the most LOCAL rung (P1.49m): ESC closes an open list first, and the box only on the
+  // next press. The list is painted from the same field, so this is one fact, not two.
+  Object.assign(ui, { mainMenu: true, menu: false, settings: "settings", settingsList: "main.uiScale" });
+  nav.step();
+  assert(shown(trees.mainLists[0].entity), "the open row list is painted while settingsList names it");
+  assert(!shown(trees.pauseLists[0].entity), "?and the other menu is list is not");
+  esc();
+  equal(ui.settingsList, null, "ESC closes the DROPDOWN first");
+  equal(ui.settings, "settings", "?leaving the section it was opened in up");
+  nav.step();
+  assert(!shown(trees.mainLists[0].entity), "?and the list is DOWN again");
+  esc();
+  equal(ui.settings, null, "?and the NEXT ESC closes the box");
   esc();
   equal(ui.settings, null, "…and ESC again leaves the settings");
   assert(shown(trees.mainMain), "…back on the main menu's own panel");
@@ -2482,9 +2503,11 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   assert(/`DIAGLOG probes [^`]*at boot/.test(main), "the composition root records the switch's boot state");
   assert(!probes.includes('"DIAGLOG '), "…as an event line: its prefix is not in the probe table");
   const menu = stripComments(readSource("src/plugins/ui/views/menu.ts"));
-  assert(/settings\.diagLogOn/.test(menu) && /settings\.diagLogOff/.test(menu),
+  // P1.49m: the toggle is a ROW now - the NAME on the left (`settings.diagLog`, `settings.vsync`) and the
+  // STATE on the right (`settings.on` / `settings.off`), so THOSE are the keys that must be translated.
+  assert(/settings\.diagLog/.test(menu) && /settings\.on/.test(menu) && /settings\.off/.test(menu),
     "the shared settings panel renders it as a two-state toggle");
-  // The label has to exist in every shipped dictionary, or the button would show the raw key.
+  // The labels have to exist in every shipped dictionary, or a row would show the raw key.
   for (const lang of ["zh", "en", "ja"]) {
     const dict = JSON.parse(
       require("node:fs").readFileSync(
@@ -2492,7 +2515,13 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
         "utf8",
       ),
     );
-    for (const key of ["settings.diagLogOn", "settings.diagLogOff"]) {
+    for (const key of [
+      "settings.diagLog",
+      "settings.vsync",
+      "settings.on",
+      "settings.off",
+      "settings.restartHint",
+    ]) {
       assert(typeof dict[key] === "string" && dict[key].length > 0, `${key} is translated (${lang})`);
     }
   }

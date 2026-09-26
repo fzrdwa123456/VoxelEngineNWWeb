@@ -411,6 +411,10 @@ export interface UiModalState {
    *  asking a surface (`SettingsPanels.openPanel()` used to keep the same fact in a closure), and the
    *  pause menu and the main menu share the field because only one of them can be up at a time. */
   settings: string | null;
+  /** The settings ROW whose DROPDOWN list is open, or null (P1.49m). It is the same kind of fact as
+   *  `settings`: a click only WRITES this field, and `ui.navigation` is what paints the list - so the
+   *  value buttons never touch a component, and the ESC step-back can see the list without asking a view. */
+  settingsList: string | null;
   /** The main menu's world-type picker is up */
   gen: boolean;
 }
@@ -418,7 +422,7 @@ export interface UiModalState {
 export const UI_MODAL = defineResource<UiModalState>("uiModal");
 
 export function createUiModalState(): UiModalState {
-  return { mainMenu: false, menu: false, inventory: false, settings: null, gen: false };
+  return { mainMenu: false, menu: false, inventory: false, settings: null, settingsList: null, gen: false };
 }
 
 /** True when any modal surface is open. The sub-panels deliberately have NO flag of their own: they
