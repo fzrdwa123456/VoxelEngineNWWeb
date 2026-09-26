@@ -208,6 +208,9 @@ pub fn capture_foreground_check(app: &tauri::AppHandle) -> bool {
     // The whole "we are not the foreground" treatment, including forgetting the hidden intent (P1.58): a
     // background window must not re-hide the cursor the moment it is foreground again.
     on_foreground_lost();
+    // Diagnostics (P1.59): this path is otherwise SILENT (it only emits an event), and "the Rust net tore a
+    // background capture down" is exactly the moment whose aftermath we are hunting.
+    crate::boot_line(app, &format!("[cursor] fgcheck tore down a background capture [{}]", trace_of(&model())));
     // Put the ARROW back with it: releasing the clip does not touch the shape, and the pointer is over
     // another application now (SDL_RedrawCursor: with no mouse focus the DEFAULT cursor is the answer).
     reconcile(app);
@@ -308,6 +311,84 @@ fn as_win_rect(c: ClipRect) -> Rect {
     Rect { left: c.left, top: c.top, right: c.right, bottom: c.bottom }
 }
 
+/// **THE CURSOR TRACE (P1.59) — everything about the cursor in ONE line.**
+///
+/// A boot.log line that carries this settles, without guessing, which of the three possible reasons left
+/// the cursor invisible:
+///   * `want=2 relative=false` + `showing=false` → **the INTENT** hid it while no capture was held (the
+///     front end asked for hidden - the `[cursor] intent` line right above says which call did);
+///   * `want=1 relative=false` + `showing=false` → nobody asked for hidden and we hold no clip, so the NULL
+///     cursor is **Chromium's** (its cached shape answers `WM_SETCURSOR`): read the front end's
+///     `computed=` CSS in its own probe line;
+///   * `showing=true` while the player sees NO cursor → the state is right and the desktop simply did not
+///     repaint the overlay (the "appears only after I move the mouse" report; the 8 ms reconciler cannot see
+///     that, because `GetCursorInfo` agrees with us).
+/// `under=` adds who owns the window under the pointer (`ours`/`other`/`none`): a foreign owner means
+/// Chromium is not even being asked for a shape, so nothing we push matters while the pointer is there.
+pub fn cursor_trace() -> String {
+    trace_of(&model())
+}
+
+/// The same, for a caller that already holds the table (`reconcile` runs under the guard - taking it again
+/// would deadlock, so the guard is passed in instead).
+fn trace_of(m: &CursorModel) -> String {
+    let (showing, hcursor) = cursor_info();
+    let focused = m.hwnd != 0 && unsafe { GetForegroundWindow() } == m.hwnd;
+    let mut pt = Point { x: 0, y: 0 };
+    let _ = unsafe { GetCursorPos(&mut pt) };
+    let under = unsafe {
+        // A fresh Point: the Win32 `Point` is not `Copy`, and the position is still needed for the trace.
+        let w = WindowFromPoint(Point { x: pt.x, y: pt.y });
+        if w == 0 {
+            "none"
+        } else {
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(w, &mut pid);
+            if pid == GetCurrentProcessId() {
+                "ours"
+            } else {
+                "other"
+            }
+        }
+    };
+    format!(
+        "want={} relative={} shape={:?} clipped=({},{},{},{}) focused={} showing={} hCursor={} pos=({},{}) under={} enforced={}",
+        m.want,
+        m.relative,
+        m.shape,
+        m.clipped.left,
+        m.clipped.top,
+        m.clipped.right,
+        m.clipped.bottom,
+        focused,
+        showing,
+        hcursor,
+        pt.x,
+        pt.y,
+        under,
+        m.enforced
+    )
+}
+
+/// A flood guard for the APPLY trace below: at most 8 lines per 500 ms. The reconciler ticks every 8 ms, and
+/// the very loop we are hunting (a stale intent fighting the system: `desired=2 showing=1`) would otherwise
+/// write 125 lines a second - the repetition IS the symptom, so it is capped, not silenced.
+fn trace_budget_ok() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static WINDOW: AtomicU64 = AtomicU64::new(0);
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let window = now / 500;
+    if WINDOW.swap(window, Ordering::Relaxed) != window {
+        COUNT.store(0, Ordering::Relaxed);
+    }
+    COUNT.fetch_add(1, Ordering::Relaxed) < 8
+}
+
 /// Win32 reads only. Thread-agnostic.
 fn probe_of(m: &CursorModel) -> CursorProbe {
     let (showing, _) = cursor_info();
@@ -406,8 +487,10 @@ fn reconcile(app: &tauri::AppHandle) {
         // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
         // never fight the foreground application for the cursor (rule 1 of the model).
     };
+    let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let mut m = model();
+        let before = (m.clipped, m.shape, m.want, m.relative);
         apply_clip(&mut m, plan.clip);
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
         // crosshair", and the only way to make that move invisible is to do it with a NULL shape. It is also
@@ -426,6 +509,25 @@ fn reconcile(app: &tauri::AppHandle) {
             m.shape = CursorShape::Unknown;
         }
         apply_shape(&mut m, plan.shape);
+        // **WHAT THE RECONCILER REALLY DID (P1.59).** Only ticks that CHANGED something are logged (rule 3:
+        // a tick whose plan changes nothing makes no Win32 call either), so this line answers "who pushed the
+        // cursor away, and how many times". `forced=true` is the disagreement loop - the system keeps showing
+        // a cursor we want hidden, or keeps hiding one we want shown - and the budget in `trace_budget_ok`
+        // caps it at 8 lines per 500 ms, because that repetition IS the symptom being hunted.
+        let changed = before != (m.clipped, m.shape, m.want, m.relative);
+        if (changed || plan.force_shape) && trace_budget_ok() {
+            crate::boot_line(
+                &handle,
+                &format!(
+                    "[cursor] apply clip={:?} shape={:?} forced={} warp={} [{}]",
+                    plan.clip,
+                    plan.shape,
+                    plan.force_shape,
+                    plan.warp.is_some(),
+                    trace_of(&m)
+                ),
+            );
+        }
     });
 }
 
@@ -568,11 +670,21 @@ pub fn install_menu_suppressor(hwnd: isize) -> bool {
 /// menu lands on the crosshair") follows from the CLIP instead of from a warp - and the explicit
 /// `center_cursor` command still exists for the paths that really do want a move.
 pub fn set_cursor_intent(app: &tauri::AppHandle, hwnd: isize, visible: bool) {
+    let new_want = if visible { 1 } else { 2 };
     {
         let mut m = model();
         m.hwnd = hwnd;
-        m.want = if visible { 1 } else { 2 };
+        m.want = new_want;
     }
+    // **WHO ASKED FOR WHAT, AND WHEN (P1.59).** This is the line that names the culprit when the cursor is
+    // hidden with no capture behind it: `want=…->2 relative=false` means the FRONT END ordered the cursor
+    // hidden (the matching `[cursor] JS …` probe line right above/below carries its inputs: canControl,
+    // locked, freeMouse, modal, computed CSS). A `want` that does not change still logs, because the
+    // re-assert path sends the same value on purpose.
+    crate::boot_line(
+        app,
+        &format!("[cursor] intent visible={visible} want->{new_want} [{}]", trace_of(&model())),
+    );
     reconcile(app);
 }
 
@@ -658,32 +770,6 @@ pub fn refresh_cursor() {
         // lParam = MAKELPARAM(HTCLIENT, WM_MOUSEMOVE): exactly the payload of a real mouse move
         let lparam = ((WM_MOUSEMOVE as isize) << 16) | (HTCLIENT as isize);
         SendMessageW(under, WM_SETCURSOR, under as usize, lparam);
-    }
-}
-
-/// For diagnostics: measure directly "is the cursor showing or hidden right now".
-///
-/// `GetCursorInfo`'s `CURSOR_SHOWING` flag is a **system-level** fact — not CSS, not our guess.
-/// It settles whether "the cursor is gone after Alt-Tab back" is:
-///   * the CSS already saying default while the system still says hidden (= the shape was not
-///     repainted, my nudge mechanism is wrong), or
-///   * the system already saying showing, in which case the problem is elsewhere.
-pub fn cursor_probe() -> String {
-    unsafe {
-        let mut p = Point { x: 0, y: 0 };
-        let _ = GetCursorPos(&mut p);
-        let mut ci = CursorInfo {
-            cb_size: std::mem::size_of::<CursorInfo>() as u32,
-            flags: 0,
-            h_cursor: 0,
-            pt_screen_pos: Point { x: 0, y: 0 },
-        };
-        let ok = GetCursorInfo(&mut ci) != 0;
-        let showing = ok && (ci.flags & CURSOR_SHOWING) != 0;
-        format!(
-            "showing={} pos=({},{}) hCursor={} getInfoOk={}",
-            showing, p.x, p.y, ci.h_cursor, ok
-        )
     }
 }
 

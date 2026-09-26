@@ -103,6 +103,23 @@ fn boot_report(state: State<'_, AppState>, message: String) {
     game::append_boot(&state.root, &message);
 }
 
+/// **One boot.log line from the PLATFORM half** (P1.59): `win.rs` owns the cursor table and the
+/// reconciler, but the LOG PATHS belong to this file — so it hands its diagnostics here instead of
+/// duplicating `AppState`. The `[cursor]` prefix is what keeps them together with the front end's own
+/// `cursorBoot()` lines, which land in the same file on purpose: one file then tells the whole story of
+/// a focus change or a capture, including which side acted first.
+pub fn boot_line(app: &AppHandle, message: &str) {
+    let root = app.state::<AppState>().root.clone();
+    game::append_boot(&root, message);
+}
+
+/// Diagnostics for the front end's timeline probes: the whole cursor state as ONE line (see
+/// `win::cursor_trace`). Read-only, so a probe can never change what it measures.
+#[tauri::command]
+fn cursor_trace() -> String {
+    win::cursor_trace()
+}
+
 #[tauri::command]
 fn preload_packs(state: State<'_, AppState>) -> packs::PackSnapshot {
     packs::snapshot(&state.root)
@@ -156,13 +173,13 @@ fn mouse_capture(state: State<'_, AppState>, window: tauri::WebviewWindow, on: b
     };
     // Diagnostics: measure the native cursor state before and after capture (whether the shape
     // really follows)
-    let before = win::cursor_probe();
+    let before = win::cursor_trace();
     let ok = win::set_mouse_capture(hwnd, on);
     game::append_boot(
         &state.root,
         &format!(
-            "[cursor] capture on={on} ok={ok} before={before} after={}",
-            win::cursor_probe()
+            "[cursor] capture on={on} ok={ok} before=[{before}] after=[{}]",
+            win::cursor_trace()
         ),
     );
     ok
@@ -223,6 +240,7 @@ pub fn run() {
             set_window_mode,
             mouse_capture,
             cursor_intent,
+            cursor_trace,
             window_is_fullscreen,
             set_vsync_disabled,
             rawinput_start,
@@ -267,7 +285,7 @@ pub fn run() {
                         if !*focused {
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus LOST  before={}", win::cursor_probe()),
+                                &format!("[cursor] focus LOST  before=[{}]", win::cursor_trace()),
                             );
                             // **Losing focus must release the native mouse capture**, otherwise after
                             // an Alt-Tab the user's cursor is shut inside the window by ClipCursor and
@@ -280,12 +298,12 @@ pub fn run() {
                             win::on_foreground_lost();
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus LOST  after ={}", win::cursor_probe()),
+                                &format!("[cursor] focus LOST  after =[{}]", win::cursor_trace()),
                             );
                         } else {
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus GAIN  before={}", win::cursor_probe()),
+                                &format!("[cursor] focus GAIN  before=[{}]", win::cursor_trace()),
                             );
                             // Only **after** focus returns does the webview get to decide the cursor
                             // shape again (by sending WM_SETCURSOR) — it must come after the focus,
@@ -297,7 +315,7 @@ pub fn run() {
                             win::kick_cursor_repaint();
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus GAIN  after ={}", win::cursor_probe()),
+                                &format!("[cursor] focus GAIN  after =[{}]", win::cursor_trace()),
                             );
                         }
                         let name = if *focused { "win-focus" } else { "win-blur" };

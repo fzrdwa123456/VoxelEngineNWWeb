@@ -1,12 +1,23 @@
 // ===== Pointer lock management =====
 import { invoke } from "@tauri-apps/api/core";
 
+// The boot.log channel (P1.59): the front end's cursor diagnostics land in the SAME file as Rust's
+// `[cursor]` probes, so one file tells the whole story in order. (mousecapture.ts imports from here too.)
+import { cursorBoot } from "../desktop/shell";
+
 export interface PointerLockDeps {
   /** What the lock manager needs from the input system (structural, no concrete class) */
   input: { lock(): Promise<void> | undefined };
   /** The DEVICE state resource (`INPUT_STATE`): `appliedCursor` is the cursor value this manager last
-   *  wrote, i.e. a fact about the window that belongs in the world rather than in a private field. */
-  state: { appliedCursor: "none" | "default" | null };
+   *  wrote, i.e. a fact about the window that belongs in the world rather than in a private field.
+   *  `locked` / `freeMouseActive` are read by the P1.59 cursor diagnostics, which has to say WHO ordered a
+   *  hidden cursor and with which inputs — the two fields that can make `canControl()` true with no capture
+   *  behind it are exactly the ones a "the cursor is invisible" report has to rule out. */
+  state: {
+    appliedCursor: "none" | "default" | null;
+    locked: boolean;
+    freeMouseActive: boolean;
+  };
   /** Whether a modal UI currently owns the mouse. ONE predicate, supplied by the composition root
    *  from the UI_MODAL resource — it replaced two separate callbacks (isMenuOpen / isInvOpen) whose
    *  OR only existed at the call sites. */
@@ -91,10 +102,31 @@ export class PointerLock {
    *  takes, because the Rust reconciler compares the plan with the SYSTEM (`GetCursorInfo`) instead of with
    *  its own record - in BOTH directions. So there is one writer of the CSS value and one mechanism for the
    *  shape, and never a frame in which a value nobody asked for is on screen. */
-  reassertCursor(): void {
+  reassertCursor(reason = "unspecified"): void {
     this.applyCursor(); // keeps the CSS value in sync (idempotent)
+    // **Diagnostics (P1.59): the intent is logged even though the value did not change** — this is the call
+    // that can ORDER a hidden cursor while nothing is captured, so the line right after it in boot.log
+    // decides whether the report "the cursor is invisible after the Win key" is a stale intent or a repaint.
+    cursorBoot(`JS reassert [${reason}] ${this.stateLine()}`);
     // The intent is sent even though the value did not change: it is the "apply it again, right now" ping.
     void invoke("cursor_intent", { visible: !this.deps.canControl() }).catch(() => {});
+  }
+
+  /** The front end's own cursor facts, as one appended fragment. Everything that decides the intent, plus
+   *  the CSS value the SYSTEM will read back through `WM_SETCURSOR` — a hidden-but-uncaptured cursor is
+   *  either this side asking for `none`, or Chromium answering from a stale cache, and the two need
+   *  different cures. */
+  private stateLine(): string {
+    const computed =
+      typeof getComputedStyle === "function" ? getComputedStyle(document.body).cursor : "?";
+    const held = this.deps.state.locked || document.pointerLockElement !== null;
+    return (
+      `css=${document.body.style.cursor || "(unset)"} computed=${computed} ` +
+      `locked=${this.deps.state.locked} held=${held} free=${this.deps.state.freeMouseActive} ` +
+      `modal=${this.deps.isUiModal()} canControl=${this.deps.canControl()} ` +
+      `applied=${this.deps.state.appliedCursor ?? "null"} ` +
+      `domFocus=${typeof document.hasFocus === "function" ? document.hasFocus() : "?"}`
+    );
   }
 
   applyCursor(): void {
@@ -109,6 +141,9 @@ export class PointerLock {
       // boot.log, it pinpoints the moment an inconsistency like "CSS says visible, the system says
       // hidden" happens.
       this.deps.logDebug(`CURSOR css=${value} canControl=${can}`);
+      // **And the same decision, with every input, into boot.log (P1.59)** — next to Rust's `[cursor]`
+      // lines, so one file shows the whole exchange in order.
+      cursorBoot(`JS applyCursor value=${value} ${this.stateLine()}`);
       // Hand the **intent** to Rust: its sentinel (every 8ms) is then responsible for actually
       // showing/hiding the cursor, no longer depending on Chromium's push timing and no longer
       // vulnerable to Windows being dragged into menu mode by Alt.

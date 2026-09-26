@@ -1262,6 +1262,21 @@ Still outstanding:
   release per DEVICE event, so one title-bar drag wrote 30+ `[cursor] capture on=false` round-trips, each one
   a main-thread ClipCursor+SetCursor pass), and the lock manager's dead `scheduleCursor` dep (the 0/120 ms
   focus re-assert of P1.11) went with the mechanism it belonged to.
+- **P1.59 - the cursor diagnostic channel: one file, both sides, in order.** `DONE`. P1.58 removed the
+  automatic re-capture on a focus event, but "the cursor is still invisible after the Win key" has three
+  causes that look identical from outside - the front end ordering a hidden cursor with no capture behind
+  it, Chromium answering `WM_SETCURSOR` from its cached `cursor: none`, or the desktop simply not
+  REPAINTING an otherwise correct state - and they are cured in three different places. So every cursor
+  decision now writes ONE line into `logs\boot.log`, carrying BOTH sides of the truth:
+  `[cursor] intent visible=… want->…`, `[cursor] apply clip=… shape=… forced=…` (only ticks that changed
+  something, capped at 8 lines per 500 ms by `win::trace_budget_ok` - the repetition IS the symptom) and
+  `[cursor] fgcheck tore down…` from Rust; `[cursor] JS applyCursor|reassert` and the throttled
+  `wingain t0/t120/t500/t1500` timeline from the front end. The shared payload is `win::cursor_trace()`
+  (want / relative / shape / clipped / focused / **showing** / hCursor / pos / **under** / enforced), read
+  by the front end through the new READ-ONLY `cursor_trace` command, so a probe can never change what it
+  measures; `lib.rs::boot_line` is the one helper that keeps the log paths in the command bus.
+  `docs\TESTING.md` (P1.59) has the decoding table: `want=2 relative=false showing=false` = the intent,
+  `want=1 relative=false showing=false` = Chromium's cache, `showing=true` + invisible = the repaint.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

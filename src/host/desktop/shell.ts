@@ -58,15 +58,10 @@ export function shellInfo(): ShellSnapshot {
   return state.snapshot;
 }
 
-/** The earliest diagnostic channel: **it hits the IPC global directly, bypassing @tauri-apps/api**.
- *
- *  It exists for the moment "the front end died before it was up" — the `invoke` wrapper and the log
- *  batching below are both still unavailable then, and in Tauri a dead front end is **silent**: no
- *  window, not one line in debug.log, indistinguishable from outside from "stuck in the loader" (this
- *  trap was really hit twice).
- *  It writes the message to logs\boot.log; call sites are main.ts's preload try/catch and index.html's
- *  inline script. */
-export function bootReport(message: string): void {
+/** The raw boot.log write. **It hits the IPC global directly, bypassing @tauri-apps/api** — the only
+ *  channel that exists before the api wrapper is usable, and therefore the one a pre-boot crash message
+ *  has to use. */
+function rawBoot(message: string): void {
   try {
     const internals = (
       globalThis as unknown as {
@@ -77,6 +72,29 @@ export function bootReport(message: string): void {
   } catch {
     /* Not even the IPC is reachable: index.html's title-writing fallback is all that is left */
   }
+}
+
+/** The earliest diagnostic channel: it writes "I am up / I died because of X" into logs\boot.log.
+ *  Why it exists: in Tauri a front end that dies before it is up is **silent** — no window, not one line in
+ *  debug.log, indistinguishable from outside from "stuck in the loader" (this trap was really hit twice).
+ *  Call sites are main.ts's preload try/catch and index.html's inline script. */
+export function bootReport(message: string): void {
+  rawBoot(message);
+}
+
+/** **The CURSOR diagnostic channel (P1.59).** The front end's own cursor lines go to logs\boot.log — the
+ *  same file Rust's `[cursor]` probes are written to — so ONE file tells the whole story of a focus change
+ *  or a capture *in order*, including which side acted first. Deliberately NOT `logDebug`: that one is
+ *  batched, suppressed by the diagnostic-probe switch and lands in debug.log, which is the wrong file for a
+ *  "the cursor is invisible right now" report. */
+export function cursorBoot(message: string): void {
+  rawBoot(`[cursor] ${message}`);
+}
+
+/** The Rust side's whole cursor table as one line (`win::cursor_trace`). Read-only, so a probe cannot change
+ *  what it measures; resolves "" when the IPC is unavailable (never throws: this is diagnostics). */
+export function cursorTrace(): Promise<string> {
+  return invoke<string>("cursor_trace").catch(() => "");
 }
 
 // ===== Log batching =====

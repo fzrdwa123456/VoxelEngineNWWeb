@@ -2785,7 +2785,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   const focusHandler = /onWinFocus\(\(\) => \{([\s\S]*?)\n\}\);/.exec(main);
   assert(focusHandler !== null, "the focus handler is read as one block");
   assert(!/relock\(/.test(focusHandler[1]), "…and a focus event never re-requests the capture");
-  assert(/reassertCursor\(\)/.test(focusHandler[1]), "…it re-asserts the cursor intent instead");
+  assert(/reassertCursor\(/.test(focusHandler[1]), "…it re-asserts the cursor intent instead");
   // …and the other half of the flap: a hidden INTENT must not outlive the foreground session, or the 8ms
   // sentinel hides the cursor again on every "focus gained" with nobody asking.
   const winSrc = stripComments(readSource("src-tauri/src/win.rs"));
@@ -2793,6 +2793,19 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "a foreground loss releases the capture AND forgets the hidden intent (win.rs)");
   assert(/on_foreground_lost\(\);/.test(stripComments(readSource("src-tauri/src/lib.rs"))),
     "…which the window-focus-lost event calls too");
+  // **THE CURSOR DIAGNOSTIC CHANNEL (P1.59).** Every cursor decision — both sides — writes ONE line into
+  // logs\boot.log, and the line carries the front end's inputs AND the Rust table, so a single file
+  // answers "who hid the cursor". Removing any of these pieces silently takes the evidence away again.
+  assert(/fn cursor_trace\(\) -> String/.test(winSrc), "the Rust table is readable as one line");
+  const libSrc = stripComments(readSource("src-tauri/src/lib.rs"));
+  assert(/pub fn boot_line\(app: &AppHandle/.test(libSrc),
+    "…through the command bus’ own log helper (win.rs stays free of the log paths)");
+  assert(/cursor_trace,/.test(libSrc), "…exposed as a READ-ONLY command for the front end’s probes");
+  assert(/cursorTrace\(\)/.test(main) && /cursorBoot/.test(main),
+    "the front end probes the same table and logs its own intent decisions");
+  assert(/probeCursorTimeline\(/.test(main), "…and walks a 0/120/500/1500 ms timeline on a focus gain");
+  assert(/cursorBoot/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
+    "the lock manager logs WHICH call sent a hidden intent, and with which inputs");
   const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");

@@ -399,3 +399,37 @@ handful of `capture on=false` lines (one per real release) instead of one per ge
 (5) the standing regressions: ESC -> pause menu -> Resume (cursor back, view live); the backpack (E) opens
 with a visible cursor and closing it re-captures at once; fullscreen/windowed from the settings panel does
 NOT pause; the menu/Apps key still produces no cursor flash.
+
+AFTER the cursor diagnostic channel (P1.59 - pinning the Win-key report down). Everything about the
+cursor now lands in ONE file, `logs\boot.log`, from BOTH sides and in order. Reproduce: enter a world,
+press Win once, wait ~2 s, come back WITHOUT clicking anything, then read the last ~40 lines.
+
+The lines to know:
+```
+[cursor] focus LOST  before=[…]              Rust: the window event, with its own table + GetCursorInfo
+[cursor] focus LOST  after =[…]              …after win::on_foreground_lost (capture released, intent forgotten)
+[cursor] … winlost JS t=+…                 the front end: locked / free / modal / canControl / css / computed
+[cursor] … winlost RUST […]               the SAME instant, read back from Rust
+[cursor] capture on=false ok=… […]         the front end released the native capture
+[cursor] intent visible=… want->… […]       WHO ordered what shape (the front end's cursor_intent)
+[cursor] apply clip=… shape=… forced=… […] the 8 ms reconciler really changing something (budgeted)
+[cursor] focus GAIN  before=/after =[…]      Rust: the window came back
+[cursor] wingain t0/t120/t500/t1500 …        the front end's timeline after the regain (3 per 2 s max)
+```
+
+Decoding - what the last `RUST`/`apply` line says about the moment you SAW no cursor:
+```
+want=2 relative=false showing=false   the front end ORDERED hidden with no capture: read the
+                                      [cursor] intent line just above and the locked=/free=/modal=
+                                      fields of the JS line that caused it (that is a real bug)
+want=1 relative=false showing=false   nobody asked for hidden and we hold no clip, so the NULL cursor
+                                      is CHROMIUM's (its cached shape answers WM_SETCURSOR): a
+                                      computed=none here is a CSS bug, computed=default is the case below
+showing=true and still invisible      the state is right and the desktop did not REPAINT the overlay
+                                      (the "only appears after I move the mouse" report). enforced= counts
+                                      our pushes; under=other means the pointer is over another process,
+                                      where nothing we push can matter at all
+```
+
+Report back: the `boot.log` block around the Win press, plus whether the cursor was visibly gone at the
+moment the last `RUST` line said `showing=true`.
