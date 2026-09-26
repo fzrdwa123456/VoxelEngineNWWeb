@@ -27,7 +27,7 @@ import {
   type VoxelWorld,
 } from "../../../data/world/world";
 import { POSITION } from "../../player/components";
-import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
+import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
@@ -61,7 +61,7 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
  *  keeps this file free of a host import. */
 export interface ChunkMeshFactory {
   createGeometry(): ChunkMeshEntry["geom"];
-  getMaterial(state: ChunkMaterialState): THREE.Material;
+  getMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material;
 }
 /** Default so a drive-by test — and the Node gate, which drives `prime`/`needsWarmUp` on a stub voxel —
  *  can construct this system without a GPU: a geometry that is never drawn and a material that never
@@ -264,7 +264,11 @@ export class ChunkStreamSystem {
   private rebuild(key: string): void {
     const entry = this.cache.meshes.get(key);
     if (entry) {
-      if (entry.geom.rebuild(this.voxel, entry.cx, entry.cy, entry.cz) > 0) return;
+      if (entry.geom.rebuild(this.voxel, entry.cx, entry.cy, entry.cz) > 0) {
+        // A dig or a place can change WHICH LOOKS this chunk shows, so the material list follows the rebuild.
+        entry.mesh.material = this.materialsFor(entry.geom);
+        return;
+      }
       this.cache.group.remove(entry.mesh);
       entry.geom.dispose();
       this.cache.meshes.delete(key);
@@ -291,12 +295,20 @@ export class ChunkStreamSystem {
       return;
     }
 
-    const mesh = new THREE.Mesh(geom.geometry, this.mesh.getMaterial(this.material));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
     mesh.matrixAutoUpdate = false;
     const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz };
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
+  }
+
+  /** The materials this chunk needs, one per LOOK group (P1.46). No specs means the geometry was built with
+   *  the engine checker (the mesher emits groups only when it knows a block). Shared per spec key by the
+   *  CHUNK_MATERIAL resource, so chunks showing the same blocks reuse the same GPU materials. */
+  private materialsFor(geom: ChunkMeshEntry["geom"]): THREE.Material | THREE.Material[] {
+    if (geom.specs.length === 0) return this.mesh.getMaterial(this.material);
+    return geom.specs.map((spec) => this.mesh.getMaterial(this.material, spec));
   }
 
   /** Geometry is chunk-local, so the mesh sits at the chunk origin of its nearest copy */

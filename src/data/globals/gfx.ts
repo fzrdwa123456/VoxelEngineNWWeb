@@ -127,8 +127,20 @@ export const ICON_BAKE: Resource<IconBakeState> = defineResource<IconBakeState>(
 /** The ONE material every chunk mesh shares. It used to be a module-level `let` in the mesher (a GPU
  *  object, so by the rule above it belongs to the world) and is created on first use, because the pack
  *  chain must be installed before the checker texture can be resolved. */
+/** One MATERIAL GROUP a chunk geometry asks for: a face texture (a resolved pack URL), a flat colour, or
+ *  the engine checker. The key is what the material cache is keyed by, so two chunks showing the same look
+ *  share one material. Data, because the mesher decides it and the platform only realises it. */
+export interface ChunkFaceSpec {
+  readonly key: string;
+  readonly texture: string | null;
+  readonly color: string | null;
+}
+
 export interface ChunkMaterialState {
   material: THREE.MeshLambertMaterial | null;
+  /** One material per LOOK (P1.46), keyed by `ChunkFaceSpec.key`: a chunk that holds grass, dirt and stone
+   *  draws three groups, and every chunk showing grass shares one material. */
+  readonly materials: Map<string, THREE.Material>;
 }
 
 export const CHUNK_MATERIAL: Resource<ChunkMaterialState> =

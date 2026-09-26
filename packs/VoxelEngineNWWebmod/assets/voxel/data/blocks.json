@@ -1,5 +1,6 @@
-﻿{
+{
   "grass": { "label": "草方块", "top": "block/grass_block_top.png", "side": "block/grass_block_side.png", "bottom": "block/dirt.png" },
+  "dirt": { "label": "泥土", "all": "block/dirt.png" },
   "default": { "label": "方块", "color": "#4caf50" },
   "missing": { "label": "缺失方块", "side": "block/nonexistent.png" },
   "ruby": { "label": "红宝石块", "all": "block/dirt.png" },

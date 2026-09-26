@@ -13,10 +13,9 @@
 //
 // THE HAND COMES FROM THE INVENTORY COMPONENT. This system used to ask the UI through a callback
 // ("is a hand non-empty?"); it now reads the selected slot itself, so the UI is purely a view and
-// cannot disagree with the world. The block TYPE is therefore known here — but placement still
-// writes SOLID, because the world has exactly one block value. Making the type meaningful needs a
-// palette in the voxel data plus per-value materials in chunkmesh.ts (ROADMAP.md §3.2), and that is
-// a separate change from this one.
+// cannot disagree with the world. The block TYPE is known here and IS WHAT GETS PLACED since P1.46: a voxel
+// value is a palette index (data/world/palette.ts), so what you hold is what the world shows (the mesher draws
+// each value with its own textures, or a flat colour, or the engine checker when a pack ships none).
 //
 // PLACEMENT IS REFUSED when the new block would overlap the entity's body box; otherwise you could
 // seal yourself inside a block.
@@ -42,6 +41,7 @@ import {
 import { getBind } from "../../input/keybinds";
 import { viewDirection } from "../../../shared/math/view";
 import { AIR, SOLID } from "../../../data/world/chunk";
+import { paletteValueOf } from "../../../data/world/palette";
 import { raycastVoxel, type RayHit } from "../../../shared/math/raycast";
 import type { VoxelWorld } from "../../../data/world/world";
 import { canControl, INPUT_STATE, LOCAL_PLAYER, UI_MODAL, VOXEL, type InputState, type UiModalState } from "../../../data/globals/resources";
@@ -157,9 +157,11 @@ export class BlockInteractionSystem {
 
     if (this.voxel.isSolid(x, y, z)) return; // already occupied
     if (this.intersectsBody(index, x, y, z)) return; // never seal the entity inside a block
-    // The type is known (blockInHand) but the world still has one block value: see the file header.
-    if (this.blockInHand(index) === null) return;
-    this.voxel.setBlock(x, y, z, SOLID);
+    const held = this.blockInHand(index);
+    if (held === null) return;
+    // P1.46: the voxel value IS the palette index of the block in hand. An id no palette names falls back to
+    // the engine checker block, so a pack with unknown blocks stays placeable.
+    this.voxel.setBlock(x, y, z, paletteValueOf(held) || SOLID);
   }
 
   /** Block type in the entity's selected slot, or null for an empty hand. Read straight from the

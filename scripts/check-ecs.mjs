@@ -2748,7 +2748,11 @@ check("the LAST module-level state is a resource too (icons, material, counters,
     "the composition root inserts it");
   const meshSrc = stripComments(readSource("src/host/browser/chunkmesh.ts"));
   equal(countOf(meshSrc, /^(?:let|var) sharedMaterial\b/gm), 0, "the material is not module state");
-  assert(/getChunkMaterial\(state: ChunkMaterialState\)/.test(meshSrc),
+  assert(/getChunkMaterial\(state: ChunkMaterialState, spec\?: ChunkFaceSpec\)/.test(meshSrc),
+    "(P1.46) and the look it is for");
+  assert(/materials: Map<string, THREE\.Material>/.test(readSource("src/data/globals/gfx.ts")),
+    "the per-look material cache is a FIELD of that resource, never module state");
+  assert(/ChunkFaceSpec/.test(meshSrc),
     "…the getter takes the resource's state");
   assert(/resource\(CHUNK_MATERIAL\)/.test(stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"))),
     "chunk.stream resolves it");

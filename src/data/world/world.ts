@@ -13,13 +13,16 @@
 //         never be punched through and the underside needs no faces); at/above WORLD_MAX_Y
 //         everything reads as air but is NOT writable.
 //
-// GENERATION is intentionally trivial for now: every chunk is filled with the single built-in
-// checker block. `generateChunk()` is the ONE place to replace when real terrain arrives —
-// nothing else in this file (or in the mesher / collision) knows what a block "is".
+// GENERATION is a LAYER CAKE, and it is still the ONE place that decides what the ground is: grass on the
+// surface, a few layers of dirt under it, stone below that (the palette in data/world/palette.ts names the
+// ids). Every value is a palette index, so the mesher draws each layer with its own texture; an install whose
+// packs define no `dirt` simply gets the engine checker for that layer. Deep chunks stay UNIFORM (one value,
+// no array allocated), which is what keeps a tall build range cheap.
 //
 // READS DO NOT GENERATE. getBlock() on a chunk that was never ensured returns AIR. Callers that
 // need a populated neighbourhood (the mesher) must ensure it first — chunkstream.ts does that.
 import { AIR, CHUNK_SIZE, Chunk, SOLID } from "./chunk";
+import { paletteValueOf } from "./palette";
 
 /** Torus period along X/Z, in chunks: 32 * 32 = 1024 blocks before the world repeats */
 export const WORLD_CHUNKS_X = 32;
@@ -39,6 +42,12 @@ export const WORLD_MAX_Y = (MIN_CHUNK_Y + CHUNK_Y_COUNT) * CHUNK_SIZE;
 export const TERRAIN_TOP_Y = 128;
 /** Where a body stands, and therefore the spawn height (feet) */
 export const WORLD_SURFACE_Y = TERRAIN_TOP_Y;
+
+/** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. */
+const SURFACE_LAYERS = 4;
+const GRASS_VALUE = paletteValueOf("grass") || SOLID;
+const DIRT_VALUE = paletteValueOf("dirt") || SOLID;
+const STONE_VALUE = paletteValueOf("stone") || SOLID;
 
 /** Block coordinate -> local coordinate inside its chunk (negative-safe) */
 function localOf(block: number): number {
@@ -67,17 +76,21 @@ export function nearestWrap(c: number, pc: number, period: number): number {
 function generateChunk(chunk: Chunk): void {
   const bottom = chunk.cy * CHUNK_SIZE;
   const top = bottom + CHUNK_SIZE;
-  if (top <= TERRAIN_TOP_Y) {
-    chunk.fill(SOLID); // entirely ground
-  } else if (bottom >= TERRAIN_TOP_Y) {
+  if (bottom >= TERRAIN_TOP_Y) {
     chunk.fill(AIR); // entirely build space
-  } else {
-    // Straddles the surface — only reachable if TERRAIN_TOP_Y is moved off a chunk boundary
-    chunk.fill(AIR);
-    for (let ly = 0; ly < TERRAIN_TOP_Y - bottom; ly++) {
-      for (let lz = 0; lz < CHUNK_SIZE; lz++) {
-        for (let lx = 0; lx < CHUNK_SIZE; lx++) chunk.set(lx, ly, lz, SOLID);
-      }
+    return;
+  }
+  if (top <= TERRAIN_TOP_Y - SURFACE_LAYERS) {
+    chunk.fill(STONE_VALUE); // entirely deep ground: ONE value, so this chunk allocates nothing
+    return;
+  }
+  // The surface band: grass on top, dirt under it, stone below. Only chunks in this band materialise.
+  for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+    const y = bottom + ly;
+    if (y >= TERRAIN_TOP_Y) continue; // above the surface is air
+    const value = y === TERRAIN_TOP_Y - 1 ? GRASS_VALUE : y >= TERRAIN_TOP_Y - SURFACE_LAYERS ? DIRT_VALUE : STONE_VALUE;
+    for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx++) chunk.set(lx, ly, lz, value);
     }
   }
 }

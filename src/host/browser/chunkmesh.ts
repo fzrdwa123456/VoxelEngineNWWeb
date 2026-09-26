@@ -1,4 +1,4 @@
-// ===== Chunk meshing: face-culled geometry + the built-in checker material =====
+// ===== Chunk meshing: face-culled geometry, one MATERIAL GROUP per block look (P1.46) =====
 // A face is emitted only when the neighbour on that side is not solid, so:
 //   - a uniformly AIR chunk draws nothing at all (the whole build space is free);
 //   - a uniformly solid chunk with solid neighbours yields NO faces — the streaming system
@@ -18,31 +18,81 @@
 // Geometry is CHUNK-LOCAL (0..CHUNK_SIZE), which also makes the bounding sphere constant — it is
 // set once and never recomputed. The caller positions the mesh at the chunk origin.
 //
-// The surface texture is the engine's own built-in magenta/black checker (CHECKER_TEXTURE_URL),
-// i.e. the "missing block" look, with no resource pack required. Voxel values are already a
-// palette, so switching to blockregistry.ts lookups later is local to this file.
+// ===== ONE GEOMETRY, MANY LOOKS (P1.46) =====
+// A voxel VALUE is a palette index (`data/world/palette.ts`), so a chunk can hold grass, dirt and stone at
+// once — and each of them has its own textures (or a flat colour, or the engine's checker when an install
+// ships no texture at all). three.js draws that with GEOMETRY GROUPS: one group per material, in order, and
+// `mesh.material` an ARRAY. Faces are therefore gathered per "look":
+//
+//   * a LOOK is (voxel value, face kind): top, bottom and side may differ (grass does), and a bottom face
+//     takes the definition's BOTTOM texture;
+//   * the scan runs TWICE — once counting faces per look, then a prefix sum gives each look its slice, then
+//     the same walk writes the faces into those slices. Two passes over the shell is the price of contiguous
+//     groups without a per-face sort, and it keeps the in-place/no-allocation property above;
+//   * `specs` is one entry per group, in `geometry.groups` order, and the CALLER resolves each to a material
+//     (`ChunkMeshFactory.getMaterial`) — the mesher never touches the GPU or the material cache.
 import * as THREE from "three/webgpu";
 // The cube's six faces, their corner UVs and the two capacity knobs are DATA (`data/globals/faces.ts`,
 // `data/globals/gfx.ts`): this file walks the tables, it does not own them.
-import { CHUNK_FACES_INITIAL, CHUNK_FACES_MAX_DOUBLING, type ChunkMaterialState } from "../../data/globals/gfx";
+import {
+  CHUNK_FACES_INITIAL,
+  CHUNK_FACES_MAX_DOUBLING,
+  type ChunkFaceSpec,
+  type ChunkMaterialState,
+} from "../../data/globals/gfx";
 import { CORNER_UVS, FACES, type Face } from "../../data/globals/faces";
 import { AIR, CHUNK_SIZE, type Chunk } from "../../data/world/chunk";
 import type { VoxelWorld } from "../../data/world/world";
-import { CHECKER_TEXTURE_URL } from "../../data/assets/textures";
+import { paletteIdOf } from "../../data/world/palette";
+import { getBlockDef } from "../../data/assets/blockregistry";
+import { CHECKER_TEXTURE_URL, resolveTexture } from "../../data/assets/textures";
 
-/** One material for every chunk (shared texture + nearest filtering for the pixel look). The material is
- *  a GPU object, so it lives in the CHUNK_MATERIAL resource (ecs/presentation.ts) and is created on first
- *  use — the pack chain must be installed before the checker texture can be resolved. */
-export function getChunkMaterial(state: ChunkMaterialState): THREE.MeshLambertMaterial {
-  if (state.material) return state.material;
-  const texture = new THREE.TextureLoader().load(CHECKER_TEXTURE_URL);
+/** The engine's own look, for a block whose definition ships no texture and no colour. */
+function checkerMaterial(): THREE.MeshLambertMaterial {
+  return new THREE.MeshLambertMaterial({ map: textureFrom(CHECKER_TEXTURE_URL) });
+}
+
+function textureFrom(url: string): THREE.Texture {
+  const texture = new THREE.TextureLoader().load(url);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
-  state.material = new THREE.MeshLambertMaterial({ map: texture });
-  return state.material;
+  return texture;
+}
+
+/** The material for one look. `spec` omitted = the engine's checker (the mesher's own fallback and what a
+ *  caller with no groups gets). Cached per SPEC KEY in the CHUNK_MATERIAL resource: a GPU object belongs to
+ *  the world, and one material per look is shared by every chunk that shows it. */
+export function getChunkMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material {
+  if (!spec) {
+    if (!state.material) state.material = checkerMaterial();
+    return state.material;
+  }
+  const hit = state.materials.get(spec.key);
+  if (hit) return hit;
+  const made =
+    spec.texture !== null
+      ? new THREE.MeshLambertMaterial({ map: textureFrom(spec.texture) })
+      : new THREE.MeshLambertMaterial({ color: new THREE.Color(spec.color ?? "#ffffff") });
+  state.materials.set(spec.key, made);
+  return made;
+}
+
+/** The look of one (voxel value, face kind): the definition's face texture, else its flat colour, else the
+ *  engine checker. `kind` is 0 top, 1 bottom, 2 side — the registry has already defaulted top/bottom to the
+ *  side texture, so a definition that sets only `all` (or only `side`) answers for every kind. */
+function specFor(value: number, kind: number): ChunkFaceSpec {
+  const id = paletteIdOf(value);
+  const def = id === null ? undefined : getBlockDef(id);
+  const path = kind === 0 ? def?.top : kind === 1 ? def?.bottom : def?.side;
+  if (path !== undefined) {
+    const url = resolveTexture(path);
+    return { key: url, texture: url, color: null };
+  }
+  if (def?.color !== undefined) return { key: `color:${def.color}`, texture: null, color: def.color };
+  return { key: "checker", texture: CHECKER_TEXTURE_URL, color: null };
 }
 
 /** One chunk's reusable geometry. A rebuild is a single `rebuild()` call: it overwrites the existing
@@ -50,6 +100,8 @@ export function getChunkMaterial(state: ChunkMaterialState): THREE.MeshLambertMa
  *  stays within the capacity already reserved for this chunk. */
 export class ChunkGeometry {
   readonly geometry = new THREE.BufferGeometry();
+  /** One look per material group, in `geometry.groups` order (the caller resolves them to materials). */
+  readonly specs: ChunkFaceSpec[] = [];
   private positions: Float32Array;
   private normals: Float32Array;
   private uvs: Float32Array;
@@ -60,6 +112,12 @@ export class ChunkGeometry {
   private indexAttr: THREE.Uint32BufferAttribute;
   private capacityFaces: number;
   private faceCount = 0;
+  /** Per-scan look bookkeeping: (value, kind) -> slot, how many faces each slot got, where its slice starts
+   *  and how far it has been written. Cleared at the start of every rebuild. */
+  private readonly slotOf = new Map<number, number>();
+  private readonly slotFaces: number[] = [];
+  private readonly slotStart: number[] = [];
+  private readonly slotCursor: number[] = [];
 
   constructor() {
     this.capacityFaces = CHUNK_FACES_INITIAL;
@@ -95,19 +153,44 @@ export class ChunkGeometry {
    *  X/Z for both the chunk lookup and the neighbour tests. */
   rebuild(voxel: VoxelWorld, cx: number, cy: number, cz: number): number {
     this.faceCount = 0;
+    this.specs.length = 0;
+    this.slotOf.clear();
+    this.slotFaces.length = 0;
+    this.geometry.clearGroups();
+
     const chunk = voxel.getChunk(cx, cy, cz);
-    if (chunk !== null && !(chunk.isUniform && chunk.uniformValue === AIR)) {
-      this.scan(voxel, chunk, cx, cy, cz);
+    if (chunk === null || (chunk.isUniform && chunk.uniformValue === AIR)) {
+      this.geometry.setDrawRange(0, 0);
+      return 0;
     }
-    // Indexed geometry: drawRange counts INDICES, and a face is 6 of them
-    this.geometry.setDrawRange(0, this.faceCount * 6);
-    if (this.faceCount > 0) {
+    // Interior voxels of a uniform chunk are surrounded by solid on all six sides -> no faces
+    const uniformSolid = chunk.isUniform && chunk.uniformValue !== AIR;
+
+    // Pass A: count the faces of every look, so each one can be given a contiguous slice.
+    this.scan(voxel, chunk, cx, cy, cz, uniformSolid, true);
+    let total = 0;
+    this.slotStart.length = this.specs.length;
+    this.slotCursor.length = this.specs.length;
+    for (let slot = 0; slot < this.specs.length; slot++) {
+      this.slotStart[slot] = total;
+      this.slotCursor[slot] = total;
+      const faces = this.slotFaces[slot];
+      if (faces > 0) this.geometry.addGroup(total * 6, faces * 6, slot);
+      total += faces;
+    }
+    if (total > 0) {
+      this.reserve(total);
+      // Pass B: the SAME walk, in the same order, writing into the slices pass A reserved.
+      this.scan(voxel, chunk, cx, cy, cz, uniformSolid, false);
+      this.faceCount = total;
       // Same arrays, same length -> three.js re-uploads into the EXISTING GPU buffers
       this.positionAttr.needsUpdate = true;
       this.normalAttr.needsUpdate = true;
       this.uvAttr.needsUpdate = true;
       this.indexAttr.needsUpdate = true;
     }
+    // Indexed geometry: drawRange counts INDICES, and a face is 6 of them
+    this.geometry.setDrawRange(0, this.faceCount * 6);
     return this.faceCount;
   }
 
@@ -122,10 +205,31 @@ export class ChunkGeometry {
     this.geometry.setIndex(this.indexAttr);
   }
 
-  private scan(voxel: VoxelWorld, chunk: Chunk, cx: number, cy: number, cz: number): void {
+  /** The look slot for one face, created on first use (so `specs`/`slotFaces` grow in first-seen order). */
+  private slotFor(value: number, face: Face): number {
+    const kind = face.dir[1] === 1 ? 0 : face.dir[1] === -1 ? 1 : 2;
+    const key = (value << 2) | kind;
+    const hit = this.slotOf.get(key);
+    if (hit !== undefined) return hit;
+    const slot = this.specs.length;
+    this.slotOf.set(key, slot);
+    this.specs.push(specFor(value, kind));
+    this.slotFaces[slot] = 0;
+    return slot;
+  }
+
+  /** One walk over the chunk's emissive voxels. `counting` picks the pass; both passes MUST visit faces in
+   *  the same order, which they do because nothing here depends on the counts. */
+  private scan(
+    voxel: VoxelWorld,
+    chunk: Chunk,
+    cx: number,
+    cy: number,
+    cz: number,
+    uniformSolid: boolean,
+    counting: boolean,
+  ): void {
     const S = CHUNK_SIZE;
-    // Interior voxels of a uniform chunk are surrounded by solid on all six sides -> no faces
-    const uniformSolid = chunk.isUniform && chunk.uniformValue !== AIR;
     const gx0 = cx * S;
     const gy0 = cy * S;
     const gz0 = cz * S;
@@ -144,21 +248,24 @@ export class ChunkGeometry {
       for (let lz = 0; lz < S; lz++) {
         for (let lx = 0; lx < S; lx++) {
           if (uniformSolid && lx > 0 && lx < S - 1 && ly > 0 && ly < S - 1 && lz > 0 && lz < S - 1) continue;
-          if (chunk.get(lx, ly, lz) === AIR) continue;
+          const value = chunk.get(lx, ly, lz);
+          if (value === AIR) continue;
 
           for (const face of FACES) {
             if (solidAt(lx + face.dir[0], ly + face.dir[1], lz + face.dir[2])) continue;
-            this.pushFace(lx, ly, lz, face);
+            const slot = this.slotFor(value, face);
+            if (counting) this.slotFaces[slot]++;
+            else this.writeFace(this.slotCursor[slot]++, lx, ly, lz, face);
           }
         }
       }
     }
   }
 
-  /** Write one face straight into the typed arrays (no intermediate JS array, so no garbage) */
-  private pushFace(lx: number, ly: number, lz: number, face: Face): void {
-    this.reserve();
-    const firstVertex = this.faceCount * 4;
+  /** Write one face straight into the typed arrays (no intermediate JS array, so no garbage). The face index
+   *  is GIVEN: pass B hands out each look's slice in order, which is what makes the groups contiguous. */
+  private writeFace(faceIndex: number, lx: number, ly: number, lz: number, face: Face): void {
+    const firstVertex = faceIndex * 4;
     const positionOffset = firstVertex * 3;
     const uvOffset = firstVertex * 2;
 
@@ -176,23 +283,21 @@ export class ChunkGeometry {
       this.uvs[u + 1] = CORNER_UVS[i][1];
     }
 
-    const io = this.faceCount * 6;
+    const io = faceIndex * 6;
     this.indices[io] = firstVertex;
     this.indices[io + 1] = firstVertex + 1;
     this.indices[io + 2] = firstVertex + 2;
     this.indices[io + 3] = firstVertex;
     this.indices[io + 4] = firstVertex + 2;
     this.indices[io + 5] = firstVertex + 3;
-    this.faceCount++;
   }
 
-  /** Make room for one more face. Growing copies what has already been written, so a mid-scan
-   *  growth needs no rescan: vertex numbering is absolute (face i owns vertices 4i..4i+3), which
-   *  keeps every index already stored valid. This happens at most a few times per chunk. */
-  private reserve(): void {
-    if (this.faceCount < this.capacityFaces) return;
+  /** Make room for `needed` faces (pass B knows the total before it starts, unlike the old per-face
+   *  growth). Growing copies what has already been written, so a growth mid-scan needs no rescan: vertex
+   *  numbering is absolute (face i owns vertices 4i..4i+3), which keeps every index already stored valid. */
+  private reserve(needed: number): void {
+    if (needed <= this.capacityFaces) return;
 
-    const needed = this.faceCount + 1;
     let capacity = this.capacityFaces;
     while (capacity < needed && capacity < CHUNK_FACES_MAX_DOUBLING) capacity *= 2;
     if (capacity < needed) capacity = needed;
