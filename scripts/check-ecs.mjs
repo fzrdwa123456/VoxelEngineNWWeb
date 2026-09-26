@@ -1637,7 +1637,7 @@ check("the HUD host MOUNTS and TAKES DOWN its elements at a BARRIER (P1.34)", ()
   equal(alive(adopted), true, "…and leaves them alive (adopted, not built)");
 });
 
-check("ESC walks the sub-page ladder one rung at a time, and its top rung is not a no-op", () => {
+check("ESC CLOSES the settings box in one step, and its root rung is not a no-op", () => {
   // The reported bug: on the settings LIST, ESC wrote "settings" over "settings" (a no-op), and from a
   // sub-page it wrote null (skipping the list). The ladder is ONE function now (stepBackSettings), shared
   // by ESC, both menus' goBack() and the settings Back buttons.
@@ -1653,11 +1653,11 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
   const trees = {
     pauseRoot: mkPanel("menu.root"),
     pauseMain: mkPanel("settings.panel"),
-    pausePanels: Object.fromEntries(ids.map((id) => [id, mkPanel("settings.panel")])),
+    pausePanels: Object.fromEntries([...ids, "root"].map((id) => [id, mkPanel("settings.panel")])),
     mainRoot: mkPanel("menu.backdrop"),
     mainMain: mkPanel("menu.panel"),
     genPanel: mkPanel("menu.panel"),
-    mainPanels: Object.fromEntries(ids.map((id) => [id, mkPanel("settings.panel")])),
+    mainPanels: Object.fromEntries([...ids, "root"].map((id) => [id, mkPanel("settings.panel")])),
     inventoryPanel: mkPanel("inv.panel"),
   };
   const effects = [];
@@ -1689,9 +1689,10 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
   Object.assign(ui, { mainMenu: true, menu: false, inventory: false, settings: "lang", gen: false });
   nav.step();
   assert(shown(trees.mainPanels.lang), "the language sub-panel is up");
+  assert(shown(trees.mainPanels.root), "and it is inside the settings BOX (P1.49)");
   esc();
-  equal(ui.settings, "settings", "ESC from a sub-page lands on the settings LIST (not past it)");
-  assert(shown(trees.mainPanels.settings) && !shown(trees.mainPanels.lang), "…and that is what is painted");
+  equal(ui.settings, null, "ESC closes the settings box in ONE step (P1.49: there is no list rung to land on)");
+  assert(!shown(trees.mainPanels.root) && !shown(trees.mainPanels.lang), "and the box is DOWN again, with its section");
   esc();
   equal(ui.settings, null, "…and ESC again leaves the settings");
   assert(shown(trees.mainMain), "…back on the main menu's own panel");
@@ -1708,8 +1709,7 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
   ui.settings = "pack";
   nav.step();
   esc();
-  equal(ui.settings, "settings", "ESC from the packs sub-page goes back to the settings LIST");
-  esc();
+  equal(ui.settings, null, "ESC from the packs section closes the box too (P1.49)");
   equal(ui.settings, null, "…then out of the settings");
   effects.length = 0;
   esc();
@@ -1747,7 +1747,7 @@ check("ESC walks the sub-page ladder one rung at a time, and its top rung is not
   Object.assign(ui, { mainMenu: true, menu: false, inventory: false, settings: "lang", gen: false });
   nav.step();
   esc();
-  equal(ui.settings, "settings", "the main-menu ladder is unaffected by the gate");
+  equal(ui.settings, null, "the main-menu ladder is unaffected by the gate");
 
   // …and the composition root has to SUPPLY that answer (a dep that is never injected would read as
   // undefined and refuse everything, which is the same class of miss as the screen that was never

@@ -15,6 +15,7 @@
   "menu.settings": "Settings",
   "menu.toMainMenu": "Back to Main Menu",
   "menu.back": "Back",
+  "settings.graphics": "Graphics",
   "settings.fpsCap": "FPS Cap",
   "settings.unlimited": "Unlimited",
   "settings.vsyncOff": "VSync: Disabled (restart to apply)",

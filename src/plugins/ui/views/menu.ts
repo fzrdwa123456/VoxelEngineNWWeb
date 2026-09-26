@@ -143,7 +143,9 @@ export interface SettingsPanels {
   /** Hide all of them (the caller shows its own main panel). */
   hideAll(): void;
   /** The four panel widgets, for the system that paints modal visibility (ui.navigation). */
-  readonly entities: Readonly<Record<SettingsPanelId, Entity>>;
+  /** One entry per SECTION, plus `root` - the settings BOX itself (P1.49), up whenever a section is
+   *  selected. `ui.navigation` paints both from `UI_MODAL.settings`, so the box and its sections agree. */
+  readonly entities: Readonly<Record<SettingsPanelId | "root", Entity>>;
 }
 
 // Shared settings panel: FPS cap slider + vsync toggle + language collection + resource pack
@@ -160,27 +162,52 @@ export function buildSettingsPanel(
 ): SettingsPanels {
   const actions = world.resource(UI_ACTIONS);
 
+  // THE BOX (P1.49): one panel, a LEFT nav column and a RIGHT content area. There are no sub-panels any
+  // more - a nav button SELECTS a section (it writes `UI_MODAL.settings`, the same state as before), and
+  // `ui.navigation` paints the box plus whichever section that value names.
+  const settingsRoot = spawnPanel(world, root, "settings.panel", { hidden: true });
+  const split = spawnPanel(world, settingsRoot, "settings.split");
+  const nav = spawnPanel(world, split, "settings.nav");
+  const content = spawnPanel(world, split, "settings.content");
+  // The sections are LAYOUT-NEUTRAL containers inside the content area: the box around them is the panel, so
+  // a section must not draw a second border of its own.
   const panels: Record<SettingsPanelId, Entity> = {
-    settings: spawnPanel(world, root, "settings.panel", { hidden: true }),
-    lang: spawnPanel(world, root, "settings.panelWide", { hidden: true }),
-    pack: spawnPanel(world, root, "settings.panel", { hidden: true }),
+    settings: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
+    lang: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
+    pack: spawnPanel(world, content, "settings.pageRows", { hidden: true }),
+  };
+  // THE LEFT NAV: one row per section, and the PAGE host mounts its rows into this SAME column (P1.49), so a
+  // page a plugin contributes (the key bind page) becomes a nav item instead of an entry button.
+  const navRows: { id: SettingsPanelId; entity: Entity }[] = [
+    { id: "settings", entity: spawnButton(world, nav, "settings.choice", `${id}.section`, "settings", "settings.graphics") },
+    { id: "pack", entity: spawnButton(world, nav, "settings.choice", `${id}.section`, "pack", "settings.resourcepacks") },
+    { id: "lang", entity: spawnButton(world, nav, "settings.choice", `${id}.section`, "lang", "settings.languageFont") },
+  ];
+  onUiAction(actions, `${id}.section`, (value) => show(value as SettingsPanelId));
+  /** Which nav row is the selected one. The selection IS `UI_MODAL.settings`, so this only mirrors it. */
+  const renderNav = (): void => {
+    const current = world.resource(UI_MODAL).settings;
+    for (const row of navRows) setUiSelected(world, row.entity, current === row.id);
   };
   // Which sub-panel is up is DATA (`UI_MODAL.settings`), not a closure variable: ui.navigation paints the
   // panels from it and the ESC step-back reads it, so there is one answer. These two functions only
   // write that state (and refresh the PUSHED labels, whose strings are composed rather than bound).
   const show = (which: SettingsPanelId | null): void => {
     world.resource(UI_MODAL).settings = which;
-    // The panel's PUSHED text (the cap label, whose string is composed rather than bound) is refreshed
-    // when it opens. The bound slider needs no such thing: it tracks the value in force every frame.
+    renderNav();
+    // The panel's PUSHED text (the cap label, whose string is composed rather than bound) is refreshed when
+    // its section opens. The bound slider needs no such thing: it tracks the value in force every frame.
     if (which === "settings") {
       renderCap();
       renderScaleLabel();
     }
+    // The pack list is a PUSH too (it comes from disk): refresh it whenever its section is selected.
+    if (which === "pack") renderPacks();
   };
   const hideAll = (): void => show(null);
 
   // --- FPS cap slider: 30..240, maxed = unlimited (0) ---
-  spawnLabel(world, panels.settings, "settings.title", "menu.settings");
+  spawnLabel(world, settingsRoot, "settings.title", "menu.settings");
   spawnLabel(world, panels.settings, "settings.label", "settings.fpsCap");
   const capValue = spawnLabel(world, panels.settings, "settings.value", "", { raw: true });
   const capSlider = spawnSlider(
@@ -235,9 +262,7 @@ export function buildSettingsPanel(
     }
   });
 
-  // --- Language & fonts: entry button + two-column sub-panel ---
-  spawnButton(world, panels.settings, "settings.btn", `${id}.openLang`, "", "settings.languageFont");
-  onUiAction(actions, `${id}.openLang`, () => show("lang"));
+  // --- Language & fonts: a SECTION now (the nav selects it) ---
 
   spawnLabel(world, panels.lang, "settings.title", "settings.languageFont");
   const choiceWrap = spawnPanel(world, panels.lang, "settings.columns");
@@ -258,17 +283,10 @@ export function buildSettingsPanel(
     key: font,
     entity: spawnButton(world, fontCol, "settings.choice", `${id}.font`, font, `fonts.${font}`),
   }));
-  spawnButton(world, panels.lang, "settings.btn", `${id}.langBack`, "", "menu.back");
   onUiAction(actions, `${id}.lang`, (value) => setLang(value as string));
   onUiAction(actions, `${id}.font`, (value) => setFontId(value as "pixel" | "system"));
-  onUiAction(actions, `${id}.langBack`, () => show("settings"));
 
-  // --- Resource packs: entry button + sub-panel listing game\resourcepacks\ ---
-  spawnButton(world, panels.settings, "settings.btn", `${id}.openPack`, "", "settings.resourcepacks");
-  onUiAction(actions, `${id}.openPack`, () => {
-    show("pack");
-    renderPacks();
-  });
+  // --- Resource packs: a SECTION now, listing game\resourcepacks\ ---
 
   spawnLabel(world, panels.pack, "settings.title", "settings.resourcepacks");
   const packScroll = spawnPanel(world, panels.pack, "settings.scrollArea");
@@ -279,8 +297,6 @@ export function buildSettingsPanel(
     meta: spawnLabel(world, row, "settings.rowMeta", "", { raw: true }),
   }));
   const packEmpty = spawnLabel(world, panels.pack, "settings.empty", "settings.packsEmpty");
-  spawnButton(world, panels.pack, "settings.btn", `${id}.packBack`, "", "menu.back");
-  onUiAction(actions, `${id}.packBack`, () => show("settings"));
 
   const renderPacks = (): void => {
     const packs = listPacks();
@@ -309,13 +325,13 @@ export function buildSettingsPanel(
   // have. Pages are mounted as its CHILDREN, so the layout decides the position and the data decides how many
   // rows there are. (Mounting them straight into the settings panel appended them after the Back button:
   // creation order IS render order, and the reconciler never re-orders.)
-  const pageRows = spawnPanel(world, panels.settings, "settings.pageRows");
+  const pageRows = spawnPanel(world, nav, "settings.pageRows");
   world.resource(UI_PAGE_HOSTS).push({
     world,
     id,
     settingsPanel: panels.settings,
     rowContainer: pageRows,
-    root,
+    root: content,
     show: (page) => show(page as SettingsPanelId | null),
     log: opts.log,
   });
@@ -338,7 +354,7 @@ export function buildSettingsPanel(
   }));
   onUiAction(actions, `${id}.windowMode`, (value) => opts.onSetWindowMode(value as WindowMode));
 
-  spawnButton(world, panels.settings, "settings.btn", `${id}.back`, "", "menu.back");
+  spawnButton(world, settingsRoot, "settings.btn", `${id}.back`, "", "menu.back");
   onUiAction(actions, `${id}.back`, () => {
     hideAll();
     opts.onBack();
@@ -410,7 +426,7 @@ export function buildSettingsPanel(
     openPanel: () => (world.resource(UI_MODAL).settings as SettingsPanelId | null),
     show,
     hideAll,
-    entities: panels,
+    entities: { ...panels, root: settingsRoot },
   };
 }
 
@@ -507,7 +523,7 @@ export class Menu {
   get mainPanelEntity(): Entity {
     return this.mainPanel;
   }
-  get panelEntities(): Readonly<Record<SettingsPanelId, Entity>> {
+  get panelEntities(): Readonly<Record<SettingsPanelId | "root", Entity>> {
     return this.panels.entities;
   }
 }

@@ -15,6 +15,7 @@
   "menu.settings": "設定",
   "menu.toMainMenu": "メインメニューに戻る",
   "menu.back": "戻る",
+  "settings.graphics": "画面設定",
   "settings.fpsCap": "FPS上限",
   "settings.unlimited": "無制限",
   "settings.vsyncOff": "垂直同期: 無効(再起動で適用)",

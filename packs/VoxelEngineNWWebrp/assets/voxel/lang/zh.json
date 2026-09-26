@@ -15,6 +15,7 @@
   "menu.settings": "设置",
   "menu.toMainMenu": "回到主菜单",
   "menu.back": "返回",
+  "settings.graphics": "画面设置",
   "settings.fpsCap": "帧率上限",
   "settings.unlimited": "无限",
   "settings.vsyncOff": "垂直同步: 已关闭(重启生效)",

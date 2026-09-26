@@ -34,12 +34,14 @@ export interface NavigationTrees {
   /** The full-screen frost under every menu (see data/assets/theme.ts, `menu.backdrop`). */
   readonly backdrop: Entity;
   readonly pauseMain: Entity;
-  readonly pausePanels: Readonly<Record<SettingsPanelId, Entity>>;
+  /** One entry per SECTION plus `root`, the settings box (P1.49); the caller passes what it built. */
+  readonly pausePanels: Readonly<Record<SettingsPanelId | "root", Entity>>;
   /** The main menu: root, main panel, world-type picker and its four settings panels */
   readonly mainRoot: Entity;
   readonly mainMain: Entity;
   readonly genPanel: Entity;
-  readonly mainPanels: Readonly<Record<SettingsPanelId, Entity>>;
+  /** The same for the main menu copy of the shared panel. */
+  readonly mainPanels: Readonly<Record<SettingsPanelId | "root", Entity>>;
   /** The inventory/backpack panel (the hotbar is always up, so it is not navigation) */
   readonly inventoryPanel: Entity;
 }
@@ -88,8 +90,9 @@ export const UI_NAVIGATION_ACCESS: SystemAccess = {
  *  skipped a level (straight to the container panel). */
 export function stepBackSettings(ui: UiModalState): void {
   if (ui.gen) ui.gen = false;
-  else if (ui.settings === "settings") ui.settings = null;
-  else if (ui.settings !== null) ui.settings = "settings";
+  // ONE RUN, not a ladder (P1.49): the settings box is a single panel with a section nav, so there is no
+  // "back to the list" rung any more - stepping back CLOSES the box.
+  else if (ui.settings !== null) ui.settings = null;
 }
 
 export class UiNavigationSystem {
@@ -264,12 +267,16 @@ export class UiNavigationSystem {
     setUiVisible(this.world, t.inventoryPanel, ui.inventory && this.deps.inventoryOn());
     // The settings panels are shared by both menus (only one menu is ever up), and the main panel of a
     // menu is up exactly when no settings sub-panel and no world-type picker is.
-    for (const id of Object.keys(t.pausePanels) as SettingsPanelId[]) {
-      setUiVisible(this.world, t.pausePanels[id], ui.menu && ui.settings === id);
+    for (const id of Object.keys(t.pausePanels) as (SettingsPanelId | "root")[]) {
+      if (id !== "root") setUiVisible(this.world, t.pausePanels[id], ui.menu && ui.settings === id);
     }
-    for (const id of Object.keys(t.mainPanels) as SettingsPanelId[]) {
-      setUiVisible(this.world, t.mainPanels[id], ui.mainMenu && ui.settings === id);
+    for (const id of Object.keys(t.mainPanels) as (SettingsPanelId | "root")[]) {
+      if (id !== "root") setUiVisible(this.world, t.mainPanels[id], ui.mainMenu && ui.settings === id);
     }
+    // THE SETTINGS BOX (P1.49): up whenever a section is selected, and it holds the section nav and the
+    // content area. The sections above are its children, so ONE value drives the box and its contents.
+    setUiVisible(this.world, t.pausePanels.root, ui.menu && ui.settings !== null);
+    setUiVisible(this.world, t.mainPanels.root, ui.mainMenu && ui.settings !== null);
     // THE PAGES a plugin contributed (P1.29): their panels belong to this painter, exactly like the four
     // settings panels above. `ui.pages` owns the widgets; WHERE they are shown is decided HERE, in the same
     // pass and from the same state as everything else — painting them from the host (which runs earlier in

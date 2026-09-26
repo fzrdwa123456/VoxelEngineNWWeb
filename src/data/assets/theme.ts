@@ -228,6 +228,9 @@ export type UiRecipe =
   | "settings.btn"
   | "settings.btnRow"
   | "settings.pageRows"
+  | "settings.split"
+  | "settings.nav"
+  | "settings.content"
   | "ui.frost"
   | "settings.choice"
   | "settings.scrollArea"
@@ -409,6 +412,14 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return "text-align:center;font-size:1.25rem;font-weight:600;margin:0.125rem 0 0.375rem;";
     case "settings.range":
       return `width:100%;margin:0 0 0.625rem;accent-color:${c.accentBg};cursor:pointer;`;
+    // THE SPLIT (P1.49): ONE settings panel with a LEFT section nav and a RIGHT content area. It replaced
+    // the sub-panel chain (a list that navigated into sibling panels, each with its own Back button).
+    case "settings.split":
+      return "display:flex;gap:1.25rem;align-items:flex-start;text-align:left;";
+    case "settings.nav":
+      return "display:block;flex:0 0 11rem;";
+    case "settings.content":
+      return "flex:1;min-width:0;";
     case "settings.columns":
       return "display:flex;gap:1.25rem;margin-bottom:0.875rem;";
     case "settings.column":

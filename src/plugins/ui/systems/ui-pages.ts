@@ -24,7 +24,7 @@ import {
   type UiPageHost,
 } from "../../../data/globals/ui-pages";
 import type { SystemAccess, World } from "../../../core/world";
-import { setUiText, setUiVisible, spawnButton, spawnPanel, subtreeOf, UI_TREE } from "../components";
+import { setUiSelected, setUiText, setUiVisible, spawnButton, spawnPanel, subtreeOf, UI_TREE } from "../components";
 
 /** It reads the contributions and the host list, and writes nothing the schedule models (the command applies
  *  the structure). Declared so the report says what it touches. */
@@ -108,7 +108,12 @@ export class UiPagesSystem {
 
   /** The ENTRY rows: up iff their page is mounted. The PANEL is NOT painted here — see the note. */
   private paintEntries(): void {
-    for (const m of this.mounted.values()) setUiVisible(this.world, m.entry, true);
+    // A page row is a NAV ITEM now (P1.49): always visible, and selected while its page is the open section.
+    const current = this.world.resource(UI_MODAL).settings;
+    for (const m of this.mounted.values()) {
+      setUiVisible(this.world, m.entry, true);
+      setUiSelected(this.world, m.entry, current === m.pageId);
+    }
   }
 }
 
