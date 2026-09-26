@@ -240,7 +240,9 @@ export function buildSettingsPanel(
     const meta = spawnLabel(world, ctl, "settings.rowMeta", "", { raw: true });
     const key2 = `${id}.${key}`;
     const value = spawnButton(world, ctl, "settings.rowBtn", `${id}.openList`, key2, initial);
-    const list = spawnPanel(world, panels.settings, "settings.list", { hidden: true });
+    // A child of the ROW: that is what makes `top:100%;right:0` anchor the popup under this row is button
+    // (an absolutely positioned child is out of the flex flow, so it changes no row layout).
+    const list = spawnPanel(world, row, "settings.list", { hidden: true });
     lists.push({ id: key2, entity: list });
     return { row, ctl, meta, list, value };
   };

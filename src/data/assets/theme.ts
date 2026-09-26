@@ -184,6 +184,9 @@ export function defaultUiTheme(): UiTheme {
       '[data-ui-recipe="settings.range"]{opacity:0;pointer-events:none;transition:opacity 120ms ease}' +
       '[data-ui-recipe="settings.optRow"]:hover [data-ui-recipe="settings.range"],' +
       '[data-ui-recipe="settings.range"]:focus-visible{opacity:1;pointer-events:auto}' +
+      // P1.49n: a dropdown ENTRY is a full-width menu row (the same recipe serves an inline chip elsewhere,
+      // and a recipe cannot see its parent - hence a stylesheet rule rather than a second role).
+      '[data-ui-recipe="settings.list"] [data-ui-recipe="settings.rowChoice"]{display:block;width:100%;text-align:left}' +
       "@keyframes capScroll{from{transform:translateX(0)}to{transform:translateX(var(--cap-shift))}}" +
       // **The cursor shape has exactly ONE source.** `recipeStyle()` carries 7 `cursor:pointer`s (button,
       // slider, grid key, list row, chip, hotbar slot), so the pointer becomes a hand as soon as it touches
@@ -561,8 +564,9 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // The section used to STACK a label, a value and a control, so one option was three lines tall and the
     // page read as a form. A row says the same thing in one line - and it is also what makes the reveal in
     // the stylesheet possible: the FPS slider lives INSIDE the row that owns it.
+    // `position:relative` is the ANCHOR of this row is dropdown popup (P1.49n).
     case "settings.optRow":
-      return "display:flex;justify-content:space-between;align-items:center;gap:0.75rem;" +
+      return "position:relative;display:flex;justify-content:space-between;align-items:center;gap:0.75rem;" +
         "padding:0.3125rem 0.25rem;margin:0.0625rem 0;";
     case "settings.rowCtl":
       return "display:flex;align-items:center;gap:0.5rem;flex-shrink:0;";
@@ -577,10 +581,16 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
         `color:${c.btnText};background:${
           state.selected ? (state.hovered ? optionOnHover : optionOn) : state.hovered ? optionHover : "transparent"
         };border:none;border-radius:0.3125rem;cursor:pointer;white-space:nowrap;`;
-    // THE DROPDOWN LIST: a wrapping row of chips, spawned right AFTER its row and hidden until picked. Its
-    // visibility is DATA (`UI_MODAL.settingsList`), painted by ui.navigation like every other panel.
+    // THE DROPDOWN POPUP (P1.49n): it is a child of its ROW and absolutely positioned under it, so it is a
+    // real dropdown - opening one does NOT reflow the rows below it. `top:100%;right:0` puts it flush under
+    // the row and aligns its right edge with the row is (i.e. with the value button). Its visibility is
+    // DATA (`UI_MODAL.settingsList`), painted by ui.navigation like every other panel.
+    // It is a COLUMN of full-width entries - the stylesheet below turns the chips into menu rows when they
+    // sit in here, which is why one entry recipe can serve both the popup and an inline choice.
     case "settings.list":
-      return "display:flex;flex-wrap:wrap;gap:0.375rem;padding:0.125rem 0.25rem 0.4375rem;";
+      return "position:absolute;top:100%;right:0;z-index:5;display:block;min-width:7.5rem;" +
+        "background:rgba(12,12,16,0.94);border:0.0625rem solid rgba(255,255,255,0.14);" +
+        "border-radius:0.375rem;padding:0.25rem;box-shadow:0 0.5rem 1.25rem rgba(0,0,0,.55);";
     case "settings.empty":
       return `font-size:${theme.size.btn};color:${c.textFaint};padding:0.5rem 0;`;
 
