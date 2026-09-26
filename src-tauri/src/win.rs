@@ -424,9 +424,15 @@ pub fn set_cursor_intent(app: &tauri::AppHandle, hwnd: isize, visible: bool) {
     // of the screen the instant you double-click the exe. Only prev == 2 means "the last state was
     // hidden", i.e. we really did leave the game.
     let was_hidden = prev == 2;
+    // **Centring needs the player to be LOOKING at us** (P1.50): it exists so that "opening a menu or the
+    // backpack lands the cursor on the crosshair". The blur path reaches this call as well - losing focus
+    // releases the capture, which flips the intent to visible - and centring there moved the cursor of
+    // whatever application the player had just switched to (the reported "the mouse jumps to the middle
+    // while I am typing in the browser"). Queried OUTSIDE the closure: it is a plain Win32 query.
+    let ours = unsafe { crate::rawinput::foreground_is_ours() };
     let _ = app.run_on_main_thread(move || {
         apply_cursor(visible);
-        if visible && was_hidden && hwnd != 0 {
+        if visible && was_hidden && hwnd != 0 && ours {
             unsafe { center_on(hwnd) };
         }
     });
@@ -448,17 +454,25 @@ pub fn cursor_sentinel(app: &tauri::AppHandle) {
     if want == 0 {
         return;
     }
+    // **NOT OUR FOREGROUND = NOT OUR CURSOR** (P1.50). This used to keep correcting while the player was in
+    // another application. The cursor belongs to the FOREGROUND thread, so a correction there is at best
+    // ignored, and this path also CENTRED the cursor on every correction while the desire was visible
+    // (the next comment) - which is exactly the reported "the mouse snaps to the middle of the game window
+    // while I am typing in the browser", and it fired 1-6 times a second (RAWMON cursorFix) because a
+    // background window disagrees with `GetCursorInfo` constantly. The shape is repaired when the player
+    // comes back (the focus-GAIN path and the frontend reapplyCursor), and the sentinel resumes on its
+    // very next tick, so standing down costs nothing.
+    if !unsafe { crate::rawinput::foreground_is_ours() } {
+        return;
+    }
     let visible = want == 1;
     if cursor_visible_now() == visible {
         return;
     }
-    let hwnd = CURSOR_HWND.load(Ordering::Relaxed);
-    let _ = app.run_on_main_thread(move || {
-        apply_cursor(visible);
-        if visible && hwnd != 0 {
-            unsafe { center_on(hwnd) };
-        }
-    });
+    // **A CORRECTION NEVER CENTRES** (P1.50). Centring belongs to the hidden -> visible INTENT transition
+    // (see set_cursor_intent, guarded by was_hidden AND by the foreground). Doing it here, unguarded, made
+    // every disagreement between the desire and the system an unconditional SetCursorPos(window centre).
+    let _ = app.run_on_main_thread(move || apply_cursor(visible));
 }
 
 pub fn cursor_enforced_count() -> u32 {

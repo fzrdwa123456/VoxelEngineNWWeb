@@ -219,7 +219,9 @@ static PROBE_SENT: AtomicBool = AtomicBool::new(false);
 /// (ESC still worked under native capture, which is why it never surfaced).
 /// Three cases are accepted now: the foreground window is ours, the foreground's **root window**
 /// is ours, or the foreground's **owner root window** is ours.
-unsafe fn foreground_is_ours() -> bool {
+/// Visible to the rest of the crate since P1.50: `win.rs` asks the same question before it touches the
+/// cursor or centres it - one predicate, one answer (it already encodes the root/owner-root cases).
+pub(crate) unsafe fn foreground_is_ours() -> bool {
     let fg = GetForegroundWindow();
     if fg == 0 {
         return false;
