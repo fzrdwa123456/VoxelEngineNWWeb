@@ -408,8 +408,13 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     // A DYNAMIC box (P1.49c): the sections differ wildly in width - the key bind page needs the keyboard
     // board PLUS its 11rem chip column, and its bottom grids alone are ~30rem - so the box takes what the
     // content wants up to a viewport-relative cap, and scrolls instead of overflowing on a small window.
+    // `overflow:auto` is the LAST RESORT, and P1.49d shrank the CONTENT instead of leaning on it (see the
+    // kb.* recipes below): the key bind page compresses, so this only ever fires below the 320x240 window
+    // floor. 96vh rather than 86vh is the headroom that buys - at that floor the page needs ~216px while
+    // 86vh gave 206, i.e. a scrollbar for six pixels. The box is centred in `menu.root` and shorter than
+    // either cap at every ordinary window, so the normal look is untouched.
     case "settings.panelAuto":
-      return settingsPanel("min(64rem, 94vw)") + "max-height:86vh;overflow:auto;";
+      return settingsPanel("min(64rem, 94vw)") + "max-height:96vh;overflow:auto;";
     case "settings.title":
       return "font-size:1.375rem;margin-bottom:0.875rem;";
     case "settings.label":
@@ -487,8 +492,12 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return "display:flex;gap:0.75rem;align-items:flex-start;margin-bottom:0.625rem;";
     case "kb.keys":
       return "flex:1 1 auto;min-width:0;user-select:none;";
+    // The chip column is the TALLEST thing on the key bind page (the list alone is `max-height:20rem`),
+    // so its cap is viewport-relative like the rows: 20rem IS 45vh while the UI scale follows the window
+    // height (20rem = 0.444h), so the rem wins at every ordinary size and the vh branch only takes over
+    // under the 8px FONT_MIN floor - where the page would otherwise be taller than the box and scroll.
     case "kb.side":
-      return "width:11rem;flex-shrink:0;max-height:20rem;display:flex;flex-direction:column;gap:0.375rem;" +
+      return "width:11rem;flex-shrink:0;max-height:min(20rem,45vh);display:flex;flex-direction:column;gap:0.375rem;" +
         `background:${c.menuSide};border-radius:0.5rem;padding:0.625rem;overflow:hidden;`;
     case "kb.sideTitle":
       return `font-size:${theme.size.btn};color:${c.textDim};text-align:center;`;
@@ -523,12 +532,28 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
       return "display:flex;gap:1.25rem;justify-content:flex-start;align-items:flex-end;margin-top:0.25rem;";
     case "kb.title":
       return "font-size:1.375rem;margin-bottom:0.375rem;";
+    // THE THREE BOTTOM CLUSTERS ARE COMPRESSIBLE (P1.49d). They were fixed-track grids
+    // (`repeat(3,2.2rem)`), and a fixed track does not shrink: a grid is then at least the SUM of its
+    // tracks wide, so as flex items of `kb.bottom` these three bottomed out at ~25.75rem, spilled past
+    // the board is right edge and became the settings box HORIZONTAL scrollbar on a small window, while
+    // the main keyboard - whose keys are flex - shrank to slivers. `minmax(0,1fr)` gives every track a
+    // ZERO minimum, so a cluster shrinks with its row, and `flex:0 1 <its old width>` keeps the rendered
+    // size EXACTLY as it was: no grow (they stay left-aligned) and any ordinary window is wider than the
+    // bases, so nothing shrinks at all. The row height is `min(1.8rem,4vh)` for one level down: 1.8rem IS
+    // 4vh exactly whenever the UI scale follows the window height, and past the 8px root-font floor
+    // (data/globals/uiscale.ts, under 360px tall) the rem stops shrinking while the viewport keeps going -
+    // the vh branch takes over, so the page fits its max-height instead of growing a scrollbar.
+    // tower: 3 columns (PrtSc / arrow cluster)
     case "kb.tower":
-      return "display:grid;grid-template-columns:repeat(3,2.2rem);grid-auto-rows:1.8rem;gap:0.125rem;";
+      return "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:min(1.8rem,4vh);gap:0.125rem;flex:0 1 6.85rem;min-width:0;";
+
+    // mouse: 6 half-column tracks
     case "kb.mouse":
-      return "display:grid;grid-template-columns:repeat(6,1.1rem);grid-auto-rows:1.8rem;gap:0.125rem;";
+      return "display:grid;grid-template-columns:repeat(6,minmax(0,1fr));grid-auto-rows:min(1.8rem,4vh);gap:0.125rem;flex:0 1 7.225rem;min-width:0;";
+
+    // numpad: 4 columns
     case "kb.numpad":
-      return "display:grid;grid-template-columns:repeat(4,2.2rem);grid-auto-rows:1.8rem;gap:0.125rem;";
+      return "display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:min(1.8rem,4vh);gap:0.125rem;flex:0 1 9.175rem;min-width:0;";
 
     // --- inventory ---------------------------------------------------------------------
     case "inv.hotbar":

@@ -273,7 +273,10 @@ export function spawnKeybindPanel(mount: KeybindPanelMount): { panel: Entity; en
         spawnLayoutBox(world, rowEl, "kb.key", flex);
         continue;
       }
-      addKeycap(rowEl, `${flex}height:1.8rem;`, code);
+      // The row height is viewport-capped for the same reason the bottom clusters are (see the kb.tower
+      // recipe): 1.8rem IS 4vh while the UI scale follows the window height, and past the 8px root-font
+      // floor the vh branch shrinks the keyboard instead of making the settings box scroll.
+      addKeycap(rowEl, `${flex}height:min(1.8rem,4vh);`, code);
     }
   }
   // Registered HERE, as soon as the widgets exist: `ui.keybind` renders FROM this spec, so a page that is
