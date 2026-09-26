@@ -2824,6 +2824,16 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "the TWO-STEP CSS nudge exists (the only cure for Chromium's cached cursor) and the next applyCursor completes it");
   assert(/nudgeCursor\(/.test(main),
     "…and both \"we owe an arrow\" paths call it (foreground lost, focus regained)");
+  // **P1.61 - THE PLAN IS DECIDED UNDER THE LOCK THAT APPLIES IT.** It used to be computed on the
+  // CALLER's thread and applied later on the main thread, so two reconciles queued back to back could land
+  // out of order: a `shape=Hidden` plan from before a release arriving after it, i.e. one tick of a shape
+  // nobody had asked for (the boot.log tell is `forced=false` on a Hidden apply that follows an Arrow one).
+  const reconcileBody = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);
+  assert(reconcileBody !== null, "reconcile is read as one block");
+  assert(
+    reconcileBody[1].indexOf("run_on_main_thread") < reconcileBody[1].indexOf("probe_of(&m)"),
+    "…and it decides the plan INSIDE the main-thread closure, from the state it applies it to",
+  );
   const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");

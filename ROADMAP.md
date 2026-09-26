@@ -1305,6 +1305,17 @@ Still outstanding:
   paths (foreground lost, focus regained) and NEVER while we hold the mouse.
   Three new table tests (24 total) pin the guard: it corrects a NULL that came back, it never pushes a
   cursor the system already shows, it expires, and arming it twice is idempotent.
+- **P1.61 - the reconciler decides the plan under the lock that applies it.** `DONE`. P1.60's log had one
+  line left that nobody had asked for: `apply … shape=Arrow forced=true` → `apply … shape=Hidden
+  forced=false` → `apply … shape=Arrow`. The plan used to be computed on the CALLER's thread
+  (`cursor_sentinel`, `cursor_intent`, `mouse_capture`) and applied later inside `run_on_main_thread`, so
+  two reconciles queued back to back could land out of order - the middle plan had been built while a
+  capture was still on (rule 2: `shape=Hidden`) and arrived AFTER the release that switched it off. The
+  `forced=false` is the tell: nothing in the model's CURRENT state could have produced that plan. The probe
+  and the decision now happen inside the closure, under the same `model()` guard that applies them, so the
+  state a plan is built from is the state it is applied to. `probe_of` only reads Win32 - and the main
+  thread is where `SetCursor`/`ClipCursor` have to run anyway - so this costs nothing. The gate pins the
+  ORDER (the closure before the probe), not just the presence of either.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

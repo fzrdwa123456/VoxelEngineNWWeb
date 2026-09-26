@@ -506,20 +506,32 @@ fn apply_shape(m: &mut CursorModel, shape: CursorShape) -> bool {
 
 /// Gather, decide, apply - ON THE MAIN THREAD. Idempotent: a tick that changes nothing makes no call.
 fn reconcile(app: &tauri::AppHandle) {
-    let plan = {
-        let m = model();
-        let p = probe_of(&m);
-        decide(&m, &p)
-        // **The system can disagree with our own record.** `SetCursor` pushes are dropped while another
-        // application owns the cursor, and Chromium answers NULL from its cached cursor for a while after
-        // focus returns (both were caught by the boot.log probes) - so when we WANT the arrow, are focused,
-        // and the system still reports a hidden cursor, the push has to be REPEATED: the plan alone would be
-        // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
-        // never fight the foreground application for the cursor (rule 1 of the model).
-    };
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let mut m = model();
+        // **THE PLAN IS DECIDED HERE, UNDER THE SAME LOCK THAT APPLIES IT (P1.61).**
+        //
+        // It used to be computed on the CALLER's thread and applied later on the main thread, so two
+        // reconciles queued back to back could land out of order: a plan built while a capture was still on
+        // (`shape=Hidden`, rule 2) could arrive AFTER the release that switched it off and put a hidden
+        // cursor on screen for one tick that nobody had asked for. The boot.log caught it exactly -
+        // `apply … shape=Arrow forced=true` → `apply … shape=Hidden forced=false` → `apply … shape=Arrow` -
+        // and `forced=false` on the middle line is the tell: that plan was computed when `relative` was
+        // still true, and nothing in the model's CURRENT state could have produced it.
+        //
+        // Deciding here costs nothing: `probe_of` only READS Win32, and the main thread is where
+        // `SetCursor`/`ClipCursor` have to run anyway. The state a plan is built from is now the state it is
+        // applied to, so the "one writer" claim covers the DECISION and not just the calls.
+        let plan = {
+            let p = probe_of(&m);
+            decide(&m, &p)
+            // **The system can disagree with our own record.** `SetCursor` pushes are dropped while another
+            // application owns the cursor, and Chromium answers NULL from its cached cursor for a while after
+            // focus returns (both were caught by the boot.log probes) - so when we WANT the arrow, are focused,
+            // and the system still reports a hidden cursor, the push has to be REPEATED: the plan alone would be
+            // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
+            // never fight the foreground application for the cursor (rule 1 of the model).
+        };
         let before = (m.clipped, m.shape, m.want, m.relative);
         apply_clip(&mut m, plan.clip);
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
