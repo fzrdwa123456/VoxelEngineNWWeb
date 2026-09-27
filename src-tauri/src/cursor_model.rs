@@ -298,6 +298,34 @@ pub fn centre_of(r: ClipRect) -> ClipPos {
     ClipPos { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }
 }
 
+/// **Where to move the pointer when we HAND THE ARROW BACK** (P1.62g): the crosshair, or `None` for "leave it
+/// where it is". Pure, so the rule is table-testable while the platform half (`win::restore_arrow`) stays
+/// thin - and the applier can safely do it because the pointer IS hidden at that moment.
+///
+/// Why this is not `decide`'s `warp`: that plan is gated on the hidden -> visible TRANSITION
+/// (`m.shape == Hidden`), and handing the arrow back sets that record to Arrow - so a later reconcile sees
+/// "no transition" and never warps. The 911-line boot.log was explicit about it: 16 focus losses while
+/// capturing (Win / Alt+Tab) produced not ONE warp, while every explicit release (ESC, Resume, the backpack -
+/// which stay Hidden until the reconciler plans the Arrow) did warp. Handing the arrow back and centring are
+/// ONE action, so they happen together.
+///
+/// Two guards, both deliberate: a pointer OUTSIDE our window is never moved (P1.62d - the user may be holding
+/// a window by its title bar), and `centre_on_show` can switch the whole thing off.
+pub fn hand_back_warp(m: &CursorModel, p: &CursorProbe) -> Option<ClipPos> {
+    if !m.centre_on_show {
+        return None;
+    }
+    if !contains(intersect(p.client, p.screen), p.pos) {
+        return None;
+    }
+    let target = crosshair_of(p);
+    if p.pos == target {
+        None
+    } else {
+        Some(target)
+    }
+}
+
 /// Is the cursor already at the CROSSHAIR (where opening a menu wants it)? If it is, no warp is planned -
 /// a move the player cannot see is still a move the compositor can show between messages.
 ///
@@ -604,6 +632,25 @@ mod tests {
         let clip = plan.clip.expect("a clip");
         assert!(!rect_is_empty(clip));
         assert!(clip.right <= 1000 && clip.bottom <= 1080, "inside the screen: {clip:?}");
+    }
+
+    #[test]
+    fn handing_the_arrow_back_lands_on_the_crosshair_while_hidden() {
+        // The reported "pressing Win does not centre the cursor" (P1.62g): the hand-back happens in ONE call
+        // (release + arrow), so the crosshair move has to be part of it - `decide`'s warp could not see the
+        // transition any more.
+        let m = model(false, ClipRect::ZERO);
+        let mut p = probe(true);
+        p.pos = ClipPos { x: 120, y: 120 }; // inside the window, away from the crosshair
+        assert_eq!(hand_back_warp(&m, &p), Some(ClipPos { x: 500, y: 400 }));
+        p.pos = ClipPos { x: 500, y: 400 }; // already there: nothing to do
+        assert_eq!(hand_back_warp(&m, &p), None);
+        p.pos = ClipPos { x: 500, y: 20 }; // on the title bar: NEVER yank a pointer we do not own the window of
+        assert_eq!(hand_back_warp(&m, &p), None);
+        let mut off = model(false, ClipRect::ZERO);
+        off.centre_on_show = false;
+        p.pos = ClipPos { x: 120, y: 120 };
+        assert_eq!(hand_back_warp(&off, &p), None, "`centre_on_show` switches it off");
     }
 
     #[test]

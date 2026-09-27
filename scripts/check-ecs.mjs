@@ -2861,6 +2861,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/window_session_active/.test(stripComments(readSource("src-tauri/src/lib.rs"))) &&
       /windowSessionActiveNow/.test(main),
     "\u2026and the world entry ASKS the platform instead of trusting the push (the stages block the loop)");
+  assert(/pub fn hand_back_warp/.test(modelSrc) && /if let Some\(target\) = hand_back_warp/.test(winSrc),
+    "handing the arrow back also lands the pointer on the CROSSHAIR (while it is hidden) - it cannot be left to `decide`, whose warp needs the hidden -> visible transition");
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),

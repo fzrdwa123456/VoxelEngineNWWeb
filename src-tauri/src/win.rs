@@ -207,13 +207,24 @@ pub fn on_foreground_lost() {
 /// `reconcile` marshal it instead.
 pub fn restore_arrow() {
     let mut m = model();
-    m.shape = CursorShape::Unknown; // force `apply_shape` to push even when our record already says Arrow
     let (showing, _) = cursor_info();
     if showing {
-        // The system already shows one: nothing to do, and the record is right again.
+        // The system already shows one: nothing to move, and the record is right again.
         m.shape = CursorShape::Arrow;
         return;
     }
+    // **MOVE IT TO THE CROSSHAIR WHILE IT IS STILL HIDDEN (P1.62g).** The product wants the mouse to come back
+    // ON the crosshair, and this is the one moment it can be moved without the player seeing it move. It has to
+    // happen HERE rather than in `decide`'s warp, because that plan is gated on the hidden -> visible
+    // TRANSITION - and this function is what sets that record to Arrow (see `hand_back_warp` for the log that
+    // pinned it: 16 focus losses while capturing, zero warps).
+    let p = probe_of(&m);
+    if let Some(target) = hand_back_warp(&m, &p) {
+        apply_cursor(false); // hide first: the move must be invisible
+        m.shape = CursorShape::Hidden;
+        warp_to(target.x, target.y);
+    }
+    m.shape = CursorShape::Unknown; // force `apply_shape` to push even when our record already says Arrow
     apply_shape(&mut m, CursorShape::Arrow);
 }
 
@@ -334,7 +345,8 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    arm_arrow_guard, clip_target, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard,
+    arm_arrow_guard, clip_target, decide, forget_intent, hand_back_warp, rect_is_empty, rect_is_zero,
+    tick_arrow_guard,
     ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 

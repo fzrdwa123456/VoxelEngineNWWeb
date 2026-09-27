@@ -1429,6 +1429,19 @@ Still outstanding:
   being inferred. **The general rule, worth keeping: a pushed device fact is trustworthy only when nothing
   long has blocked the loop since it was pushed; a decision taken at the end of a loading sequence must
   QUERY.**
+- **P1.62g - handing the arrow back also lands on the crosshair.** `DONE`. Reported as "the entry fix works,
+  but pressing Win no longer centres the cursor". P1.62's "hand the arrow back in the SAME call"
+  (`win::restore_arrow`, called from the focus-loss branch) is what killed it: `decide`'s crosshair `warp` is
+  gated on the hidden -> visible TRANSITION (`m.shape == Hidden`), and restoring the arrow sets that record to
+  Arrow - so a later reconcile saw "no transition" and never warped. The 911-line boot.log says it exactly:
+  **16 focus losses while capturing (Win / Alt+Tab) and not one warp among them**, while every explicit
+  release (ESC, Resume, the backpack - which stay Hidden until the reconciler plans the Arrow) did warp to the
+  client centre.
+  Handing the arrow back and centring are ONE action, so they now happen together: the rule is a pure
+  `cursor_model::hand_back_warp(m, probe)` (the crosshair, or `None`), and `restore_arrow` hides, warps and
+  shows in that order. Its two guards are the ones the previous rounds established: a pointer OUTSIDE our
+  window is never moved (P1.62d - the user may be holding the window by its title bar) and `centre_on_show`
+  switches the whole thing off. One new table test pins all four cases (28 total).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

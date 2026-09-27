@@ -454,6 +454,19 @@ smooth: enter a world (captured), press Win, and **watch the cursor while the po
     we hold the mouse) and no `[cursor] apply … forced=true` storm
 ```
 
+AFTER the crosshair on hand-back (P1.62g). The report was "pressing Win no longer centres the cursor" - the
+cursor became visible wherever the physical mouse had left it:
+```
+(1) play (mouse captured), press Win: the pause menu comes up and the cursor must appear ON THE CROSSHAIR.
+    boot.log shows it as an `apply … warp=true` line whose `pos=` is the client centre, with the move done
+    while `showing=false`
+(2) Alt+Tab away and back: same
+(3) ESC (explicit release) must still centre (it always did - that path keeps the shape Hidden until the
+    reconciler plans the Arrow)
+(4) while HOLDING the title bar (a capture request, or a release) the pointer must still NOT be moved - the
+    hand-back warp refuses a pointer outside our window
+```
+
 AFTER the QUERIED session check (P1.62f - the entry asks instead of trusting the push). The report was "if I
 do not move it, it does not pause; the moment I move, it pauses", with boot.log saying `window session
 moving=true` 158ms before the entry captured anyway:
