@@ -1316,6 +1316,31 @@ Still outstanding:
   state a plan is built from is the state it is applied to. `probe_of` only reads Win32 - and the main
   thread is where `SetCursor`/`ClipCursor` have to run anyway - so this costs nothing. The gate pins the
   ORDER (the closure before the probe), not just the presence of either.
+- **P1.62 - dragging or resizing the window must not tow the pointer.** `DONE`. Reported as "resizing or
+  dragging the window yanks the cursor once". The mechanism: the capture is a **1x1 px centre lock**, and
+  `ClipCursor` CLAMPS the pointer into the rectangle it is given - so recomputing that rectangle from the
+  new CLIENT rect on every geometry event (which `reclip_mouse_capture` did, one per pixel of a drag) moved
+  the lock to the new centre and dragged the pointer along by the same delta the window moved. It is very
+  visible because Windows draws its own move/size cursor during the modal loop, and the clamp also reaches
+  the input pipeline as a teleport-sized jump. Two rules, modelled on SDL:
+  (1) **A MOVE/SIZE SESSION POSTPONES THE CLIP.** The existing window subclass (the Alt-menu suppressor)
+  now watches `WM_ENTERSIZEMOVE`/`WM_EXITSIZEMOVE` and `WM_NCLBUTTONDOWN`/`WM_NCLBUTTONUP` and only sets a
+  FLAG (a window procedure must not take the model lock: it runs during the dispatch that `ClipCursor`
+  itself can trigger). `reconcile` then hands the pointer back ONCE - releasing the clip is what lets the
+  window be dragged at all, a stale 1px lock freezes the pointer - arms the arrow guard without ticking it,
+  and does nothing else until the session ends; `reclip_mouse_capture` returns early for the same window of
+  time. SDL does exactly this: `WIN_UpdateClipCursor` returns early while `in_title_click ||
+  focus_click_pending || postpone_clipcursor` (SDL_windowswindow.c:1543). A capture request clears the flag,
+  so a swallowed `WM_EXITSIZEMOVE` can never wedge the clip off for the rest of the run.
+  (2) **A RE-CLIP NEVER MOVES THE POINTER.** `clip_target` now keeps the 1px lock AT THE POINTER while the
+  pointer is inside the window (same confinement, zero movement) and falls back to the crosshair only for a
+  pointer that is genuinely outside - so even the geometry changes that never see a session (Aero Snap, DPI,
+  our own fullscreen switch) cannot tow anything. That forced the CROSSHAIR to become its own question
+  (`crosshair_of`): the `warp` on the hidden -> visible transition used to be derived from the clip target,
+  and with the target following the pointer it would have answered "already at the crosshair" for every
+  position and never fired - the `becoming_visible_elsewhere_plans_a_warp` table test caught that.
+  Two new table tests (26 total) pin the pointer rule from both sides (the lock follows the pointer; a
+  moved window keeps the pointer where it is).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

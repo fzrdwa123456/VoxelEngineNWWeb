@@ -453,3 +453,23 @@ smooth: enter a world (captured), press Win, and **watch the cursor while the po
 (4) while playing (captured), nothing new may appear: no nudge lines (the nudge must refuse to run while
     we hold the mouse) and no `[cursor] apply … forced=true` storm
 ```
+
+AFTER the window-session guard (P1.62 - dragging/resizing the window towed the cursor). In a world, with
+the mouse captured:
+```
+(1) DRAG THE TITLE BAR: the pointer must not be pulled anywhere, the view must not turn, and the pause menu
+    must come up (that is onWinGeometry's existing behaviour). Before this, the cursor was towed by the
+    window and the view yanked once
+(2) DRAG A BORDER / CORNER TO RESIZE: same - no yank, no view turn; the window must resize normally (a
+    stale 1px clip would freeze the pointer and make the drag impossible, which is why the session RELEASES
+    it rather than leaving it alone)
+(3) boot.log must show, once per session, `[cursor] window session -> clip released [...]` and NOT a single
+    `apply clip=Some(...)` line between the start and the end of the drag; `reclip` is skipped for the whole
+    session
+(4) after the drag: the cursor must be visible (the arrow guard was armed but not ticked) and the pause
+    menu's Resume must capture again with one LOCK request
+(5) the suppressed case - switch fullscreen/windowed from the settings panel: no pause, no yank, and the
+    clip must follow the new geometry (the pointer is inside the new client, so rule 2 keeps it put)
+(6) Aero Snap (drag the title bar to a screen edge and release): same as (1), and the clip must be right
+    afterwards
+```

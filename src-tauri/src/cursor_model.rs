@@ -150,6 +150,12 @@ pub fn rect_is_empty(r: ClipRect) -> bool {
     r.right <= r.left || r.bottom <= r.top
 }
 
+/// Is `p` inside `r`? Half-open on the right/bottom edges, matching the 1px rects `ClipCursor` is given.
+/// Used by the centre lock to decide whether a re-clip would have to MOVE the pointer (P1.62).
+pub fn contains(r: ClipRect, p: ClipPos) -> bool {
+    !rect_is_empty(r) && p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+}
+
 /// The overlap of two rectangles (`rect_is_empty` reports the "they do not touch" case).
 pub fn intersect(a: ClipRect, b: ClipRect) -> ClipRect {
     ClipRect {
@@ -197,30 +203,87 @@ pub fn fit_into(r: ClipRect, bounds: ClipRect) -> ClipRect {
     ClipRect { left, top, right: left + w, bottom: top + h }
 }
 
-/// The rect to confine the cursor to. PURE (the remote-session flag and the screen bounds arrive in the
-/// probe). Returns `ZERO` when NOTHING can be confined (the window is off the screen).
-pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
+/// The 1px rect at the CLIENT CENTRE - "the crosshair". `adjust` widens it on a remote-desktop session,
+/// where a single pixel is too fine for the coarse absolute positions the RDP client reports (SDL does the
+/// same); the pointer is still inside it, so the lock is just as tight in practice.
+fn centre_lock_at(p: &CursorProbe) -> ClipRect {
+    let adjust = if p.remote_session { 2 } else { 0 };
+    let cx = (p.client.left + p.client.right) / 2;
+    let cy = (p.client.top + p.client.bottom) / 2;
+    ClipRect { left: cx - adjust, top: cy, right: cx + 1 + adjust, bottom: cy + 1 }
+}
+
+/// The region a clip target may live in: the VISIBLE part of the client, kept a couple of pixels away from
+/// the monitor edges (see SCREEN_EDGE_MARGIN). `ZERO` when nothing is visible.
+fn clip_region(p: &CursorProbe) -> ClipRect {
     // **Only the VISIBLE part of the client area can be clipped to**: `ClipCursor` refuses a rectangle that
     // is not on the screen (SDL says so in its own comment: "ClipCursor may fail if rect beyond screen").
     let visible = intersect(p.client, p.screen);
     if rect_is_empty(visible) {
         return ClipRect::ZERO;
     }
-    // The cursor may only live a couple of pixels inside a monitor edge (see SCREEN_EDGE_MARGIN). A visible
-    // sliver thinner than the margin keeps its own (tiny) area: refusing to capture would be worse.
+    // The cursor may only live a couple of pixels inside a monitor edge. A visible sliver thinner than the
+    // margin keeps its own (tiny) area: refusing to capture would be worse.
     let safe = away_from_screen_edges(visible, p.screen, SCREEN_EDGE_MARGIN);
-    let region = if rect_is_empty(safe) { visible } else { safe };
-    let target = if m.centre_lock {
-        let adjust = if p.remote_session { 2 } else { 0 };
-        let cx = (p.client.left + p.client.right) / 2;
-        let cy = (p.client.top + p.client.bottom) / 2;
-        ClipRect { left: cx - adjust, top: cy, right: cx + 1 + adjust, bottom: cy + 1 }
+    if rect_is_empty(safe) {
+        visible
     } else {
+        safe
+    }
+}
+
+/// The rect to confine the cursor to. PURE (the remote-session flag and the screen bounds arrive in the
+/// probe). Returns `ZERO` when NOTHING can be confined (the window is off the screen).
+pub fn clip_target(m: &CursorModel, p: &CursorProbe) -> ClipRect {
+    let region = clip_region(p);
+    if rect_is_zero(region) {
+        return ClipRect::ZERO;
+    }
+    let target = if !m.centre_lock {
         p.client
+    } else if contains(intersect(p.client, p.screen), p.pos) {
+        // **RE-CLIPPING MUST NEVER MOVE THE POINTER (P1.62).**
+        //
+        // `ClipCursor` CLAMPS the pointer into the rectangle it is given. The target used to be the client
+        // centre ALWAYS, so every time the window moved or resized the 1px lock jumped to the new centre and
+        // DRAGGED the pointer along with it - the reported "resizing or dragging the window yanks the cursor
+        // once", which is very visible because Windows draws its own move/size cursor during the modal loop
+        // (so the player watches the pointer get towed by the window). The same clamp also feeds the input
+        // pipeline a teleport-sized jump.
+        //
+        // So: while the pointer is still inside the window, the lock stays exactly where the pointer is - same
+        // confinement (it still cannot wander), zero movement. Only a pointer that is genuinely OUTSIDE falls
+        // back to the crosshair, and that move is required: being captured means being inside.
+        //
+        // The product feel is untouched: "opening a menu lands on the crosshair" is the `warp` plan of the
+        // hidden -> visible transition, which moves the pointer WHILE IT IS HIDDEN - and that warp asks for
+        // `crosshair_of(p)`, NOT for `centre_of(clip_target(...))`: the two are different questions now.
+        let adjust = if p.remote_session { 2 } else { 0 };
+        ClipRect {
+            left: p.pos.x - adjust,
+            top: p.pos.y,
+            right: p.pos.x + 1 + adjust,
+            bottom: p.pos.y + 1,
+        }
+    } else {
+        centre_lock_at(p)
     };
     // A 1px rect whose centre is off the screen cannot be clipped to, and for relative mode it does not
     // matter WHERE inside the window the cursor sits - so the target slides into the visible part.
     fit_into(target, region)
+}
+
+/// **Where "opening a menu" wants the pointer: the crosshair** (the client centre), fitted into what can be
+/// clipped to. Deliberately its own function (P1.62): the CLIP target now follows the pointer while it is
+/// inside the window, so deriving the crosshair from it would answer "the cursor is already at the crosshair"
+/// for every position - and the warp would never fire. (The `becoming_visible_elsewhere_plans_a_warp` table
+/// test caught exactly that.)
+pub fn crosshair_of(p: &CursorProbe) -> ClipPos {
+    let region = clip_region(p);
+    if rect_is_zero(region) {
+        return centre_of(p.client);
+    }
+    centre_of(fit_into(centre_lock_at(p), region))
 }
 
 /// The centre of a rect - where "opening a menu" wants the cursor (the crosshair).
@@ -228,12 +291,14 @@ pub fn centre_of(r: ClipRect) -> ClipPos {
     ClipPos { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }
 }
 
-/// Is the cursor already where the centre lock keeps it? While capturing it is confined to a 1px rect at
-/// the client centre, so this is normally TRUE and no warp is ever planned (which is the point: a move the
-/// player cannot see is still a move the compositor can show between messages).
-pub fn is_at_centre(m: &CursorModel, p: &CursorProbe) -> bool {
-    let t = clip_target(m, p);
-    rect_is_empty(t) || p.pos == centre_of(t)
+/// Is the cursor already at the CROSSHAIR (where opening a menu wants it)? If it is, no warp is planned -
+/// a move the player cannot see is still a move the compositor can show between messages.
+///
+/// It asks `crosshair_of`, NOT `centre_of(clip_target(...))` (P1.62): the clip target follows the pointer
+/// while the pointer is inside the window, so the old question would always answer "yes, already there" and
+/// the warp would never fire.
+pub fn is_at_centre(p: &CursorProbe) -> bool {
+    p.pos == crosshair_of(p)
 }
 
 /// The whole rule set. PURE: no Win32, no globals - this is what the table test drives.
@@ -280,9 +345,9 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     let warp = if shape == CursorShape::Arrow
         && m.shape == CursorShape::Hidden
         && m.centre_on_show
-        && !is_at_centre(m, p)
+        && !is_at_centre(p)
     {
-        Some(centre_of(clip_target(m, p)))
+        Some(crosshair_of(p))
     } else {
         None
     };
@@ -636,5 +701,47 @@ mod tests {
         assert_eq!(ticks, ARROW_GUARD_TICKS as i32);
         tick_arrow_guard(&mut m); // saturating: never wraps around into "armed again"
         assert_eq!(m.arrow_guard, 0);
+    }
+
+    #[test]
+    fn re_clipping_never_moves_the_pointer_while_it_is_inside_the_window() {
+        // The "dragging or resizing the window yanks the cursor" report (P1.62). `ClipCursor` clamps the
+        // pointer into the rect it is given, so a target that always jumps to the CLIENT CENTRE tows the
+        // pointer along with the window. While the pointer is inside, the 1px lock keeps its position.
+        let m = model(true, ClipRect::ZERO);
+        let mut p = probe(true);
+        p.pos = ClipPos { x: 300, y: 200 }; // inside client (100,100)-(900,700)
+        assert_eq!(
+            decide(&m, &p).clip,
+            Some(ClipRect { left: 300, top: 200, right: 301, bottom: 201 }),
+            "the lock follows the pointer instead of pulling it to the centre"
+        );
+        // …and a pointer OUTSIDE the (new) client falls back to the centre: that one move is required.
+        p.pos = ClipPos { x: 20, y: 20 };
+        assert_eq!(
+            decide(&m, &p).clip,
+            Some(ClipRect { left: 500, top: 400, right: 501, bottom: 401 })
+        );
+    }
+
+    #[test]
+    fn a_window_that_moved_keeps_the_pointer_where_it_is() {
+        // The same rule seen from the window's side: the client rect changes (a drag), the pointer does not.
+        let m = model(true, ClipRect::ZERO);
+        let mut moved = probe(true);
+        moved.client = ClipRect { left: 400, top: 300, right: 1200, bottom: 900 };
+        moved.pos = ClipPos { x: 500, y: 400 }; // the OLD centre, still inside the new client
+        assert_eq!(
+            decide(&m, &moved).clip,
+            Some(ClipRect { left: 500, top: 400, right: 501, bottom: 401 }),
+            "the clip follows the window; the pointer stays put"
+        );
+        // Leave the client entirely and the capture moves the pointer back in - which is the whole point of
+        // being captured.
+        moved.pos = ClipPos { x: 100, y: 100 };
+        assert_eq!(
+            decide(&m, &moved).clip,
+            Some(ClipRect { left: 800, top: 600, right: 801, bottom: 601 })
+        );
     }
 }

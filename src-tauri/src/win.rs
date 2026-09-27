@@ -8,7 +8,7 @@
 //   win.setAlwaysOnTop(false)         -> not needed: NW.js kiosk force-topped itself and had to
 //                                        be undone, Tauri does not
 //   cursor.exe / setCursorPos(x, y)   -> compute the window centre here + SetCursorPos
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 
 use tauri::WebviewWindow;
@@ -67,6 +67,11 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     if hwnd == 0 {
         return false;
     }
+    // **A CAPTURE REQUEST ENDS ANY MOVE/SIZE SESSION (P1.62).** The flag is set by `WM_ENTERSIZEMOVE` and
+    // cleared by `WM_EXITSIZEMOVE`; a session that somehow ends without that message (an aborted drag, a
+    // swallowed message) must not be able to wedge the clip OFF for the rest of the run. Asking for the mouse
+    // is the one signal that says "the user is back in the game".
+    CLIP_POSTPONED.store(false, Ordering::SeqCst);
     let mut m = model();
     m.hwnd = hwnd;
     // Capture while NOT the foreground window is refused: the clip would sit over somebody else is screen
@@ -122,6 +127,13 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
 /// by another program and other geometry changes. Returns whether it really re-clipped (for
 /// diagnostics).
 pub fn reclip_mouse_capture() -> bool {
+    // **NOT WHILE THE USER IS DRAGGING OR RESIZING (P1.62)**: recomputing the rectangle is what tows the
+    // pointer along, and the geometry events of a drag arrive one per pixel. `reconcile` hands the pointer
+    // back ONCE at the start of the session instead, and the sentinel re-clips from the settled geometry
+    // after `WM_EXITSIZEMOVE`.
+    if clip_is_postponed() {
+        return false;
+    }
     let mut m = model();
     if m.hwnd == 0 {
         return false;
@@ -509,6 +521,30 @@ fn reconcile(app: &tauri::AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let mut m = model();
+        // **THE USER IS MOVING OR RESIZING THE WINDOW (P1.62).** Hand the pointer back ONCE, then leave the
+        // cursor completely alone until the session ends:
+        //   * re-clipping during the session is what tows the pointer (see `WM_ENTERSIZEMOVE`), and Windows is
+        //     drawing its own move/size cursor anyway;
+        //   * the clip must NOT stay where it was either: a stale 1px lock freezes the pointer, i.e. the window
+        //     could not be dragged at all. Releasing it is what makes the drag behave like a normal window drag;
+        //   * the ARROW GUARD is armed but NOT ticked (we return before the tick), so it is still armed when the
+        //     session ends and the cursor must be visible again;
+        //   * `relative` goes false with it, so nothing downstream believes we are capturing a window the user
+        //     is currently moving. The FRONT END separately treats the geometry change as "hand the mouse back
+        //     and pause" (main.ts::onWinGeometry) - this is the platform half of the same decision.
+        // The 8 ms sentinel picks the settled geometry up on its first tick after `WM_EXITSIZEMOVE`.
+        if clip_is_postponed() {
+            if m.relative || !rect_is_zero(m.clipped) {
+                m.relative = false;
+                apply_clip(&mut m, Some(ClipRect::ZERO));
+                arm_arrow_guard(&mut m);
+                crate::boot_line(
+                    &handle,
+                    &format!("[cursor] window session -> clip released [{}]", trace_of(&m)),
+                );
+            }
+            return;
+        }
         // **THE PLAN IS DECIDED HERE, UNDER THE SAME LOCK THAT APPLIES IT (P1.61).**
         //
         // It used to be computed on the CALLER's thread and applied later on the main thread, so two
@@ -650,6 +686,34 @@ fn apply_cursor(visible: bool) {
 // that is not used.)
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_KEYMENU: usize = 0xF100;
+/// **The user is MOVING or RESIZING the window** (P1.62): `WM_ENTERSIZEMOVE` opens Windows' modal move/size
+/// loop (and is also the moment the system starts drawing the move/size cursor itself), `WM_EXITSIZEMOVE`
+/// closes it. A title-bar click without a move sets/clears the same flag, so a click that ends up snapping
+/// (Aero Snap) is covered too.
+///
+/// Why the cursor code cares: `ClipCursor` CLAMPS the pointer into the rectangle it is given, and our
+/// rectangle is computed from the CLIENT rect - so re-clipping while the window is being dragged tows the
+/// pointer along by the same delta the window moved, which the player SEES (Windows is drawing its own
+/// cursor during that loop) and which the input pipeline receives as a teleport-sized jump. SDL refuses to
+/// touch the clip for exactly this window of time: `WIN_UpdateClipCursor` returns early while
+/// `in_title_click || focus_click_pending || postpone_clipcursor` (SDL_windowswindow.c:1543, set on
+/// `WM_ENTERSIZEMOVE`, cleared on `WM_EXITSIZEMOVE`).
+///
+/// Only a FLAG is set here: the release itself happens in `reconcile` (main thread, under the model lock),
+/// because a window procedure must not take that lock - it runs during message dispatch, including the
+/// dispatch that `ClipCursor`/`SetCursor` can trigger.
+const WM_ENTERSIZEMOVE: u32 = 0x0231;
+const WM_EXITSIZEMOVE: u32 = 0x0232;
+const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+const WM_NCLBUTTONUP: u32 = 0x00A2;
+
+/// See `WM_ENTERSIZEMOVE`: true while the window is in a title-click / move / size session.
+static CLIP_POSTPONED: AtomicBool = AtomicBool::new(false);
+
+/// Is the user moving or resizing the window right now? Read by `reclip_mouse_capture` and `reconcile`.
+fn clip_is_postponed() -> bool {
+    CLIP_POSTPONED.load(Ordering::SeqCst)
+}
 /// The keyboard's "context menu" gesture (the menu key / Shift+F10) also reaches the window as
 /// WM_CONTEXTMENU at the system level: the default handling "gets ready to pop up a menu", and
 /// before popping it up Windows makes the cursor visible — our 8ms cursor sentinel then presses it
@@ -679,6 +743,14 @@ unsafe extern "system" fn menu_suppressor_proc(
         // Swallow it: without calling DefWindowProc neither menu mode nor the context menu starts
         // (so the cursor is never lit up either)
         return 0;
+    }
+    // The move/size session (P1.62). Only the FLAG is touched here - see `WM_ENTERSIZEMOVE`: taking the model
+    // lock inside a window procedure could deadlock against the dispatch that `ClipCursor` itself triggers.
+    // These messages are still FORWARDED (the window needs them to move at all).
+    match msg {
+        WM_ENTERSIZEMOVE | WM_NCLBUTTONDOWN => CLIP_POSTPONED.store(true, Ordering::SeqCst),
+        WM_EXITSIZEMOVE | WM_NCLBUTTONUP => CLIP_POSTPONED.store(false, Ordering::SeqCst),
+        _ => {}
     }
     let old = OLD_WNDPROC.load(Ordering::SeqCst);
     if msg == WM_NCDESTROY && old != 0 {

@@ -2828,6 +2828,18 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // CALLER's thread and applied later on the main thread, so two reconciles queued back to back could land
   // out of order: a `shape=Hidden` plan from before a release arriving after it, i.e. one tick of a shape
   // nobody had asked for (the boot.log tell is `forced=false` on a Hidden apply that follows an Arrow one).
+  // **P1.62 - DRAGGING OR RESIZING THE WINDOW MUST NOT TOW THE POINTER.** `ClipCursor` clamps the pointer
+  // into the rect it is given, and that rect used to be recomputed from the CLIENT rect on every geometry
+  // event: the 1px lock jumped to the new centre and dragged the pointer with the window (and reached the
+  // input pipeline as a teleport-sized jump). Two rules, both pinned here.
+  assert(/WM_ENTERSIZEMOVE/.test(winSrc) && /fn clip_is_postponed/.test(winSrc),
+    "a title-click / move / size session postpones the clip (SDL WIN_UpdateClipCursor does the same)");
+  assert(/CLIP_POSTPONED\.store\(false, Ordering::SeqCst\)/.test(winSrc),
+    "\u2026and a capture request clears it, so a swallowed WM_EXITSIZEMOVE cannot wedge the clip off");
+  assert(/pub fn contains\(/.test(modelSrc) && /contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
+    "re-clipping never moves the pointer while it is inside the window");
+  assert(/pub fn crosshair_of/.test(modelSrc) && /Some\(crosshair_of\(p\)\)/.test(modelSrc),
+    "\u2026and the crosshair is its OWN question: the warp must not follow the pointer");
   const reconcileBody = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);
   assert(reconcileBody !== null, "reconcile is read as one block");
   assert(
