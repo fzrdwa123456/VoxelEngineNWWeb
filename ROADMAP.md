@@ -1610,6 +1610,15 @@ Still outstanding:
      we want hidden is never nudged into view, and while the mouse is captured the condition cannot hold at all.
   Two table tests rewritten around the new rule (including the Win+L sequence end to end: armed at the loss,
   not paid while locked, paid at the unlock); 32/32 pass.
+- **P1.74 - the overlay give-up stops centring at all.** `DONE`, by request. P1.73 paid the centre debt one tick
+  after the Win+; give-up (when the front end's "hand the mouse back" arrived), and the report's verdict was that
+  a visible move is worse than no move: "remove the Win+; centring". So the give-up branch arms NOTHING now -
+  the cursor stays exactly where the overlay left it until the player moves it themselves, and there is no debt
+  left for the not-hidden branch to pay (and no `was_hidden` warp either, since the give-up already applied the
+  Arrow shape). The other hand-backs are untouched: ESC / Resume / the backpack release the mouse while we are
+  in front, and that move really is invisible (the applier hides the cursor first), so they keep centring on the
+  crosshair; a lost foreground still goes through the debt, because its loss-tick move may land nowhere (Win+L).
+  One test flipped from "owes the centring" to "owes nothing"; the gate pins the branch.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

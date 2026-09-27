@@ -624,11 +624,11 @@ AFTER the hand-back centring (P1.73 - the cursor must be ON the crosshair when t
 out of the capture, and Windows must actually DRAW it). The report was "the cursor is visible but not on the
 crosshair, and clicking puts it back on the crosshair". Enter a world (the mouse is captured) and then:
 ```
-(1) Win+; (the emoji/symbol overlay) - the reported case: the pause menu comes up and the cursor must be on the
-    crosshair within a frame or two. boot.log: `cannot hide the cursor (an overlay is showing it)` → one
-    `we owe a centring until the pointer is ON the crosshair (P1.73)` → one `apply … warp=true` whose `pos=` is
-    the client centre. **This path IS allowed to show one visible move** (the overlay's own cursor is what was
-    on screen); what it must NOT do is sit in the wrong place until you click
+(1) Win+; (the emoji/symbol overlay) - the reported case: the pause menu comes up and the cursor must be **left
+    exactly where the overlay left it** (P1.74 removed the centring on this path on purpose: the move is visible
+    there, because the cursor on screen belongs to the overlay). boot.log: `cannot hide the cursor (an overlay is
+    showing it)` → the capture drop → and then **NO** `apply … warp=true` and **NO** `we owe a centring …` line.
+    Moving the mouse afterwards works normally
 (2) Alt+Tab away: the window loses the foreground, the pause menu comes up - and the cursor must ALREADY be on
     the crosshair while the window is still in the background (the hand-back centres it right there; P1.71
     deferred this to the moment you clicked back). Coming back must not move it again

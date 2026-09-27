@@ -2900,8 +2900,9 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/let settle_centre_debt = \(m\.centre_debt && is_at_centre\(p\)\) \|\| \(warp\.is_some\(\) && p\.focused\);/.test(modelSrc),
     "the debt ends on the MEASUREMENT, or on a move issued while IN FRONT (an unfocused call is the one that lands "
     + "nowhere - settling on that is exactly the P1.71 bug)");
-  assert(/arm_centre_debt: owes_centre\(m, p\)/.test(modelSrc),
-    "\u2026the overlay give-up arms it too (and pays it one tick later, when the front end hands the mouse back)");
+  assert(!/arm_centre_debt: owes_centre\(m, p\)/.test(modelSrc) && /if p\.showing && m\.lost_fight_ticks >= LOST_FIGHT_TICKS \{/.test(modelSrc),
+    "\u2026and the overlay give-up owes NOTHING and moves nothing (P1.74): the cursor stays where the overlay left "
+    + "it, instead of jumping to the crosshair a tick later - the move would be watched either way");
   assert(/if plan\.settle_centre_debt \{/.test(winSrc) && /if plan\.arm_centre_debt \{/.test(winSrc),
     "\u2026the platform half records exactly those two transitions");
   assert(/m\.centre_debt = false;/.test(winSrc.split("m.want = 2;")[1].split("let p = probe_of")[0]),

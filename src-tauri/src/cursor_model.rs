@@ -456,12 +456,17 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
         // back instead - the front end pauses, the cursor is legitimately visible again, and the 125 pushes a
         // second stop.
         if p.showing && m.lost_fight_ticks >= LOST_FIGHT_TICKS {
-            // It is a hidden -> visible transition like any other, so it OWES a centring like any other.
-            // **It is paid ONE TICK LATER, when the front end's "hand the mouse back" arrives (`want` 2 -> 1):
-            // here the overlay is still drawing the cursor, so the move would be a move the player watches.**
-            // (P1.73 keeps that one-tick deferral - the boot.log of P1.70 showed the visible jump - but the
-            // payment itself is no longer gated on focus or on "no cursor displayed", which is what used to
-            // leave the debt unpaid until some later accident.)
+            // **AND THIS PATH DOES NOT CENTRE AT ALL (P1.74, by request).** It used to owe a centring and pay it
+            // one tick later, when the front end's "hand the mouse back" arrived. That move is a move the player
+            // WATCHES - the whole reason we gave up is that a cursor is on screen and we cannot hide it (P1.70's
+            // boot.log: "the cursor appears and THEN jumps to the middle") - and the alternative the report
+            // chose is no centring at all: the cursor stays exactly where the overlay left it until the player
+            // moves it themselves. Nothing is owed here, so the retry in the not-hidden branch below has nothing
+            // to pay, and the next tick (shape is Arrow now) cannot plan a `was_hidden` warp either.
+            //
+            // The OTHER hand-backs keep centring: ESC / Resume / the backpack release the mouse while we are in
+            // front (that move is invisible - the applier hides the cursor first), and a lost foreground is
+            // covered by the debt because its loss-tick move may land nowhere (Win+L).
             let release = plan(
                 if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
                 CursorShape::Arrow,
@@ -469,11 +474,7 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
                 None,
                 m.shape == CursorShape::Hidden,
             );
-            return CursorPlan {
-                drop_capture: true,
-                arm_centre_debt: owes_centre(m, p),
-                ..release
-            };
+            return CursorPlan { drop_capture: true, ..release };
         }
         // …otherwise the disagreement is ours to correct: push the hidden shape (that is how a dropped
         // `SetCursor` or a stale Chromium cache gets fixed).
@@ -966,6 +967,8 @@ mod tests {
         // P1.69: the emoji/IME overlay never takes the foreground, so the projection keeps wanting hidden while
         // the system keeps showing a cursor (the log had `enforced` climb 1145 -> 1671 without winning). After
         // ~250 ms it gives up and hands the mouse back, which makes the front end pause.
+        // **P1.74: this path neither moves the pointer NOR owes a centring for later** - the cursor stays where
+        // the overlay left it (the move would be watched either way; see the branch's own note).
         let mut m = model(true, ClipRect::ZERO);
         let mut p = probe(true); // showing = true: somebody else is drawing a cursor
         p.pos = ClipPos { x: 120, y: 120 }; // …and the pointer is away from the crosshair
@@ -979,9 +982,12 @@ mod tests {
             "it does NOT move the pointer: the cursor is visible, so the move would be watched (P1.71)"
         );
         assert!(
-            plan.arm_centre_debt,
-            "…it OWES the centring instead, and pays it at the first invisible moment (P1.71)"
+            !plan.arm_centre_debt,
+            "…and this path owes NO centring either (P1.74, by request): the cursor stays where the overlay \
+             left it, instead of jumping to the crosshair a tick later"
         );
+        // …and that is a decision about THIS path only: the same hand-back through the front end's release does
+        // centre (see `the_centre_debt_is_paid_on_the_first_moment_no_cursor_is_displayed`).
         // A cursor the system already hides is never a lost fight: that is the normal capturing state.
         let mut shown = probe(true);
         shown.showing = false;
