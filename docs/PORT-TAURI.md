@@ -99,25 +99,52 @@ rule 3), but it **accumulates only, never applies**; `frame()` calls `input.fram
 > After switching to one take per frame, the per-frame turn angle = that frame's real mouse displacement, independent of what the main thread is busy with. This was the project's **last
 > `setInterval`**, and the front end now has none left.
 
-### Mouse capture: native ClipCursor + a foreground gate + an ESC bridge
+### Mouse capture: native ClipCursor + the CENTRE LOCK + raw buttons (no Pointer Lock API at all)
 
-The original used the browser's pointer lock (`requestPointerLock`); the Tauri version **does not touch it**, and uses Win32 `ClipCursor` to pin the system
-cursor physically inside the window's client area, paired with `SetCursorPos(centre)` and a 4 ms "cursor sentinel" (`win::cursor_sentinel`,
-which corrects only when "the expected visibility and the system's actual state disagree", zero cost in steady state). Visually equivalent, but it buys three responsibilities the original did not have:
+The original used the browser's pointer lock (`requestPointerLock`); the Tauri version **does not touch it anywhere** (P1.72
+deleted the fallback too: a failed capture now means the mouse stays free, and `input.lock()` refuses outright when the
+raw-input listener is not running, because a capture without deltas would hide and confine the cursor for a view that cannot
+turn). What replaced it:
 
-1. **Foreground gate**: `ClipCursor` **does not check whether the window is foreground** (the browser's `requestPointerLock` refuses by itself),
-   while the back-end raw input is `RIDEV_INPUTSINK` (it receives in the background too). So "capture only while foreground" has to be done explicitly, in three layers:
-   `PointerLockDeps.focused` (the normal path refuses), the automatic relock when `enterWorld` enters a world (if not in the foreground, open the pause
-   menu instead), and `win::capture_foreground_check` (the system-level backstop: two consecutive ticks with the foreground not ours -> release the mouse + restore
-   the cursor + emit `capture-lost`, which the front end handles as a blur).
-2. **ESC's default unlock action**: the browser's "ESC unlocks" happens in the **browser process**, before the page receives the event, and `preventDefault()`
-   cannot stop it. The Rust side installs a `WH_KEYBOARD_LL` hook to swallow ESC (and the menu key / Shift+F10 context-menu gesture),
-   then synthesises a real `KeyboardEvent` from the `esc` event and dispatches it to the page. **But in practice that hook was never called**
-   (`logs\debug.log` shows `HOOKPROBE seen=0`, consistent across several runs) -- so what actually works today is the three pieces "native capture + front-end
-   `preventDefault` + cursor sentinel"; the hook belongs to the part that is "installed but ineffective, and lets the event through on failure".
-3. **Cursor visibility belongs to Rust**: CSS `cursor` is only an intent; what actually decides that the cursor is invisible on screen is the `SetCursor` push,
-   and its timing is unreliable (a push at the moment of losing focus is dropped by the system). So the front end only tells Rust "expect visible/hidden"
-   (the `cursor_intent` command), and the sentinel reconciles it every 4 ms.
+1. **THE CENTRE LOCK (P1.76/P1.77)** - copied from SDL3, which is what Minecraft uses. While we hold the mouse the clip is a
+   **1x1 px box on the crosshair** (`GetSystemMetrics(SM_REMOTESESSION)` widens it to 5x1, exactly SDL's
+   `remote_desktop_adjustment`; `SDL_windowswindow.c:397-403`, used at `:1598-1632`, driven by
+   `SDL_HINT_MOUSE_RELATIVE_MODE_CENTER`, which defaults on). Windows then refuses to move the pointer out of that box, so
+   **the pointer physically cannot move while captured** - which also means there is nothing to "centre": the cursor is on
+   the crosshair at every instant, so "opening a menu lands on the crosshair" is a property of the clip rather than of a
+   move. That retired a whole family of rules (see `ROADMAP.md` P1.70-P1.78): P1.62's "drop the capture when the pointer
+   leaves the window", P1.64's one-time "entry move", the centre debt and its payments, and the injected-input repaint.
+   **It deliberately inverts P1.63's invariant** ("the rect given to `ClipCursor` always contains the pointer"): the box does
+   not contain the pointer, and moving it is the mechanism. The drag/resize tow that invariant was protecting against is
+   handled the way SDL handles it - the whole window session releases the clip (`CLIP_POSTPONED` + `win-session`, and the
+   front end pauses), and a capture request while the user holds the frame is refused.
+2. **Foreground gate**: `ClipCursor` **does not check whether the window is foreground**, while the raw input is
+   `RIDEV_INPUTSINK` (it receives in the background too). So "capture only while foreground" is explicit, in three layers:
+   `PointerLockDeps.focused` (the normal path refuses), the automatic capture when `enterWorld` enters a world (if not in
+   the foreground, open the pause menu instead), and `win::capture_foreground_check` (the backstop: the foreground not ours
+   -> release the mouse + restore the cursor + emit `capture-lost`, which the front end handles as a blur).
+3. **RAW BUTTONS (P1.76)**: the button edges come out of the same `WM_INPUT` packets as the deltas
+   (`rawmouse->usButtonFlags` -> two bitmasks -> the `raw-buttons` event -> `input.rawButtons`), which is again what SDL
+   does (`SDL_windowsevents.c:556-573`, `:690-732`) and why Minecraft's break/place keep working while a shell overlay
+   (Win+;, the IME candidate window) owns the click. Ownership is explicit: **raw while captured, DOM while the cursor is
+   free**, so one click is never counted twice; `releaseCapture()` clears the held mouse binds, so a press whose release
+   lands in another window cannot stick across a pause.
+4. **The overlay policy (P1.75)**: an overlay that keeps showing a cursor is detected (`lost_fight_ticks`) and we **stop
+   pushing the shape but KEEP the capture** - the game does not pause, the view keeps turning (raw deltas do not care where
+   the cursor is), and the overlay's own cursor sits still on the crosshair until it closes.
+5. **What Windows does after a lock screen is left alone (P1.78)**: after a Win+L unlock the system reports
+   `showing=false hCursor=<arrow>` for a while (the arrow is set and not drawn) and only draws it when real mouse input
+   arrives; P1.73 forced that with a net-zero injected `SendInput`, and P1.78 deleted it by request, so the cursor now waits
+   for the mouse exactly as it does in any other application.
+6. **Cursor visibility belongs to Rust**: CSS `cursor` is only an intent; what decides that the cursor is invisible on screen
+   is the `SetCursor` push, and its timing is unreliable (a push at the moment of losing focus is dropped by the system). So
+   the front end only tells Rust "expect visible/hidden" (the `cursor_intent` command) and the 4 ms sentinel
+   (`win::cursor_sentinel`) reconciles it.
+7. **ESC needs no bridge any more.** The `WH_KEYBOARD_LL` hook used to swallow ESC (because the browser's default unlock
+   gesture is handled in the browser process, before the page sees it); with no pointer lock in the picture ESC is an
+   ordinary key, so that half is gone (P1.72). The hook remains for the **context-menu gestures only** (the menu/Apps key
+   and Shift+F10), which Windows answers by revealing the system cursor for a frame.
+
 
 ### How packs.rs and textures.ts divide the work
 

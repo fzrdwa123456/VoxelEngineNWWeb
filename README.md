@@ -57,7 +57,7 @@ npm run app:portable     # 打包成 release\VoxelEngineTauri\：exe + WebView2L
 只验前端（不碰 Rust）：
 
 ```powershell
-npm run check                          # tsc --noEmit(strict) + check:ecs（54 组断言）
+npm run check                          # tsc --noEmit(strict) + check:ecs（69 组断言）
 npm run build                          # tsc && vite build -> dist\
 node scripts/build-all.mjs --cargo     # 再带上 cargo check
 ```
@@ -101,7 +101,7 @@ game\saves\
 | `main.ts` 顶部 `initShell()` | 多了两行 `await preloadShell(); await preloadPacks();` —— Tauri 命令是异步的，而后面所有读都是同步的 |
 
 **除这三个文件外，`src/` 下其余文件、几十处 `logDebug`/`readSettings`/`resolveTexture`
-调用点，一个都没改**；`check:ecs` 的 54 组断言全部照常通过。
+调用点，一个都没改**；`check:ecs` 的断言组全部照常通过（现在是 69 组）。
 
 ## 与原版的已知差异
 
@@ -124,8 +124,9 @@ game\saves\
    **同一个坑还踩了第二次**：`main.ts` 原来写的是 `input.rawInputActive = rawInput.available` ——
    原版 `startRawInput()` 是同步 NAPI，`available` 当场为真；Tauri 版它要等
    `invoke("rawinput_start")` 落地才变真，**同步读一次就永久是 false**。后果是原生鼠标捕获
-   永远不启用（悄悄退回 `requestPointerLock()`，又撞上 ESC 解锁 + 冷却），raw-input 的视角接管
-   也一起失效。现在 `RawInputHandle.ready` 是一个 Promise，调用点必须 await 它。
+   永远不启用（P1.72 之后连"悄悄退回 `requestPointerLock()`"这条回退都删了：捕获直接拒绝，
+   因为没有 raw input 就没有视角来源），raw-input 的视角接管也一起失效。现在
+   `RawInputHandle.ready` 是一个 Promise，调用点必须 await 它。
    **规律：凡是原版靠同步/`require` 拿到的值，移植后都要检查是不是变成异步了。**
 6. **多了一条最早期诊断通道 `logs\boot.log`。** Tauri 里前端挂掉是**静默**的（没窗口、没日志），
    所以 `index.html` 里有一个 classic inline 脚本（在 module 之前）直接打 IPC 全局报错，
@@ -137,43 +138,56 @@ game\saves\
    Tauri 2.11 没暴露这个开关（只有菜单 accelerator），所以走官方的 `with_webview` 拿到
    `ICoreWebView2Controller` 自己设。**代价：Ctrl+C / Ctrl+V / Ctrl+A 也一起关掉**（游戏里不需要）。
    结果写进 `logs\boot.log`。
-8. **ESC 由原生钩子吞掉后再合成给页面**（方案 B，`rawinput.rs` 的 `esc_hook`）。
-   为什么必须这样：ESC 是浏览器的"默认解锁手势"，由**浏览器进程在把按键交给页面之前**处理
-   （`content/browser/renderer_host/render_widget_host_impl.cc` 的 `ForwardKeyboardEvent` →
-   `PreHandleKeyboardEvent`；Chrome 层 `exclusive_access_manager.cc:196` 的 `HandleUserKeyEvent`
-   只看 keycode，从不查页面有没有 preventDefault）。所以 `main.ts:725` 那个 `preventDefault()`
-   （注释引的 #7907）在原生 Chromium/WebView2 上拦不住它 —— 现象就是
-   **第 1 次 ESC 只把光标放出来（浏览器解锁），第 2 次才到页面开暂停菜单**。
-   现在 `WH_KEYBOARD_LL` 钩子把 ESC **吞掉**（仅当前台窗口属于本进程时），
-   经 `esc` 事件推到前端，前端**合成一个真的 KeyboardEvent** 派发到 `document` ——
-   于是 `input.ts`/`main.ts` 的监听器、`ui.navigation` 的 ESC 阶梯全都不用改。
-   **失败即放行**：钩子没装上就不吞，退回旧行为，日志里会写明。
-9. **鼠标捕获不用 Pointer Lock API 了，改走 Win32**（`win.rs::set_mouse_capture` +
-   `platform/mousecapture.ts`）。这是最后一块、也是根因那块：
-   浏览器的指针锁定**有两条页面管不了的策略** —— ESC 强制解锁，以及解锁之后**一段时间拒绝
-   重新锁定**（Blink 的 `kUserEscapeCooldown`，`pointer_lock_controller.cc:273-277`：
-   *"Pointer lock cannot be acquired immediately after the user has exited the lock."*）。
-   页面无权关闭，Tauri/WebView2 也没暴露开关；NW.js 当年能解决是因为它自带一份**打过补丁的
-   Chromium**。所以现在自己捕获：
-   * `ClipCursor(客户区)` 把系统光标**物理夹**在窗口里 + `SetCursorPos(中心)`；
-   * 光标隐藏仍然交给 CSS（`cursor: none`）—— 光标一定落在 webview 上，够用；
-   * **视角旋转强制走 raw input**：`ClipCursor` 把光标夹住后贴边就不动了，`movementX` 会归零
-     （和原来"窗口一半在屏幕外"是同一个原因）；
-   * **失焦必须释放**（Rust 的 `WindowEvent::Focused(false)` + 前端 `onWinBlur` 两边都做），
-     否则 Alt-Tab 之后光标被关在窗口里出不来；
-   * **失败即退回** `requestPointerLock()`，原始输入不可用时也走浏览器那套。
+8. **ESC 现在是普通按键；原生钩子只剩"右键菜单手势"那一半。**
+    （P1.72 之前）ESC 是浏览器的"默认解锁手势"，由**浏览器进程在把按键交给页面之前**处理
+    （`content/browser/renderer_host/render_widget_host_impl.cc` 的 `ForwardKeyboardEvent` →
+    `PreHandleKeyboardEvent`；Chrome 层 `exclusive_access_manager.cc:196` 的 `HandleUserKeyEvent`
+    只看 keycode，从不查页面有没有 preventDefault），所以 `preventDefault()` 拦不住它，只能靠
+    `WH_KEYBOARD_LL` 钩子把 ESC 吞掉再合成一个 KeyboardEvent 给页面。
+    现在**引擎完全不用 Pointer Lock API**（见第 9 条），ESC 就是普通按键、一次就能开暂停菜单，
+    所以钩子的 ESC 那一半已删除（P1.72）；保留的是**菜单键 / Shift+F10**：Windows 收到它们会进入
+    菜单模式并把光标换成箭头（DOM 的 `contextmenu` preventDefault 拦不住操作系统这一步），
+    钩子在 Windows/Chromium 看到之前就把它吞掉。**失败即放行**（钩子没装上就不吞，日志里写
+    `MENU HOOK installed / NOT installed`），且只在本窗口是前台时才吞。
+9. **鼠标捕获不用 Pointer Lock API 了，改走 Win32 + 中心锁**（`win.rs::set_mouse_capture` +
+    `platform/mousecapture.ts`）。浏览器的指针锁定有两条页面管不了的策略 —— ESC 强制解锁、解锁后
+    一段时间拒绝重新锁定（Blink 的 `kUserEscapeCooldown`，`pointer_lock_controller.cc:273-277`），
+    而且**解锁后光标会被放回"上锁前的位置"**，所以"菜单光标落在准星上"根本没法在它上面实现。
+    P1.72 起**彻底不用它**（连回退都删了：原始输入不可用时捕获直接拒绝，而不是偷偷换机制）。现在：
+    * **中心锁（P1.76/P1.77，抄 SDL3 = 抄 MC）**：捕获期间 `ClipCursor` 把系统光标夹在
+      **准星上的 1×1 像素框**里（远程桌面自动放宽到 5×1，就是 SDL 的 `remote_desktop_adjustment`，
+      开关 `SDL_HINT_MOUSE_RELATIVE_MODE_CENTER` 默认开）→ **指针物理上不能移动**，于是
+      "菜单出现时光标在准星上"变成裁剪的副产品，而不是靠"移动"实现。
+      这也让 P1.70→P1.75 那一整串居中补丁（欠账 / 结算 / 在看不见的时刻付账 / 干脆不居中）全部作废，
+      `hand_back_warp` 恒为空操作（保留只作保险）。
+      ⚠️ 它**故意反转了 P1.63 的不变式**（"交给 `ClipCursor` 的矩形必须包含指针"）：现在是
+      "指针在框外也没关系，夹进来就是机制"。当年那个拖窗口会拽指针的问题，按 SDL 的办法兜住：
+      **窗口拖拽/缩放会话期间整个释放裁剪**（`CLIP_POSTPONED` + `win-session`，前端同时暂停），
+      而且"用户手按着边框时的捕获请求"本来就拒绝。
+    * **视角旋转强制走 raw input**：`WM_INPUT` 的增量与光标位置无关（这也是"顶到边不冻"的原因）。
+    * **鼠标按键也走 raw（P1.76）**：同一批 `WM_INPUT` 包里的 `usButtonFlags`（SDL 就是这么做的），
+      所以**叠加层（Win+; / 输入法候选窗）挡着时左右键照样破坏/放置**。归属明确：
+      捕获期间 raw 拥有按键、光标自由时 DOM 拥有（一次点击永不重复计数）；`releaseCapture()` 会
+      清掉按住的鼠标绑定，防止"按下后释放落到别的窗口"卡住。
+    * **叠加层不暂停（P1.75）**：检测到"别人一直在画光标"就**停止推形状、但保住捕获** —— 不暂停、
+      视角继续转，叠加层那个系统光标也被钉在准星上直到它关闭。
+    * **失焦必须释放**（Rust 的 `WindowEvent::Focused(false)` + 前端 `onWinBlur` 两边都做），
+      否则 Alt-Tab 之后光标被关在窗口里出不来。
+    * **锁屏解锁后光标什么时候出现，交回 Windows 默认（P1.78）**：解锁后系统会有一段时间
+      "句柄装了但不画"，要等真实鼠标输入才画。P1.73 曾用一次净位移为 0 的 `SendInput` 强行让它
+      立刻出现，按需求已删除。
 
-   于是 `state.locked` 的含义从"浏览器给了指针锁定"变成"我们自己捕获了鼠标"，
-   日志里换成 `MOUSE CAPTURE on/off`，`LOCKCHANGE` / `LOCK rejected` 不再出现。
+    于是 `state.locked` 的含义从"浏览器给了指针锁定"变成"我们自己捕获了鼠标"，
+    日志里换成 `MOUSE CAPTURE on/off`，`LOCKCHANGE` / `LOCK rejected` 不再出现。
 
-   光标策略的两条要点（都踩过）：
-   * **判据是 `canControl()`，不是 `!isUiModal()`**。加载界面跑在 `load` 模式、不占任何模态面，
-     `!isUiModal` 在那时为真 → 光标被藏起来。`canControl` 在鼠标真被捕获之前一直是 false，
-     所以启动、配置检查、进世界的加载界面、所有菜单都看得见光标，只有真正在玩时才隐藏。
-   * **Alt-Tab 回来要强刷一次光标形状**（`win.rs::nudge_cursor`）。Windows 只在
-     `WM_SETCURSOR`（鼠标移动时才发）里决定光标形状，CSS 的 `cursor` 变化不会主动重发它 ——
-     失焦期间 CSS 从 `none` 改成 `default`，切回来时不会立刻生效，现象就是
-     "**Alt-Tab 回来光标还是隐藏的，动一下鼠标才出现**"。把光标挪 1px 再挪回来即可触发重发。
+    光标策略的两条要点（都踩过）：
+    * **判据是 `canControl()`，不是 `!isUiModal()`**。加载界面跑在 `load` 模式、不占任何模态面，
+      `!isUiModal` 在那时为真 → 光标被藏起来。`canControl` 在鼠标真被捕获之前一直是 false，
+      所以启动、配置检查、进世界的加载界面、所有菜单都看得见光标，只有真正在玩时才隐藏。
+    * **Alt-Tab 回来要强刷一次光标形状**（`platform/pointerlock.ts::nudgeCursor` 的两步 CSS
+      `auto`→`default`，加 Rust 的 `refresh_cursor`）。Windows 只在 `WM_SETCURSOR`（鼠标移动时才发）
+      里决定光标形状，CSS 的 `cursor` 变化不会主动重发它 —— 失焦期间 CSS 从 `none` 改成
+      `default`，切回来时不会立刻生效，现象就是"**Alt-Tab 回来光标还是隐藏的，动一下鼠标才出现**"。
 
 ## 状态（都是实跑出来的）
 

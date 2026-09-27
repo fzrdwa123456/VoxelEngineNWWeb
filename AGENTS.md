@@ -424,7 +424,7 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
    - RECORD components (`world.get(e, CONTROL)`) return an object whose **identity is stable** for
      as long as the component is attached, so caching it for the system's lifetime is correct.
      `insert` throws on duplicates and on dead entities — enforcement, not a suggestion.
-3. **The pointer-lock/input race code in plugins/player/systems/input.ts is timing-sensitive**
+3. **The mouse-capture/input race code in plugins/player/systems/input.ts is timing-sensitive**
    (skipFirstMove, lockGraceUntil, raw-input takeover arbitration, spike guards). It encodes
    real Chromium/Windows races. Do not simplify or reorder without replaying them. The DOM listeners
    still take every one of those decisions at EVENT time and only QUEUE the result; `step()` (fixed
@@ -617,6 +617,50 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
   shape into a widget surface. (`host/browser/blockicons.ts` exports `clampIconSize`/`iconCacheKey` so
   the peek and the bake cannot disagree about what a cache entry is called.)
 
+## The mouse: native capture, the CENTRE LOCK and raw buttons
+
+There is no Pointer Lock API anywhere in the engine (P1.72 deleted even the fallback: a failed capture leaves
+the mouse free, and `input.lock()` refuses outright when the raw-input listener is not running, because a
+capture without deltas would hide and confine the cursor for a view that cannot turn). The cursor's rules are
+`src-tauri/src/cursor_model.rs` - pure, table-tested - with `src-tauri/src/win.rs` as its platform half.
+
+- **The centre lock is the mechanism** (P1.76/P1.77; copied from SDL3, which is what Minecraft uses). While we
+  hold the mouse the clip handed to `ClipCursor` is a **1x1 px box on the crosshair** (5x1 over a remote
+  desktop - SDL's `remote_desktop_adjustment`), and Windows then refuses to move the pointer at all:
+  `SDL_HINT_MOUSE_RELATIVE_MODE_CENTER` is on by default (`SDL_windowswindow.c:397-403`, used at `:1598-1632`).
+  - It **inverts P1.63's invariant** ("the rect handed to `ClipCursor` always contains the pointer"): the box
+    deliberately does not contain it, and clamping it in *is* the mechanism. What that invariant protected is
+    covered elsewhere: the whole window session releases the clip (`CLIP_POSTPONED` + `win-session`, and the
+    front end pauses) - SDL's own `postpone_clipcursor` - and a capture request while the user holds the frame
+    is refused before it gets that far.
+  - Because the pointer is on the crosshair at every instant, **there is nothing left to "centre"**. The whole
+    P1.70-P1.75 family (warp on every hand-back, the centre debt, paying it at an "invisible moment", settling
+    it by measurement, "Win+L does not centre", "Win+; does not centre") is obsolete, and `hand_back_warp` is a
+    permanent no-op kept as a safety net. **Do not reintroduce a "where is the cursor" rule**: with the lock
+    there is no such variable.
+- **The view comes from raw input** (`rawinput.rs`: a hidden `HWND_MESSAGE` window + `RIDEV_INPUTSINK` +
+  `WM_INPUT`), which is why the pointer's position is irrelevant and why holding it against a window edge does
+  not freeze the view.
+- **The buttons come from raw input too** (P1.76): the same packet's `usButtonFlags` -> two bitmasks -> the
+  `raw-buttons` event -> `input.rawButtons`, exactly as SDL does it (`SDL_windowsevents.c:556-573`, `:690-732`).
+  That is what keeps break/place working while a shell overlay (Win+;, the IME candidate window) owns the click
+  - a DOM `mousedown` never happens there. **Ownership is explicit: raw while captured, DOM while the cursor is
+  free** (both sides gated, so one click is never counted twice), and `releaseCapture()` clears the held MOUSE
+  binds so a press whose release lands in another window cannot stick across a pause. The wheel sits in the same
+  union and is deliberately unread: nothing consumes a wheel event yet.
+- **An overlay that keeps showing a cursor** (`lost_fight_ticks`, ~250 ms) makes us stop pushing the shape but
+  **keep the capture**: the game does not pause, the view keeps turning, and the overlay's own cursor sits still
+  on the crosshair until it closes (P1.75). Nothing hands the mouse back on that path any more.
+- **Windows' own behaviour after a lock screen is left alone** (P1.78): after a Win+L unlock the system reports
+  `showing=false hCursor=<arrow>` until real mouse input arrives, and we no longer force it - `SendInput` is not
+  used anywhere (the injected repair of P1.73 is deleted, and the gate pins its absence). The repaint helpers
+  that predate it (`refresh_cursor`, `kick_cursor_repaint`) stay: the P1.73 boot.log proves they do not change
+  visibility (1.5 s of `showing=false` with both of them running).
+- **Foreground is a MEASURED fact**: `ClipCursor` does not care who is in front while raw input arrives in the
+  background, so "capture only while foreground" is explicit - the front end's `focused` gate, the entry driver's
+  refusal, and `win::capture_foreground_check` as the system-level backstop that releases and emits
+  `capture-lost`.
+
 ## Testing
 
 There is no test runner: `node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json` (strict,
@@ -753,13 +797,14 @@ When work lands, move the entry here and delete it there.
   event-time half (which listener fires, when the shield arms) — and NOTHING ELSE: the rubber band is a
   widget whose geometry `ui.keybind` writes, and the pointer position comes from the `POINTER` resource,
   so this file creates no element and listens for no mousemove.
-- **The low-level keyboard hook is INSTALLED BUT NEVER CALLED.** `rawinput.rs::esc_hook` gets a valid hook
-  handle and its thread pumps messages, yet the probe line (`HOOKPROBE seen=…`, written to debug.log 4 s /
-  8 s / 12 s after start) reports `seen=0` after dozens of keystrokes, with the foreground window confirmed
-  to be our own process. So "swallow the key before Windows/Chromium sees it" **is not available in this
-  environment**, and the ESC protection it was written for has never actually been active (harmless in
-  practice: the native capture means there is no browser lock to escape). Anything that must have a key
-  suppressed has to be done in the page or in a window procedure — do not build on the hook.
+- **The low-level keyboard hook is for the CONTEXT-MENU gestures only.** `rawinput.rs::menu_hook` swallows the
+  menu/Apps key and Shift+F10, and only while our window is the foreground: Windows answers those gestures by
+  entering menu mode and switching the cursor to an arrow, which no page-side `preventDefault` can cancel. The
+  ESC half is GONE (P1.72) - it existed only because the browser's pointer lock treats ESC as its default unlock
+  gesture, and this engine no longer uses pointer lock at all (see the mouse section above). The hook **fails
+  open** (no handle -> nothing is swallowed), and whether it works is always visible: `MENU HOOK installed /
+  NOT installed` once at startup, `HOOKPROBE seen=…` 4/8/12 s in, and the RAWMON `hookSeen=` counter - so
+  "installed but ineffective" can never be confused with "never installed".
 - **The menu/Apps key's one-frame cursor flash is a RACE we win, not a call we cancel.** Chromium treats that
   key (and Shift+F10) as "show a context menu" and REVEALS the system cursor for it; the reveal happens
   outside the page (WebView2/Windows), so `preventDefault` cannot stop it. `host/browser/window-guards.ts`
