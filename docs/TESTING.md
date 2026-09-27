@@ -454,6 +454,23 @@ smooth: enter a world (captured), press Win, and **watch the cursor while the po
     we hold the mouse) and no `[cursor] apply … forced=true` storm
 ```
 
+AFTER the client-area clip (P1.62c - the capture no longer centres, and a capture request is never refused).
+This is the one to walk first, because it is the behaviour the whole arc was aiming at:
+```
+(1) enter a world and play: the pointer is hidden and the view turns from raw deltas - WHERE the invisible
+    pointer sits must not matter at all, and nothing may ever yank it to the middle
+(2) open the pause menu: the cursor must land on the crosshair (the hidden -> visible warp). `boot.log`
+    shows it as ONE `apply … warp=true` line with the pointer already moved while `showing=false`
+(3) enter a world again WHILE the pointer is on the title bar or a border (drag the window a little first,
+    then click Singleplayer/Resume): `boot.log` must show `capture on=true ok=true` - never
+    `MOUSE CAPTURE native refused, falling back to requestPointerLock` in debug.log. A fallback means the
+    native capture refused a pointer that was outside the window, which is the P1.62b bug
+(4) drag/resize the window while captured: no tow, no view turn, pause menu on the way out (P1.62/62b lines:
+    `capture dropped: the pointer left the client`)
+(5) the standing ones: the backpack, ESC/Resume, fullscreen<->windowed (must NOT pause), Alt+Tab and the
+    Win key (cursor visible, no flash)
+```
+
 AFTER the window-session guard (P1.62 - dragging/resizing the window towed the cursor). In a world, with
 the mouse captured:
 ```

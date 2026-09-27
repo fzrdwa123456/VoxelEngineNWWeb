@@ -2837,7 +2837,18 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/CLIP_POSTPONED\.store\(false, Ordering::SeqCst\)/.test(winSrc),
     "\u2026and a capture request clears it, so a swallowed WM_EXITSIZEMOVE cannot wedge the clip off");
   assert(/pub fn contains\(/.test(modelSrc) && /contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
-    "re-clipping never moves the pointer while it is inside the window");
+    "an ONGOING capture whose window no longer contains the pointer is dropped, never clamped back in");
+  // **P1.62c - THE CLIP IS THE CLIENT AREA, AND CENTRING IS A SHOW-TIME THING.** The 1px centre lock (and
+  // then the 1px lock that followed the pointer) both had to MOVE the pointer whenever the window moved; the
+  // client area needs no move at all. The crosshair survives as the WARP target only - and entering a capture
+  // must never be refused for a pointer that is outside, or the front end falls back to the browser's lock.
+  assert(/pub fn clip_target\(p: &CursorProbe\)/.test(modelSrc) && /fit_into\(p\.client, region\)/.test(modelSrc),
+    "the capture clips to the CLIENT AREA (no centre lock)");
+  assert(!/centre_lock/.test(modelSrc), "\u2026the centre-lock knob is gone with it");
+  assert(/crosshair_rect\(p\)/.test(modelSrc), "\u2026and the crosshair is only the warp target");
+  const setCaptureSrc = winSrc.split("pub fn set_mouse_capture")[1].split("pub fn reclip_mouse_capture")[0];
+  assert(/let target = clip_target\(&p\);/.test(setCaptureSrc) && !/decide\(/.test(setCaptureSrc),
+    "entering a capture uses the clip target, NOT decide: the drop rule must not refuse it");
   assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
     "a capture whose window no longer contains the pointer is DROPPED (the drag/resize tow)");
   assert(/plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),

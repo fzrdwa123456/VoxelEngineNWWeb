@@ -82,32 +82,35 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     }
     m.relative = true;
     let p = probe_of(&m);
-    if rect_is_empty(p.client) {
+    // **THE CLIP TARGET, NOT `decide` (P1.62c).** `decide` carries rule 2's "the pointer has left the window"
+    // DROP, which is about an ONGOING capture. Applying it here REFUSED the capture whenever the pointer
+    // happened to be outside the client at the moment of the request - and a pointer on the title bar is
+    // exactly where it is right after the user has been dragging the window. The refusal sent the front end to
+    // `requestPointerLock`, i.e. to Chromium's own client-area clip, which tows the pointer on a geometry
+    // change just as happily AND brings back ESC-unlock and its cooldown (boot.log: `MOUSE CAPTURE native
+    // refused, falling back to requestPointerLock`). Entering a capture may move the pointer into the window
+    // ONCE - that is what capture means - and it is invisible, because we hide it first (below).
+    let target = clip_target(&p);
+    if rect_is_zero(target) {
+        // Nothing visible to clip to (the window is off the screen): do NOT pretend to be capturing. The front
+        // end sees `false` and falls back, instead of the cursor escaping the window while the game still
+        // processes clicks.
         m.relative = false;
-        return false;
-    }
-    // The CLIP only. The shape (hidden) arrives through the cursor INTENT, because SetCursor has to run on
-    // the thread that owns the window - and the POSITION is deliberately left alone: SDL calls this
-    // "clip != warp", and warping here is what used to make the cursor jump into the middle and vanish.
-    // It is also unnecessary: raw input deltas do not depend on where the cursor is, and the centre lock
-    // keeps it on the crosshair by itself.
-    let plan = decide(&m, &p);
-    let held = apply_clip(&mut m, plan.clip);
-    if !plan.confined || !held {
-        // Nothing visible to clip to (the window is off the screen) or Windows refused the rectangle: do NOT
-        // pretend to be capturing. The front end sees `false` and falls back, instead of the cursor escaping
-        // the window while the game still processes clicks.
-        apply_clip(&mut m, Some(ClipRect::ZERO));
-        m.relative = false;
-        // A refused capture still gives the mouse BACK, so it owes an arrow exactly like a release does.
         arm_arrow_guard(&mut m);
         return false;
     }
-    // **Hide IN THE SAME CALL** (P1.57). The log showed `capture on=true` arriving while `showing=true`:
-    // clamping here and hiding one frame later (when the front end noticed the CSS change) leaves exactly one
-    // frame with the arrow on screen - the reported "Alt+Tab / Win flashes". Best effort on this thread; if the
-    // system drops the push, the 8ms reconciler re-applies it from the model on the next tick.
+    // **HIDE FIRST, THEN CLIP** (P1.57, one step earlier). `ClipCursor` clamps the pointer into the new
+    // rectangle, and at CAPTURE time that clamp is a real move (the pointer may be on the title bar) - doing
+    // it while the cursor is still visible would show a jump for a frame. So: hide, clip, and if the clip is
+    // refused, hand the arrow straight back and give up.
     apply_shape(&mut m, CursorShape::Hidden);
+    if !apply_clip(&mut m, Some(target)) {
+        m.relative = false;
+        arm_arrow_guard(&mut m);
+        m.shape = CursorShape::Unknown; // force the push: the record already says Hidden
+        apply_shape(&mut m, CursorShape::Arrow);
+        return false;
+    }
     true
 }
 
@@ -320,8 +323,8 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    arm_arrow_guard, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard, ClipPos,
-    ClipRect, CursorModel, CursorProbe, CursorShape,
+    arm_arrow_guard, clip_target, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard,
+    ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 
 /// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
@@ -330,7 +333,6 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     hwnd: 0,
     want: 0,
     relative: false,
-    centre_lock: true,
     clipped: ClipRect::ZERO,
     shape: CursorShape::Unknown,
     enforced: 0,
@@ -458,7 +460,6 @@ fn probe_of(m: &CursorModel) -> CursorProbe {
         focused,
         showing,
         client,
-        remote_session: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
         screen,
         pos: ClipPos { x: pt.x, y: pt.y },
     }
@@ -641,8 +642,7 @@ struct CursorInfo {
 const CURSOR_SHOWING: u32 = 0x0000_0001;
 /// MAKEINTRESOURCE(32512)
 const IDC_ARROW: *const u16 = 32512 as *const u16;
-/// `SM_REMOTESESSION`: a remote desktop session needs a larger centre lock (SDL adds the same 2px).
-const SM_REMOTESESSION: i32 = 0x1000;
+
 /// The VIRTUAL SCREEN (every monitor): `ClipCursor` refuses a rectangle that is not on it, so the model
 /// intersects every clip target with this.
 const SM_XVIRTUALSCREEN: i32 = 76;

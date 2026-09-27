@@ -1354,6 +1354,29 @@ Still outstanding:
   the window is never moved (it is a pointer the user is holding a window by). Four older table tests had to
   change with it - they had encoded the OLD "clamp it back into the window" behaviour, which is exactly the
   tow - and two new ones pin the drop and the no-warp rule (28 total).
+- **P1.62c - the clip is the CLIENT AREA, and centring is a SHOW-time thing.** `DONE`, and it REPLACES
+  P1.62's rule (2) and P1.62b's capture-time refusal. The next log showed both: `capture on=true ok=false`
+  followed by `MOUSE CAPTURE native refused, falling back to requestPointerLock` - the drop rule had been
+  applied to the capture REQUEST, and since the pointer was still on the title bar (where it is right after a
+  window drag) the native capture was refused and the game landed on **Chromium's own pointer lock**, which
+  brings back ESC-unlock, its cooldown, and Chromium's client-area clip that tows the pointer just as happily.
+  Two rules, both from the user's own reading of the problem ("capturing should not centre, only showing
+  should") - which is exactly SDL's split: `SDL_HINT_MOUSE_RELATIVE_MODE_CENTER` is an OPTION, and the recentre
+  is an event of entering or leaving relative mode, not something every tick does.
+  (1) **The capture clips to the WHOLE CLIENT AREA** (`clip_target(p) = fit_into(p.client, region)`):
+  `centre_lock` and the `remote_session` 2px adjustment are GONE. Both earlier attempts kept a 1px lock (first
+  at the client centre, then at the pointer) and both had to MOVE the pointer as soon as the window moved out
+  from under it - and `ClipCursor` clamps the pointer into whatever rectangle it is given, so that move IS the
+  tow. The client area needs no move at all; its job is only to keep the (hidden) pointer from wandering onto
+  another application. Where it sits inside the window is irrelevant (the view comes from raw deltas), and
+  "opening a menu lands on the crosshair" is the `warp` of the hidden -> visible transition, which now asks
+  `crosshair_of(p)` (a 1px rect at the client centre) and still moves the pointer while it is hidden.
+  (2) **A capture REQUEST is never refused for a pointer that is outside the window.** `set_mouse_capture` uses
+  `clip_target` directly instead of `decide` (whose rule 2 belongs to an ONGOING capture), and it now **hides
+  FIRST and clips after**: the one-time clamp at capture time is then invisible, which is P1.57's lesson one
+  step earlier in the same call. If the clip is refused, the arrow is handed straight back and the front end
+  may still fall back - but only for a genuinely unclippable window.
+  Two tests were removed with the rule they pinned and two replaced it (26 total).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
