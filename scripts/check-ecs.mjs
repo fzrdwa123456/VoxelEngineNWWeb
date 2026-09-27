@@ -2842,14 +2842,18 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // then the 1px lock that followed the pointer) both had to MOVE the pointer whenever the window moved; the
   // client area needs no move at all. The crosshair survives as the WARP target only - and entering a capture
   // must never be refused for a pointer that is outside, or the front end falls back to the browser's lock.
-  assert(/pub fn clip_target\(p: &CursorProbe\)/.test(modelSrc) && /fit_into\(p\.client, region\)/.test(modelSrc),
-    "the capture clips to the CLIENT AREA (no centre lock)");
+  assert(/pub fn clip_target\(p: &CursorProbe\)/.test(modelSrc) && /let target = if contains\(client_visible, p\.pos\)/.test(modelSrc),
+    "the clip target ALWAYS contains the pointer (client inside it, the whole WINDOW on the frame)");
+  assert(/pub window: ClipRect/.test(modelSrc) && /fn window_rect/.test(winSrc) && /GetWindowRect/.test(winSrc),
+    "\u2026which is why the probe reads the whole window rect");
+  assert(/contains\(clip, p\.pos\)/.test(modelSrc), "and no rule may exclude the pointer: moving it is what towed the window");
+  assert(/fit_into\(target, region\)/.test(modelSrc), "the capture clips to the client area, or to the window rect on the frame");
   assert(!/centre_lock/.test(modelSrc), "\u2026the centre-lock knob is gone with it");
   assert(/crosshair_rect\(p\)/.test(modelSrc), "\u2026and the crosshair is only the warp target");
   const setCaptureSrc = winSrc.split("pub fn set_mouse_capture")[1].split("pub fn reclip_mouse_capture")[0];
   assert(/let target = clip_target\(&p\);/.test(setCaptureSrc) && !/decide\(/.test(setCaptureSrc),
     "entering a capture uses the clip target, NOT decide: the drop rule must not refuse it");
-  assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
+  assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(held_area, p\.pos\)/.test(modelSrc),
     "a capture whose window no longer contains the pointer is DROPPED (the drag/resize tow)");
   assert(/plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),
     "\u2026and the platform half tells the front end about it");

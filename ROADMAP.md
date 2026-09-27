@@ -1377,7 +1377,23 @@ Still outstanding:
   step earlier in the same call. If the clip is refused, the arrow is handed straight back and the front end
   may still fall back - but only for a genuinely unclippable window.
   Two tests were removed with the rule they pinned and two replaced it (26 total).
-- **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
+- **P1.62d - the clip must CONTAIN the pointer, or `ClipCursor` moves it.** `DONE`. The user's next report
+  was "much better, but it still moves a little", and the log had the number: at the moment the capture was
+  established the probe read `pos=(1166,192)` and the trace right after read `pos=(1166,198)` - the pointer
+  had been clamped 6px down into the client, because it was sitting on the TITLE BAR (the user was dragging
+  the window while the world finished loading). Windows' move loop follows the pointer, so the window jumped
+  6px with it. The whole 1px-lock saga (centre, then pointer, then client) had been chasing one invariant:
+  **the rectangle handed to `ClipCursor` must already contain the pointer.**
+  So the probe now carries the WHOLE WINDOW rect (`GetWindowRect`, screen coordinates - `CursorProbe.window`)
+  next to the client rect, and `clip_target` picks the rect that contains the pointer: the CLIENT while the
+  pointer is inside it (normal play, and the screen-edge margin applies), the whole WINDOW while it is on the
+  frame (a title bar or a sizing border - i.e. exactly while the user drags or resizes). `fit_into` still
+  clips to the visible part of the screen, and rule 2's drop now fires only for a pointer outside the
+  WINDOW, not merely outside the client. One precedence rule fell out of it and is pinned by a test: the
+  screen-edge margin (which keeps an invisible cursor off the taskbar's auto-hide band) yields when the
+  pointer itself is in that band - containing the pointer wins, because a clip that excludes it is a clip
+  that MOVES it.
+— write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
   constants or system fields are components now too (BODY, REACH, INTERACTION), so "only one entity

@@ -57,6 +57,17 @@ unsafe fn client_rect_on_screen(hwnd: isize) -> Option<Rect> {
     Some(Rect { left: tl.x, top: tl.y, right: br.x, bottom: br.y })
 }
 
+/// The WHOLE window rectangle in screen coordinates (client + title bar + borders), for the fallback clip
+/// target (P1.62d). `GetWindowRect` already answers in screen coordinates, so there is nothing to convert.
+/// Returns None on failure (the caller then uses the client rect, as before).
+unsafe fn window_rect(hwnd: isize) -> Option<Rect> {
+    let mut rc = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+    if GetWindowRect(hwnd, &mut rc) == 0 {
+        return None;
+    }
+    Some(rc)
+}
+
 /// Turn native mouse capture on/off. Returns whether it worked (on failure the front end falls
 /// back to the browser's requestPointerLock).
 pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
@@ -456,10 +467,16 @@ fn probe_of(m: &CursorModel) -> CursorProbe {
     // move (P1.55 - the centre lock normally means it does not).
     let mut pt = Point { x: 0, y: 0 };
     let _ = unsafe { GetCursorPos(&mut pt) };
+    let window = if m.hwnd == 0 {
+        ClipRect::ZERO
+    } else {
+        unsafe { window_rect(m.hwnd) }.map(as_clip_rect).unwrap_or_default()
+    };
     CursorProbe {
         focused,
         showing,
         client,
+        window,
         screen,
         pos: ClipPos { x: pt.x, y: pt.y },
     }
@@ -943,6 +960,7 @@ struct Point {
 extern "system" {
     fn ClipCursor(rect: *const Rect) -> i32;
     fn GetClientRect(hwnd: isize, rect: *mut Rect) -> i32;
+    fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
     fn ClientToScreen(hwnd: isize, point: *mut Point) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
     fn GetCursorInfo(info: *mut CursorInfo) -> i32;

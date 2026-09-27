@@ -454,6 +454,19 @@ smooth: enter a world (captured), press Win, and **watch the cursor while the po
     we hold the mouse) and no `[cursor] apply … forced=true` storm
 ```
 
+AFTER the window-rect clip (P1.62d - the clip must contain the pointer). The one to walk first:
+```
+(1) START A DRAG AND ENTER A WORLD IN THE MIDDLE OF IT (grab the title bar, then click Singleplayer/Resume
+    while the window is still held): the window must NOT jump. `boot.log` must show the capture's clip as
+    the WINDOW rect - `clipped=(…)` clearly larger than the client - and the pointer position must be
+    IDENTICAL in the `before=` and `after=` traces of the `capture on=true` line. A few px of difference is
+    the P1.62d bug (6px was reported)
+(2) play normally: the clip is the client area again (the sentinel tightens it within a tick), the pointer is
+    hidden, nothing is centred and nothing drifts
+(3) the standing ones: pause menu lands on the crosshair (one `warp=true` while hidden), drag/resize does not
+    tow and pauses, and no `native refused, falling back to requestPointerLock` in debug.log
+```
+
 AFTER the client-area clip (P1.62c - the capture no longer centres, and a capture request is never refused).
 This is the one to walk first, because it is the behaviour the whole arc was aiming at:
 ```
