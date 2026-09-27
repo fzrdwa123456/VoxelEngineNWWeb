@@ -710,15 +710,13 @@ fn reconcile(app: &tauri::AppHandle) {
             }
             warp_to(pos.x, pos.y);
         }
-        // **"THE ARROW IS SET AND NOT DRAWN" (P1.73/P1.77).** The last piece the boot.log exposed: after a Win+L
-        // unlock the system reported `showing=false hCursor=65539` for 1.5 s while `enforced` climbed by 62 -
-        // the pointer WAS on the crosshair and the arrow WAS set, and the desktop simply did not draw it, until
-        // a physical mouse move. Injected input is the one thing MEASURED to fix that, so this sends a net-zero
-        // one - **BEFORE the shape is pushed (P1.77)**: the move it makes is real (a zero-delta injection is
-        // ignored), and running it first means it happens while nothing is displayed yet, exactly like the warp
-        // above. (P1.73 called it after `apply_shape`, so the freshly shown arrow twitched 1 px - reported as
-        // "the cursor still moves slightly".)
-        maybe_nudge_stuck_cursor(&handle, &m, &p);
+        // **NO CURSOR REPAIR IS FORCED HERE ANY MORE (P1.78).** The last piece the boot.log exposed was that after
+        // a Win+L unlock the system reports `showing=false hCursor=65539` for a while - the arrow IS set, the
+        // pointer IS on the crosshair, and the desktop simply does not draw it until real mouse input arrives.
+        // P1.73 "fixed" that by injecting a net-zero move, which made the cursor appear with the first tick
+        // instead of the first mouse move - and the report's verdict is that this is Windows' own behaviour and
+        // should be left alone. So it is gone (see the note where the FFI used to be): after an unlock the cursor
+        // waits for the mouse, exactly as it does everywhere else. Nothing here replaces it.
         // The model compared the plan with the SYSTEM (`GetCursorInfo`), not with our own record: a dropped
         // push or a stale Chromium cache has to be corrected in BOTH directions.
         if plan.force_shape {
@@ -1120,34 +1118,7 @@ struct Point {
     y: i32,
 }
 
-// ===== `SendInput` (P1.73): the only way to make Windows REPAINT the cursor overlay =====
-//
-// Why it is needed (boot.log, after a Win+L unlock): for 1.5 s and some 62 pushes the system answered
-// `showing=false hCursor=65539` - the arrow handle IS set, the pointer IS on the crosshair, and nothing is
-// DRAWN. It only appeared when the player physically moved the mouse, by which time the hand had already taken
-// the pointer off the crosshair ("Win+L is still not centred" was really this). `SetCursor` (already set),
-// a `SetCursorPos` jog (the reconciler's own `kick_cursor_repaint`, MSDN: a program moving the cursor does
-// NOT count as "the mouse") and a synthetic `WM_SETCURSOR` (it only asks Chromium to set the shape it has
-// already set) all left it undrawn. Injected input, on the other hand, goes through the input stack exactly
-// like the real thing - which is the one event we MEASURED to fix it.
-const INPUT_MOUSE: u32 = 0;
-const MOUSEEVENTF_MOVE: u32 = 0x0001;
-
-#[repr(C)]
-struct MouseInput {
-    dx: i32,
-    dy: i32,
-    mouse_data: u32,
-    dw_flags: u32,
-    time: u32,
-    dw_extra_info: usize,
-}
-
-#[repr(C)]
-struct Input {
-    type_: u32,
-    mi: MouseInput,
-}
+// ===== (the injected-input cursor repair lived here from P1.73 to P1.77 - see the note further down) =====
 
 extern "system" {
     fn ClipCursor(rect: *const Rect) -> i32;
@@ -1161,7 +1132,6 @@ extern "system" {
 fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
-    fn SendInput(count: u32, inputs: *const Input, cb_size: i32) -> u32;
     // These two are also declared in rawinput.rs (not pub there, so they are declared again here;
     // separate modules declaring the same Win32 symbol is legal and links to the same import)
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
@@ -1172,47 +1142,14 @@ fn GetSystemMetrics(index: i32) -> i32;
     fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
 }
 
-/// One net-zero injected move (`+1px`, then back), which is what makes Windows redraw the cursor overlay
-/// (see the note above). Net position change is 0, so it cannot be seen and cannot accumulate - the same
-/// symmetric jog `kick_cursor_repaint` does, but through the input stack.
-fn nudge_cursor_overlay() {
-    let one = |dx: i32| Input {
-        type_: INPUT_MOUSE,
-        mi: MouseInput { dx, dy: 0, mouse_data: 0, dw_flags: MOUSEEVENTF_MOVE, time: 0, dw_extra_info: 0 },
-    };
-    let events = [one(1), one(-1)];
-    unsafe {
-        SendInput(events.len() as u32, events.as_ptr(), std::mem::size_of::<Input>() as i32);
-    }
-}
-
-/// **The system says "the arrow is set" and is not drawing it** (P1.73): nudge the overlay, at most once every
-/// 500 ms, and only while we WANT the cursor visible and we are the foreground.
-///
-/// The three terms are the exact signature the boot.log showed (`want=1`, `showing=false`, `hCursor=65539`):
-/// a NULL/never-set handle is a different disease (Chromium's stale cache, the arrow guard's job), and a cursor
-/// we want HIDDEN must never be nudged into view. While the mouse is captured the condition cannot hold, so the
-/// injected move can never disturb the view.
-fn maybe_nudge_stuck_cursor(handle: &tauri::AppHandle, m: &CursorModel, p: &CursorProbe) {
-    if m.want != 1 || !p.focused || p.showing {
-        return;
-    }
-    let (_, hcursor) = cursor_info();
-    if hcursor == 0 {
-        return;
-    }
-    if !trace_gap_ok(500) {
-        return;
-    }
-    nudge_cursor_overlay();
-    crate::boot_line(
-        handle,
-        &format!(
-            "[cursor] the arrow is SET but not displayed -> nudging the overlay (P1.73) [{}]",
-            trace_of(m)
-        ),
-    );
-}
+// (`SendInput` and the net-zero injected move lived here from P1.73 to P1.77: they were the only way found to
+// make Windows DRAW a cursor it had the handle for but was not displaying, which is what a Win+L unlock leaves
+// behind - the cursor came back with the first tick instead of the first mouse move. **P1.78 removed it BY
+// REQUEST**: the post-unlock hiding is Windows' own behaviour and the report prefers it left alone, so the
+// cursor after an unlock now waits for the mouse exactly as it does in every other application. The repaint
+// nudges that predate it - `refresh_cursor` (a synthetic `WM_SETCURSOR`) and `kick_cursor_repaint` (the
+// symmetric `SetCursorPos` jog) - are still here and change nothing about visibility: the P1.73 boot.log shows
+// the cursor staying undrawn for 1.5 s with both of them running.)
 
 /// ===== Option A: turn off WebView2's **browser accelerator keys** =====
 ///

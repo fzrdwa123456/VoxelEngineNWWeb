@@ -2942,27 +2942,18 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "\u2026so the 'cannot hide the cursor -> handing the mouse back' line is gone with it");
   assert(/an overlay is showing the cursor: keeping the capture and pausing nothing \(P1\.75\)/.test(winSrc),
     "\u2026replaced by a rate-limited line saying what the code actually decided");
-  // …and the third piece: "the arrow is SET and NOT DRAWN" (Win+L, 1.5 s, `showing=false hCursor=65539`, 62
-  // pushes). Only injected input counts as "the mouse" for Windows, which is why the cure is a net-zero
-  // `SendInput` and not another `SetCursorPos` jog or another `WM_SETCURSOR`.
-  assert(/fn nudge_cursor_overlay\(\)/.test(winSrc) && /MOUSEEVENTF_MOVE/.test(winSrc) &&
-      /SendInput\(events\.len\(\) as u32, events\.as_ptr\(\)/.test(winSrc),
-    "a stuck cursor overlay is nudged with a net-zero injected move (P1.73)");
-  assert(/if m\.want != 1 \|\| !p\.focused \|\| p\.showing \{\s*return;/.test(winSrc),
-    "\u2026only while we WANT the cursor visible, we are in front, and the system says nothing is displayed");
-  assert(/let \(_, hcursor\) = cursor_info\(\);\s*if hcursor == 0 \{\s*return;/.test(winSrc),
-    "\u2026and only when an arrow handle IS set (a NULL handle is the arrow guard's disease, not this one)");
-  assert(/maybe_nudge_stuck_cursor\(&handle, &m, &p\);/.test(winSrc),
-    "\u2026driven from the reconciler, which is where the probe is taken");
-  // …and it runs BEFORE the shape push (P1.77): the injected move is real (a zero-delta injection is ignored by
-  // Windows), so doing it after `apply_shape` made the freshly drawn arrow twitch by a pixel.
-  const reconcileOrder = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);
-  assert(
-    reconcileOrder !== null &&
-      reconcileOrder[1].indexOf("maybe_nudge_stuck_cursor(&handle, &m, &p);") <
-        reconcileOrder[1].indexOf("apply_shape(&mut m, plan.shape);"),
-    "\u2026and the nudge happens while the cursor is still hidden, before its shape is pushed",
-  );
+  // **P1.78 - THE INJECTED-INPUT CURSOR REPAIR IS GONE, BY REQUEST.** From P1.73 it forced Windows to DRAW a
+  // cursor it had the handle for but was not displaying - which is the state a Win+L unlock leaves behind, so
+  // the cursor came back with the first tick instead of the first mouse move. The report's verdict is that this
+  // post-unlock hiding is Windows' own behaviour and should be left alone ("把这个锁屏解锁后重新显示光标的去掉吧
+  // windows默认就行了"). So the whole mechanism is deleted: `nudge_cursor_overlay`, `maybe_nudge_stuck_cursor`,
+  // the `SendInput` declaration, the `INPUT`/`MOUSEINPUT` layouts and the constants. Nothing replaces it - and
+  // the repaint nudges that PREDATE it (`refresh_cursor`, `kick_cursor_repaint`) stay, because the P1.73 log
+  // proves they do not change visibility (1.5 s of `showing=false` with both of them running).
+  assert(!/SendInput|MOUSEEVENTF_MOVE|nudge_cursor_overlay|maybe_nudge_stuck_cursor|struct MouseInput/.test(winSrc),
+    "the injected net-zero move is gone: Windows' own post-unlock hiding is left alone (P1.78)");
+  assert(!/the arrow is SET but not displayed/.test(winSrc),
+    "\u2026and with it the log line that announced it");
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),

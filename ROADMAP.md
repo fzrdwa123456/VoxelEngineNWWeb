@@ -1692,6 +1692,19 @@ Still outstanding:
      warp follows ("every move in this system happens while the cursor is hidden"), and the Win+L repaint cure
      is unchanged. The gate pins the ORDER, not just the call.
   One table test extended (1x1 locally, 5x1 with `remote`); 29/29 pass.
+- **P1.78 - the injected-input cursor repair is gone: Windows' own behaviour after a lock is left alone.** `DONE`,
+  by request. P1.73 added a net-zero `SendInput(MOUSEEVENTF_MOVE, +1/-1)` because a Win+L unlock leaves the system
+  reporting `showing=false hCursor=65539` for a second or more - the arrow IS set and NOT drawn - and injected
+  input is the one event MEASURED to make Windows draw it. The user's verdict after P1.77: the cursor now appears
+  immediately after an unlock where Windows would have kept it hidden until the mouse moved, and that default is
+  the behaviour they want back. So `nudge_cursor_overlay`, `maybe_nudge_stuck_cursor`, the `SendInput` declaration,
+  the `INPUT`/`MOUSEINPUT` layouts, the `INPUT_MOUSE`/`MOUSEEVENTF_MOVE` constants and the reconciler call are
+  deleted, and nothing replaces them. The repaint helpers that PREDATE the nudge stay (`refresh_cursor`'s synthetic
+  `WM_SETCURSOR` and `kick_cursor_repaint`'s symmetric `SetCursorPos` jog): the P1.73 boot.log proves they do not
+  change visibility - the cursor stayed undrawn for 1.5 s and ~62 pushes with both of them running, and only went
+  away when the hand moved. The gate now pins their ABSENCE (`SendInput`, `nudge_cursor_overlay`,
+  `maybe_nudge_stuck_cursor`, the log line), so "the cursor after an unlock waits for the mouse" is a decision
+  recorded in code rather than an accident.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
