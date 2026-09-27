@@ -622,7 +622,13 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
 There is no Pointer Lock API anywhere in the engine (P1.72 deleted even the fallback: a failed capture leaves
 the mouse free, and `input.lock()` refuses outright when the raw-input listener is not running, because a
 capture without deltas would hide and confine the cursor for a view that cannot turn). The cursor's rules are
-`src-tauri/src/cursor_model.rs` - pure, table-tested - with `src-tauri/src/win.rs` as its platform half.
+`src-tauri/src/cursor_model.rs` - pure, table-tested - plus the two files that serve it:
+`src-tauri/src/cursor_session.rs` (the cross-platform state machine: when to ask, what to do with the
+answer, what to log) and `src-tauri/src/platform/windows.rs` (the backend - every Win32 call).
+**That split is the port's shape (P1.79).** The seam is `src-tauri/src/platform/mod.rs`, whose header
+lists the exact functions a backend must provide; a new operating system writes ONE file under
+`src-tauri/src/platform/`, and a target with no backend fails with a `compile_error!` naming it.
+`cursor_model.rs`, `cursor_session.rs` and the whole front end stay untouched by a port.
 
 - **The centre lock is the mechanism** (P1.76/P1.77; copied from SDL3, which is what Minecraft uses). While we
   hold the mouse the clip handed to `ClipCursor` is a **1x1 px box on the crosshair** (5x1 over a remote
@@ -658,7 +664,7 @@ capture without deltas would hide and confine the cursor for a view that cannot 
   visibility (1.5 s of `showing=false` with both of them running).
 - **Foreground is a MEASURED fact**: `ClipCursor` does not care who is in front while raw input arrives in the
   background, so "capture only while foreground" is explicit - the front end's `focused` gate, the entry driver's
-  refusal, and `win::capture_foreground_check` as the system-level backstop that releases and emits
+  refusal, and `cursor_session::capture_foreground_check` as the system-level backstop that releases and emits
   `capture-lost`.
 
 ## Testing

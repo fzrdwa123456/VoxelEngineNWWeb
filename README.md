@@ -132,7 +132,7 @@ game\saves\
    所以 `index.html` 里有一个 classic inline 脚本（在 module 之前）直接打 IPC 全局报错，
    `main.ts` 的 preload 也包了 try/catch。内容是 `html loaded` / `error: ...` / `rejection: ...`。
    **排查"窗口不出来"先看这个文件。**
-7. **关掉了 WebView2 的浏览器加速键**（`win.rs::disable_browser_accelerator_keys`）。
+7. **关掉了 WebView2 的浏览器加速键**（`platform/windows.rs::disable_browser_accelerator_keys`）。
    WebView2 默认 `AreBrowserAcceleratorKeysEnabled = true`，于是 **F3 会弹出"查找"**
    （本项目里 F3 是调试面板 + F3/F4 游戏模式选择器的热键）、Ctrl+F 弹查找栏、F5 刷新、F12 开 DevTools。
    Tauri 2.11 没暴露这个开关（只有菜单 accelerator），所以走官方的 `with_webview` 拿到
@@ -149,7 +149,7 @@ game\saves\
     菜单模式并把光标换成箭头（DOM 的 `contextmenu` preventDefault 拦不住操作系统这一步），
     钩子在 Windows/Chromium 看到之前就把它吞掉。**失败即放行**（钩子没装上就不吞，日志里写
     `MENU HOOK installed / NOT installed`），且只在本窗口是前台时才吞。
-9. **鼠标捕获不用 Pointer Lock API 了，改走 Win32 + 中心锁**（`win.rs::set_mouse_capture` +
+9. **鼠标捕获不用 Pointer Lock API 了，改走 Win32 + 中心锁**（`cursor_session.rs::set_mouse_capture` +
     `platform/mousecapture.ts`）。浏览器的指针锁定有两条页面管不了的策略 —— ESC 强制解锁、解锁后
     一段时间拒绝重新锁定（Blink 的 `kUserEscapeCooldown`，`pointer_lock_controller.cc:273-277`），
     而且**解锁后光标会被放回"上锁前的位置"**，所以"菜单光标落在准星上"根本没法在它上面实现。

@@ -594,7 +594,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         let mut emits: u32 = 0;
         let mut last_wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
         let mut last_btn = ACC_BTN_TOTAL.load(Ordering::Relaxed);
-        let mut last_fix = crate::win::cursor_enforced_count() as i32;
+        let mut last_fix = crate::cursor_session::cursor_enforced_count() as i32;
         let mut last_seen = HOOK_SEEN.load(Ordering::Relaxed);
         let mut last_mon = Instant::now();
         while RUNNING.load(Ordering::SeqCst) {
@@ -608,14 +608,14 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             // system lights the cursor up -> the sentinel forces it back"; halving the period halves
             // that interval (the frontend also rewrites the hidden state on the key edge itself, so
             // both sides fight over that same frame).
-            crate::win::cursor_sentinel(&app);
+            crate::cursor_session::cursor_sentinel(&app);
             if tick % 2 == 0 {
                 // Capture must stay on only while in the foreground: when it is not, tear it down
                 // and tell the frontend (which "releases the mouse + pauses if it should").
                 // Releasing on the Rust side alone is not enough — the frontend's
                 // INPUT_STATE.locked is still true, so the view keeps turning and the cursor stays
                 // hidden.
-                if crate::win::capture_foreground_check(&app) {
+                if crate::cursor_session::capture_foreground_check(&app) {
                     let _ = app.emit("capture-lost", ());
                 }
                 // Probe: emitted once each at 4s / 8s / 12s (the old "once 1.5 seconds after
@@ -646,9 +646,9 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             let now = Instant::now();
             if now.duration_since(last_mon).as_millis() >= 1000 {
                 let wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
-                let fix = crate::win::cursor_enforced_count() as i32;
+                let fix = crate::cursor_session::cursor_enforced_count() as i32;
                 let seen = HOOK_SEEN.load(Ordering::Relaxed);
-                let (desired, showing) = crate::win::cursor_state();
+                let (desired, showing) = crate::cursor_session::cursor_state();
                 let line = format!(
                     "RAWMON emits={} wmIn={} btn={} cursorFix={} hookSeen={} ridFail={} desired={} showing={} capture={} fgOurs={}",
                     emits,
@@ -659,7 +659,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                     ACC_RID_FAIL.load(Ordering::Relaxed),
                     desired,
                     if showing { 1 } else { 0 },
-                    if crate::win::capture_active() { 1 } else { 0 },
+                    if crate::cursor_session::capture_active() { 1 } else { 0 },
                     if unsafe { foreground_is_ours() } { 1 } else { 0 },
                 );
                 let _ = app.emit("raw-mon", line);

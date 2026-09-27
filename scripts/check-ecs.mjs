@@ -2788,9 +2788,14 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/reassertCursor\(/.test(focusHandler[1]), "…it re-asserts the cursor intent instead");
   // …and the other half of the flap: a hidden INTENT must not outlive the foreground session, or the 8ms
   // sentinel hides the cursor again on every "focus gained" with nobody asking.
-  const winSrc = stripComments(readSource("src-tauri/src/win.rs"));
+  const winSrc = stripComments(
+    // P1.79 split win.rs into the cross-platform SESSION and the Windows BACKEND. The assertions
+    // below are unchanged; they just read both halves - the session FIRST, so the two `split()`
+    // slices further down still see the capture lifecycle in its original order.
+    readSource("src-tauri/src/cursor_session.rs") + readSource("src-tauri/src/platform/windows.rs"),
+  );
   assert(/pub fn on_foreground_lost\(\)/.test(winSrc) && /forget_intent\(&mut m\)/.test(winSrc),
-    "a foreground loss releases the capture AND forgets the hidden intent (win.rs)");
+    "a foreground loss releases the capture AND forgets the hidden intent (cursor_session.rs)");
   assert(/on_foreground_lost\(\);/.test(stripComments(readSource("src-tauri/src/lib.rs"))),
     "…which the window-focus-lost event calls too");
   // **THE CURSOR DIAGNOSTIC CHANNEL (P1.59).** Every cursor decision — both sides — writes ONE line into
@@ -2799,7 +2804,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/fn cursor_trace\(\) -> String/.test(winSrc), "the Rust table is readable as one line");
   const libSrc = stripComments(readSource("src-tauri/src/lib.rs"));
   assert(/pub fn boot_line\(app: &AppHandle/.test(libSrc),
-    "…through the command bus’ own log helper (win.rs stays free of the log paths)");
+    "…through the command bus’ own log helper (cursor_session.rs stays free of the log paths)");
   assert(/cursor_trace,/.test(libSrc), "…exposed as a READ-ONLY command for the front end’s probes");
   assert(/cursorTrace\(\)/.test(main) && /cursorBoot/.test(main),
     "the front end probes the same table and logs its own intent decisions");

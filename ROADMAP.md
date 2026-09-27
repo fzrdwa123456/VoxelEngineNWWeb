@@ -1705,6 +1705,27 @@ Still outstanding:
   away when the hand moved. The gate now pins their ABSENCE (`SendInput`, `nudge_cursor_overlay`,
   `maybe_nudge_stuck_cursor`, the log line), so "the cursor after an unlock waits for the mouse" is a decision
   recorded in code rather than an accident.
+- **P1.79 - the Windows cursor mechanism moves behind a PLATFORM SEAM (the port's first structural step).** `DONE`,
+  by request ("我只是想把目前属于win的情况搬出来后期任意移植和兼容那两个系统"). `win.rs` (1214 lines) was ONE file mixing
+  three concerns; it is three now, and only one of them knows Windows exists: `cursor_model.rs` (unchanged, 1005
+  lines: the pure rules + the 29 table tests), `cursor_session.rs` (the cross-platform state machine - the one
+  `MODEL` table, the capture lifecycle, `reconcile`, the diagnostics, the Tauri-facing entry points, and **no
+  platform call at all**), and `platform/windows.rs` (the backend: the `extern "system"` declarations, `probe_of`,
+  `trace_of`, `apply_clip`/`apply_shape`/`apply_cursor`, `warp_to`, the window-procedure subclass, the WebView2
+  accelerator-key switch). `platform/mod.rs` is the seam: it documents the exact function list a backend must
+  provide AND `compile_error!`s on a target that has none, so a macOS/Linux build fails LOUDLY at that one file
+  instead of inside 800 lines of Win32. `windows`/`webview2-com` moved to
+  `[target.'cfg(windows)'.dependencies]` (one file used them), `main.rs`'s `windows_subsystem` attribute became
+  `target_os`-conditional, and `lib.rs`'s 19 call sites plus `rawinput.rs`'s 6 now name `cursor_session::` /
+  `platform::`. **Behaviour is unchanged BY CONSTRUCTION**: the split is a pure line-range move - not one line was
+  retyped - and the only edits are four semantically identical ones (`GetForegroundWindow() == hwnd` ->
+  `platform::is_foreground(hwnd)` in three places, `CLIP_POSTPONED.store(false)` ->
+  `platform::clear_clip_postponed()`). The regression net is the one the mouse has always had: the 29 pure model
+  tests, the 69-group gate (it reads the Rust sources BY PATH - now both halves, concatenated session-first so its
+  two `split()` slices still see the capture lifecycle in its original order), tsc, and the manual list.
+  **`rawinput.rs` is deliberately NOT cut in this round**: it is the same seam, but it shares no code with the
+  cursor path, so folding it into this diff would only make a regression harder to localise. It is step 2; turning
+  the free functions into `trait`s (so the compiler names what a port is missing) is step 3.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

@@ -28,7 +28,8 @@ mod cursor_model;
 mod game;
 mod packs;
 mod rawinput;
-mod win;
+mod cursor_session;
+mod platform;
 
 struct AppState {
     root: PathBuf,
@@ -114,10 +115,10 @@ pub fn boot_line(app: &AppHandle, message: &str) {
 }
 
 /// Diagnostics for the front end's timeline probes: the whole cursor state as ONE line (see
-/// `win::cursor_trace`). Read-only, so a probe can never change what it measures.
+/// `cursor_session::cursor_trace`). Read-only, so a probe can never change what it measures.
 #[tauri::command]
 fn cursor_trace() -> String {
-    win::cursor_trace()
+    cursor_session::cursor_trace()
 }
 
 /// **Is the user moving or resizing the window right now?** (P1.62f)
@@ -131,7 +132,7 @@ fn cursor_trace() -> String {
 /// closing the backpack). Read-only.
 #[tauri::command]
 fn window_session_active() -> bool {
-    win::clip_is_postponed()
+    platform::clip_is_postponed()
 }
 
 #[tauri::command]
@@ -159,7 +160,7 @@ fn quit_app(app: AppHandle) {
 
 #[tauri::command]
 fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
-    win::set_fullscreen(&window, fullscreen)
+    platform::set_fullscreen(&window, fullscreen)
 }
 
 /// Native mouse capture switch (**the only mechanism: the engine does not use the Pointer Lock API at
@@ -170,7 +171,7 @@ fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
 /// back to another mechanism.
 /// The frontend tells us the **desired** cursor visibility (called once whenever
 /// `pointerlock.applyCursor()`'s value changes).
-/// After that `win::cursor_sentinel()` reconciles and corrects it every 8 ms — see that note in
+/// After that `cursor_session::cursor_sentinel()` reconciles and corrects it every 8 ms — see that note in
 /// win.rs.
 #[tauri::command]
 fn cursor_intent(app: AppHandle, window: tauri::WebviewWindow, visible: bool) {
@@ -178,7 +179,7 @@ fn cursor_intent(app: AppHandle, window: tauri::WebviewWindow, visible: bool) {
         Ok(h) => h.0 as isize,
         Err(_) => 0,
     };
-    win::set_cursor_intent(&app, hwnd, visible);
+    cursor_session::set_cursor_intent(&app, hwnd, visible);
 }
 
 #[tauri::command]
@@ -189,13 +190,13 @@ fn mouse_capture(state: State<'_, AppState>, window: tauri::WebviewWindow, on: b
     };
     // Diagnostics: measure the native cursor state before and after capture (whether the shape
     // really follows)
-    let before = win::cursor_trace();
-    let ok = win::set_mouse_capture(hwnd, on);
+    let before = cursor_session::cursor_trace();
+    let ok = cursor_session::set_mouse_capture(hwnd, on);
     game::append_boot(
         &state.root,
         &format!(
             "[cursor] capture on={on} ok={ok} before=[{before}] after=[{}]",
-            win::cursor_trace()
+            cursor_session::cursor_trace()
         ),
     );
     ok
@@ -203,7 +204,7 @@ fn mouse_capture(state: State<'_, AppState>, window: tauri::WebviewWindow, on: b
 
 #[tauri::command]
 fn window_is_fullscreen(window: tauri::WebviewWindow) -> bool {
-    win::is_fullscreen(&window)
+    platform::is_fullscreen(&window)
 }
 
 #[tauri::command]
@@ -269,7 +270,7 @@ pub fn run() {
             // win.on("focus"/"blur"))
             if let Some(w) = app.get_webview_window("main") {
                 // Option A: turn off WebView2's browser accelerator keys (F3 no longer opens "Find")
-                win::disable_browser_accelerator_keys(&w, app.state::<AppState>().root.clone());
+                platform::disable_browser_accelerator_keys(&w, app.state::<AppState>().root.clone());
 
                 // Disable "a bare Alt opens the system menu": otherwise menu mode deactivates the
                 // window (the game auto-pauses) and runs a nested modal loop that blocks the main
@@ -278,7 +279,7 @@ pub fn run() {
                 let diag_root0 = app.state::<AppState>().root.clone();
                 match w.hwnd() {
                     Ok(h) => {
-                        let ok = win::install_menu_suppressor(h.0 as isize);
+                        let ok = platform::install_menu_suppressor(h.0 as isize);
                         game::append_boot(
                             &diag_root0,
                             &format!(
@@ -302,7 +303,7 @@ pub fn run() {
                         if !*focused {
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus LOST  before=[{}]", win::cursor_trace()),
+                                &format!("[cursor] focus LOST  before=[{}]", cursor_session::cursor_trace()),
                             );
                             // **Losing focus must release the native mouse capture**, otherwise after
                             // an Alt-Tab the user's cursor is shut inside the window by ClipCursor and
@@ -312,7 +313,7 @@ pub fn run() {
                             // still standing, the 8 ms sentinel re-hid the cursor on every "focus
                             // gained", which is the Win-key focus flap (see
                             // win.rs::on_foreground_lost).
-                            win::on_foreground_lost();
+                            cursor_session::on_foreground_lost();
                             // **…and hand the ARROW back in the same breath** (P1.60). `on_foreground_lost`
                             // releases the clip but does not touch the shape, so the cursor stayed NULL
                             // until the 8 ms sentinel got to it — the `after` probe below used to read
@@ -324,12 +325,12 @@ pub fn run() {
                             // "it centres itself a few hundred ms later for no reason").
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus LOST  after =[{}]", win::cursor_trace()),
+                                &format!("[cursor] focus LOST  after =[{}]", cursor_session::cursor_trace()),
                             );
                         } else {
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus GAIN  before=[{}]", win::cursor_trace()),
+                                &format!("[cursor] focus GAIN  before=[{}]", cursor_session::cursor_trace()),
                             );
                             // Only **after** focus returns does the webview get to decide the cursor
                             // shape again (by sending WM_SETCURSOR) — it must come after the focus,
@@ -338,14 +339,14 @@ pub fn run() {
                             // fires in a WebView2 app (it never did while it compared PROCESS ids, because
                             // the child window under the pointer belongs to msedgewebview2.exe) — so the
                             // line says whether Chromium was actually asked to re-decide the shape.
-                            let refreshed = win::refresh_cursor();
+                            let refreshed = platform::refresh_cursor();
                             // One more kick to force the system to **repaint the cursor on screen**
                             // (the case where the system state is right but the picture was not
                             // redrawn)
-                            win::kick_cursor_repaint();
+                            platform::kick_cursor_repaint();
                             game::append_boot(
                                 &diag_root,
-                                &format!("[cursor] focus GAIN  after =[{}]", win::cursor_trace()),
+                                &format!("[cursor] focus GAIN  after =[{}]", cursor_session::cursor_trace()),
                             );
                             game::append_boot(
                                 &diag_root,
@@ -356,7 +357,7 @@ pub fn run() {
                         let _ = handle.emit(name, ());
                     }
                     WindowEvent::Destroyed => {
-                        win::release_mouse_capture();
+                        cursor_session::release_mouse_capture();
                         rawinput::stop();
                     }
                     // Window geometry changed (resize / move / DPI). **This is the only reliable
@@ -382,7 +383,7 @@ pub fn run() {
                     WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
                         let h = handle.clone();
                         let _ = h.run_on_main_thread(|| {
-                            win::reclip_mouse_capture();
+                            cursor_session::reclip_mouse_capture();
                         });
                         let _ = handle.emit("win-geometry", ());
                     }

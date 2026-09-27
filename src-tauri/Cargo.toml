@@ -25,9 +25,14 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-# The native WebView2 settings (plan A: disable the browser accelerator keys, so F3 no longer opens
-# "Find"). Versions kept in step with what Cargo.lock already has (windows 0.61.3 /
-# webview2-com 0.38.2): this only pulls the names in, it adds no real dependency.
+# ===== THE WINDOWS-ONLY DEPENDENCIES (P1.79) =====
+# Both are used by exactly ONE file, `src/platform/windows.rs`: `webview2-com` for the native
+# WebView2 settings (plan A: disable the browser accelerator keys, so F3 no longer opens "Find") and
+# `windows` for `windows::core::Interface`. Versions kept in step with what Cargo.lock already has
+# (windows 0.61.3 / webview2-com 0.38.2). TARGET-GATED, because they are the Windows backend's
+# business: a macOS/Linux build now reaches `platform/mod.rs`'s `compile_error!` - which names the
+# one file a port has to write - instead of failing inside a crate it would never call.
+[target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows = "0.61"
 

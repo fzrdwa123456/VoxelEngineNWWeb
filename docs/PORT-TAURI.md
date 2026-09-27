@@ -63,7 +63,9 @@ src-tauri/src/boot/main.rs      entry point (release carries no console, matchin
 src-tauri/src/lib.rs       the command bus + Builder + focus-event forwarding
 src-tauri/src/game.rs      game root / settings.json / logs / the vsync switch / WebView2 arguments
 src-tauri/src/packs.rs     resource-pack and mod scanning (lists directories and reads bytes only, no normalisation)
-src-tauri/src/win.rs       the window: show / focus / fullscreen / center_cursor
+src-tauri/src/cursor_session.rs   the cursor STATE MACHINE: the one table, the capture lifecycle, reconcile, diagnostics
+src-tauri/src/platform/mod.rs      the SEAM: cfg + the interface a backend implements (+ fullscreen, pure Tauri API)
+src-tauri/src/platform/windows.rs  the WINDOWS backend: probe / ClipCursor / SetCursor / warp / the window subclass
 src-tauri/src/rawinput.rs  raw mouse input (a direct translation of the original rawinput/src/lib.rs, NAPI -> Tauri events)
 ```
 
