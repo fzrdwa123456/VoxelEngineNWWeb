@@ -103,6 +103,10 @@ pub struct CursorModel {
     /// `LOST_FIGHT_TICKS` of it the projection gives up and hands the mouse back, i.e. the front end pauses -
     /// which is what the player expects once the system has taken the screen.
     pub lost_fight_ticks: u8,
+    /// **Is the user holding the window right now?** (`win::clip_is_postponed`, mirrored here so the pure
+    /// rule can consult it) - P1.70. The crosshair move of the hidden -> visible transition must never happen
+    /// while a hand is on the frame: that is the ONE case where moving the pointer drags a window with it.
+    pub user_holding: bool,
 }
 
 /// ~250 ms at the sentinel's 8 ms tick: "we have been trying to hide a cursor somebody else keeps showing".
@@ -323,12 +327,16 @@ pub fn centre_of(r: ClipRect) -> ClipPos {
 /// Two guards, both deliberate: a pointer OUTSIDE our window is never moved (P1.62d - the user may be holding
 /// a window by its title bar), and `centre_on_show` can switch the whole thing off.
 pub fn hand_back_warp(m: &CursorModel, p: &CursorProbe) -> Option<ClipPos> {
-    if !m.centre_on_show {
+    if !m.centre_on_show || m.user_holding {
+        // Switched off, or the user has a HAND ON THE FRAME: moving the pointer then drags the window with it
+        // (that is the whole reason this rule has an exception at all).
         return None;
     }
-    if !contains(intersect(p.client, p.screen), p.pos) {
-        return None;
-    }
+    // **…AND IT NO LONGER CARES WHERE THE POINTER IS (P1.70).** It used to refuse a pointer outside our
+    // window, which made "the cursor comes back" centre the cursor on SOME paths and not on others: the
+    // Win+; / IME overlay leaves the pointer over ITS window, so the pause menu appeared with the cursor
+    // wherever it had been. Where the pointer sits on the way IN is not a statement about what the player
+    // wants - "the mouse is mine again" is, and that is the transition this rule describes.
     let target = crosshair_of(p);
     if p.pos == target {
         None
@@ -403,11 +411,13 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
         // back instead - the front end pauses, the cursor is legitimately visible again, and the 125 pushes a
         // second stop.
         if p.showing && m.lost_fight_ticks >= LOST_FIGHT_TICKS {
+            // It is a hidden -> visible transition like any other, so it CENTRES like any other (P1.70) - the
+            // old "no move here" made this path visibly different from ESC/Resume.
             let release = plan(
                 if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
                 CursorShape::Arrow,
                 false,
-                None,
+                hand_back_warp(m, p),
                 m.shape == CursorShape::Hidden,
             );
             return CursorPlan { drop_capture: true, ..release };
@@ -492,6 +502,7 @@ mod tests {
             centre_on_show: true,
             arrow_guard: 0,
             lost_fight_ticks: 0,
+            user_holding: false,
         }
     }
 
@@ -664,8 +675,14 @@ mod tests {
         assert_eq!(hand_back_warp(&m, &p), Some(ClipPos { x: 500, y: 400 }));
         p.pos = ClipPos { x: 500, y: 400 }; // already there: nothing to do
         assert_eq!(hand_back_warp(&m, &p), None);
-        p.pos = ClipPos { x: 500, y: 20 }; // on the title bar: NEVER yank a pointer we do not own the window of
-        assert_eq!(hand_back_warp(&m, &p), None);
+        // **A POINTER OUTSIDE OUR WINDOW STILL CENTRES (P1.70)**: the Win+; / IME overlay leaves it over ITS
+        // window, and the reported bug was that the pause menu then appeared with the cursor wherever it was.
+        p.pos = ClipPos { x: 500, y: 20 };
+        assert_eq!(hand_back_warp(&m, &p), Some(ClipPos { x: 500, y: 400 }));
+        // …UNLESS the user is HOLDING the window: that is the one case where the move would drag it.
+        let mut held = model(false, ClipRect::ZERO);
+        held.user_holding = true;
+        assert_eq!(hand_back_warp(&held, &p), None, "a hand on the frame is never fought");
         let mut off = model(false, ClipRect::ZERO);
         off.centre_on_show = false;
         p.pos = ClipPos { x: 120, y: 120 };
@@ -850,13 +867,14 @@ mod tests {
         // the system keeps showing a cursor (the log had `enforced` climb 1145 -> 1671 without winning). After
         // ~250 ms it gives up and hands the mouse back, which makes the front end pause.
         let mut m = model(true, ClipRect::ZERO);
-        let p = probe(true); // showing = true: somebody else is drawing a cursor
+        let mut p = probe(true); // showing = true: somebody else is drawing a cursor
+        p.pos = ClipPos { x: 120, y: 120 }; // …and the pointer is away from the crosshair
         assert!(!decide(&m, &p).drop_capture, "the first ticks keep trying");
         m.lost_fight_ticks = LOST_FIGHT_TICKS;
         let plan = decide(&m, &p);
         assert!(plan.drop_capture, "…and then it gives up");
         assert_eq!(plan.shape, CursorShape::Arrow);
-        assert_eq!(plan.warp, None, "and it does not move a cursor that is not ours to place");
+        assert_eq!(plan.warp, Some(ClipPos { x: 500, y: 400 }), "and it centres like every other hand-back");
         // A cursor the system already hides is never a lost fight: that is the normal capturing state.
         let mut shown = probe(true);
         shown.showing = false;
@@ -917,17 +935,20 @@ mod tests {
     }
 
     #[test]
-    fn a_pointer_outside_the_window_is_never_warped() {
-        // The other half of the same report: the hidden -> visible warp ("opening a menu lands on the
-        // crosshair") must not fire for a pointer that is out on a title bar - moving it would drag the
-        // window the user is holding.
+    fn a_pointer_outside_the_window_still_centres_unless_the_user_holds_it() {
+        // P1.62 used to refuse this move for a pointer outside our window, and that is what made "the cursor
+        // comes back" centre on some paths and not others (the Win+; / IME overlay leaves the pointer over ITS
+        // window, so the pause menu appeared with the cursor wherever it had been - P1.70).
         let mut m = model(false, ClipRect::ZERO);
         m.shape = CursorShape::Hidden;
         let mut p = probe(true);
-        p.pos = ClipPos { x: 500, y: 20 }; // the title bar
-        assert_eq!(decide(&m, &p).warp, None);
-        p.pos = ClipPos { x: 120, y: 120 }; // inside the window, but away from the crosshair
+        p.pos = ClipPos { x: 500, y: 20 }; // over somebody else's window
         assert_eq!(decide(&m, &p).warp, Some(ClipPos { x: 500, y: 400 }));
+        // …unless the user has a hand on the frame: moving it then drags the window with it.
+        let mut held = model(false, ClipRect::ZERO);
+        held.shape = CursorShape::Hidden;
+        held.user_holding = true;
+        assert_eq!(decide(&held, &p).warp, None);
     }
 
 }

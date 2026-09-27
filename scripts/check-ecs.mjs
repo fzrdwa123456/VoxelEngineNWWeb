@@ -2869,7 +2869,10 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "\u2026and the world entry ASKS the platform instead of trusting the push (the stages block the loop)");
   assert(/LOST_FIGHT_TICKS/.test(modelSrc) && /m\.lost_fight_ticks >= LOST_FIGHT_TICKS/.test(modelSrc),
     "a cursor an OVERLAY keeps showing ends the fight: the mouse is handed back so the front end pauses");
-  assert(/pub fn hand_back_warp/.test(modelSrc) && /if let Some\(target\) = hand_back_warp/.test(winSrc),
+  assert(!/fn restore_arrow/.test(winSrc), "ONE path centres a hand-back: the second one is gone (P1.70)");
+  assert(/pub fn hand_back_warp/.test(modelSrc) && /m\.user_holding/.test(modelSrc),
+    "\u2026and its one exception is a HAND ON THE FRAME, not where the pointer happens to be");
+  assert(/hand_back_warp\(m, p\)/.test(modelSrc), "\u2026which every hidden -> visible transition uses");
     "handing the arrow back also lands the pointer on the CROSSHAIR (while it is hidden) - it cannot be left to `decide`, whose warp needs the hidden -> visible transition");
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");

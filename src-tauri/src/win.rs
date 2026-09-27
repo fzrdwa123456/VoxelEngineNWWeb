@@ -211,28 +211,6 @@ pub fn on_foreground_lost() {
 /// **MAIN THREAD ONLY**: `SetCursor` belongs to the thread that owns the window (see `apply_shape`), so this
 /// is called from the window-event path in `lib.rs`; the raw-input path (`capture_foreground_check`) lets
 /// `reconcile` marshal it instead.
-pub fn restore_arrow() {
-    let mut m = model();
-    let (showing, _) = cursor_info();
-    if showing {
-        // The system already shows one: nothing to move, and the record is right again.
-        m.shape = CursorShape::Arrow;
-        return;
-    }
-    // **MOVE IT TO THE CROSSHAIR WHILE IT IS STILL HIDDEN (P1.62g).** The product wants the mouse to come back
-    // ON the crosshair, and this is the one moment it can be moved without the player seeing it move. It has to
-    // happen HERE rather than in `decide`'s warp, because that plan is gated on the hidden -> visible
-    // TRANSITION - and this function is what sets that record to Arrow (see `hand_back_warp` for the log that
-    // pinned it: 16 focus losses while capturing, zero warps).
-    let p = probe_of(&m);
-    if let Some(target) = hand_back_warp(&m, &p) {
-        apply_cursor(false); // hide first: the move must be invisible
-        m.shape = CursorShape::Hidden;
-        warp_to(target.x, target.y);
-    }
-    m.shape = CursorShape::Unknown; // force `apply_shape` to push even when our record already says Arrow
-    apply_shape(&mut m, CursorShape::Arrow);
-}
 
 /// **Capture is only allowed to stay on in the foreground — this is the system-level backstop.**
 ///
@@ -369,6 +347,7 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     centre_on_show: true,
     arrow_guard: 0,
     lost_fight_ticks: 0,
+    user_holding: false,
 });
 
 fn model() -> std::sync::MutexGuard<'static, CursorModel> {
@@ -740,6 +719,8 @@ fn reconcile(app: &tauri::AppHandle) {
         // **COUNT THE TICKS WE SPEND FIGHTING A CURSOR SOMEBODY ELSE SHOWS (P1.69).** `want` hidden + focused +
         // the system still showing one is the overlay state; `decide` gives up on it after ~250 ms.
         {
+            // …and mirror the other platform fact the pure rule asks for (`user_holding`, P1.70).
+            m.user_holding = clip_is_postponed();
             let p = probe_of(&m);
             if m.want == 2 && p.focused && p.showing {
                 m.lost_fight_ticks = m.lost_fight_ticks.saturating_add(1);

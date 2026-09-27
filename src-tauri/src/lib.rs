@@ -316,7 +316,10 @@ pub fn run() {
                             // until the 8 ms sentinel got to it — the `after` probe below used to read
                             // `shape=Hidden showing=false`, i.e. one tick of "no cursor" on exactly the path
                             // the Win-key report is about. Main thread: this is the window-event handler.
-                            win::restore_arrow();
+                            // (P1.70) NO `restore_arrow()` here any more: the centring of a hidden -> visible
+                            // transition is the PROJECTION's job, and having a second path do it from the event
+                            // made the cursor appear at the crosshair at an unpredictable moment (the reported
+                            // "it centres itself a few hundred ms later for no reason").
                             game::append_boot(
                                 &diag_root,
                                 &format!("[cursor] focus LOST  after =[{}]", win::cursor_trace()),
