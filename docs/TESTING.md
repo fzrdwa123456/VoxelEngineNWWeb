@@ -620,29 +620,38 @@ contain `RAWINPUT listener started` and `RAWINPUT active=true` (once per run).
     does not exist any more)
 ```
 
-AFTER the hand-back centring (P1.73 - the cursor must be ON the crosshair when the menu appears, for every way
-out of the capture, and Windows must actually DRAW it). The report was "the cursor is visible but not on the
-crosshair, and clicking puts it back on the crosshair". Enter a world (the mouse is captured) and then:
+AFTER the two switches the report asked for (P1.75 - Win+L no longer centres, and Win+; no longer pauses).
+This SUPERSEDES the centring expectations of P1.73/P1.74 below: the centring a hand-back performs now happens
+ONLY while we are in front (the deliberate release: ESC, Resume, the backpack), and the overlay keeps the mouse
+instead of handing it back. Enter a world (the mouse is captured) and then:
 ```
-(1) Win+; (the emoji/symbol overlay) - the reported case: the pause menu comes up and the cursor must be **left
-    exactly where the overlay left it** (P1.74 removed the centring on this path on purpose: the move is visible
-    there, because the cursor on screen belongs to the overlay). boot.log: `cannot hide the cursor (an overlay is
-    showing it)` → the capture drop → and then **NO** `apply … warp=true` and **NO** `we owe a centring …` line.
-    Moving the mouse afterwards works normally
-(2) Alt+Tab away: the window loses the foreground, the pause menu comes up - and the cursor must ALREADY be on
-    the crosshair while the window is still in the background (the hand-back centres it right there; P1.71
-    deferred this to the moment you clicked back). Coming back must not move it again
-(3) Win+L, then unlock: after the unlock the cursor must be on the crosshair, and it must be DRAWN - it must not
-    need a mouse move to appear. boot.log: `foreground LOST` → `we owe a centring … (P1.73)` → `foreground
-    REGAINED` → `apply … warp=true pos=(client centre)` → and, if the desktop refused to draw it,
-    `[cursor] the arrow is SET but not displayed -> nudging the overlay (P1.73)` (at most one per 500 ms) after
-    which the arrow must be visible. If it appears only once you move the mouse, that nudging line is the one to
-    report back
-(4) ESC → pause menu, and Resume → capture → ESC again: unchanged, centred at once, and boot.log must NOT show
-    a `we owe a centring …` line for this path (a hand-back while we are in front owes nothing - the move it
-    issues is the one that lands). The cursor must NOT stick to the crosshair: after the menu is up, moving the
-    mouse must move it freely (a second warp on the next tick would be the debt fighting your hand)
-(5) the standing set: drag/resize the title bar → no tow, the pause menu comes up and the cursor is NOT yanked
-    (that path deliberately owes nothing); the backpack (E); fullscreen <-> windowed must not pause; while
-    captured nothing new appears in the log
+(1) Win+; (or Win+.) - THE reported case: **the game must NOT pause.** The overlay shows its own cursor over the
+    screen, the world keeps running, the view keeps turning (raw deltas do not care where the cursor is), and
+    boot.log shows `an overlay is showing the cursor: keeping the capture and pausing nothing (P1.75)` (at most
+    one per 500 ms) with **NO** `capture dropped` and **NO** `capture-lost`-driven pause. Nothing jumps to the
+    middle. When the overlay closes, play carries on as if nothing had happened
+(2) Win+L, then unlock: the cursor must NOT be moved to the crosshair any more - it stays wherever it was (the
+    report's choice: the move is not worth the delayed jump it used to cause). boot.log must show `foreground
+    LOST` → `foreground REGAINED` with **NO** `apply … warp=true` in between and **NO** `we owe a centring` line.
+    If the unlock leaves the cursor invisible, the `the arrow is SET but not displayed -> nudging the overlay`
+    repair still runs (that part is untouched)
+(3) Alt+Tab away and back: same - nothing moves, nothing is owed. The world is paused after the blur (that is
+    the focus policy, not the cursor) and Resume recaptures and parks the pointer on the crosshair once
+(4) ESC → pause menu, and Resume → capture → ESC again: **this is now the only way a hand-back centres** - the
+    cursor must land on the crosshair at once, and boot.log must show exactly one `apply … warp=true pos=(client
+    centre)` on the release tick. After the menu is up the mouse must move freely (no second warp)
+(5) the standing set: drag/resize the title bar → no tow, the pause menu comes up, the cursor is NOT yanked; the
+    backpack (E); fullscreen <-> windowed must not pause; while captured nothing new appears in the log
+```
+
+AFTER the hand-back centring (P1.73 - historical; see P1.75 above for what replaced it). The report was "the
+cursor is visible but not on the crosshair, and clicking puts it back on the crosshair". Enter a world and then:
+```
+(1) Win+; (the emoji/symbol overlay) - the pause menu comes up and the cursor is left exactly where the overlay
+    left it: the move is visible there, because the cursor on screen belongs to the overlay
+(2) Alt+Tab away: the hand-back centred it right there, while the window was still in the background
+(3) Win+L, then unlock: after the unlock the cursor was on the crosshair, and `the arrow is SET but not displayed
+    -> nudging the overlay (P1.73)` forced Windows to DRAW it when it refused (at most one per 500 ms)
+(4) ESC → pause menu, Resume → capture → ESC again: centred at once
+(5) the standing set: drag/resize the title bar → no tow; the backpack (E); fullscreen <-> windowed must not pause
 ```

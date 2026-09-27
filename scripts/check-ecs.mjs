@@ -2873,40 +2873,34 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
       /windowSessionActiveNow/.test(main),
     "\u2026and the world entry ASKS the platform instead of trusting the push (the stages block the loop)");
   assert(/LOST_FIGHT_TICKS/.test(modelSrc) && /m\.lost_fight_ticks >= LOST_FIGHT_TICKS/.test(modelSrc),
-    "a cursor an OVERLAY keeps showing ends the fight: the mouse is handed back so the front end pauses");
+    "an overlay that keeps showing the cursor is still DETECTED (the counter is what stops the push storm)");
   assert(!/fn restore_arrow/.test(winSrc), "ONE path centres a hand-back: the second one is gone (P1.70)");
   assert(/pub fn hand_back_warp/.test(modelSrc) && /m\.user_holding/.test(modelSrc),
     "\u2026and its one exception is a HAND ON THE FRAME, not where the pointer happens to be");
-  assert(/hand_back_warp\(m, p\)/.test(modelSrc), "\u2026which every hidden -> visible transition uses");
-  // **P1.73 - THE CENTRE DEBT, SIMPLIFIED (the original design was wrong in two ways, and the user's log
-  // showed both).** (1) It only ARMED the debt when the tick's move had been refused, and it only PAID it at a
-  // moment it called "invisible" - foreground AND no cursor displayed. The real state after a hand-back is
-  // "the pause menu is up (so an arrow IS displayed - ours) and the window may be in the background", so the
-  // debt waited and was settled by a later accident: the report was "the cursor is visible but not on the
-  // crosshair, and clicking puts it back". (2) It treated "we issued a warp" as "we centred", which cannot hold
-  // on the secure desktop of a session lock. Now: the hand-back centres at once (no focus gate - a plain
-  // background move lands), the debt is armed by the hand-back itself, the retry needs only "no capture wanted"
-  // plus the foreground (so a doomed call is not fired every 4 ms for the length of a lock), and the debt ends
-  // on the MEASUREMENT.
-  assert(!/pub fn invisible_moment/.test(modelSrc) && !/spend_centre_debt/.test(modelSrc),
-    "the 'invisible moment' gate is gone: it was false in exactly the state a hand-back leaves us in");
-  assert(/pub fn owes_centre\(m: &CursorModel, p: &CursorProbe\) -> bool \{\s*m\.centre_on_show && !m\.user_holding && !is_at_centre\(p\)/.test(modelSrc),
-    "\u2026the debt is owed by any hand-back that does not leave the pointer on the crosshair");
-  assert(/let mut warp = if was_hidden \{ hand_back_warp\(m, p\) \} else \{ None \};/.test(modelSrc),
-    "the hand-back moves the pointer ONCE, right there, with no foreground requirement (the P1.71 gate was what "
-    + "deferred Alt+Tab / the Win key / Win+L until the player clicked back in)");
-  assert(/warp\.is_none\(\) && m\.centre_debt && m\.want != 2 && p\.focused/.test(modelSrc),
-    "\u2026and an unpaid centring is retried while no capture is wanted and we can really land the move");
-  assert(/let settle_centre_debt = \(m\.centre_debt && is_at_centre\(p\)\) \|\| \(warp\.is_some\(\) && p\.focused\);/.test(modelSrc),
-    "the debt ends on the MEASUREMENT, or on a move issued while IN FRONT (an unfocused call is the one that lands "
-    + "nowhere - settling on that is exactly the P1.71 bug)");
-  assert(!/arm_centre_debt: owes_centre\(m, p\)/.test(modelSrc) && /if p\.showing && m\.lost_fight_ticks >= LOST_FIGHT_TICKS \{/.test(modelSrc),
-    "\u2026and the overlay give-up owes NOTHING and moves nothing (P1.74): the cursor stays where the overlay left "
-    + "it, instead of jumping to the crosshair a tick later - the move would be watched either way");
-  assert(/if plan\.settle_centre_debt \{/.test(winSrc) && /if plan\.arm_centre_debt \{/.test(winSrc),
-    "\u2026the platform half records exactly those two transitions");
-  assert(/m\.centre_debt = false;/.test(winSrc.split("m.want = 2;")[1].split("let p = probe_of")[0]),
-    "\u2026and taking the mouse back drops the debt, so it can never fire into a running session");
+  // **P1.75 - THE TWO THINGS THE REPORT SWITCHED OFF.** The centre debt (P1.71/P1.73) is GONE, and so is the
+  // overlay give-up's "hand the mouse back" (P1.69):
+  //   * a hand-back now centres only while we are IN FRONT - the deliberate release (ESC / Resume / the
+  //     backpack), whose move the applier makes invisible. Win+L and Alt+Tab move nothing and owe nothing,
+  //     because their move was issued against a desktop that was not there (the log) and the retry that
+  //     covered it was the thing the player experienced as "clicking puts the cursor back";
+  //   * Win+; must not pause: the overlay case keeps the CAPTURE and only stops pushing the shape
+  //     (`force_shape = false`), so no `drop_capture`, no `capture-lost`, no pause - and the view keeps turning,
+  //     because the deltas are raw input and the overlay never takes the foreground.
+  assert(!/centre_debt/.test(modelSrc) && !/centre_debt/.test(winSrc) && !/arm_centre_debt|settle_centre_debt/.test(modelSrc),
+    "the centre debt is gone from both halves: no field, no flags, no bookkeeping");
+  assert(!/pub fn owes_centre|pub fn is_at_centre|pub fn invisible_moment/.test(modelSrc),
+    "\u2026and with it the 'owed a centring' predicates (a move is now decided tick by tick, not remembered)");
+  assert(/let warp = if was_hidden && p\.focused \{ hand_back_warp\(m, p\) \} else \{ None \};/.test(modelSrc),
+    "a hand-back centres ONLY while we are in front (P1.75, by request): Win+L / Alt+Tab move nothing");
+  assert(!/m\.want != 2 && p\.focused/.test(modelSrc),
+    "\u2026and there is no retry behind it: nothing is carried across a session lock any more");
+  assert(/return plan\(Some\(target\), CursorShape::Hidden, true, None, false\);/.test(modelSrc),
+    "the overlay case KEEPS the capture and stops pushing the shape (force_shape = false) - P1.75: Win+; must "
+    + "not pause the game");
+  assert(!/handing the mouse back/.test(winSrc),
+    "\u2026so the 'cannot hide the cursor -> handing the mouse back' line is gone with it");
+  assert(/an overlay is showing the cursor: keeping the capture and pausing nothing \(P1\.75\)/.test(winSrc),
+    "\u2026replaced by a rate-limited line saying what the code actually decided");
   // …and the third piece: "the arrow is SET and NOT DRAWN" (Win+L, 1.5 s, `showing=false hCursor=65539`, 62
   // pushes). Only injected input counts as "the mouse" for Windows, which is why the cure is a net-zero
   // `SendInput` and not another `SetCursorPos` jog or another `WM_SETCURSOR`.

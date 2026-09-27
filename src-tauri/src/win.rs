@@ -98,10 +98,6 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     }
     m.want = 2; // …and the request sets want=2 (see the note above)
     m.relative = true;
-    // **A NEW CAPTURE DROPS ANY CENTRE DEBT (P1.71).** The debt is "the pause menu should have landed on the
-    // crosshair"; the player has just taken the mouse back, so whatever we owed is moot - and keeping it
-    // would let it fire later, into a running session, as a move nobody asked for.
-    m.centre_debt = false;
     let p = probe_of(&m);
     // **THE CLIP TARGET, NOT `decide` (P1.62c).** `decide` carries rule 2's "the pointer has left the window"
     // DROP, which is about an ONGOING capture. Applying it here REFUSED the capture whenever the pointer
@@ -352,7 +348,6 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     arrow_guard: 0,
     lost_fight_ticks: 0,
     user_holding: false,
-    centre_debt: false,
 });
 
 fn model() -> std::sync::MutexGuard<'static, CursorModel> {
@@ -410,7 +405,7 @@ fn trace_of(m: &CursorModel) -> String {
         }
     };
     format!(
-        "want={} relative={} shape={:?} clipped=({},{},{},{}) focused={} showing={} hCursor={} pos=({},{}) under={} enforced={} debt={}",
+        "want={} relative={} shape={:?} clipped=({},{},{},{}) focused={} showing={} hCursor={} pos=({},{}) under={} enforced={}",
         m.want,
         m.relative,
         m.shape,
@@ -424,8 +419,7 @@ fn trace_of(m: &CursorModel) -> String {
         pt.x,
         pt.y,
         under,
-        m.enforced,
-        m.centre_debt
+        m.enforced
     )
 }
 
@@ -681,26 +675,26 @@ fn reconcile(app: &tauri::AppHandle) {
         // request here is the platform half; the event below is what tells the FRONT END (releasing on this
         // side alone would leave it believing it still holds the mouse, which is the trap
         // `capture_foreground_check` documents).
+        //
+        // **It is the ONLY thing that drops a capture (P1.75).** The overlay case used to come through here too
+        // (P1.69's "cannot hide the cursor -> handing the mouse back"), which is what made Win+; pause the game;
+        // it now keeps the capture and only stops pushing the shape (see `decide`).
         if plan.drop_capture {
-            if m.lost_fight_ticks >= LOST_FIGHT_TICKS {
-                crate::boot_line(
-                    &handle,
-                    &format!(
-                        "[cursor] cannot hide the cursor (an overlay is showing it) -> handing the mouse back [{}]",
-                        trace_of(&m)
-                    ),
-                );
-            }
             m.relative = false;
             m.lost_fight_ticks = 0;
             arm_arrow_guard(&mut m);
         }
-        // **THE CENTRE DEBT (P1.73).** Both flags come from the pure model, so the platform half is one write
-        // per branch: `settle` means the pointer was MEASURED on the crosshair this tick (that - and nothing
-        // else - ends the debt; a move that was issued but landed nowhere, as on the secure desktop of a
-        // session lock, has to stay owed), and `arm` means this hand-back did not leave it there.
-        if plan.settle_centre_debt {
-            m.centre_debt = false;
+        // **"SOMEBODY ELSE IS DRAWING THE CURSOR: WE ARE NOT FIGHTING AND NOT LETTING GO" (P1.75).** One
+        // rate-limited line for a state that lasts as long as the overlay does, so the log says what the code
+        // decided (the alternative - the old `cannot hide the cursor -> handing the mouse back` - is gone).
+        if m.want == 2 && p.focused && p.showing && m.lost_fight_ticks >= LOST_FIGHT_TICKS && trace_gap_ok(500) {
+            crate::boot_line(
+                &handle,
+                &format!(
+                    "[cursor] an overlay is showing the cursor: keeping the capture and pausing nothing (P1.75) [{}]",
+                    trace_of(&m)
+                ),
+            );
         }
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
         // crosshair", and the only way to make that move invisible is to do it with a NULL shape. It is also
@@ -712,15 +706,6 @@ fn reconcile(app: &tauri::AppHandle) {
                 m.shape = CursorShape::Hidden;
             }
             warp_to(pos.x, pos.y);
-        }
-        if plan.arm_centre_debt {
-            m.centre_debt = true;
-            if trace_gap_ok(500) {
-                crate::boot_line(
-                    &handle,
-                    &format!("[cursor] we owe a centring until the pointer is ON the crosshair (P1.73) [{}]", trace_of(&m)),
-                );
-            }
         }
         // The model compared the plan with the SYSTEM (`GetCursorInfo`), not with our own record: a dropped
         // push or a stale Chromium cache has to be corrected in BOTH directions.

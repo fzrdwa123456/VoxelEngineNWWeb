@@ -1619,6 +1619,29 @@ Still outstanding:
   in front, and that move really is invisible (the applier hides the cursor first), so they keep centring on the
   crosshair; a lost foreground still goes through the debt, because its loss-tick move may land nowhere (Win+L).
   One test flipped from "owes the centring" to "owes nothing"; the gate pins the branch.
+- **P1.75 - Win+L stops centring, and Win+; stops pausing.** `DONE`, by request ("把win加L的居中也去掉，win加；触发暂停也去掉"). Two switches, both the opposite of a rule this project had argued its way into:
+  1. **The centre debt is deleted.** P1.70 warped on every hand-back (the Win+L move was issued against the
+     locked desktop, landed nowhere, and consumed the transition); P1.71 turned that into a debt paid at an
+     "invisible moment" (foreground AND no cursor displayed - a state the pause menu is never in, so it was paid
+     by a later accident: "the cursor is not centred and clicking puts it back"); P1.73 paid it on the hand-back
+     and settled it by measurement. Each was a real fix for a real log, and the report's verdict is still that
+     the delayed move is worse than no move. So `p.focused` is back as the gate on the move itself, nothing is
+     owed, nothing is retried, and `centre_debt` / `arm_centre_debt` / `settle_centre_debt` / `owes_centre` /
+     `is_at_centre` / the `debt=` trace field are gone from both halves. What still centres is the DELIBERATE
+     release - ESC, Resume, the backpack, the world leaving - which always happens while we are in front and
+     whose move the applier makes invisible (`apply_cursor(false)` -> warp -> show).
+  2. **The overlay give-up no longer hands the mouse back.** P1.69's give-up (release + `capture-lost` -> the
+     front end pauses) existed because `SetCursor(0)` cannot win against a shell overlay: `enforced` climbed
+     1145 -> 1671 (125 pushes a second) while the cursor stayed visible. Its verdict was "once the system has
+     taken the screen, the player expects the game to pause"; the report's is the opposite - pressing Win+;
+     must not pause. So the capture is KEPT (the view keeps turning: the deltas are WM_INPUT and the overlay
+     never takes the foreground) and the shape pushes simply STOP (`force_shape = false`, and the clip is
+     unchanged, so the branch makes no Win32 call at all). The old line
+     `cannot hide the cursor (an overlay is showing it) -> handing the mouse back` is replaced by a rate-limited
+     `an overlay is showing the cursor: keeping the capture and pausing nothing (P1.75)`, and `drop_capture` is
+     back to meaning exactly one thing: the pointer left the window (the drag/resize tow of P1.62).
+  Three table tests rewritten (the overlay keeps the capture and stops pushing; a hand-back centres only in
+  front; the ordinary capturing state is untouched); 30/30 pass.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
