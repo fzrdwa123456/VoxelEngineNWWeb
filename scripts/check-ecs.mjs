@@ -2853,6 +2853,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // manager refuses the request with a line saying why.
   assert(/LAST_FOCUSED/.test(winSrc) && /emit\(&handle, "capture-lost"/.test(winSrc),
     "a foreground loss is POLLED and announced: Win+L and the Win+; overlay never send a blur event");
+  assert(/emit\(&handle, "win-focus"/.test(winSrc) && /kick_cursor_repaint\(\)/.test(winSrc),
+    "\u2026and the REGAIN is too (the cursor is repainted, not left hidden until the mouse moves)");
   assert(/fn left_button_down/.test(winSrc) && /WM_CANCELMODE/.test(winSrc),
     "the \"a hand is on the window\" flag heals itself: the caption buttons used to leave it set for the whole run");
   assert(/win-session/.test(winSrc) && /pub fn clip_is_postponed/.test(winSrc),

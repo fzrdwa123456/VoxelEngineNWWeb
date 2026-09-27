@@ -593,12 +593,30 @@ fn reconcile(app: &tauri::AppHandle) {
         // loss, which the front end already handles (release + pause when a world is running), and that covers
         // Win+L, Win+;, UAC, the task manager, the task view and anything else that becomes foreground.
         let focused_now = m.hwnd != 0 && unsafe { GetForegroundWindow() } == m.hwnd;
-        if LAST_FOCUSED.swap(focused_now, Ordering::SeqCst) && !focused_now {
-            crate::boot_line(
-                &handle,
-                &format!("[cursor] foreground LOST (measured) -> telling the front end [{}]", trace_of(&m)),
-            );
-            let _ = tauri::Emitter::emit(&handle, "capture-lost", ());
+        if LAST_FOCUSED.swap(focused_now, Ordering::SeqCst) != focused_now {
+            if !focused_now {
+                crate::boot_line(
+                    &handle,
+                    &format!("[cursor] foreground LOST (measured) -> telling the front end [{}]", trace_of(&m)),
+                );
+                let _ = tauri::Emitter::emit(&handle, "capture-lost", ());
+            } else {
+                // **THE REGAIN NEEDS THE SAME TREATMENT (P1.68).** After a session lock (Win+L) the cursor was
+                // hidden until the mouse moved: the LOSS was announced (P1.67) but the REGAIN was not, and
+                // neither the window event nor the repaint nudges ran - so the cursor was never REPAINTED
+                // (the system can report `showing=true` while the desktop still shows nothing; see the note
+                // on `kick_cursor_repaint`). Do exactly what the window-event focus branch does here, and tell
+                // the front end too (`win-focus`): its focus policy re-asserts the intent and runs the
+                // two-step CSS nudge, which is what turns the intent back into a shape.
+                crate::boot_line(
+                    &handle,
+                    &format!("[cursor] foreground REGAINED (measured) -> refreshing + telling the front end [{}]", trace_of(&m)),
+                );
+                let refreshed = refresh_cursor();
+                kick_cursor_repaint();
+                crate::boot_line(&handle, &format!("[cursor] refresh sent={refreshed} (measured regain)"));
+                let _ = tauri::Emitter::emit(&handle, "win-focus", ());
+            }
         }
         let moving = clip_is_postponed();
         if moving != SESSION_PUSHED.load(Ordering::SeqCst) {
