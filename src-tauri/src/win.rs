@@ -647,16 +647,16 @@ fn reconcile(app: &tauri::AppHandle) {
         // Deciding here costs nothing: `probe_of` only READS Win32, and the main thread is where
         // `SetCursor`/`ClipCursor` have to run anyway. The state a plan is built from is now the state it is
         // applied to, so the "one writer" claim covers the DECISION and not just the calls.
-        let plan = {
-            let p = probe_of(&m);
-            decide(&m, &p)
-            // **The system can disagree with our own record.** `SetCursor` pushes are dropped while another
-            // application owns the cursor, and Chromium answers NULL from its cached cursor for a while after
-            // focus returns (both were caught by the boot.log probes) - so when we WANT the arrow, are focused,
-            // and the system still reports a hidden cursor, the push has to be REPEATED: the plan alone would be
-            // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
-            // never fight the foreground application for the cursor (rule 1 of the model).
-        };
+        // **THE PROBE IS KEPT** (it used to be scoped to the `decide` call): the stuck-cursor repair at the
+        // bottom of this function needs the same measurements the plan was built from (P1.73).
+        let p = probe_of(&m);
+        let plan = decide(&m, &p);
+        // **The system can disagree with our own record.** `SetCursor` pushes are dropped while another
+        // application owns the cursor, and Chromium answers NULL from its cached cursor for a while after
+        // focus returns (both were caught by the boot.log probes) - so when we WANT the arrow, are focused,
+        // and the system still reports a hidden cursor, the push has to be REPEATED: the plan alone would be
+        // a no-op, because `m.shape` already says Arrow. Only while FOCUSED, though: a background window must
+        // never fight the foreground application for the cursor (rule 1 of the model).
         let before = (m.clipped, m.shape, m.want, m.relative);
         apply_clip(&mut m, plan.clip);
         // **DIAGNOSTICS (P1.65): "we WANT the mouse and we hold no clip".** That is the reported state where
@@ -695,11 +695,11 @@ fn reconcile(app: &tauri::AppHandle) {
             m.lost_fight_ticks = 0;
             arm_arrow_guard(&mut m);
         }
-        // **THE CENTRE DEBT (P1.71).** Both flags come from the pure model, so the platform half is one write
-        // per branch: an armed debt survives until the tick that can spend it (the first moment the system
-        // reports no cursor displayed while we are in front and the front end is not asking for hidden), and
-        // ANY applied warp settles it - a pointer already on the crosshair has nothing to pay.
-        if plan.spend_centre_debt || plan.warp.is_some() {
+        // **THE CENTRE DEBT (P1.73).** Both flags come from the pure model, so the platform half is one write
+        // per branch: `settle` means the pointer was MEASURED on the crosshair this tick (that - and nothing
+        // else - ends the debt; a move that was issued but landed nowhere, as on the secure desktop of a
+        // session lock, has to stay owed), and `arm` means this hand-back did not leave it there.
+        if plan.settle_centre_debt {
             m.centre_debt = false;
         }
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
@@ -718,7 +718,7 @@ fn reconcile(app: &tauri::AppHandle) {
             if trace_gap_ok(500) {
                 crate::boot_line(
                     &handle,
-                    &format!("[cursor] we owe a centring: the hand-back could not be centred here (P1.71) [{}]", trace_of(&m)),
+                    &format!("[cursor] we owe a centring until the pointer is ON the crosshair (P1.73) [{}]", trace_of(&m)),
                 );
             }
         }
@@ -738,13 +738,19 @@ fn reconcile(app: &tauri::AppHandle) {
         // The ARROW GUARD counts down once per reconciler tick (P1.60). It lives here, not in `decide`, so
         // that the rule set stays pure.
         tick_arrow_guard(&mut m);
+        // **"THE ARROW IS SET AND NOT DRAWN" (P1.73).** The last piece the boot.log exposed: after a Win+L
+        // unlock the system reported `showing=false hCursor=65539` for 1.5 s while `enforced` climbed by 62 -
+        // the pointer WAS on the crosshair and the arrow WAS set, and the desktop simply did not draw it, until
+        // a physical mouse move. This is the one measured cure for that, and it only ever runs in the exact
+        // state it was diagnosed in (see `maybe_nudge_stuck_cursor`).
+        maybe_nudge_stuck_cursor(&handle, &m, &p);
         // **COUNT THE TICKS WE SPEND FIGHTING A CURSOR SOMEBODY ELSE SHOWS (P1.69).** `want` hidden + focused +
         // the system still showing one is the overlay state; `decide` gives up on it after ~250 ms.
         {
             // …and mirror the other platform fact the pure rule asks for (`user_holding`, P1.70).
             m.user_holding = clip_is_postponed();
-            let p = probe_of(&m);
-            if m.want == 2 && p.focused && p.showing {
+            let q = probe_of(&m);
+            if m.want == 2 && q.focused && q.showing {
                 m.lost_fight_ticks = m.lost_fight_ticks.saturating_add(1);
             } else {
                 m.lost_fight_ticks = 0;
@@ -1121,6 +1127,35 @@ struct Point {
     y: i32,
 }
 
+// ===== `SendInput` (P1.73): the only way to make Windows REPAINT the cursor overlay =====
+//
+// Why it is needed (boot.log, after a Win+L unlock): for 1.5 s and some 62 pushes the system answered
+// `showing=false hCursor=65539` - the arrow handle IS set, the pointer IS on the crosshair, and nothing is
+// DRAWN. It only appeared when the player physically moved the mouse, by which time the hand had already taken
+// the pointer off the crosshair ("Win+L is still not centred" was really this). `SetCursor` (already set),
+// a `SetCursorPos` jog (the reconciler's own `kick_cursor_repaint`, MSDN: a program moving the cursor does
+// NOT count as "the mouse") and a synthetic `WM_SETCURSOR` (it only asks Chromium to set the shape it has
+// already set) all left it undrawn. Injected input, on the other hand, goes through the input stack exactly
+// like the real thing - which is the one event we MEASURED to fix it.
+const INPUT_MOUSE: u32 = 0;
+const MOUSEEVENTF_MOVE: u32 = 0x0001;
+
+#[repr(C)]
+struct MouseInput {
+    dx: i32,
+    dy: i32,
+    mouse_data: u32,
+    dw_flags: u32,
+    time: u32,
+    dw_extra_info: usize,
+}
+
+#[repr(C)]
+struct Input {
+    type_: u32,
+    mi: MouseInput,
+}
+
 extern "system" {
     fn ClipCursor(rect: *const Rect) -> i32;
     fn GetClientRect(hwnd: isize, rect: *mut Rect) -> i32;
@@ -1134,6 +1169,7 @@ extern "system" {
 fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
+    fn SendInput(count: u32, inputs: *const Input, cb_size: i32) -> u32;
     // These two are also declared in rawinput.rs (not pub there, so they are declared again here;
     // separate modules declaring the same Win32 symbol is legal and links to the same import)
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
@@ -1142,6 +1178,48 @@ fn GetSystemMetrics(index: i32) -> i32;
     fn LoadCursorW(hinst: isize, name: *const u16) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
+}
+
+/// One net-zero injected move (`+1px`, then back), which is what makes Windows redraw the cursor overlay
+/// (see the note above). Net position change is 0, so it cannot be seen and cannot accumulate - the same
+/// symmetric jog `kick_cursor_repaint` does, but through the input stack.
+fn nudge_cursor_overlay() {
+    let one = |dx: i32| Input {
+        type_: INPUT_MOUSE,
+        mi: MouseInput { dx, dy: 0, mouse_data: 0, dw_flags: MOUSEEVENTF_MOVE, time: 0, dw_extra_info: 0 },
+    };
+    let events = [one(1), one(-1)];
+    unsafe {
+        SendInput(events.len() as u32, events.as_ptr(), std::mem::size_of::<Input>() as i32);
+    }
+}
+
+/// **The system says "the arrow is set" and is not drawing it** (P1.73): nudge the overlay, at most once every
+/// 500 ms, and only while we WANT the cursor visible and we are the foreground.
+///
+/// The three terms are the exact signature the boot.log showed (`want=1`, `showing=false`, `hCursor=65539`):
+/// a NULL/never-set handle is a different disease (Chromium's stale cache, the arrow guard's job), and a cursor
+/// we want HIDDEN must never be nudged into view. While the mouse is captured the condition cannot hold, so the
+/// injected move can never disturb the view.
+fn maybe_nudge_stuck_cursor(handle: &tauri::AppHandle, m: &CursorModel, p: &CursorProbe) {
+    if m.want != 1 || !p.focused || p.showing {
+        return;
+    }
+    let (_, hcursor) = cursor_info();
+    if hcursor == 0 {
+        return;
+    }
+    if !trace_gap_ok(500) {
+        return;
+    }
+    nudge_cursor_overlay();
+    crate::boot_line(
+        handle,
+        &format!(
+            "[cursor] the arrow is SET but not displayed -> nudging the overlay (P1.73) [{}]",
+            trace_of(m)
+        ),
+    );
 }
 
 /// ===== Option A: turn off WebView2's **browser accelerator keys** =====

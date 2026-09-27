@@ -1578,6 +1578,38 @@ Still outstanding:
   the cursor for a frame), so `esc_hook`/`EscEvent`/the `esc` event bridge/`escHook` are now
   `menu_hook`/`menuHook`. The mousemove look branch stays as the defence in depth it always was, now marked
   unreachable by construction.
+- **P1.73 - the centring is paid on the hand-back and measured, and the cursor is nudged when Windows forgets to
+  draw it.** `DONE`. The user's report after P1.71 was exact: "the cursor is visible but not on the crosshair,
+  and clicking (or anything) puts it back on the crosshair". The boot.log named both halves:
+  1. **The debt was paid at the wrong moment.** P1.71 armed it correctly but PAID it only at a moment it called
+     "invisible": foreground AND no cursor displayed. The state a hand-back actually leaves is "the pause menu
+     is up, so an arrow IS displayed (ours)" and often "the window is in the background" - so the debt waited,
+     and the boot.log shows it being settled by a later accident: `222 armed → 236 paid` (the regain, i.e. the
+     click that brought the window back), `336 armed → 352 paid` (same), and on the overlay path a lucky tick
+     where Chromium reported `hCursor=0`. That is literally "clicking puts it back".
+  2. **"We issued a warp" was treated as "we centred".** The Win+L loss-tick call is issued against the secure
+     desktop and lands nowhere, so only a MEASUREMENT can end the debt.
+  The cure (and it is simpler than what it replaces): the hand-back moves the pointer ONCE, right there, with
+  **no foreground gate** (a plain background `SetCursorPos` lands; only the secure desktop swallows it) and no
+  "is a cursor displayed" gate (the applier hides ours first); the debt is ARMED by any hand-back that does not
+  leave the pointer on the crosshair; the retry needs only "no capture wanted" plus the foreground (so a doomed
+  call is not fired every 4 ms for the length of a session lock); and the debt is SETTLED by the measurement - or
+  by a move issued while in front, because the Win+L log proved that is the one that lands. `invisible_moment`
+  and `spend_centre_debt` are gone, and so is the ping-pong risk with the player's own hand (a hand-back while
+  focused owes nothing, because the move it just issued is the one that lands).
+  3. **And then Windows did not draw the cursor at all.** After a Win+L unlock the system answered
+     `showing=false hCursor=65539` for 1.5 s while `enforced` climbed 249 → 311 (62 pushes): the arrow handle IS
+     set, the pointer IS on the crosshair, and the desktop draws nothing - until the player physically moves the
+     mouse, by which time the hand has already taken the pointer off the crosshair. `SetCursor` (already set), the
+     reconciler's `kick_cursor_repaint` jog (MSDN: a program moving the cursor is not "the mouse") and a
+     synthetic `WM_SETCURSOR` (it only asks Chromium for the shape it already set) all left it undrawn, so the
+     one thing MEASURED to fix it is what we now do: a net-zero `SendInput(MOUSEEVENTF_MOVE, +1, -1)`, i.e.
+     injected input, which goes through the input stack exactly like the real mouse. It runs only in the exact
+     state it was diagnosed in (`want` visible + foreground + `showing == false` + `hCursor != 0`), at most once
+     every 500 ms, with one boot.log line - a NULL handle is a different disease (the arrow guard's) and a cursor
+     we want hidden is never nudged into view, and while the mouse is captured the condition cannot hold at all.
+  Two table tests rewritten around the new rule (including the Win+L sequence end to end: armed at the loss,
+  not paid while locked, paid at the unlock); 32/32 pass.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

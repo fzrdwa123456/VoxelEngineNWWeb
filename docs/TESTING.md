@@ -619,3 +619,30 @@ contain `RAWINPUT listener started` and `RAWINPUT active=true` (once per run).
     two refusals of a capture request; there must never be a `falling back to requestPointerLock` line (it
     does not exist any more)
 ```
+
+AFTER the hand-back centring (P1.73 - the cursor must be ON the crosshair when the menu appears, for every way
+out of the capture, and Windows must actually DRAW it). The report was "the cursor is visible but not on the
+crosshair, and clicking puts it back on the crosshair". Enter a world (the mouse is captured) and then:
+```
+(1) Win+; (the emoji/symbol overlay) - the reported case: the pause menu comes up and the cursor must be on the
+    crosshair within a frame or two. boot.log: `cannot hide the cursor (an overlay is showing it)` → one
+    `we owe a centring until the pointer is ON the crosshair (P1.73)` → one `apply … warp=true` whose `pos=` is
+    the client centre. **This path IS allowed to show one visible move** (the overlay's own cursor is what was
+    on screen); what it must NOT do is sit in the wrong place until you click
+(2) Alt+Tab away: the window loses the foreground, the pause menu comes up - and the cursor must ALREADY be on
+    the crosshair while the window is still in the background (the hand-back centres it right there; P1.71
+    deferred this to the moment you clicked back). Coming back must not move it again
+(3) Win+L, then unlock: after the unlock the cursor must be on the crosshair, and it must be DRAWN - it must not
+    need a mouse move to appear. boot.log: `foreground LOST` → `we owe a centring … (P1.73)` → `foreground
+    REGAINED` → `apply … warp=true pos=(client centre)` → and, if the desktop refused to draw it,
+    `[cursor] the arrow is SET but not displayed -> nudging the overlay (P1.73)` (at most one per 500 ms) after
+    which the arrow must be visible. If it appears only once you move the mouse, that nudging line is the one to
+    report back
+(4) ESC → pause menu, and Resume → capture → ESC again: unchanged, centred at once, and boot.log must NOT show
+    a `we owe a centring …` line for this path (a hand-back while we are in front owes nothing - the move it
+    issues is the one that lands). The cursor must NOT stick to the crosshair: after the menu is up, moving the
+    mouse must move it freely (a second warp on the next tick would be the debt fighting your hand)
+(5) the standing set: drag/resize the title bar → no tow, the pause menu comes up and the cursor is NOT yanked
+    (that path deliberately owes nothing); the backpack (E); fullscreen <-> windowed must not pause; while
+    captured nothing new appears in the log
+```

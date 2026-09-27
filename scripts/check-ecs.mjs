@@ -2878,25 +2878,46 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/pub fn hand_back_warp/.test(modelSrc) && /m\.user_holding/.test(modelSrc),
     "\u2026and its one exception is a HAND ON THE FRAME, not where the pointer happens to be");
   assert(/hand_back_warp\(m, p\)/.test(modelSrc), "\u2026which every hidden -> visible transition uses");
-  // **P1.71 - THE CENTRE DEBT.** A hand-back that could NOT be centred when it happened must not be dropped:
-  // the Win+L hand-back planned its warp while the secure desktop owned the input (the move landed nowhere and
-  // consumed the transition), and the overlay give-up's move was VISIBLE (the cursor is shown by somebody
-  // else). Both become a debt, settled at the first moment the system reports no cursor displayed.
-  assert(/pub fn invisible_moment/.test(modelSrc) && /p\.focused && !p\.showing && m\.want != 2/.test(modelSrc),
-    "a move may only happen where it cannot be SEEN: the foreground, no cursor displayed, no capture wanted");
-  assert(/pub fn owes_centre/.test(modelSrc) && /pub centre_debt: bool/.test(modelSrc),
-    "\u2026and a hand-back that could not use such a moment OWES a centring (the debt)");
-  assert(/if was_hidden && p\.focused \{ hand_back_warp\(m, p\) \}/.test(modelSrc),
-    "the immediate hand-back warp requires the FOREGROUND: a background move is lost, not invisible");
-  assert(/arm_centre_debt: owes_centre\(m, p, None\)/.test(modelSrc),
-    "\u2026the overlay give-up ARMS the debt instead of jumping on a visible cursor (P1.71)");
-  assert(/m\.centre_debt && invisible_moment\(m, p\)/.test(modelSrc),
-    "\u2026and the debt is spent on the first `invisible_moment`");
-  assert(/if plan\.spend_centre_debt \|\| plan\.warp\.is_some\(\)/.test(winSrc) &&
-      /if plan\.arm_centre_debt/.test(winSrc),
-    "\u2026the platform half records it, and any applied warp settles it");
+  // **P1.73 - THE CENTRE DEBT, SIMPLIFIED (the original design was wrong in two ways, and the user's log
+  // showed both).** (1) It only ARMED the debt when the tick's move had been refused, and it only PAID it at a
+  // moment it called "invisible" - foreground AND no cursor displayed. The real state after a hand-back is
+  // "the pause menu is up (so an arrow IS displayed - ours) and the window may be in the background", so the
+  // debt waited and was settled by a later accident: the report was "the cursor is visible but not on the
+  // crosshair, and clicking puts it back". (2) It treated "we issued a warp" as "we centred", which cannot hold
+  // on the secure desktop of a session lock. Now: the hand-back centres at once (no focus gate - a plain
+  // background move lands), the debt is armed by the hand-back itself, the retry needs only "no capture wanted"
+  // plus the foreground (so a doomed call is not fired every 4 ms for the length of a lock), and the debt ends
+  // on the MEASUREMENT.
+  assert(!/pub fn invisible_moment/.test(modelSrc) && !/spend_centre_debt/.test(modelSrc),
+    "the 'invisible moment' gate is gone: it was false in exactly the state a hand-back leaves us in");
+  assert(/pub fn owes_centre\(m: &CursorModel, p: &CursorProbe\) -> bool \{\s*m\.centre_on_show && !m\.user_holding && !is_at_centre\(p\)/.test(modelSrc),
+    "\u2026the debt is owed by any hand-back that does not leave the pointer on the crosshair");
+  assert(/let mut warp = if was_hidden \{ hand_back_warp\(m, p\) \} else \{ None \};/.test(modelSrc),
+    "the hand-back moves the pointer ONCE, right there, with no foreground requirement (the P1.71 gate was what "
+    + "deferred Alt+Tab / the Win key / Win+L until the player clicked back in)");
+  assert(/warp\.is_none\(\) && m\.centre_debt && m\.want != 2 && p\.focused/.test(modelSrc),
+    "\u2026and an unpaid centring is retried while no capture is wanted and we can really land the move");
+  assert(/let settle_centre_debt = \(m\.centre_debt && is_at_centre\(p\)\) \|\| \(warp\.is_some\(\) && p\.focused\);/.test(modelSrc),
+    "the debt ends on the MEASUREMENT, or on a move issued while IN FRONT (an unfocused call is the one that lands "
+    + "nowhere - settling on that is exactly the P1.71 bug)");
+  assert(/arm_centre_debt: owes_centre\(m, p\)/.test(modelSrc),
+    "\u2026the overlay give-up arms it too (and pays it one tick later, when the front end hands the mouse back)");
+  assert(/if plan\.settle_centre_debt \{/.test(winSrc) && /if plan\.arm_centre_debt \{/.test(winSrc),
+    "\u2026the platform half records exactly those two transitions");
   assert(/m\.centre_debt = false;/.test(winSrc.split("m.want = 2;")[1].split("let p = probe_of")[0]),
     "\u2026and taking the mouse back drops the debt, so it can never fire into a running session");
+  // …and the third piece: "the arrow is SET and NOT DRAWN" (Win+L, 1.5 s, `showing=false hCursor=65539`, 62
+  // pushes). Only injected input counts as "the mouse" for Windows, which is why the cure is a net-zero
+  // `SendInput` and not another `SetCursorPos` jog or another `WM_SETCURSOR`.
+  assert(/fn nudge_cursor_overlay\(\)/.test(winSrc) && /MOUSEEVENTF_MOVE/.test(winSrc) &&
+      /SendInput\(events\.len\(\) as u32, events\.as_ptr\(\)/.test(winSrc),
+    "a stuck cursor overlay is nudged with a net-zero injected move (P1.73)");
+  assert(/if m\.want != 1 \|\| !p\.focused \|\| p\.showing \{\s*return;/.test(winSrc),
+    "\u2026only while we WANT the cursor visible, we are in front, and the system says nothing is displayed");
+  assert(/let \(_, hcursor\) = cursor_info\(\);\s*if hcursor == 0 \{\s*return;/.test(winSrc),
+    "\u2026and only when an arrow handle IS set (a NULL handle is the arrow guard's disease, not this one)");
+  assert(/maybe_nudge_stuck_cursor\(&handle, &m, &p\);/.test(winSrc),
+    "\u2026driven from the reconciler, which is where the probe is taken");
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
