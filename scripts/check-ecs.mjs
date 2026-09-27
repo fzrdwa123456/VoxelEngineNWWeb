@@ -2878,6 +2878,25 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/pub fn hand_back_warp/.test(modelSrc) && /m\.user_holding/.test(modelSrc),
     "\u2026and its one exception is a HAND ON THE FRAME, not where the pointer happens to be");
   assert(/hand_back_warp\(m, p\)/.test(modelSrc), "\u2026which every hidden -> visible transition uses");
+  // **P1.71 - THE CENTRE DEBT.** A hand-back that could NOT be centred when it happened must not be dropped:
+  // the Win+L hand-back planned its warp while the secure desktop owned the input (the move landed nowhere and
+  // consumed the transition), and the overlay give-up's move was VISIBLE (the cursor is shown by somebody
+  // else). Both become a debt, settled at the first moment the system reports no cursor displayed.
+  assert(/pub fn invisible_moment/.test(modelSrc) && /p\.focused && !p\.showing && m\.want != 2/.test(modelSrc),
+    "a move may only happen where it cannot be SEEN: the foreground, no cursor displayed, no capture wanted");
+  assert(/pub fn owes_centre/.test(modelSrc) && /pub centre_debt: bool/.test(modelSrc),
+    "\u2026and a hand-back that could not use such a moment OWES a centring (the debt)");
+  assert(/if was_hidden && p\.focused \{ hand_back_warp\(m, p\) \}/.test(modelSrc),
+    "the immediate hand-back warp requires the FOREGROUND: a background move is lost, not invisible");
+  assert(/arm_centre_debt: owes_centre\(m, p, None\)/.test(modelSrc),
+    "\u2026the overlay give-up ARMS the debt instead of jumping on a visible cursor (P1.71)");
+  assert(/m\.centre_debt && invisible_moment\(m, p\)/.test(modelSrc),
+    "\u2026and the debt is spent on the first `invisible_moment`");
+  assert(/if plan\.spend_centre_debt \|\| plan\.warp\.is_some\(\)/.test(winSrc) &&
+      /if plan\.arm_centre_debt/.test(winSrc),
+    "\u2026the platform half records it, and any applied warp settles it");
+  assert(/m\.centre_debt = false;/.test(winSrc.split("m.want = 2;")[1].split("let p = probe_of")[0]),
+    "\u2026and taking the mouse back drops the debt, so it can never fire into a running session");
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),

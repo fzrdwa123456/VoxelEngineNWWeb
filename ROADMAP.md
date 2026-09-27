@@ -1520,6 +1520,33 @@ Still outstanding:
   3. The platform model gained the `user_holding` mirror so the rule is table-testable, and the ONE rule is
      pinned by the gate (`no fn restore_arrow`, `hand_back_warp` + `user_holding`, and every hidden -> visible
      transition using it). Three table tests updated, one added; 29/29 pass.
+- **P1.71 - the CENTRE DEBT: a hand-back that cannot be centred invisibly is OWED, not performed.** `DONE`.
+  The report after P1.70 was "Win+L still does not centre, and Win+; shows the cursor and THEN moves it to the
+  middle". Both are one mistake: a move was issued at a moment when it could not be invisible.
+  1. **Win+L.** P1.70's warp was planned on the LOSS tick, where `focused=false` (the secure desktop owns the
+     input): the `SetCursorPos` went to a desktop the user was not looking at, the boot.log shows the trace
+     still reading `pos=(0,0)` right after it, and after the unlock the pointer sat at `(320,195)` - the
+     top-left corner of the clip rect, i.e. our own `ClipCursor` clamping the locked desktop's `(0,0)` read.
+     Worse, that doomed call had CONSUMED the hidden -> visible transition (it recorded `shape=Arrow`), so no
+     later tick planned a warp again and the cursor never came back to the crosshair. The old
+     `win::restore_arrow` had the same defect (it was called from the focus-LOST handler), which is why Win+L
+     never worked - not a P1.70 regression.
+  2. **Win+;.** The give-up branch (P1.69) centred in the same plan, but the whole reason for giving up is that
+     the cursor IS VISIBLE (a system overlay keeps showing it), so that move was a move the player watched:
+     "the cursor appears and then jumps to the middle", 250 ms after the Win+; press.
+  The cure is one new rule and one new piece of state. `invisible_moment(m,p)` = we are the FOREGROUND, the
+  system reports NO cursor displayed (`GetCursorInfo`), and the front end is not asking for hidden (a move
+  during a capture is invisible too, but it reaches the input pipeline as a synthetic mouse movement - the
+  P1.62d teleport). The hand-back warp now requires the foreground, and anything it could not do becomes
+  `CursorModel::centre_debt`, settled on the first `invisible_moment` - which is the tick right after a
+  Win+L unlock (the log has `showing=false hCursor=0` there) and never happens while an overlay is on screen.
+  The debt is dropped the moment the player takes the mouse back (`set_mouse_capture`) and by any applied
+  warp, so it can never fire into a running session; it has no timer, because a lock can last minutes. The
+  drop branch (a pointer the user dragged outside) deliberately arms NOTHING - a debt there would pull the
+  pointer back in, the exact class of move P1.62…P1.62d removed. `trace_of` now ends with `debt=` so the
+  state is readable in boot.log, the arming logs one rate-limited line, and the gate pins the rule
+  (`invisible_moment`, `owes_centre`, the foreground term, the give-up arming, the spend, the clearing).
+  Two new table tests (the Win+L sequence, and "never paid into a running capture"); 31/31 pass.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

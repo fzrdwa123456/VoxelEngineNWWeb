@@ -557,25 +557,34 @@ the mouse captured:
     afterwards
 ```
 
-AFTER the ONE hand-back warp (P1.70 - the cursor must come back ON THE CROSSHAIR on every path, at once).
-The report was "Win+; pauses but the cursor is not centred, and sometimes it jumps to the middle later on its
-own". Enter a world (captured), then walk every way OUT of the capture, and each time look at the cursor the
-moment the pause menu appears - it must be ON THE CROSSHAIR, and it must not move again afterwards:
+AFTER the CENTRE DEBT (P1.71 - the centring is OWED when it cannot be done invisibly). This supersedes the
+P1.70 expectations for Win+; and Win+L: the report was "Win+L still does not centre, and Win+; shows the
+cursor and THEN moves it to the middle". Both are the same mistake - a move was issued at a moment it could
+not be invisible (a background window for Win+L, a cursor somebody else is drawing for Win+;) - so the move
+is DEFERRED to the first moment the system reports no cursor displayed at all. Enter a world (captured):
 ```
-(1) Win+; (the emoji/symbol overlay) - THE reported case: the overlay never takes the foreground, so this
-    goes through P1.69's give-up branch. The cursor must be on the crosshair as soon as the menu is up, and
-    boot.log must show the `cannot hide the cursor (an overlay is showing it) -> handing the mouse back`
-    line TOGETHER WITH one `apply … warp=true` whose `pos=` is the client centre; `showing=false` at that
-    moment is what proves the move happened while the pointer was still hidden
-(2) Win+. (the same overlay family) and Win (Start menu), and a click on the IME candidate window: same as (1)
-(3) ESC -> pause menu, and Resume -> capture -> ESC again: still centred (this path always worked; it is the
-    regression check for "one rule, not two")
-(4) Alt+Tab away and back, and Win+L + unlock: nothing may move on its own AFTER the menu is up. A cursor
-    that drifts to the middle a second later is the deleted `restore_arrow` path back (boot.log would show
-    the warp in a later line than the menu, from the window event, not from an `apply`)
-(5) the one case that must NOT centre: HOLD THE TITLE BAR (or a border) and then release the mouse - with
-    `user_holding=true` the hand-back warp refuses, because moving the pointer drags the window with it.
-    boot.log shows the refusal by the ABSENCE of `warp=true` while `moving=true`
+(1) Win+L, then unlock (this is THE case): the pause menu must come up with the cursor ON THE CROSSHAIR, and
+    it must never sit in a corner. boot.log must show, in this order: `foreground LOST (measured)`; one
+    `[cursor] we owe a centring: the hand-back could not be centred here (P1.71)` (its trace ends `debt=true`);
+    `foreground REGAINED (measured)`; then ONE `apply … warp=true` whose `pos=` is the client centre - with
+    `showing=false` on that line, which is what proves the move happened while nothing was displayed
+(2) Win+; (the emoji/symbol overlay) and Win+.: the cursor must sit STILL where it was when the menu appeared
+    (NO jump to the middle) - the debt is owed, not paid, because the overlay is still drawing a cursor
+    (`showing=true`). boot.log: the `cannot hide the cursor (an overlay is showing it)` line, then
+    `we owe a centring … debt=true`, and NO `warp=true`, because there is no invisible moment while the
+    overlay is up. If the overlay closes and the system reports no cursor on a later tick, ONE `warp=true`
+    appears then - and the cursor must not visibly move at that instant
+(3) ESC -> pause menu, Resume -> capture -> ESC again: still centred IMMEDIATELY (this path is a hand-back
+    while we ARE the foreground, so nothing is deferred). The regression tells: no `we owe a centring` line on
+    this path, and `warp=true` on the same tick as the release
+(4) the debt must never fire into a running session: after (1) or (2), press Resume and play for a few
+    seconds - nothing may move the pointer, and `debt=` must go back to `false` (boot.log's first
+    `capture on=true` after the pause clears it)
+(5) the case that must never move: HOLD THE TITLE BAR (or a border) and release - `user_holding=true`, so no
+    warp and no debt (`we owe a centring` must NOT appear). Same for a drag/resize drop
 (6) the standing ones: drag/resize never tows the pointer, the backpack opens with a visible centred cursor,
     fullscreen <-> windowed does not pause, and while captured nothing new appears in the log
+```
+Report back: for Win+L the `foreground LOST/REGAINED` block with the `apply … warp=` line between them, and
+for Win+; whether any `warp=true` line appears at all.
 ```

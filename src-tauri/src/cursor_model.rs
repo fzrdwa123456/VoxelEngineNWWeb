@@ -107,6 +107,21 @@ pub struct CursorModel {
     /// rule can consult it) - P1.70. The crosshair move of the hidden -> visible transition must never happen
     /// while a hand is on the frame: that is the ONE case where moving the pointer drags a window with it.
     pub user_holding: bool,
+    /// **THE CENTRE DEBT (P1.71)**: a hand-back happened that could NOT be centred at the time, so the next
+    /// moment the system reports NO cursor displayed at all is owed a move to the crosshair.
+    ///
+    /// Why a debt and not a better-timed call (boot.log, P1.71):
+    ///   * the Win+L hand-back planned its centring `warp=true` ON THE LOSS TICK, while the secure desktop had
+    ///     the input - `SetCursorPos` went to a desktop the user was not looking at, and after the unlock the
+    ///     pointer was still parked in the client's top-left corner (`(320,195)`, i.e. our own clip clamping
+    ///     the `(0,0)` read of the locked desktop). The transition was CONSUMED by that call, so no later tick
+    ///     planned a warp again and the cursor never came back to the crosshair.
+    ///   * the overlay give-up (P1.69/P1.70) did the same thing for the opposite reason: a move there is
+    ///     VISIBLE, because the whole reason for giving up is that the cursor cannot be hidden.
+    /// A debt is settled by the first `invisible_moment` (see below) - the tick after a lock is released is
+    /// exactly one - and it is dropped the moment the player takes the mouse again (`win::set_mouse_capture`),
+    /// so it can never fire into a running session. No timer: a lock can last minutes.
+    pub centre_debt: bool,
 }
 
 /// ~250 ms at the sentinel's 8 ms tick: "we have been trying to hide a cursor somebody else keeps showing".
@@ -172,6 +187,13 @@ pub struct CursorPlan {
     /// cursor along with a window being dragged or resized (the boot.log: `relative=true` for four seconds
     /// while the clip walked 963 -> 639 -> 480, with the pointer dragged along at every step).
     pub drop_capture: bool,
+    /// **P1.71: we handed the mouse back and did NOT centre it** (we were not the foreground, or somebody
+    /// else was drawing the cursor) - the caller records the debt (`CursorModel::centre_debt`), which the next
+    /// `invisible_moment` settles.
+    pub arm_centre_debt: bool,
+    /// **P1.71**: this plan was built at an `invisible_moment` and the caller must consider the debt settled
+    /// (whether or not `warp` is `Some`: a pointer already on the crosshair owes nothing).
+    pub spend_centre_debt: bool,
 }
 
 pub fn rect_is_zero(r: ClipRect) -> bool {
@@ -355,6 +377,29 @@ pub fn is_at_centre(p: &CursorProbe) -> bool {
     p.pos == crosshair_of(p)
 }
 
+/// **Is this a moment in which a move CANNOT be seen?** (P1.71) Three facts, all MEASURED, never assumed:
+///   * we are the FOREGROUND. A `SetCursorPos` from a window that is not the foreground is issued against a
+///     desktop the user is not looking at (the Win+L boot.log: the hand-back planned `warp=true` at the loss
+///     and the pointer was still in the same corner after the unlock), so a move there is not "invisible" -
+///     it is LOST, and it costs the transition that would have centred later.
+///   * the system reports NO cursor displayed anywhere (`GetCursorInfo`). Then a move now is invisible by
+///     definition. This is the tick right after a session lock is released - the only chance the Win+L path
+///     has - and the moment a system overlay hands the cursor back.
+///   * the front end is NOT asking for hidden. A move during a capture is invisible too, but it arrives in the
+///     input pipeline as a synthetic mouse movement (the "teleport-sized jump" of P1.62d), so it is refused.
+pub fn invisible_moment(m: &CursorModel, p: &CursorProbe) -> bool {
+    p.focused && !p.showing && m.want != 2
+}
+
+/// **Do we OWE the player a centring?** (P1.71) A hand-back that could not be performed as an invisible move
+/// must not be dropped: the pointer would stay wherever the lock, the overlay or the user left it, and the
+/// pause menu would come up with the cursor in a corner - the report this rule answers. `warp.is_none()` is
+/// the "we did not centre" half; the other three terms are the reasons a move is refused in the first place
+/// (`hand_back_warp`), plus "the pointer is already on the crosshair, so there is nothing to owe".
+pub fn owes_centre(m: &CursorModel, p: &CursorProbe, warp: Option<ClipPos>) -> bool {
+    warp.is_none() && m.centre_on_show && !m.user_holding && !is_at_centre(p)
+}
+
 /// The whole rule set. PURE: no Win32, no globals - this is what the table test drives.
 pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     if m.hwnd == 0 {
@@ -404,6 +449,10 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
                 None,
                 force,
             );
+            // **…AND THIS PATH NEVER OWES A CENTRING (P1.71).** The pointer is outside our window because the
+            // user put it there (a drag, a resize, a window that moved away) or because there is nothing
+            // visible to clip to. A debt would later PULL it back in, which is the class of move P1.62…P1.62d
+            // spent four rounds removing.
             return CursorPlan { drop_capture: true, ..release };
         }
         // **WE CANNOT WIN: STOP FIGHTING (P1.69).** We want it hidden, we are focused, and the system has been
@@ -411,16 +460,23 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
         // back instead - the front end pauses, the cursor is legitimately visible again, and the 125 pushes a
         // second stop.
         if p.showing && m.lost_fight_ticks >= LOST_FIGHT_TICKS {
-            // It is a hidden -> visible transition like any other, so it CENTRES like any other (P1.70) - the
-            // old "no move here" made this path visibly different from ESC/Resume.
+            // It is a hidden -> visible transition like any other, so it OWES a centring like any other - but it
+            // must NOT PERFORM one (P1.71). The whole reason for giving up is that the cursor IS VISIBLE
+            // (somebody else keeps showing it), so a move here is a move the player watches: the report was
+            // "Win+; makes the cursor appear and THEN puts it in the middle". A visible jump is not a cure for
+            // a visible cursor - the centring becomes a debt, settled at the first `invisible_moment`.
             let release = plan(
                 if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
                 CursorShape::Arrow,
                 false,
-                hand_back_warp(m, p),
+                None,
                 m.shape == CursorShape::Hidden,
             );
-            return CursorPlan { drop_capture: true, ..release };
+            return CursorPlan {
+                drop_capture: true,
+                arm_centre_debt: owes_centre(m, p, None),
+                ..release
+            };
         }
         // …otherwise the disagreement is ours to correct: push the hidden shape (that is how a dropped
         // `SetCursor` or a stale Chromium cache gets fixed).
@@ -431,17 +487,36 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     // first, so the move is never seen). A background window never compares with the system (rule 1 of the
     // old model, now just the `p.focused` term in `force`), so it cannot fight the foreground application.
     let was_hidden = m.shape == CursorShape::Hidden;
-    let warp = if was_hidden { hand_back_warp(m, p) } else { None };
+    // **A HAND-BACK MOVES THE POINTER ONLY WHERE THE MOVE CAN LAND (P1.71).** `p.focused` joins `was_hidden`
+    // here: a hand-back planned while another window is in front issues its `SetCursorPos` against a desktop
+    // the user is not looking at, so what the Win+L log shows is a `warp=true` that never happened - and the
+    // transition it consumed is the only chance the rule gets. The call is not made; the debt below is.
+    let mut warp = if was_hidden && p.focused { hand_back_warp(m, p) } else { None };
+    // **SETTLE THE DEBT (P1.71).** A hand-back that could not be centred when it happened (an unfocused loss,
+    // the overlay give-up) is paid at the first moment the system reports no cursor on screen at all - the
+    // tick after a Win+L unlock, which is the one moment that path can be moved invisibly.
+    let mut spend_centre_debt = false;
+    if warp.is_none() && m.centre_debt && invisible_moment(m, p) {
+        spend_centre_debt = true;
+        warp = hand_back_warp(m, p);
+    }
+    // …and ARM it when we have just handed back WITHOUT centring (the `was_hidden` half is what makes this the
+    // hand-back and not, say, every tick of a running menu).
+    let arm_centre_debt = was_hidden && owes_centre(m, p, warp);
     let force = was_hidden
         || (p.focused && disagrees(p, CursorShape::Arrow))
         || (m.arrow_guard > 0 && !p.showing);
-    plan(
-        if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
-        CursorShape::Arrow,
-        false,
-        warp,
-        force,
-    )
+    CursorPlan {
+        arm_centre_debt,
+        spend_centre_debt,
+        ..plan(
+            if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
+            CursorShape::Arrow,
+            false,
+            warp,
+            force,
+        )
+    }
 }
 
 /// **Rule 4 (P1.58): a HIDDEN intent does not outlive the FOREGROUND SESSION.**
@@ -476,7 +551,18 @@ fn plan(
     warp: Option<ClipPos>,
     force_shape: bool,
 ) -> CursorPlan {
-    CursorPlan { clip, shape, confined, warp, force_shape, drop_capture: false }
+    CursorPlan {
+        clip,
+        shape,
+        confined,
+        warp,
+        force_shape,
+        drop_capture: false,
+        // The DEBT flags are P1.71's and are set by the two branches that hand the mouse back; every other
+        // plan leaves them alone.
+        arm_centre_debt: false,
+        spend_centre_debt: false,
+    }
 }
 
 
@@ -503,6 +589,7 @@ mod tests {
             arrow_guard: 0,
             lost_fight_ticks: 0,
             user_holding: false,
+            centre_debt: false,
         }
     }
 
@@ -797,9 +884,13 @@ mod tests {
         // window is never hidden (`hidden = want == 2 && p.focused`), so no intent can "outlive" the session.
         let mut m = model(true, client());
         m.shape = CursorShape::Hidden;
-        let away = decide(&m, &probe(false));
+        let mut lost = probe(false); // the cursor is somewhere else while the game holds it
+        lost.pos = ClipPos { x: 700, y: 600 };
+        let away = decide(&m, &lost);
         assert_eq!(away.clip, Some(ClipRect::ZERO), "the clip we hold is released");
         assert_eq!(away.shape, CursorShape::Arrow, "and the arrow comes back");
+        assert_eq!(away.warp, None, "…and nothing is MOVED: a background move lands nowhere (P1.71)");
+        assert!(away.arm_centre_debt, "…so the centring becomes a DEBT instead of a doomed call (P1.71)");
         m.clipped = ClipRect::ZERO; // what apply_clip(ZERO) records
         m.shape = CursorShape::Arrow;
         // Focus returns and the front end still wants the mouse (it is the pause menu that would flip that):
@@ -874,11 +965,74 @@ mod tests {
         let plan = decide(&m, &p);
         assert!(plan.drop_capture, "…and then it gives up");
         assert_eq!(plan.shape, CursorShape::Arrow);
-        assert_eq!(plan.warp, Some(ClipPos { x: 500, y: 400 }), "and it centres like every other hand-back");
+        assert_eq!(
+            plan.warp, None,
+            "it does NOT move the pointer: the cursor is visible, so the move would be watched (P1.71)"
+        );
+        assert!(
+            plan.arm_centre_debt,
+            "…it OWES the centring instead, and pays it at the first invisible moment (P1.71)"
+        );
         // A cursor the system already hides is never a lost fight: that is the normal capturing state.
         let mut shown = probe(true);
         shown.showing = false;
         assert!(!decide(&m, &shown).drop_capture);
+    }
+
+    #[test]
+    fn the_centre_debt_is_paid_on_the_first_moment_no_cursor_is_displayed() {
+        // The Win+L report (P1.71), as one sequence: the hand-back happens while the secure desktop owns the
+        // input, so the move is not attempted; and the tick where the foreground comes back with the system
+        // reporting NO cursor on screen is where the debt is paid - invisibly.
+        let mut m = model(true, client());
+        m.shape = CursorShape::Hidden;
+        let mut locked = probe(false);
+        locked.pos = ClipPos { x: 0, y: 0 }; // what `GetCursorPos` answers while locked
+        assert!(decide(&m, &locked).arm_centre_debt, "the loss owes a centring");
+        m.centre_debt = true;
+        m.shape = CursorShape::Arrow; // …which is what the hand-back applied
+        m.clipped = ClipRect::ZERO;
+        // …and the front end answers the announced loss by handing the mouse back (the pause menu):
+        m.want = 1;
+        m.relative = false;
+        // Back in front, and the cursor is up again - nothing may move while the player can see it.
+        let mut visible = probe(true);
+        visible.pos = ClipPos { x: 320, y: 195 };
+        let plan = decide(&m, &visible);
+        assert_eq!(plan.warp, None, "never a move the player can watch");
+        assert!(!plan.spend_centre_debt);
+        // …until the tick the system says nothing is displayed: the unlock moment.
+        let mut hidden_cursor = probe(true);
+        hidden_cursor.showing = false;
+        hidden_cursor.pos = ClipPos { x: 320, y: 195 }; // the corner our own clip left it in
+        let plan = decide(&m, &hidden_cursor);
+        assert_eq!(plan.warp, Some(ClipPos { x: 500, y: 400 }), "the debt is paid on the crosshair");
+        assert!(plan.spend_centre_debt);
+        // A pointer that is already on the crosshair owes nothing, and an unarmed model never moves.
+        let mut centred = hidden_cursor;
+        centred.pos = ClipPos { x: 500, y: 400 };
+        let plan = decide(&m, &centred);
+        assert_eq!(plan.warp, None);
+        assert!(plan.spend_centre_debt, "the debt is settled, not left armed");
+        m.centre_debt = false;
+        assert_eq!(decide(&m, &hidden_cursor).warp, None, "no debt, no move");
+        assert_eq!(decide(&m, &hidden_cursor).arm_centre_debt, false);
+    }
+
+    #[test]
+    fn the_centre_debt_is_never_paid_into_a_running_capture() {
+        // The move would be invisible, but it would reach the input pipeline as a synthetic mouse movement -
+        // the "teleport-sized jump" of P1.62d. A player who takes the mouse back drops the debt entirely
+        // (`win::set_mouse_capture`), so this is the pure half of that rule.
+        let mut m = model(true, ClipRect::ZERO); // want = 2: the game holds the mouse
+        m.centre_debt = true;
+        let mut p = probe(true);
+        p.showing = false; // the cursor is hidden, as it is while capturing
+        p.pos = ClipPos { x: 120, y: 120 };
+        let plan = decide(&m, &p);
+        assert_eq!(plan.warp, None, "a capture is never moved by the debt");
+        assert!(!plan.spend_centre_debt, "and the debt is left for later");
+        assert!(invisible_moment(&model(false, ClipRect::ZERO), &p), "…while the same facts with a visible intent are a moment");
     }
 
     #[test]

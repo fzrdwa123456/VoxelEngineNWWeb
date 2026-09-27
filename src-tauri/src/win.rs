@@ -98,6 +98,10 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     }
     m.want = 2; // …and the request sets want=2 (see the note above)
     m.relative = true;
+    // **A NEW CAPTURE DROPS ANY CENTRE DEBT (P1.71).** The debt is "the pause menu should have landed on the
+    // crosshair"; the player has just taken the mouse back, so whatever we owed is moot - and keeping it
+    // would let it fire later, into a running session, as a move nobody asked for.
+    m.centre_debt = false;
     let p = probe_of(&m);
     // **THE CLIP TARGET, NOT `decide` (P1.62c).** `decide` carries rule 2's "the pointer has left the window"
     // DROP, which is about an ONGOING capture. Applying it here REFUSED the capture whenever the pointer
@@ -329,9 +333,8 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    arm_arrow_guard, clip_target, decide, forget_intent, hand_back_warp, rect_is_empty, rect_is_zero,
-    tick_arrow_guard, LOST_FIGHT_TICKS,
-    ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
+    arm_arrow_guard, clip_target, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard,
+    LOST_FIGHT_TICKS, ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 
 /// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
@@ -348,6 +351,7 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     arrow_guard: 0,
     lost_fight_ticks: 0,
     user_holding: false,
+    centre_debt: false,
 });
 
 fn model() -> std::sync::MutexGuard<'static, CursorModel> {
@@ -405,7 +409,7 @@ fn trace_of(m: &CursorModel) -> String {
         }
     };
     format!(
-        "want={} relative={} shape={:?} clipped=({},{},{},{}) focused={} showing={} hCursor={} pos=({},{}) under={} enforced={}",
+        "want={} relative={} shape={:?} clipped=({},{},{},{}) focused={} showing={} hCursor={} pos=({},{}) under={} enforced={} debt={}",
         m.want,
         m.relative,
         m.shape,
@@ -419,7 +423,8 @@ fn trace_of(m: &CursorModel) -> String {
         pt.x,
         pt.y,
         under,
-        m.enforced
+        m.enforced,
+        m.centre_debt
     )
 }
 
@@ -689,6 +694,13 @@ fn reconcile(app: &tauri::AppHandle) {
             m.lost_fight_ticks = 0;
             arm_arrow_guard(&mut m);
         }
+        // **THE CENTRE DEBT (P1.71).** Both flags come from the pure model, so the platform half is one write
+        // per branch: an armed debt survives until the tick that can spend it (the first moment the system
+        // reports no cursor displayed while we are in front and the front end is not asking for hidden), and
+        // ANY applied warp settles it - a pointer already on the crosshair has nothing to pay.
+        if plan.spend_centre_debt || plan.warp.is_some() {
+            m.centre_debt = false;
+        }
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
         // crosshair", and the only way to make that move invisible is to do it with a NULL shape. It is also
         // why the old separate `center_cursor` command could still flash: it raced the visible intent through
@@ -699,6 +711,15 @@ fn reconcile(app: &tauri::AppHandle) {
                 m.shape = CursorShape::Hidden;
             }
             warp_to(pos.x, pos.y);
+        }
+        if plan.arm_centre_debt {
+            m.centre_debt = true;
+            if trace_gap_ok(500) {
+                crate::boot_line(
+                    &handle,
+                    &format!("[cursor] we owe a centring: the hand-back could not be centred here (P1.71) [{}]", trace_of(&m)),
+                );
+            }
         }
         // The model compared the plan with the SYSTEM (`GetCursorInfo`), not with our own record: a dropped
         // push or a stale Chromium cache has to be corrected in BOTH directions.
