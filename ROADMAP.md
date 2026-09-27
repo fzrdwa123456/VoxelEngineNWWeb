@@ -1675,6 +1675,23 @@ Still outstanding:
   wheel event yet.
   Three table tests replaced (centre lock, "the clip does not depend on the pointer", "an outside pointer is
   locked in, never dropped"); 29/29 pass.
+- **P1.77 - the centre lock is ONE pixel, and the repaint nudge no longer twitches.** `DONE`. Report after P1.76:
+  "the centre lock is great - the cursor now comes out of the middle - but it can still be seen moving slightly,
+  MC's is completely still". Two causes, both ours:
+  1. **The box was 3x1, not 1x1.** P1.76 took SDL's *remote-desktop* width "as a compromise"; SDL's local box is a
+     single pixel and only widens to 5x1 when `GetSystemMetrics(SM_REMOTESESSION)` is set
+     (`remote_desktop_adjustment`, `SDL_windowswindow.c:397`). With three valid columns Windows clamps the
+     pointer to the NEAREST one, so it parked 1px off the crosshair and could slide between cx-1/cx/cx+1. The
+     probe now carries `remote` (read once and cached in `win::remote_session` - the value cannot change while
+     the process lives) and `centre_lock` pads by 2 only for it. Locally the pointer now has exactly one
+     position, which also makes `hand_back_warp` a permanent no-op: the pointer IS on the crosshair, always.
+  2. **The P1.73 repaint nudge is a REAL 1px move, and it ran after the arrow was shown.** `nudge_cursor_overlay`
+     injects `MOUSEEVENTF_MOVE +1` then `-1` (a zero-delta injection is ignored by Windows, so the move has to
+     be real), and `reconcile` called it after `apply_shape` - i.e. the freshly drawn arrow twitched by a pixel
+     on every hand-back. It now runs BEFORE the shape push, while nothing is displayed yet: the same rule the
+     warp follows ("every move in this system happens while the cursor is hidden"), and the Win+L repaint cure
+     is unchanged. The gate pins the ORDER, not just the call.
+  One table test extended (1x1 locally, 5x1 with `remote`); 29/29 pass.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

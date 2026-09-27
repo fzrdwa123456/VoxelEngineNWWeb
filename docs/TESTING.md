@@ -624,9 +624,14 @@ AFTER the centre lock and the raw buttons (P1.76 - the two things Minecraft does
 captured) and check, in this order:
 ```
 (1) **THE POINTER MUST NOT MOVE AT ALL.** While captured, push the mouse around as hard as you like - the
-    pointer is pinned by `ClipCursor` to a 3x1 px box on the crosshair (SDL's `relative_mode_center`), so the
-    view turns (raw deltas) and the pointer stays put. Not even the clip rect moves: `boot.log`'s `clipped=` is
-    the same box all session, and the `pos=` values stop changing (they used to roam the whole client area)
+    pointer is pinned by `ClipCursor` to a **1x1 px box on the crosshair** (SDL's `relative_mode_center`; 5x1
+    only over a remote desktop), so the view turns (raw deltas) and the pointer stays put. Not even the clip
+    rect moves: `boot.log`'s `clipped=` is the same one-pixel box all session, and the `pos=` values stop
+    changing entirely (they used to roam the whole client area, and with the 3x1 box of P1.76 they still slid
+    1 px). If you can see ANY movement, report the `clipped=` value from boot.log
+(2) **and nothing twitches when a menu appears**: ESC / Resume / Win+; - the cursor appears ON the crosshair
+    without a 1 px jump (the repaint nudge that forces Windows to draw it now runs while the cursor is still
+    hidden, so its injected +1/-1 px is invisible)
 (2) **Win+; / Win+.**: the overlay shows ITS cursor - and it now appears ON THE CROSSHAIR and cannot be moved
     either (it is the system cursor, and the system cursor is inside our box). The game does NOT pause, the
     view still turns, and boot.log keeps saying `an overlay is showing the cursor: keeping the capture and

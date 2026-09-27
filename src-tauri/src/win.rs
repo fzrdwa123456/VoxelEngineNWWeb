@@ -480,6 +480,25 @@ fn probe_of(m: &CursorModel) -> CursorProbe {
         client,
         screen,
         pos: ClipPos { x: pt.x, y: pt.y },
+        remote: remote_session(),
+    }
+}
+
+/// **Is this a remote-desktop session?** — read ONCE and cached (P1.77), because the centre lock's width depends
+/// on it (SDL: `remote_desktop_adjustment = GetSystemMetrics(SM_REMOTESESSION) ? 2 : 0`,
+/// `SDL_windowswindow.c:397`). A probe runs every 4 ms, so the answer is kept: it cannot change while the
+/// process lives without the session being re-established.
+fn remote_session() -> bool {
+    use std::sync::atomic::AtomicU8;
+    static REMOTE: AtomicU8 = AtomicU8::new(2); // 2 = not asked yet, 1 = yes, 0 = no
+    match REMOTE.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let remote = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
+            REMOTE.store(if remote { 1 } else { 0 }, Ordering::Relaxed);
+            remote
+        }
     }
 }
 
@@ -691,6 +710,15 @@ fn reconcile(app: &tauri::AppHandle) {
             }
             warp_to(pos.x, pos.y);
         }
+        // **"THE ARROW IS SET AND NOT DRAWN" (P1.73/P1.77).** The last piece the boot.log exposed: after a Win+L
+        // unlock the system reported `showing=false hCursor=65539` for 1.5 s while `enforced` climbed by 62 -
+        // the pointer WAS on the crosshair and the arrow WAS set, and the desktop simply did not draw it, until
+        // a physical mouse move. Injected input is the one thing MEASURED to fix that, so this sends a net-zero
+        // one - **BEFORE the shape is pushed (P1.77)**: the move it makes is real (a zero-delta injection is
+        // ignored), and running it first means it happens while nothing is displayed yet, exactly like the warp
+        // above. (P1.73 called it after `apply_shape`, so the freshly shown arrow twitched 1 px - reported as
+        // "the cursor still moves slightly".)
+        maybe_nudge_stuck_cursor(&handle, &m, &p);
         // The model compared the plan with the SYSTEM (`GetCursorInfo`), not with our own record: a dropped
         // push or a stale Chromium cache has to be corrected in BOTH directions.
         if plan.force_shape {
@@ -707,12 +735,6 @@ fn reconcile(app: &tauri::AppHandle) {
         // The ARROW GUARD counts down once per reconciler tick (P1.60). It lives here, not in `decide`, so
         // that the rule set stays pure.
         tick_arrow_guard(&mut m);
-        // **"THE ARROW IS SET AND NOT DRAWN" (P1.73).** The last piece the boot.log exposed: after a Win+L
-        // unlock the system reported `showing=false hCursor=65539` for 1.5 s while `enforced` climbed by 62 -
-        // the pointer WAS on the crosshair and the arrow WAS set, and the desktop simply did not draw it, until
-        // a physical mouse move. This is the one measured cure for that, and it only ever runs in the exact
-        // state it was diagnosed in (see `maybe_nudge_stuck_cursor`).
-        maybe_nudge_stuck_cursor(&handle, &m, &p);
         // **COUNT THE TICKS WE SPEND FIGHTING A CURSOR SOMEBODY ELSE SHOWS (P1.69).** `want` hidden + focused +
         // the system still showing one is the overlay state; `decide` gives up on it after ~250 ms.
         {
@@ -766,6 +788,8 @@ const SM_XVIRTUALSCREEN: i32 = 76;
 const SM_YVIRTUALSCREEN: i32 = 77;
 const SM_CXVIRTUALSCREEN: i32 = 78;
 const SM_CYVIRTUALSCREEN: i32 = 79;
+/// Remote Desktop session (P1.77): it widens the centre lock from 1 px to 5 px, as SDL does.
+const SM_REMOTESESSION: i32 = 0x1000;
 
 /// Whether the cursor is visible at the system level: `hCursor == 0` (a NULL shape) means hidden.
 fn cursor_visible_now() -> bool {

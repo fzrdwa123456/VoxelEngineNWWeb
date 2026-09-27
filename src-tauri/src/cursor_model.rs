@@ -149,6 +149,11 @@ pub struct CursorProbe {
     /// the VIRTUAL SCREEN bounds: `ClipCursor` refuses a rectangle that is not on the screen, so every clip
     /// target is intersected with this (a window half off the screen is the normal way to hit it).
     pub screen: ClipRect,
+    /// **Is this a REMOTE DESKTOP session?** (`GetSystemMetrics(SM_REMOTESESSION)`, read once and cached by
+    /// `win::remote_session`.) It widens the centre lock from 1 px to 5 px, exactly as SDL does
+    /// (`remote_desktop_adjustment`, `SDL_windowswindow.c:397`): a remote pointer is positioned coarsely and
+    /// would fight a single-pixel box, while locally a single pixel is what makes the pointer immovable.
+    pub remote: bool,
 }
 
 /// The DECISION - data again. `clip: None` = leave the clip alone; `Some(ZERO)` = release it.
@@ -260,15 +265,22 @@ fn clip_region(p: &CursorProbe) -> ClipRect {
     }
 }
 
-/// **THE CENTRE LOCK (P1.76) - the clip while we hold the mouse: a 3x1 px box AT THE CROSSHAIR.**
+/// **THE CENTRE LOCK (P1.76) - the clip while we hold the mouse: a box AT THE CROSSHAIR, one pixel wide.**
 ///
 /// This is SDL's `relative_mode_center`, which is ON by default (`SDL_HINT_MOUSE_RELATIVE_MODE_CENTER`,
 /// `include/SDL3/SDL_hints.h:3032-3051`) and is the whole reason Minecraft's pointer never moves: with
-/// `lock_to_ctr` the clip becomes `data->cursor_ctrlock_rect` (a 1x1 - 3x1 on RDP - box, see
-/// `src/video/windows/SDL_windowswindow.c:397-403` and `:1598-1632`) offset to the client centre, so Windows
-/// itself refuses to move the pointer out of that box. Nothing has to warp, and the shell's overlay cursor
-/// (which is the SYSTEM cursor, drawn wherever the pointer is) is pinned there too - which is why in MC the
-/// cursor that Win+; reveals sits still, exactly on the crosshair.
+/// `lock_to_ctr` the clip becomes `data->cursor_ctrlock_rect` - **1x1 px locally, 5x1 over a remote desktop**
+/// (`src/video/windows/SDL_windowswindow.c:397-403`, used at `:1598-1632`) - offset to the client centre, so
+/// Windows itself refuses to move the pointer out of that box. Nothing has to warp, and the shell's overlay
+/// cursor (which is the SYSTEM cursor, drawn wherever the pointer is) is pinned there too - which is why in MC
+/// the cursor that Win+; reveals sits still, exactly on the crosshair.
+///
+/// **The width matters, and P1.76 got it wrong first (P1.77).** It used a 3x1 box "as a compromise", which left
+/// the pointer three valid columns: Windows clamps it to the NEAREST column, so it parked 1px off the crosshair
+/// and could be nudged between cx-1, cx and cx+1 - reported, correctly, as "the cursor still moves slightly".
+/// SDL's local box is a single pixel, and `remote_desktop_adjustment = GetSystemMetrics(SM_REMOTESESSION) ? 2 : 0`
+/// is the only reason it is ever wider (a coarse remote pointer would fight a 1px box). So: `p.remote` decides,
+/// and locally the pointer has exactly ONE position.
 ///
 /// **This INVERTS the invariant this file was built on.** P1.63's rule was "the rect handed to `ClipCursor`
 /// always CONTAINS the pointer, so the clip can never move it" - that is what made dragging/resizing stop
@@ -279,19 +291,18 @@ fn clip_region(p: &CursorProbe) -> ClipRect {
 ///     while `in_title_click`, `SDL_windowswindow.c:1543`);
 ///   * a capture request that arrives while the pointer is on the title bar: it is REFUSED while the user holds
 ///     the frame (`winWindowMoving`), so the clamp can never drag a window that is being moved.
-///
-/// 3x1 rather than SDL's local 1x1: the wider box is SDL's own remote-desktop variant, and +-1 px of freedom
-/// on a coarse remote pointer is invisible locally.
 pub fn centre_lock(p: &CursorProbe) -> ClipRect {
     let region = clip_region(p);
     if rect_is_zero(region) {
         return ClipRect::ZERO; // nothing visible to lock to: the caller releases instead (a minimised window)
     }
     let target = fit_into(crosshair_rect(p), region);
+    // SDL's own adjustment: 0 locally (ONE pixel), 2 on a remote desktop (5x1). See the note above.
+    let pad = if p.remote { 2 } else { 0 };
     ClipRect {
-        left: target.left - 1,
+        left: target.left - pad,
         top: target.top,
-        right: target.right + 1,
+        right: target.right + pad,
         bottom: target.bottom,
     }
 }
@@ -522,6 +533,7 @@ mod tests {
             client: client(),
             screen: screen(),
             pos: ClipPos { x: 500, y: 400 },
+            remote: false,
         }
     }
 
@@ -602,8 +614,16 @@ mod tests {
         let plan = decide(&model(true, ClipRect::ZERO), &probe(true));
         assert_eq!(plan.shape, CursorShape::Hidden);
         let clip = plan.clip.expect("a clip");
-        assert_eq!(clip, ClipRect { left: 499, top: 400, right: 502, bottom: 401 });
-        assert!(!rect_is_empty(clip), "3x1 px, on the screen");
+        assert_eq!(clip, ClipRect { left: 500, top: 400, right: 501, bottom: 401 }, "ONE pixel, on the desktop");
+        assert!(!rect_is_empty(clip));
+        // …and a REMOTE desktop gets SDL's wider box: a coarse remote pointer would fight a single pixel.
+        let mut far = probe(true);
+        far.remote = true;
+        assert_eq!(
+            decide(&model(true, ClipRect::ZERO), &far).clip,
+            Some(ClipRect { left: 498, top: 400, right: 503, bottom: 401 }),
+            "5x1 over RDP (SDL's remote_desktop_adjustment)"
+        );
     }
 
     #[test]
@@ -764,8 +784,8 @@ mod tests {
         // An EMPTY rect is rejected by Windows, so the lock must never collapse for a window that is at least
         // partly on the screen.
         let t = centre_lock(&probe(true));
-        assert!(!rect_is_empty(t), "3x1 px at the crosshair: {t:?}");
-        assert_eq!(t, ClipRect { left: 499, top: 400, right: 502, bottom: 401 });
+        assert!(!rect_is_empty(t), "1x1 px at the crosshair: {t:?}");
+        assert_eq!(t, ClipRect { left: 500, top: 400, right: 501, bottom: 401 });
         // …and a window with nothing visible gives ZERO, which is the caller's cue to release instead.
         let mut p = probe(true);
         p.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };

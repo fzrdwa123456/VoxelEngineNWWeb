@@ -2850,11 +2850,15 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   //   * "the one entry move that pulls the pointer in" - the clamp does that, always.
   // The drag/resize tow those rules were protecting against is still covered: the window session releases the
   // clip for its whole duration, which is exactly SDL's `postpone_clipcursor` (asserted just above).
-  assert(/pub fn centre_lock\(p: &CursorProbe\) -> ClipRect/.test(modelSrc) &&
-      /let target = fit_into\(crosshair_rect\(p\), region\);/.test(modelSrc),
-    "the clip is the CENTRE LOCK: the crosshair rect fitted into the visible client");
-  assert(/left: target\.left - 1,/.test(modelSrc) && /right: target\.right \+ 1,/.test(modelSrc),
-    "\u2026a 3x1 px box (SDL's remote-desktop width) - the pointer is pinned, not merely confined");
+  assert(/let target = fit_into\(crosshair_rect\(p\), region\);/.test(modelSrc) &&
+      /let pad = if p\.remote \{ 2 \} else \{ 0 \};/.test(modelSrc),
+    "the clip is the CENTRE LOCK: the crosshair rect fitted into the visible client, ONE pixel wide locally");
+  assert(/left: target\.left - pad,/.test(modelSrc) && /right: target\.right \+ pad,/.test(modelSrc) &&
+      /pub remote: bool/.test(modelSrc) && /fn remote_session\(\) -> bool/.test(winSrc) &&
+      /GetSystemMetrics\(SM_REMOTESESSION\)/.test(winSrc),
+    "\u2026and SDL's `remote_desktop_adjustment` is the ONLY reason it is ever wider (5x1 over RDP): the 3x1 "
+    + "compromise of P1.76 left the pointer three columns, and Windows parks it on the nearest one - \"the cursor "
+    + "still moves slightly\"");
   assert(!/pub fn clip_target|pub fn contains\(/.test(modelSrc) && !/pub window: ClipRect/.test(modelSrc),
     "the pointer-following clip target, `contains` and the whole-window probe field are gone with the rules");
   assert(/let target = centre_lock\(p\);/.test(modelSrc) &&
@@ -2950,6 +2954,15 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "\u2026and only when an arrow handle IS set (a NULL handle is the arrow guard's disease, not this one)");
   assert(/maybe_nudge_stuck_cursor\(&handle, &m, &p\);/.test(winSrc),
     "\u2026driven from the reconciler, which is where the probe is taken");
+  // …and it runs BEFORE the shape push (P1.77): the injected move is real (a zero-delta injection is ignored by
+  // Windows), so doing it after `apply_shape` made the freshly drawn arrow twitch by a pixel.
+  const reconcileOrder = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);
+  assert(
+    reconcileOrder !== null &&
+      reconcileOrder[1].indexOf("maybe_nudge_stuck_cursor(&handle, &m, &p);") <
+        reconcileOrder[1].indexOf("apply_shape(&mut m, plan.shape);"),
+    "\u2026and the nudge happens while the cursor is still hidden, before its shape is pushed",
+  );
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
