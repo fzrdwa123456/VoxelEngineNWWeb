@@ -2877,6 +2877,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "a capture whose window no longer contains the pointer is DROPPED (the drag/resize tow)");
   assert(/plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),
     "\u2026and the platform half tells the front end about it");
+  assert(/m\.shape != CursorShape::Hidden && !rect_is_zero\(clip_region\(p\)\)/.test(modelSrc),
+    "TAKING the mouse may move the pointer into our window ONCE (after a minimise/maximise it starts outside)");
   assert(/pub fn crosshair_of/.test(modelSrc) && /let target = crosshair_of\(p\)/.test(modelSrc),
     "\u2026and the crosshair is its OWN question: the warp must not follow the pointer");
   const reconcileBody = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);

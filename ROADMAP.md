@@ -1442,6 +1442,17 @@ Still outstanding:
   shows in that order. Its two guards are the ones the previous rounds established: a pointer OUTSIDE our
   window is never moved (P1.62d - the user may be holding the window by its title bar) and `centre_on_show`
   switches the whole thing off. One new table test pins all four cases (28 total).
+- **P1.64 - taking the mouse may move the pointer into the window ONCE.** `DONE`. Reported as "minimise or
+  maximise during the loading: it enters PAUSED (right), but then the cursor never disappears, the view
+  cannot turn and only ESC does anything". P1.63's projection had kept SDL's "never tow" half but dropped
+  the other one: entering relative mode is ALLOWED to recentre once. After a minimise/maximise/restore the
+  pointer is usually outside the restored window (the taskbar, the desktop), so the projection refused to
+  clip, marked the request DROPPED, and the front end read that as "the window was lost" - pause again, and
+  Resume looped. The entry branch is now `m.shape != Hidden && the client has a visible part`: hide, move to
+  the crosshair (invisible - the applier hides first), then clip. An ONGOING capture whose pointer leaves the
+  window is still the drag case and still releases instead of towing, so invariant 1 is untouched. One new
+  table test covers all three halves (the entry moves, an ongoing capture releases, a minimised window
+  releases).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

@@ -361,10 +361,22 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     let hidden = m.want == 2 && p.focused;
     if hidden {
         let target = clip_target(p);
-        // The pointer is outside our window (the user is dragging it, or the window has moved away from it):
-        // RELEASE, never tow - and tell the caller to drop the request, which is what the front end's
-        // "hand the mouse back" policy hangs off.
+        // The pointer is outside our window (the user is dragging it, or the window has moved away from it).
         if rect_is_zero(target) || !contains(target, p.pos) {
+            // **THE ONE ENTRY MOVE (P1.64).** TAKING the mouse may move the pointer into our window ONCE,
+            // while it is hidden - the projection's version of SDL's "entering relative mode recentres". It
+            // is needed because the pointer and the window get out of step: after a minimise, a maximise or a
+            // restore it usually sits outside the window (the taskbar, the desktop, another screen position).
+            // Refusing to clip there dropped the request, the front end read that as "the window was lost"
+            // and paused again - so Resume LOOPED: a visible cursor, a view that cannot turn, ESC the only key
+            // that does anything.
+            //
+            // Allowed ONLY on the entry (`m.shape != Hidden`: we were not capturing a tick ago) and only when
+            // the client has a visible part to move into. An ONGOING capture whose pointer leaves the window
+            // is the drag/resize case, and that still RELEASES instead of towing (invariant 1).
+            if m.shape != CursorShape::Hidden && !rect_is_zero(clip_region(p)) {
+                return plan(Some(target), CursorShape::Hidden, true, Some(crosshair_of(p)), true);
+            }
             let force = m.shape == CursorShape::Hidden || (m.arrow_guard > 0 && !p.showing);
             let release = plan(
                 if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
@@ -657,7 +669,7 @@ mod tests {
         // window finds the pointer on the title bar. Clamping it into the client moved the window by the same
         // amount (6px in the boot.log) - so the clip becomes the whole WINDOW, which already contains the
         // pointer and therefore moves nothing.
-        let m = model(true, ClipRect::ZERO);
+        let mut m = model(true, ClipRect::ZERO);
         let mut p = probe(true);
         p.pos = ClipPos { x: 500, y: 80 }; // inside the window (60..710), above the client (100..)
         let plan = decide(&m, &p);
@@ -669,6 +681,7 @@ mod tests {
         assert_eq!(decide(&m, &p).clip, Some(client()));
         // …and when the window rect could NOT be read, the client is all we can trust: a pointer outside it
         // is treated as outside (the request is dropped) rather than clipped to a frame we do not know.
+        m.shape = CursorShape::Hidden; // an ongoing capture, not the entry
         let mut blind = probe(true);
         blind.window = ClipRect::ZERO;
         blind.pos = ClipPos { x: 500, y: 80 };
@@ -805,12 +818,42 @@ mod tests {
     }
 
     #[test]
+    fn taking_the_mouse_moves_the_pointer_into_the_window_once() {
+        // The minimise/maximise report (P1.64): the pointer is outside the restored window when the request
+        // comes in. Dropping the request there paused the game again and Resume looped - so the ENTRY is
+        // allowed to move the pointer in, while it is hidden. An ONGOING capture must not (that is the drag
+        // case), which is the second half of this test.
+        let mut m = model(true, ClipRect::ZERO); // want = 2
+        m.shape = CursorShape::Arrow; // we were not capturing a tick ago
+        let mut p = probe(true);
+        p.pos = ClipPos { x: 500, y: 20 }; // outside the window rect (60..710)
+        let plan = decide(&m, &p);
+        assert!(!plan.drop_capture, "the request is NOT dropped: we are taking the mouse");
+        assert_eq!(plan.shape, CursorShape::Hidden);
+        assert_eq!(plan.warp, Some(ClipPos { x: 500, y: 400 }), "and the pointer comes to the crosshair");
+        assert!(!rect_is_zero(plan.clip.expect("a clip")), "with something to clip to");
+        // Already capturing, and the pointer leaves the window (the user is dragging it): release, never tow.
+        m.shape = CursorShape::Hidden;
+        let plan = decide(&m, &p);
+        assert!(plan.drop_capture, "an ONGOING capture releases instead of towing");
+        assert_eq!(plan.warp, None, "and it never moves the pointer");
+        // …and with nothing visible to move into, even the entry releases (a minimised window).
+        m.shape = CursorShape::Arrow;
+        let mut tiny = probe(true);
+        tiny.pos = ClipPos { x: 500, y: 20 };
+        tiny.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };
+        tiny.window = ClipRect { left: 2390, top: -40, right: 3410, bottom: 610 };
+        assert!(decide(&m, &tiny).drop_capture);
+    }
+
+    #[test]
     fn a_capture_ends_when_the_pointer_leaves_the_window() {
         // The P1.62 report, second half. A capture that is still held while the user drags the window by its
         // TITLE BAR (or a sizing border) has a pointer in the NON-CLIENT area: "keep the lock where the
         // pointer is" cannot apply, and clamping it into the moving client centre is what towed it. So the
         // capture is DROPPED instead - release the clip, hand the arrow back, and tell the caller.
-        let m = model(true, ClipRect::ZERO);
+        let mut m = model(true, ClipRect::ZERO);
+        m.shape = CursorShape::Hidden; // an ONGOING capture (not the entry)
         let mut p = probe(true);
         p.pos = ClipPos { x: 500, y: 20 }; // above client (100,100)-(900,700): the title bar
         let plan = decide(&m, &p);
