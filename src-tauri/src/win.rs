@@ -72,6 +72,11 @@ unsafe fn window_rect(hwnd: isize) -> Option<Rect> {
 /// back to the browser's requestPointerLock).
 pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     if !on {
+        // **SET THE ONE INPUT THE PROJECTION READS (P1.63).** `mouse_capture` and `cursor_intent` are two
+        // views of the same boolean now, and writing it here means the hand-back (visible + centred, via the
+        // projection's `was_hidden` warp) happens on the next tick even if the intent push is still in
+        // flight - the ordering that used to matter no longer can.
+        model().want = 1;
         release_mouse_capture();
         return true;
     }
@@ -91,6 +96,7 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     if unsafe { GetForegroundWindow() } != hwnd {
         return false;
     }
+    m.want = 2; // …and the request sets want=2 (see the note above)
     m.relative = true;
     let p = probe_of(&m);
     // **THE CLIP TARGET, NOT `decide` (P1.62c).** `decide` carries rule 2's "the pointer has left the window"

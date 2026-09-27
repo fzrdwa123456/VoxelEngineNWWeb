@@ -341,73 +341,59 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     if m.hwnd == 0 {
         return plan(None, CursorShape::Unknown, false, None, false);
     }
-    if !p.focused {
-        // Rule 1.
-        // Not our foreground: no shape of ours belongs on the screen (rule 1) - EXCEPT that we are the one
-        // that hid it, so the arrow is handed back EXACTLY ONCE (`m.shape == Hidden`): that is the
-        // "press Win / Alt+Tab and the cursor stays gone until I jiggle the mouse" report. Once pushed, the
-        // record says Arrow, so a background window never keeps fighting the foreground app for the cursor.
-        //
-        // **…AND THEN THE ARROW GUARD (P1.60): "exactly once" is not enough.** A NULL cursor comes back
-        // after that single push (Chromium answers `WM_SETCURSOR` from the cache it filled while we were
-        // capturing), and because the plan is compared with OUR OWN RECORD - which now says Arrow - the model
-        // then sat still while the system reported `showing=false`: a real boot.log had four consecutive
-        // `RAWMON … cursorFix=0 desired=1 showing=0` windows, and only a mouse move restored it. While the
-        // guard runs we keep pushing; after ~1 s we are back to comparing with our own record, so a
-        // foreground application that hides the cursor for its own reasons is not fought forever.
-        let force = m.shape == CursorShape::Hidden || (m.arrow_guard > 0 && !p.showing);
-        return plan(
-            if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
-            CursorShape::Arrow,
-            false,
-            None,
-            force,
-        );
-    }
-    if m.relative {
-        // Rule 2. `confined` is false when the window has no visible area left: the caller then DROPS
-        // capture instead of pretending to hold the mouse.
-        // **A CAPTURE WHOSE WINDOW NO LONGER CONTAINS THE POINTER IS OVER (P1.62).**
-        //
-        // The clip keeps the pointer inside OUR WINDOW (client or frame - see `clip_target`), so finding it
-        // OUTSIDE the window means the window moved out from under it: the user dragged or resized it and the
-        // pointer was left behind. Re-clipping would CLAMP the pointer back in, which is what towed it (the
-        // boot.log: `relative=true` for four seconds while the clip walked 963 -> 639 -> 480, dragging the
-        // pointer at every step - a late `LOCK request [world entered]` had re-taken the capture after the
-        // geometry release).
-        //
-        // Dropping the capture instead is the platform half of the policy the front end already applies to
-        // a geometry change ("hand the mouse back + pause"), and it cannot tow anything. **It applies to an
-        // ONGOING capture only** - a capture REQUEST (`set_mouse_capture`) must not be refused for this, or
-        // the front end falls back to the browser's pointer lock, which is worse in every way: ESC unlocks
-        // it, it has a re-lock cooldown, and Chromium's own client-area clip tows the pointer just as happily.
-        let held_area = if rect_is_empty(p.window) { intersect(p.client, p.screen) } else { intersect(p.window, p.screen) };
-        if !contains(held_area, p.pos) {
-            return drop_capture_plan();
-        }
+    // ===== THE PROJECTION (P1.63) =====
+    //
+    // ONE policy input from the front end (`want`: "the mouse is mine", i.e. in a world with no modal UI) -
+    // ANDed with the one OS fact we must never fight (`focused`). Everything else is MEASURED here, every
+    // tick. There is no event left that could be late, missed, or applied out of order, because nothing is
+    // event-driven any more; and there is no per-transition compensation because there are no transitions to
+    // miss. Every one of P1.58…P1.62g was a patch on ONE such transition.
+    //
+    // The shape makes three invariants structural (each was a bug a per-transition patch could not kill):
+    //   1. **The rect handed to `ClipCursor` always CONTAINS the pointer** (or the clip is released), so
+    //      `ClipCursor` can never move it. A window drag, a resize, a title-bar press or a stale request
+    //      therefore cannot tow the cursor: the projection releases and re-clips a tick later.
+    //   2. **The only MOVE in the whole system is the crosshair warp of the hidden -> visible transition**
+    //      (`hand_back_warp`), done while the pointer is still hidden and never on a pointer outside our
+    //      window. It is derived from the PREVIOUS tick's applied shape, so no event has to arm it.
+    //   3. **The shape is compared with the SYSTEM** (`GetCursorInfo`) whenever we are focused, so a dropped
+    //      `SetCursor` or Chromium answering from a stale NULL cache is corrected on the next tick.
+    let hidden = m.want == 2 && p.focused;
+    if hidden {
         let target = clip_target(p);
+        // The pointer is outside our window (the user is dragging it, or the window has moved away from it):
+        // RELEASE, never tow - and tell the caller to drop the request, which is what the front end's
+        // "hand the mouse back" policy hangs off.
+        if rect_is_zero(target) || !contains(target, p.pos) {
+            let force = m.shape == CursorShape::Hidden || (m.arrow_guard > 0 && !p.showing);
+            let release = plan(
+                if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
+                CursorShape::Arrow,
+                false,
+                None,
+                force,
+            );
+            return CursorPlan { drop_capture: true, ..release };
+        }
         // We want it HIDDEN, so a system that still shows it is the disagreement to correct.
-        return plan(Some(target), CursorShape::Hidden, !rect_is_zero(target), None, p.showing);
+        return plan(Some(target), CursorShape::Hidden, true, None, p.showing);
     }
-    // No capture: nothing is confined, and the arrow is right - unless the front end asked for hidden
-    // (a loading screen draws its own progress and wants no pointer on top of it).
-    let shape = if m.want == 2 { CursorShape::Hidden } else { CursorShape::Arrow };
-    let clip = if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) };
-    // **THE CROSSHAIR WARP (P1.55)**: only on hidden -> visible, only when the product wants it, and only
-    // when the cursor is not already at the centre. The applier hides first, so the move is never visible.
-    let warp = if shape == CursorShape::Arrow
-        && m.shape == CursorShape::Hidden
-        && m.centre_on_show
-        && !is_at_centre(p)
-        // **…and never for a pointer that is OUTSIDE the window (P1.62)**: that is a pointer the user is
-        // holding on a title bar or a sizing border, and moving it would yank the window being dragged.
-        && contains(intersect(p.client, p.screen), p.pos)
-    {
-        Some(crosshair_of(p))
-    } else {
-        None
-    };
-    plan(clip, shape, false, warp, disagrees(p, shape))
+    // Not hidden: no world, a modal UI, or another application in front. Release what we hold, show the
+    // arrow, and - if the pointer was hidden until this tick - CENTRE IT, in the same plan (the applier hides
+    // first, so the move is never seen). A background window never compares with the system (rule 1 of the
+    // old model, now just the `p.focused` term in `force`), so it cannot fight the foreground application.
+    let was_hidden = m.shape == CursorShape::Hidden;
+    let warp = if was_hidden { hand_back_warp(m, p) } else { None };
+    let force = was_hidden
+        || (p.focused && disagrees(p, CursorShape::Arrow))
+        || (m.arrow_guard > 0 && !p.showing);
+    plan(
+        if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
+        CursorShape::Arrow,
+        false,
+        warp,
+        force,
+    )
 }
 
 /// **Rule 4 (P1.58): a HIDDEN intent does not outlive the FOREGROUND SESSION.**
@@ -445,19 +431,6 @@ fn plan(
     CursorPlan { clip, shape, confined, warp, force_shape, drop_capture: false }
 }
 
-/// **The plan that ENDS the capture** (P1.62): release the clip, hand the arrow back and tell the caller to
-/// clear the capture request. No warp - the pointer is outside the window, so moving it would yank whatever
-/// the user is dragging.
-fn drop_capture_plan() -> CursorPlan {
-    CursorPlan {
-        clip: Some(ClipRect::ZERO),
-        shape: CursorShape::Arrow,
-        confined: false,
-        warp: None,
-        force_shape: true,
-        drop_capture: true,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -470,7 +443,9 @@ mod tests {
     fn model(relative: bool, clipped: ClipRect) -> CursorModel {
         CursorModel {
             hwnd: 42,
-            want: 1,
+            // (P1.63) The front end's boolean: `relative` in this helper means "the game wants the mouse",
+            // which is `want == 2` now - the model no longer has a separate capture request.
+            want: if relative { 2 } else { 1 },
             relative,
             clipped,
             shape: CursorShape::Unknown,
@@ -602,12 +577,17 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_intent_stays_hidden_without_capture() {
+    fn a_hidden_intent_also_confines() {
+        // (P1.63) There is no "hidden but uncaptured" state any more: asking for the cursor to be hidden IS
+        // asking for it to be confined to our window while the window is foreground. That is what removes the
+        // whole class of "the intent outlived the capture" bugs.
         let mut m = model(false, ClipRect::ZERO);
         m.want = 2;
         let plan = decide(&m, &probe(true));
         assert_eq!(plan.shape, CursorShape::Hidden);
-        assert_eq!(plan.clip, None, "nothing is confined outside capture");
+        assert_eq!(plan.clip, Some(client()));
+        // …and in the background the same intent confines nothing (the projection's `focused` term).
+        assert_eq!(decide(&m, &probe(false)).clip, None);
     }
 
     #[test]
@@ -681,14 +661,14 @@ mod tests {
         let mut p = probe(true);
         p.pos = ClipPos { x: 500, y: 80 }; // inside the window (60..710), above the client (100..)
         let plan = decide(&m, &p);
-        assert!(!plan.drop_capture, "the capture survives: the pointer is still inside our window");
+        assert!(!plan.drop_capture, "the request survives: the pointer is still inside our window");
         assert_eq!(plan.clip, Some(window()), "the clip is the window rect");
         assert!(contains(plan.clip.expect("a clip"), p.pos), "and it contains the pointer");
         // Back inside the client, the clip tightens to the client area again (the sentinel's next tick).
         p.pos = ClipPos { x: 500, y: 400 };
         assert_eq!(decide(&m, &p).clip, Some(client()));
         // …and when the window rect could NOT be read, the client is all we can trust: a pointer outside it
-        // is then treated as outside (the capture ends) rather than clipped to a frame we do not know.
+        // is treated as outside (the request is dropped) rather than clipped to a frame we do not know.
         let mut blind = probe(true);
         blind.window = ClipRect::ZERO;
         blind.pos = ClipPos { x: 500, y: 80 };
@@ -711,8 +691,8 @@ mod tests {
         p.window = ClipRect { left: 2390, top: -40, right: 3410, bottom: 610 }; // the frame goes with it
         let plan = decide(&model(true, ClipRect::ZERO), &p);
         assert!(!plan.confined, "nothing can be held");
-        assert_eq!(plan.clip, Some(ClipRect::ZERO), "and whatever we held is released");
-        assert!(plan.drop_capture, "and the capture itself is given up (P1.62)");
+        assert_eq!(plan.clip, None, "we hold nothing, so there is nothing to release");
+        assert!(plan.drop_capture, "and the request itself is dropped (the front end's pause policy)");
         assert_eq!(plan.shape, CursorShape::Arrow, "the arrow comes back with it");
     }
 
@@ -755,36 +735,21 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_hidden_intent_is_what_used_to_re_hide_the_cursor_on_focus_gain() {
-        // The flap in ONE line, pinned so it cannot come back: an intent that survived the foreground loss
-        // hides the cursor again the moment the window is foreground again - with no capture behind it.
-        let mut m = model(false, ClipRect::ZERO);
-        m.want = 2;
-        m.shape = CursorShape::Hidden;
-        assert_eq!(decide(&m, &probe(true)).shape, CursorShape::Hidden);
-        assert_eq!(decide(&m, &probe(true)).clip, None, "and with no capture behind it");
-    }
-
-    #[test]
-    fn a_foreground_loss_forgets_the_hidden_intent() {
-        // Rule 4. win.rs::on_foreground_lost() is the platform half (drop the capture request + release
-        // the clip we hold); the intent is what this pins.
+    fn a_foreground_loss_releases_the_clip_and_hands_the_arrow_back() {
+        // (P1.63) The projection makes the old rule 4 structural instead of something to remember: a background
+        // window is never hidden (`hidden = want == 2 && p.focused`), so no intent can "outlive" the session.
         let mut m = model(true, client());
-        m.want = 2;
         m.shape = CursorShape::Hidden;
-        m.relative = false; // release_mouse_capture()
-        forget_intent(&mut m);
-        // The clip itself is released by the platform half (`apply_clip(ZERO)`, which records ZERO): while
-        // that is still recorded, the plan releases it and shows the arrow - and NOTHING is confined.
-        let releasing = decide(&m, &probe(true));
-        assert_eq!(releasing.clip, Some(ClipRect::ZERO));
-        assert_eq!(releasing.shape, CursorShape::Arrow);
+        let away = decide(&m, &probe(false));
+        assert_eq!(away.clip, Some(ClipRect::ZERO), "the clip we hold is released");
+        assert_eq!(away.shape, CursorShape::Arrow, "and the arrow comes back");
         m.clipped = ClipRect::ZERO; // what apply_clip(ZERO) records
-        // Coming back must now touch the cursor not at all: no clip (nothing is confined without a capture
-        // request) and no hidden shape. That is the Win-key flap, cured.
+        m.shape = CursorShape::Arrow;
+        // Focus returns and the front end still wants the mouse (it is the pause menu that would flip that):
+        // the projection takes it back - hide and confine again, no event involved.
         let back = decide(&m, &probe(true));
-        assert_eq!(back.shape, CursorShape::Arrow);
-        assert_eq!(back.clip, None);
+        assert_eq!(back.shape, CursorShape::Hidden);
+        assert_eq!(back.clip, Some(client()));
     }
 
     #[test]
@@ -849,8 +814,8 @@ mod tests {
         let mut p = probe(true);
         p.pos = ClipPos { x: 500, y: 20 }; // above client (100,100)-(900,700): the title bar
         let plan = decide(&m, &p);
-        assert!(plan.drop_capture, "the capture is over");
-        assert_eq!(plan.clip, Some(ClipRect::ZERO), "and the clip we hold is released");
+        assert!(plan.drop_capture, "the request is dropped (the front end's pause policy)");
+        assert_eq!(plan.clip, None, "we hold nothing to release");
         // (the pointer is ABOVE the window rect as well - the window is 60..710 - which is what makes it a
         // drop rather than a window clip)
         assert_eq!(plan.shape, CursorShape::Arrow, "with the arrow back");

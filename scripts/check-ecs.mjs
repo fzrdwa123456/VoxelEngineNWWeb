@@ -2873,11 +2873,11 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   const setCaptureSrc = winSrc.split("pub fn set_mouse_capture")[1].split("pub fn reclip_mouse_capture")[0];
   assert(/let target = clip_target\(&p\);/.test(setCaptureSrc) && !/decide\(/.test(setCaptureSrc),
     "entering a capture uses the clip target, NOT decide: the drop rule must not refuse it");
-  assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(held_area, p\.pos\)/.test(modelSrc),
+  assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(target, p\.pos\)/.test(modelSrc),
     "a capture whose window no longer contains the pointer is DROPPED (the drag/resize tow)");
   assert(/plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),
     "\u2026and the platform half tells the front end about it");
-  assert(/pub fn crosshair_of/.test(modelSrc) && /Some\(crosshair_of\(p\)\)/.test(modelSrc),
+  assert(/pub fn crosshair_of/.test(modelSrc) && /let target = crosshair_of\(p\)/.test(modelSrc),
     "\u2026and the crosshair is its OWN question: the warp must not follow the pointer");
   const reconcileBody = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);
   assert(reconcileBody !== null, "reconcile is read as one block");
