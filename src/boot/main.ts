@@ -299,9 +299,9 @@ world.insertResource(LOCAL_PLAYER, player);
 // The cursor policy reads it (canControl), so keep a reference
 const inputState = createInputState();
 world.insertResource(INPUT_STATE, inputState);
-// The race guards' own state (ecs/resources.ts::InputTiming): which mousemove is the synthetic
-// lock-instant one, whether the unlock was ours, the grace deadline, the offscreen cache, the
-// diagnostic counters. It used to be private fields of player.input; the LOGIC did not move with them
+// The race guards' own state (ecs/resources.ts::InputTiming): which mouse event is the synthetic
+// capture-instant one, the grace deadline, the diagnostic counters. It used to be private fields of
+// player.input; the LOGIC did not move with them
 // (iron rule 3), only the place the facts live — so a test and the gate can read them.
 world.insertResource(INPUT_TIMING, createInputTiming());
 // The input system's SPACE/MOUSE diagnostic log: written by the device layer, forwarded and printed by
@@ -741,8 +741,8 @@ const navigation = createNavigationSystem(world, {
   // instead of stepping back through the ladder.
   dragging: () => keybindGesture.drag !== null,
   cancelDrag: (reason) => cancelKeybindDrag(reason, logDebug),
-  // Native capture: does NOT go through `document.exitPointerLock` (see platform/mousecapture.ts)
-  exitPointerLock: () => input.releaseCapture(),
+  // Native capture: there is no `document.exitPointerLock` to call (see platform/mousecapture.ts)
+  releaseCapture: () => input.releaseCapture(),
   relock: (reason) => pointerLock.relock(reason),
   // "Relock, but not in this key dispatch": the DEADLINE goes into the world and `ui.delays` applies it
   // (it used to be a `setTimeout(…, 0)` here — a timer owned by the composition root).
@@ -764,7 +764,9 @@ const delays = createDelaySystem(world, {
 
 // (world.start() moved below: ui.navigation needs the widget trees the surfaces build during wiring.)
 
-// Raw mouse input (Rust plugin): takes over view rotation when pointer lock is cancelled with the window partially offscreen.
+// Raw mouse input (Rust plugin): **the ONLY source of view deltas while the mouse is captured** (P1.72
+// deleted the pointer-lock fallback). WM_INPUT is delivered to a hidden HWND_MESSAGE window
+// (`RIDEV_INPUTSINK`), so it is unaffected by where the cursor is or by our own ClipCursor.
 // **Decided on event arrival, applied ONCE per frame**: `rawDelta` runs the takeover/grace/spike
 // decision in every event and accumulates the part that passes; `frame()` calls `input.frameLook()`
 // once per frame to queue it as ONE look intent — the view no longer goes through any timer (the old
@@ -777,16 +779,16 @@ const rawInput = startRawInput((dx, dy) => input.rawDelta(dx, dy), world.resourc
 // NAPI call, so `available` was true on the spot and this line used to be a synchronous assignment,
 // `input.rawInputActive = rawInput.available`; the Tauri port only sets it in
 // `invoke("rawinput_start").then()`, and a synchronous read gets **permanently** false. The consequence
-// is that native mouse capture never enables (falling back to the browser's requestPointerLock, which
-// runs into ESC unlock + the cooldown) and the raw-input view takeover dies with it. That trap was hit.
+// is that the mouse is never captured at all — raw input is the only source of view deltas (P1.72: there
+// is no pointer-lock fallback any more). That trap was hit.
 void rawInput.ready.then((ok) => {
   input.rawInputActive = ok;
   logDebug(
-    `RAWINPUT active=${ok} -> mouse capture uses ${ok ? "**native ClipCursor** (browser pointer lock untouched)" : "the browser requestPointerLock path (raw input unavailable)"}`,
+    `RAWINPUT active=${ok} -> ${ok ? "the mouse can be captured (native ClipCursor + raw deltas)" : "**the mouse CANNOT be captured** (raw input is the only view source; no pointer-lock fallback by design)"}`,
   );
 });
 
-// Pointer lock manager: referenced by the menu callbacks; declared with let then assigned, avoiding a circular dependency
+// Mouse-capture manager: referenced by the menu callbacks; declared with let then assigned, avoiding a circular dependency
 let pointerLock: PointerLock;
 
 pointerLock = new PointerLock({
@@ -798,8 +800,8 @@ pointerLock = new PointerLock({
   // will not do — the loading screen holds no modal surface, so that would make the loading screen
   // hide the cursor (a legacy bug).
   canControl: () => canControl(inputState, uiModal),
-  // Capture only opens while foregrounded (native ClipCursor does not look at focus; the browser's
-  // requestPointerLock refuses on its own anyway).
+  // Capture only opens while foregrounded: native ClipCursor does not look at focus, and a background
+  // capture would clip the cursor to another application's screen area.
   focused: winFocused,
   // …and not while the user is holding the window (P1.62e): a capture taken then would end on the first
   // movement anyway (`onWinGeometry` pauses), so it is refused with a line saying why.
@@ -891,7 +893,7 @@ const menu = createPauseMenu(world, {
   // The pause menu PUBLISHES its navigation state into UI_MODAL itself, and ui.navigation paints it —
   // so no call site has to remember to say so, and a sub-panel needs no flag of its own.
   onResume: () => {
-        // Back to game: relock the mouse (cooldown after ESC, auto-retry on failure)
+        // Back to game: recapture the mouse (auto-retry on failure; P1.72: no browser cooldown to dodge)
         // Diagnostics (P1.65): the timeline around a Resume - it says whether the lock resolved, whether the
         // Rust table ever wanted the cursor hidden, and whether it ever held a clip.
         probeCursorTimeline("resume");
@@ -1168,11 +1170,11 @@ const onWindowLost = (reason: string): void => {
 const cursorJsState = (): string => {
   const computed = typeof getComputedStyle === "function" ? getComputedStyle(document.body).cursor : "?";
   return (
-    `t=+${performance.now().toFixed(0)}ms locked=${inputState.locked} free=${inputState.freeMouseActive} ` +
+    `t=+${performance.now().toFixed(0)}ms captured=${inputState.locked} ` +
     `modal=${uiOpen()} canControl=${canControl(inputState, uiModal)} inWorld=${inWorld()} ` +
     `focused=${winFocused()} domFocus=${typeof document.hasFocus === "function" ? document.hasFocus() : "?"} ` +
     `css=${document.body.style.cursor || "(unset)"} computed=${computed} ` +
-    `applied=${inputState.appliedCursor ?? "null"} plock=${document.pointerLockElement !== null}`
+    `applied=${inputState.appliedCursor ?? "null"}`
   );
 };
 /** ONE front-end line plus the Rust table for the SAME instant. `cursorTrace()` only READS the table, so a

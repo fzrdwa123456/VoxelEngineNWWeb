@@ -162,10 +162,12 @@ fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
     win::set_fullscreen(&window, fullscreen)
 }
 
-/// Native mouse capture switch (**does not go through the Pointer Lock API**). See the notes in
-/// win.rs: ClipCursor + SetCursorPos pin the system cursor inside the window, so there is no ESC
+/// Native mouse capture switch (**the only mechanism: the engine does not use the Pointer Lock API at
+/// all**, see src/host/browser/mousecapture.ts). See the notes in
+/// win.rs: ClipCursor + SetCursor(NULL) pin the system cursor inside the window, so there is no ESC
 /// unlock gesture, no cooldown after an unlock, and none of the "the browser took the lock away"
-/// class of problems. When it returns false the frontend falls back to requestPointerLock.
+/// class of problems. `false` means the mouse stays free — the frontend reports it and does NOT fall
+/// back to another mechanism.
 /// The frontend tells us the **desired** cursor visibility (called once whenever
 /// `pointerlock.applyCursor()`'s value changes).
 /// After that `win::cursor_sentinel()` reconciles and corrects it every 8 ms — see that note in

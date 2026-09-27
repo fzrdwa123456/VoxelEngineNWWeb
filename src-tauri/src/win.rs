@@ -68,8 +68,8 @@ unsafe fn window_rect(hwnd: isize) -> Option<Rect> {
     Some(rc)
 }
 
-/// Turn native mouse capture on/off. Returns whether it worked (on failure the front end falls
-/// back to the browser's requestPointerLock).
+/// Turn native mouse capture on/off. Returns whether it worked (P1.72: a failure means the mouse simply
+/// stays free — there is no second mechanism to fall back to).
 pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     if !on {
         // **SET THE ONE INPUT THE PROJECTION READS (P1.63).** `mouse_capture` and `cursor_intent` are two
@@ -106,11 +106,12 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     // **THE CLIP TARGET, NOT `decide` (P1.62c).** `decide` carries rule 2's "the pointer has left the window"
     // DROP, which is about an ONGOING capture. Applying it here REFUSED the capture whenever the pointer
     // happened to be outside the client at the moment of the request - and a pointer on the title bar is
-    // exactly where it is right after the user has been dragging the window. The refusal sent the front end to
-    // `requestPointerLock`, i.e. to Chromium's own client-area clip, which tows the pointer on a geometry
-    // change just as happily AND brings back ESC-unlock and its cooldown (boot.log: `MOUSE CAPTURE native
-    // refused, falling back to requestPointerLock`). Entering a capture may move the pointer into the window
-    // ONCE - that is what capture means - and it is invisible, because we hide it first (below).
+    // exactly where it is right after the user has been dragging the window. The refusal used to send the
+    // front end to `requestPointerLock` (Chromium's own client-area clip, which tows the pointer on a
+    // geometry change just as happily and brought ESC-unlock back with it); P1.72 deleted that fallback, so
+    // this refusal would now leave the player with no mouse at all. Entering a capture may move the pointer
+    // into the window ONCE - that is what capture means - and it is invisible, because we hide it first
+    // (below).
     let target = clip_target(&p);
     if rect_is_zero(target) {
         // Nothing visible to clip to (the window is off the screen): do NOT pretend to be capturing. The front

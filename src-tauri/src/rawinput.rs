@@ -36,31 +36,26 @@ const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
 /// and does not flood IPC
 const BATCH_MS: u64 = 4;
 
-// ===== Option B: a low-level keyboard hook, solely to swallow ESC =====
-// Why it is needed: ESC is the browser's "default unlock gesture", handled by the **browser
-// process before the key is ever handed to the page** (ForwardKeyboardEvent ->
-// PreHandleKeyboardEvent in content/browser/renderer_host/render_widget_host_impl.cc; at the
-// Chrome layer see chrome/browser/ui/exclusive_access/exclusive_access_manager.cc:196
-// HandleUserKeyEvent, which looks only at the keycode and never asks the page whether it called
-// preventDefault). So the page's preventDefault() (main.ts:725, whose comment still cites #7907)
-// **cannot** stop it on native Chromium/WebView2:
-//   1st ESC -> the browser releases the pointer lock (the cursor comes out and the page never even
-//              sees this keydown)
-//   2nd ESC -> there is no lock left to release, so the event finally reaches the page -> pause menu
-// The fix is to make the browser **never see ESC**: the hook swallows it, and this side pushes it
-// to the frontend to synthesise a real KeyboardEvent.
+// ===== A low-level keyboard hook, solely to swallow the CONTEXT-MENU gestures =====
+// The menu/Apps key and Shift+F10 make Windows enter menu state and switch the cursor to an arrow; the
+// DOM's `contextmenu` preventDefault cannot stop that step (it happens before the page is consulted), and
+// our 8 ms cursor sentinel then forces the cursor back to hidden — what the player sees is a cursor FLASH,
+// and the window menu may pop up as well. So the key is swallowed before Windows/Chromium ever sees it.
+//
+// **The ESC half is GONE (P1.72).** It existed for one reason only: with the browser's Pointer Lock API,
+// ESC is the "default unlock gesture" and is handled by the browser process before the page sees it
+// (ForwardKeyboardEvent -> PreHandleKeyboardEvent; at the Chrome layer
+// `chrome/browser/ui/exclusive_access/exclusive_access_manager.cc:196` looks only at the keycode and never
+// asks the page whether it called preventDefault), so the page had to be handed a synthesised event. The
+// engine no longer uses pointer lock at all (see src/host/browser/mousecapture.ts), so ESC reaches the page
+// normally and swallowing it would only risk eating a key the menus need.
 const WH_KEYBOARD_LL: i32 = 13;
-const VK_ESCAPE: u32 = 0x1B;
 /// The menu key (Apps): one of the keyboard's "context menu" gestures
 const VK_APPS: u32 = 0x5D;
 /// F10 combined with Shift = a gesture equivalent to the menu key (a bare F10 is left alone: it
 /// may be one of the player's bound keys)
 const VK_F10: u32 = 0x79;
 const VK_SHIFT: u32 = 0x10;
-const WM_KEYDOWN: u32 = 0x0100;
-const WM_KEYUP: u32 = 0x0101;
-const WM_SYSKEYDOWN: u32 = 0x0104;
-const WM_SYSKEYUP: u32 = 0x0105;
 
 type WndProc = unsafe extern "system" fn(isize, u32, usize, isize) -> isize;
 
@@ -159,7 +154,7 @@ extern "system" {
     fn GetCurrentThread() -> isize;
     fn SetThreadPriority(thread: isize, priority: i32) -> i32;
     pub fn SetCursorPos(x: i32, y: i32) -> i32;
-    // ===== Used by the ESC hook (option B) =====
+    // ===== Used by the low-level context-menu hook =====
     fn SetWindowsHookExW(
         id_hook: i32,
         lpfn: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>,
@@ -188,35 +183,24 @@ static ACC_RID_FAIL: AtomicI32 = AtomicI32::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// ESC hook handle (0 = not installed -> **fail open**: ESC is not swallowed and the game falls
-/// back to the old "press it twice" behaviour)
-static ESC_HOOK: AtomicIsize = AtomicIsize::new(0);
-/// Pending ESC edges to push. The hook callback touches **only** these atomics —
-/// low-level hooks have `LowLevelHooksTimeout` (1 second by default), and a slow IPC send inside
-/// the callback makes Windows silently unhook the hook.
-static ESC_DOWNS: AtomicI32 = AtomicI32::new(0);
-static ESC_REPEATS: AtomicI32 = AtomicI32::new(0);
-static ESC_UPS: AtomicI32 = AtomicI32::new(0);
-/// Down state (used to tell "first press" from "auto-repeat")
-static ESC_IS_DOWN: AtomicBool = AtomicBool::new(false);
+/// Hook handle (0 = not installed -> **fail open**: the gesture is not swallowed and Windows may reveal
+/// the cursor for a moment)
+static MENU_HOOK: AtomicIsize = AtomicIsize::new(0);
 /// How many times the hook **has been called** (+1 per key event). Probe use: if it stays 0 the
 /// hook is not being called at all
 /// (installed but ineffective vs never installed are two entirely different faults, and this one
 /// number separates them).
 static HOOK_SEEN: AtomicI32 = AtomicI32::new(0);
-/// The probe fires only once (to avoid spamming)
-static PROBE_SENT: AtomicBool = AtomicBool::new(false);
 
 /// Does the foreground window belong to this process? If not, **nothing is swallowed** — otherwise
-/// the user pressing ESC in another program would be eaten by us too.
+/// the user pressing the menu key in another program would be eaten by us too.
 ///
 /// **The test walks the HWND / ancestor chain, not "the process id of the foreground window".**
 /// It used to compare `GetWindowThreadProcessId(GetForegroundWindow()) == our pid`, but under
 /// Tauri/WebView2 the foreground HWND can be **a child window of WebView2 itself** (owned by
 /// `msedgewebview2.exe`), so that test was always false — the consequence being a hook that was
 /// "installed but swallowed not a single key": the menu key / Shift+F10 leaked into the page (the
-/// `code=ContextMenu` line in the log is the evidence) and the ESC guard failed along with it
-/// (ESC still worked under native capture, which is why it never surfaced).
+/// `code=ContextMenu` line in the log is the evidence).
 /// Three cases are accepted now: the foreground window is ours, the foreground's **root window**
 /// is ours, or the foreground's **owner root window** is ours.
 /// Visible to the rest of the crate since P1.50: `win.rs` asks the same question before it touches the
@@ -266,7 +250,7 @@ fn hook_probe_line() -> String {
         format!(
             "HOOKPROBE seen={} hook={:#x} fg={:#x}/pid={} root={:#x}/pid={} owner={:#x}/pid={} ours={}",
             HOOK_SEEN.load(Ordering::Relaxed),
-            ESC_HOOK.load(Ordering::Relaxed) as usize,
+            MENU_HOOK.load(Ordering::Relaxed) as usize,
             fg as usize,
             pid_of(fg),
             root as usize,
@@ -280,41 +264,23 @@ fn hook_probe_line() -> String {
 
 /// The WH_KEYBOARD_LL callback. **Must be extremely fast**: a few comparisons + atomic increments,
 /// then `return 1` to swallow.
-unsafe extern "system" fn esc_hook(code: i32, w_param: usize, l_param: isize) -> isize {
+unsafe extern "system" fn menu_hook(code: i32, w_param: usize, l_param: isize) -> isize {
     if code >= 0 && l_param != 0 {
         let kb = &*(l_param as *const KbDllHookStruct);
         HOOK_SEEN.fetch_add(1, Ordering::Relaxed); // probe: the hook really was called (atomic, safe)
-        // **The menu key / Shift+F10 must be swallowed too.** They are the "context menu" keyboard
+        // **The menu key / Shift+F10 must be swallowed.** They are the "context menu" keyboard
         // gestures: on receiving one, Windows enters menu state and switches the cursor to an arrow
         // (the `contextmenu` preventDefault at the DOM layer cannot stop that step), and our 8 ms
         // cursor sentinel immediately forces it back to hidden — what the player sees is **a cursor
-        // flash**; it may also pop up the window menu. Same trick as ESC: swallow it before
-        // Windows/Chromium ever sees it, and there is neither a flash nor a menu.
-        // It is swallowed only when "the foreground is this window" (same as ESC), and only
-        // Shift+F10 is swallowed (a bare F10 is not — it may be one of the player's bound keys).
+        // flash**; it may also pop up the window menu. Swallow it before Windows/Chromium ever sees it,
+        // and there is neither a flash nor a menu.
+        // It is swallowed only when "the foreground is this window", and only Shift+F10 is swallowed
+        // (a bare F10 is not — it may be one of the player's bound keys).
         let shift_f10 = kb.vk_code == VK_F10 && (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
-        if kb.vk_code == VK_APPS || shift_f10 {
-            if foreground_is_ours() {
-                return 1;
-            }
+        if (kb.vk_code == VK_APPS || shift_f10) && foreground_is_ours() {
+            return 1;
         }
-        if kb.vk_code == VK_ESCAPE && foreground_is_ours() {
-            match w_param as u32 {
-                WM_KEYDOWN | WM_SYSKEYDOWN => {
-                    if ESC_IS_DOWN.swap(true, Ordering::Relaxed) {
-                        ESC_REPEATS.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        ESC_DOWNS.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                WM_KEYUP | WM_SYSKEYUP => {
-                    ESC_IS_DOWN.store(false, Ordering::Relaxed);
-                    ESC_UPS.fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
-            }
-            return 1; // swallow it: the browser never sees this ESC, so it never releases the pointer lock
-        }
+        let _ = w_param;
     }
     CallNextHookEx(0, code, w_param, l_param)
 }
@@ -406,18 +372,8 @@ pub struct MouseDelta {
     pub t: u64,
 }
 
-/// An ESC swallowed by the hook, pushed to the frontend to synthesise a real KeyboardEvent (see
-/// src/platform/rawinput.ts)
-#[derive(Clone, Serialize)]
-pub struct EscEvent {
-    pub down: bool,
-    pub repeat: bool,
-}
-
 /// The payload name of every event pushed to the frontend
 const EVENT: &str = "raw-input";
-/// The payload name for ESC edges (option B)
-const ESC_EVENT: &str = "esc";
 
 /// Starts the listener: the collector thread + the push thread. On failure it returns the reason
 /// and the game runs as usual (merely without raw input as a fallback).
@@ -478,17 +434,17 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             return;
         }
 
-        // ===== Option B: install the ESC hook first (it does **not depend** on raw input
+        // ===== Install the context-menu hook first (it does **not depend** on raw input
         // registering successfully) =====
         // A low-level hook is called back on whichever thread installed it — so the GetMessageW
         // loop below also pumps messages for the hook, which is a hard requirement of
         // WH_KEYBOARD_LL (not optional).
-        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(esc_hook), 0, 0);
-        ESC_HOOK.store(hook, Ordering::SeqCst);
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(menu_hook), 0, 0);
+        MENU_HOOK.store(hook, Ordering::SeqCst);
 
         // Register raw mouse input: INPUTSINK lets the hidden window receive global input even
         // while it is not in the foreground.
-        // **A failure no longer aborts the thread** — the ESC hook must keep working; the two paths
+        // **A failure no longer aborts the thread** — the hook must keep working; the two paths
         // are independent.
         let device = RawInputDevice {
             us_usage_page: 0x01, // Generic Desktop
@@ -527,8 +483,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e)?;
 
     RUNNING.store(true, Ordering::SeqCst);
-    // Whether raw input actually registered is taken from what the thread reported (the ESC hook
-    // works even when it fails)
+    // Whether raw input actually registered is taken from what the thread reported (the context-menu
+    // hook works even when it fails)
     REGISTERED.store(registered.load(Ordering::SeqCst), Ordering::SeqCst);
 
     // Push thread: at a fixed rate it takes and zeroes the accumulated values and emits events
@@ -584,17 +540,6 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                 emits += 1;
                 let _ = app.emit(EVENT, MouseDelta { dx, dy, t: t0.elapsed().as_millis() as u64 });
             }
-            // ESC edges swallowed by the hook: also pushed in batches, in the order down -> repeat
-            // -> up (a human cannot press twice within 4 ms, so the order cannot really scramble)
-            for _ in 0..ESC_DOWNS.swap(0, Ordering::Relaxed) {
-                let _ = app.emit(ESC_EVENT, EscEvent { down: true, repeat: false });
-            }
-            for _ in 0..ESC_REPEATS.swap(0, Ordering::Relaxed) {
-                let _ = app.emit(ESC_EVENT, EscEvent { down: true, repeat: true });
-            }
-            for _ in 0..ESC_UPS.swap(0, Ordering::Relaxed) {
-                let _ = app.emit(ESC_EVENT, EscEvent { down: false, repeat: false });
-            }
 
             // RAWMON: one line per second (emitted as an event, the frontend writes it to
             // debug.log along the same route as HOOKPROBE)
@@ -643,9 +588,9 @@ pub struct RawStats {
     pub wmInputTotal: i32,
     pub ridFail: i32,
     pub absoluteDropped: i32,
-    /// Whether option B's ESC hook is installed (false = fail open, the game falls back to
-    /// "press ESC twice")
-    pub escHook: bool,
+    /// Whether the low-level context-menu hook is installed (false = fail open: the menu key /
+    /// Shift+F10 reach Windows and may flash the cursor for a frame)
+    pub menuHook: bool,
 }
 
 pub fn stats() -> RawStats {
@@ -654,14 +599,14 @@ pub fn stats() -> RawStats {
         wmInputTotal: ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed),
         ridFail: ACC_RID_FAIL.load(Ordering::Relaxed),
         absoluteDropped: ACC_ABS_DROPPED.load(Ordering::Relaxed),
-        escHook: ESC_HOOK.load(Ordering::SeqCst) != 0,
+        menuHook: MENU_HOOK.load(Ordering::SeqCst) != 0,
     }
 }
 
 pub fn stop() {
     RUNNING.store(false, Ordering::SeqCst);
-    // Remove the ESC hook (an unremoved low-level hook keeps being called until the process exits)
-    let hook = ESC_HOOK.swap(0, Ordering::SeqCst);
+    // Remove the hook (an unremoved low-level hook keeps being called until the process exits)
+    let hook = MENU_HOOK.swap(0, Ordering::SeqCst);
     if hook != 0 {
         unsafe { UnhookWindowsHookEx(hook) };
     }

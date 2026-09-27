@@ -7,63 +7,44 @@
 // and never checks whether the page called preventDefault). And after unlocking it **refuses to re-lock**
 // for a while — the `kUserEscapeCooldown` in Blink (`pointer_lock_controller.cc:273-277`):
 //   "Pointer lock cannot be acquired immediately after the user has exited the lock."
-// The page has no say in it, and Tauri/WebView2 exposes no switch either. NW.js could solve it back then
-// because it shipped its own patched Chromium.
+// The W3C spec makes both of those requirements rather than implementation details ("a default unlock
+// gesture must always be available… the ESC key is recommended"; a re-lock after an escape needs fresh
+// user activation), it exits the lock on its own whenever the window loses focus, and on exit it puts the
+// cursor back **where it was when the lock was entered** — so the "the menu's cursor lands on the
+// crosshair" behaviour this engine wants cannot be built on it at all.
 //
 // So this goes through Win32 instead (the Rust side's `win.rs::set_mouse_capture`):
-//   ClipCursor(client area) + SetCursorPos(center)
+//   ClipCursor(client area) + SetCursor(NULL)
 // Hiding the cursor is still CSS's job (`pointerlock.applyCursor()`'s `cursor: none`) — the cursor is
 // clamped inside the client area and therefore necessarily lands on the webview, so CSS suffices and
 // there is no need to hook WM_SETCURSOR.
 //
-// The view rotation comes from raw input (while captured, `movementX` goes to zero once the cursor
-// reaches an edge, see the note in input.ts).
+// The view rotation comes from raw input (`RIDEV_INPUTSINK`, so the pointer's position — clamped or not —
+// never matters). This is Minecraft's mechanism, ported: SDL's `SDL_SetWindowRelativeMouseMode` is
+// literally `WIN_SetRawMouseEnabled` on Windows, and MC never touches the OS cursor while it holds the
+// mouse.
 //
-// **Failure means fall back**: when the native command fails (or returns false) it falls back to
-// `requestPointerLock()`, because returning to the browser's old behaviour is preferable to leaving the
-// mouse completely out of control.
+// **There is NO fallback to `requestPointerLock` (P1.72).** A failure is reported as a failure: the mouse
+// stays free and the reason is logged. Silently switching mechanism would put the engine back on the
+// browser's policy (ESC unlock + cooldown + focus-loss unlock) without anyone asking for it — and without
+// raw input a capture would hide and clip the cursor for a view that cannot turn.
 import { invoke } from "@tauri-apps/api/core";
 
 import { logDebug } from "../desktop/shell";
 
-/** Turn native capture on. Resolves on success; on failure it **falls back** to the browser's
- *  requestPointerLock. */
-export function captureMouse(dom: HTMLElement): Promise<void> {
-  return invoke<boolean>("mouse_capture", { on: true })
-    .then((ok) => {
-      if (ok) return;
-      logDebug("MOUSE CAPTURE native refused, falling back to requestPointerLock");
-      // Diagnostics (P1.65): this is the path that used to be silent about FAILING - and a fallback that
-      // REJECTS is exactly "the cursor stays and the view is dead".
-      return (dom.requestPointerLock() as unknown as Promise<void>)
-        .then(() => {
-          logDebug(`MOUSE CAPTURE fallback engaged: pointerLockElement=${document.pointerLockElement !== null}`);
-        })
-        .catch((err: unknown) => {
-          logDebug(`MOUSE CAPTURE fallback FAILED: ${String(err)}`);
-          throw err;
-        });
-    })
-    .catch((err) => {
-      logDebug(`MOUSE CAPTURE native failed (${String(err)}), falling back to requestPointerLock`);
-      // Diagnostics (P1.65): this is the path that used to be silent about FAILING - and a fallback that
-      // REJECTS is exactly "the cursor stays and the view is dead".
-      return (dom.requestPointerLock() as unknown as Promise<void>)
-        .then(() => {
-          logDebug(`MOUSE CAPTURE fallback engaged: pointerLockElement=${document.pointerLockElement !== null}`);
-        })
-        .catch((err: unknown) => {
-          logDebug(`MOUSE CAPTURE fallback FAILED: ${String(err)}`);
-          throw err;
-        });
-    });
+/** Turn native capture on. Resolves on success, **rejects** when the platform refused it (the caller
+ *  reports that; the mouse simply stays free). */
+export function captureMouse(_dom: HTMLElement): Promise<void> {
+  return invoke<boolean>("mouse_capture", { on: true }).then((ok) => {
+    if (!ok) {
+      logDebug("MOUSE CAPTURE native refused (no pointer-lock fallback by design, P1.72)");
+      throw new Error("native mouse capture refused");
+    }
+  });
 }
 
-/** Release: turn the native capture off and, as a backstop, drop the browser's lock too (both paths are
- *  idempotent) */
+/** Release: turn the native capture off. Idempotent — the Rust side treats a release it does not hold as
+ *  a no-op. */
 export function releaseMouse(): void {
   void invoke<boolean>("mouse_capture", { on: false }).catch(() => {});
-  if (typeof document !== "undefined" && document.pointerLockElement) {
-    document.exitPointerLock();
-  }
 }

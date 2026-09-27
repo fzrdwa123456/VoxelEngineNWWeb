@@ -1,17 +1,17 @@
-// ===== Player input system: pointer-lock state machine + mouse/keyboard/bind capture =====
+// ===== Player input system: the mouse-capture state machine + mouse/keyboard/bind capture =====
 // An ECS system in the FIXED lane and the tick's FIRST act: the device events that arrived between two
 // ticks become component data here, before anything that reads them runs.
 //   CONTROL.keys   held bind codes (read by movement/interaction)
 //   VIEW           accumulated view deltas (drained by the controller in the same tick)
 //   MOTION/CONTROL jump + fly state, decided at press time by onJumpPress — but ONLY while the player
 //                  is controllable (canControl)
-//   INPUT_STATE    pointer-lock / free-mouse / raw-input availability (read by every gameplay system
+//   INPUT_STATE    whether WE hold the mouse + raw-input availability (read by every gameplay system
 //                  through canControl() — that is why this file is not imported by them)
 //   KEY_EVENTS     key EDGES, published at event time and consumed by the ui systems that own a global
 //                  chord (ui.picker's F3+F4) — a held-key set cannot say "F3 went down just now"
-//   INPUT_TIMING   the race guards' own state (which mousemove is the synthetic lock-instant one,
-//                  whether the unlock was ours, the grace deadline, the offscreen cache): the fields
-//                  that make this file race-sensitive, in a resource so a test and a log can see them
+//   INPUT_TIMING   the race guards' own state (which mouse event is the synthetic capture-instant one,
+//                  the grace deadline): the fields that make this file race-sensitive, in a resource so
+//                  a test and a log can see them
 //
 // The DOM listeners below are PRODUCERS: they take every decision at EVENT time — which key, which
 // view delta, which jump branch, and all of the race guards — exactly where they were when the writes
@@ -20,24 +20,31 @@
 //   * a gameplay component is written inside a system run only, between the scheduler's structural
 //     checks, by a system with a DECLARED access set — input is no longer the one exception;
 //   * the schedule can order it against the controller/movement/collision that consume it.
-// INPUT_STATE stays event-time on purpose: the pointer-lock state machine has to react SYNCHRONOUSLY
-// to a pointerlockchange (a lock flag that lands a tick late is a bug, not a refactor), and that
-// resource belongs to the device layer. What it does NOT hold is "may a click grab the lock": that is
+// INPUT_STATE stays event-time on purpose: the capture state machine has to react SYNCHRONOUSLY to a
+// capture/release (a flag that lands a tick late is a bug, not a refactor), and that
+// resource belongs to the device layer. What it does NOT hold is "may a click grab the mouse": that is
 // `!isModalUi(UI_MODAL)`, asked at the moment of the question instead of cached on the device state.
 //
-// Race-sensitive logic (skipFirstMove / lockGrace / offscreen raw-input takeover) moved here
-// verbatim from the old shell — do not "simplify" without replaying those pointer-lock races. Its STATE
+// Race-sensitive logic (skipFirstMove / lockGrace / the raw-input takeover) moved here
+// verbatim from the old shell — do not "simplify" without replaying those races. Its STATE
 // is the INPUT_TIMING resource now (a change of where the fields live, not of when they are read or
 // written); the logic itself is untouched.
 //
-// ===== One Tauri-specific change: mouse capture is done by Win32, not the Pointer Lock API =====
-// `state.locked` no longer means "the browser granted pointer lock" but "**we captured the mouse**
-// ourselves" (Rust side: ClipCursor + SetCursorPos, see the note in platform/mousecapture.ts). The
-// browser's own path is a security policy: ESC force-unlocks it, and relocking is refused for a while
-// afterwards — neither the page nor the host may turn that off.
-// So lock() no longer calls requestPointerLock: it engages the native capture and keeps its own
-// bookkeeping in step (a native capture has no pointerlockchange to wait for). **It falls back** to
-// the browser path only when raw input is unavailable.
+// ===== Mouse capture is OURS, and it is the ONLY path (P1.72) =====
+// `state.locked` does not mean "the browser granted pointer lock" — it means "**we captured the mouse**"
+// (Rust side: ClipCursor + SetCursor(NULL), see the note in platform/mousecapture.ts), with the view
+// turns coming from raw input (WM_INPUT).
+//
+// **There is no fallback to the Pointer Lock API any more, and that is the Minecraft model**: MC never
+// touches the OS cursor while it holds the mouse (`SDL_SetWindowRelativeMouseMode` is its whole
+// mechanism: hidden + constrained + raw deltas), never re-derives the grab from window/focus state, and
+// has exactly ONE place that grabs and releases (`Gui.setScreen`). The browser's own path was the source
+// of every special case we kept paying for: ESC force-unlocks it (a browser security policy — the page
+// cannot prevent it), relocking is refused for a while afterwards (`kUserEscapeCooldown` in
+// `pointer_lock_controller.cc`), a lost focus unlocks it by itself, the page needs a fresh user gesture to
+// re-lock, and on unlock the cursor is put back where it was when the lock was entered — i.e. the "the
+// menu's cursor lands on the crosshair" behaviour this engine wants is IMPOSSIBLE there. So a failed
+// capture now fails LOUDLY and leaves the mouse free; it does not silently change mechanism.
 /** The native mouse-capture pair, INJECTED rather than imported: a plugin may not reach into `host/`
  *  (the layer rule enforced by check:ecs), and engaging/dropping the native capture is a platform
  *  operation. The composition root hands in `host/browser/mousecapture`'s pair. */
@@ -144,12 +151,11 @@ export class PlayerInputSystem {
   private readonly dom: HTMLElement;
   private readonly log: (line: string) => void;
   private readonly sensitivity = 0.002;
-  /** The DEVICE-TIMING state (INPUT_TIMING, ecs/resources.ts): which mousemove is the synthetic one at
-   *  lock instant, whether an unlock was OURS, how long the grace window runs, when the offscreen check
-   *  was last done, and the diagnostic counters. It is world state now — one home, readable by a test and
-   *  by the gate — while the DECISIONS stay exactly where they were: the listeners still decide at event
-   *  time and only queue. Moving these fields moved no line of that logic; if a change ever does, iron
-   *  rule 3 says replay the races first. */
+  /** The DEVICE-TIMING state (INPUT_TIMING, ecs/resources.ts): which mouse event is the synthetic one at
+   *  capture instant, how long the grace window runs, and the diagnostic counters. It is world state now —
+   *  one home, readable by a test and by the gate — while the DECISIONS stay exactly where they were: the
+   *  listeners still decide at event time and only queue. Moving these fields moved no line of that logic;
+   *  if a change ever does, iron rule 3 says replay the races first. */
   private readonly timing: InputTiming;
   /** The queue of decisions waiting for `step()`. It IS the INPUT_INTENTS resource (ecs/resources.ts):
    *  the array lives in the world, this system is its only writer and its only reader, and the accessor
@@ -212,17 +218,12 @@ export class PlayerInputSystem {
     this.log = log;
 
     this.dom.addEventListener("click", () => {
-      // Grab the lock ONLY when we do not already hold it. This is deliberate and load-bearing:
-      // re-requesting pointer lock on the already-locked element is a known Chromium bug path
-      // (issue 40122995: "we have a bug" from requestPointerLock called in a click handler on the
-      // locked element) and in this NW.js build it is rejected as kAlreadyLocked. Worse, any
-      // pointerlockchange it produces re-arms the grace window below, and that DISCARDS every
-      // mousemove for LOCK_GRACE_MS — a visible freeze of mouse look right after each click.
-      // Never grab again once captured. **`state.locked` MUST be part of this test**: under the native
-      // capture document.pointerLockElement is always null, so without that term every click re-arms
-      // the grace window — which is exactly "the view hitches after each click" (the comment above
-      // warns about precisely this).
-      if (isModalUi(this.ui) || this.state.locked || document.pointerLockElement !== null) return;
+      // Grab the mouse ONLY when we do not already hold it. This is deliberate and load-bearing:
+      // re-requesting a capture on every click re-arms the grace window below, and that DISCARDS every
+      // delta for LOCK_GRACE_MS — a visible freeze of mouse look right after each click.
+      // (It used to matter for a second reason too: re-requesting a POINTER LOCK on the already-locked
+      // element was a known Chromium bug path, issue 40122995 "we have a bug". That path is gone.)
+      if (isModalUi(this.ui) || this.state.locked) return;
       // …and nothing may capture the mouse before a WORLD exists. The loading screen is not a modal
       // surface, so this guard let a click there engage the native capture; the world entry then re-locked
       // on top of a capture that was already live (see the injection comment above).
@@ -233,28 +234,6 @@ export class PlayerInputSystem {
       // and get written to the log by the window-level handler.
       if (pending) pending.catch((err) => this.log(`LOCK click grab rejected: ${String(err)}`));
     });
-    document.addEventListener("pointerlockchange", () => {
-      this.state.locked = document.pointerLockElement === this.dom;
-      if (this.state.locked) {
-        this.state.freeMouseActive = false;
-        this.timing.unlockIsIntentional = false; // moot once we hold the lock again
-        this.timing.skipFirstMove = true;
-        this.timing.lockGraceUntil = performance.now() + LOCK_GRACE_MS;
-      } else if (this.timing.unlockIsIntentional) {
-        // WE released the lock (pause menu / inventory / window blur). This must NOT enable the
-        // offscreen fallback: a window half offscreen that opens a menu is indistinguishable from
-        // "Chromium cancelled the lock" by position alone, and treating it as such leaves the game
-        // fully controllable behind the menu (movement, view, break/place all gate on canControl).
-        // prepareUnlock() has already cleared freeMouseActive for the case where no event follows.
-        this.timing.unlockIsIntentional = false;
-        this.state.freeMouseActive = false;
-      } else if (this.isWindowPartiallyOffScreen()) {
-        // Window partially offscreen and pointer lock cancelled by Chromium by itself
-        this.state.freeMouseActive = true;
-      } else {
-        this.state.freeMouseActive = false;
-      }
-    });
     document.addEventListener("mousemove", (ev) => {
       // The POINTER resource first, BEFORE any guard below returns: this is the device layer's record of
       // where the cursor is, and consumers (the key bind drag's hover target and rubber band) read it
@@ -264,8 +243,13 @@ export class PlayerInputSystem {
       this.pointer.y = ev.clientY;
       this.pointer.buttons = ev.buttons;
       if (this.state.locked) {
-        // --- Pointer-locked mode ---
-        // Window offscreen + raw input available: skip movementX (the cursor is clamped onscreen, its delta goes to zero and would double count with raw input)
+        // --- Captured: the view comes from raw input (see `rawInputShouldTakeOver`) ---
+        // While raw is the source, `movementX` is ignored outright: it is derived from the cursor, which our
+        // own clip stops at the client edge, so accepting both would double count and would freeze at the edge.
+        // **This branch is unreachable by construction since P1.72** (`lock()` refuses a capture without the
+        // raw listener, and a modal UI blocks the takeover), but it is kept as the defence in depth it always
+        // was: it is the only thing that would stop a future change from double counting, and iron rule 3 says
+        // the guards below are not to be deleted on a reading.
         const takeOver = this.rawInputShouldTakeOver();
         this.syncRawTakeoverLog(takeOver);
         if (takeOver) return;
@@ -466,7 +450,7 @@ export class PlayerInputSystem {
     return !isModalUi(this.ui);
   }
 
-  /** Whether we currently hold the pointer lock */
+  /** Whether WE currently hold the mouse (the native capture) */
   get locked(): boolean {
     return this.state.locked;
   }
@@ -479,19 +463,13 @@ export class PlayerInputSystem {
     this.state.rawInputActive = active;
   }
 
-  /** Called immediately BEFORE we release the pointer on purpose (open the pause menu, open the
-   *  inventory, lose window focus). Three things have to happen here:
-   *    1. arm the grace window that swallows the synthetic deltas of the exitPointerLock +
-   *       SetCursorPos race while still locked;
-   *    2. drop free-mouse mode AT ONCE — control has to stop the moment a UI opens, and this is also
-   *       what covers the case where the lock was ALREADY gone (Chromium had cancelled it earlier),
-   *       because then exitPointerLock() changes nothing and no pointerlockchange will follow;
-   *    3. record that this unlock is OURS, so the pointerlockchange that does follow cannot mistake
-   *       it for Chromium cancelling the lock and re-enable the offscreen fallback. */
+  /** Called immediately BEFORE we release the mouse on purpose (open the pause menu, open the inventory,
+   *  lose window focus): arm the grace window that swallows the synthetic deltas of the SetCursorPos race
+   *  while still captured. It used to do two more things — drop free-mouse mode at once and record that
+   *  "this unlock was OURS" — and both existed only because the browser could have cancelled a pointer
+   *  lock behind our back. There is no second owner of the mouse left to be mistaken for (P1.72). */
   prepareUnlock(): void {
     this.timing.lockGraceUntil = performance.now() + 100;
-    this.state.freeMouseActive = false;
-    this.timing.unlockIsIntentional = this.state.locked;
   }
 
   /** Raw mouse deltas (WM_INPUT). Called ONCE PER ARRIVAL by `platform/rawinput.ts`'s event listener
@@ -501,9 +479,9 @@ export class PlayerInputSystem {
    *  8 ms poll it replaced (iron rule 3): takeover, then the lock-grace window, then the spike guard.
    *  Only what PASSES is accumulated; the frame applies the total later.
    *
-   *  Takeover rule: plugin available + no menu/inventory + window extends past the screen; lock state irrelevant.
-   *  Locked + offscreen = movementX is ruined by cursor clamping, exactly where raw input fills in;
-   *  menu state discards (no modal UI owns the mouse); onscreen locked state discards (movementX works, prevents double counting). */
+   *  Takeover rule: raw listener available + no menu/inventory + we hold the mouse. While captured, the
+   *  clip stops the cursor at the client edge, so a delta derived from its position would freeze there —
+   *  which is exactly the job raw input fills in. Menu state discards (no modal UI owns the mouse). */
   rawDelta(dx: number, dy: number): void {
     if (dx === 0 && dy === 0) return;
     this.diag.look.raw++;
@@ -565,54 +543,49 @@ export class PlayerInputSystem {
     this.pending.push({ kind: "look", yaw: -dx * this.sensitivity, pitch: -dy * this.sensitivity });
   }
 
-  /** Grab the mouse.
+  /** **Grab the mouse — the ONE way in (P1.72).** The native capture (Win32 `ClipCursor` + a hidden
+   *  cursor) plus raw input for the view; the Pointer Lock API is not touched from anywhere in the engine
+   *  any more, so none of the browser's policies apply: no ESC unlock gesture, no cooldown after an unlock,
+   *  no lost-focus unlock we did not ask for, and no "the cursor goes back where it was when you locked".
    *
-   *  **With raw input available it uses the native capture** (Win32 ClipCursor): the Pointer Lock API
-   *  is never touched, so there is no ESC unlock gesture, no cooldown after an unlock and no browser
-   *  taking the lock away — all of those are policies a page cannot override. It falls back to
-   *  requestPointerLock only when raw input is unavailable (that path has nothing but movementX).
+   *  **Requires raw input.** A capture without it would hide and clip the cursor for a view that cannot
+   *  turn (deltas would have to come from `mousemove`, which the clip stops at the window edge) — so a
+   *  missing listener is a LOUD no-op and the mouse stays free, instead of silently switching mechanism
+   *  the way the old `requestPointerLock` fallback did. Diagnose with the F3 panel's `RAWINPUT` state or
+   *  the boot.log line the composition root writes when the listener starts.
    *
-   *  A native capture **has no pointerlockchange to wait for**, so the "just locked" bookkeeping
-   *  (skipFirstMove + grace) is done here after the promise resolves, with exactly the semantics of
-   *  the locked branch of pointerlockchange. */
+   *  There is no browser event to wait for, so the "just captured" bookkeeping (skipFirstMove + the grace
+   *  window) is armed here, after the native call resolves. */
   lock(): Promise<void> | undefined {
     if (!this.state.rawInputActive) {
-      return this.dom.requestPointerLock() as Promise<void> | undefined;
+      this.log("MOUSE CAPTURE refused: raw input is not running (there is no other source of view deltas)");
+      return undefined;
     }
     const pending = this.mouse.capture(this.dom);
-    // Record only on success: on failure the front end falls back to requestPointerLock, and
-    // pointerlockchange is what covers that path.
+    // Record only on success: a failed capture leaves the mouse free, and the caller's `.catch` reports it.
     pending.then(() => this.onCaptured()).catch(() => {});
     return pending;
   }
 
-  /** Record "the mouse is captured now" — the four things the locked branch of pointerlockchange
-   *  does, copied one by one */
+  /** Record "the mouse is captured now": the state flag plus the two race guards that swallow the
+   *  synthetic deltas of the capture-time warp. */
   private onCaptured(): void {
     this.state.locked = true;
-    this.state.freeMouseActive = false;
-    this.timing.unlockIsIntentional = false; // moot once we hold the mouse again
     this.timing.skipFirstMove = true;
     this.timing.lockGraceUntil = performance.now() + LOCK_GRACE_MS;
     this.log("MOUSE CAPTURE on (native ClipCursor; browser pointer lock not used)");
   }
 
   /** Release the mouse (opening a menu / losing focus / leaving the world): called right after
-   *  prepareUnlock(). A native capture has no pointerlockchange to wait for, so the state has to be
-   *  settled here itself; on the fallback path releaseMouse() also calls document.exitPointerLock(). */
+   *  prepareUnlock(). There is no browser unlock to wait for either — the state is settled here. */
   releaseCapture(): void {
     // **IDEMPOTENT (P1.58).** This used to invoke the native release unconditionally, and its callers fire
     // per DEVICE event - `onWinGeometry` runs on every pixel of a window drag - so one boot.log held 30+
     // `[cursor] capture on=false` round-trips for a single title-bar drag, every one of them a main-thread
     // ClipCursor + SetCursor pass. Releasing something we do not hold is not a state change.
-    const held = this.state.locked || document.pointerLockElement === this.dom;
-    if (this.state.locked) this.log("MOUSE CAPTURE off (native ClipCursor released)");
+    if (!this.state.locked) return;
+    this.log("MOUSE CAPTURE off (native ClipCursor released)");
     this.state.locked = false;
-    this.state.freeMouseActive = false;
-    // The FLAGS are always settled (the free-mouse fallback has to end even when no lock was held); only the
-    // native release is skipped - and `held` covers the browser path too, where the LOCK, not the state, is
-    // what has to go.
-    if (!held) return;
     this.mouse.release();
   }
 
@@ -628,38 +601,21 @@ export class PlayerInputSystem {
     this.queueKey(code, false);
   }
 
-  /** Whether the window extends past its monitor bounds (screen coordinate system, result cached ~120ms).
-   *  Key context: pointer lock clamps the cursor to the window∩screen area,
-   *  a half-offscreen window pushes the cursor against the virtual desktop edge -> Windows stops sending deltas -> movementX goes to zero -> view frozen;
-   *  and the lock is NOT cancelled (the window still counts as visible), so pointerlockchange does not fire.
-   *  WM_INPUT relative deltas are unaffected by cursor clamping — the only input source that keeps turning the view. */
-  private isWindowPartiallyOffScreen(): boolean {
-    const now = performance.now();
-    if (now >= this.timing.offscreenCacheUntil) {
-      this.timing.offscreenCacheUntil = now + 120;
-      const scr = screen as Screen & { availLeft?: number; availTop?: number };
-      const mLeft = scr.availLeft ?? 0;
-      const mTop = scr.availTop ?? 0;
-      const x = window.screenX;
-      const y = window.screenY;
-      this.timing.offscreenCached =
-        x < mLeft - 1 ||
-        y < mTop - 1 ||
-        x + window.outerWidth > mLeft + screen.width + 1 ||
-        y + window.outerHeight > mTop + screen.height + 1;
-    }
-    return this.timing.offscreenCached;
-  }
-
-  /** Whether raw input should take over the view.
-   *  During the native capture (ClipCursor) it **must** take over: the cursor is clamped inside the
-   *  window, stops moving once it reaches the edge, and movementX goes to zero with it — the same
-   *  cause as the original "window half offscreen". Every other case: plugin available + no menu +
-   *  window half offscreen. */
+  /** **Whether raw input is the source of the view right now: it is, whenever we hold the mouse (P1.72).**
+   *
+   *  During the native capture (ClipCursor) it MUST be: the cursor is clamped inside the client area, stops
+   *  moving at its edge, and a delta derived from its position would go to zero exactly there — Minecraft
+   *  has the same rule by construction (`SDL_SetWindowRelativeMouseMode`, i.e. raw HID, is its entire
+   *  mechanism). WM_INPUT deltas are unaffected by clamping, and `RIDEV_INPUTSINK` delivers them to our
+   *  hidden message window regardless of the pointer's position or the window's shape.
+   *
+   *  The `movementX` path below therefore keeps working only for the free cursor — menus, the loading screen
+   *  — and, because nothing accumulates it while we are not captured (`mousemove`'s look branch requires
+   *  `locked`), the two sources can never double count. The old third case (`window partially offscreen and
+   *  NOT captured`, a workaround for a pointer lock Chromium had cancelled by itself) is gone with the
+   *  browser path. */
   private rawInputShouldTakeOver(): boolean {
-    if (!this.state.rawInputActive || !this.clickLockAllowed) return false;
-    if (this.state.locked) return true;
-    return this.isWindowPartiallyOffScreen();
+    return this.state.rawInputActive && this.clickLockAllowed && this.state.locked;
   }
 
   /** Log one line when the takeover mode switches (for diagnosis) */

@@ -1,16 +1,17 @@
 // ===== The window-level guards: the listeners that must decide INSIDE the event =====
-// These four used to sit in `main.ts` (the composition root — which should WIRE, not listen). They are
+// These used to sit in `main.ts` (the composition root — which should WIRE, not listen). They are
 // device-layer code by nature: each one exists only because something has to happen *inside* the event
 // that must be cancelled, which no lane or system can do for it.
 //
-//   1. `pointerlockchange` — a diagnostic line, the moment the lock state changes. It is what the
-//      cursor-centering races were diagnosed with (boot.log/debug.log probe lines).
-//   2. `Escape` — the browser's default action for ESC is to exit pointer lock / leave fullscreen, and a
-//      `preventDefault` is only possible in the event itself. The DECISION is not here: `ui.navigation`
-//      reads the Escape EDGE the device layer publishes and steps back through UI_MODAL.
-//   3. `contextmenu` — right-click is a game action (place a block), so the browser menu must never
+//   1. `Escape` — the browser's default action for ESC is to leave fullscreen, and a `preventDefault` is
+//      only possible in the event itself. The DECISION is not here: `ui.navigation` reads the Escape EDGE
+//      the device layer publishes and steps back through UI_MODAL. (P1.72 removed the `pointerlockchange`
+//      diagnostic that used to sit here: the engine no longer uses the Pointer Lock API at all, so there is
+//      no lock state to observe. The ESC default it also used to block — "exit pointer lock" — cannot
+//      happen any more either; what is left is the fullscreen one.)
+//   2. `contextmenu` — right-click is a game action (place a block), so the browser menu must never
 //      appear: in a captured window it interrupts the frame and pulls the cursor away for a moment.
-//   4. `Space` (capture phase) — while any modal UI is open, Space's default (scroll the nearest
+//   3. `Space` (capture phase) — while any modal UI is open, Space's default (scroll the nearest
 //      scrollable ancestor of the focused element, e.g. the keybind chip list) is swallowed. Gameplay
 //      Space is unaffected, and a rebind capture still sees the event through its own handler.
 //
@@ -31,13 +32,9 @@ export interface WindowGuardDeps {
 }
 
 export function installWindowGuards(deps: WindowGuardDeps): void {
-  document.addEventListener("pointerlockchange", () => {
-    deps.log(`LOCKCHANGE ${document.pointerLockElement ? "locked" : "unlocked"}`);
-  });
-
   document.addEventListener("keydown", (ev) => {
     if (ev.code !== "Escape") return;
-    ev.preventDefault(); // #7907: block the default unlock; we control menu open/close
+    ev.preventDefault(); // the fullscreen default; the DECISION is ui.navigation's (see the header)
   });
 
   document.addEventListener("contextmenu", (ev) => ev.preventDefault());

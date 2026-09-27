@@ -1699,7 +1699,7 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
     inWorld: () => inWorld,
     inventoryOn: () => true,
     prepareUnlock: () => effects.push("prepareUnlock"),
-    exitPointerLock: () => effects.push("exit"),
+    releaseCapture: () => effects.push("release"),
     relock: (r) => effects.push(`relock:${r}`),
     relockSoon: (r) => effects.push(`relockSoon:${r}`),
     applyCursor: () => {},
@@ -1768,7 +1768,7 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   effects.length = 0;
   esc();
   equal(ui.menu, true, "ESC in game opens the pause menu");
-  equal(effects.join(","), "prepareUnlock,exit", "…releasing the mouse (the crosshair centring is the model is job now, not a navigation effect)");
+  equal(effects.join(","), "prepareUnlock,release", "…releasing the mouse (the crosshair centring is the model's job now, not a navigation effect)");
 
   // ── …but NOT while a loading screen is up: the startup and a world entry spend seconds in the
   // `load` mode with no modal open and no world running, and both of these used to fire there (ESC
@@ -2924,6 +2924,41 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");
+  // **P1.72 - NATIVE ONLY, the Minecraft model.** One mechanism: our own ClipCursor + a hidden cursor,
+  // with the view coming from WM_INPUT. The Pointer Lock API is gone from the engine, and with it every
+  // policy that used to leak in through it (ESC force-unlock, the relock cooldown, an unlock we did not
+  // ask for, and a cursor that comes back where it was when the lock was entered).
+  const MECHANISM_FILES = [
+    "src/plugins/player/systems/input.ts",
+    "src/host/browser/mousecapture.ts",
+    "src/host/browser/pointerlock.ts",
+    "src/host/browser/window-guards.ts",
+    "src/host/browser/rawinput.ts",
+    "src/plugins/ui/systems/navigation.ts",
+    "src/boot/main.ts",
+  ];
+  for (const f of MECHANISM_FILES) {
+    const s = stripComments(readSource(f));
+    for (const banned of ["requestPointerLock", "exitPointerLock", "pointerLockElement", "pointerlockchange"]) {
+      assert(!s.includes(banned), `${f} does not use ${banned} (native-only, P1.72)`);
+    }
+  }
+  const inputSrc = stripComments(readSource("src/plugins/player/systems/input.ts"));
+  assert(/if \(!this\.state\.rawInputActive\) \{/.test(inputSrc) && /MOUSE CAPTURE refused/.test(inputSrc),
+    "a capture without the raw-input listener is REFUSED, loudly: it is the only source of view deltas");
+  assert(/return this\.state\.rawInputActive && this\.clickLockAllowed && this\.state\.locked;/.test(inputSrc),
+    "\u2026and the view takeover is exactly 'the listener runs + no modal UI + we hold the mouse'");
+  assert(/prepareUnlock\(\): void \{\s*this\.timing\.lockGraceUntil = performance\.now\(\) \+ 100;\s*\}/.test(inputSrc),
+    "prepareUnlock arms the grace window and nothing else (the free-mouse flags went with the browser path)");
+  assert(!/freeMouseActive/.test(stripComments(readSource("src/data/globals/resources.ts"))),
+    "the device state is ONE boolean again (Minecraft's `mouseGrabbed`), not two ways to be in control");
+  assert(/return devices\.locked && !isModalUi\(ui\);/.test(stripComments(readSource("src/data/globals/resources.ts"))),
+    "\u2026so the gate reads one term");
+  assert(/Some\(menu_hook\)/.test(rawinputSrc) && !/Some\(esc_hook\)/.test(rawinputSrc) &&
+      !/"esc"/.test(stripComments(readSource("src/host/browser/rawinput.ts"))),
+    "the ESC swallow + its synthetic-event bridge are gone; the context-menu hook stays");
+  assert(/pub menuHook: bool/.test(rawinputSrc),
+    "\u2026and its state is reported as menuHook, not escHook");
   // A2: the chunk-mesh cache is the resource, not a private field of the streaming system.
   const stream = stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"));
   equal(countOf(stream, /private readonly meshes|private readonly empty|this\.meshes|this\.empty\b/g), 0,
@@ -3047,10 +3082,7 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
   for (const field of [
     "skipFirstMove",
     "lockGraceUntil",
-    "unlockIsIntentional",
     "rawTakeoverActive",
-    "offscreenCacheUntil",
-    "offscreenCached",
     "lastSpaceDown",
     "spaceSeq",
     "mouseSeq",
@@ -3062,7 +3094,7 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
   equal(
     countOf(
       src,
-      /private (?:readonly )?(?:skipFirstMove|lockGraceUntil|unlockIsIntentional|rawTakeoverActive|offscreenCacheUntil|offscreenCached|lastSpaceDown|spaceSeq|mouseSeq|lastMouseLog)\b/g,
+      /private (?:readonly )?(?:skipFirstMove|lockGraceUntil|rawTakeoverActive|lastSpaceDown|spaceSeq|mouseSeq|lastMouseLog)\b/g,
     ),
     0,
     "player.input keeps no private copy of a race-guard field",
@@ -3197,16 +3229,14 @@ check("the UI modality gate: one predicate, two reasons", () => {
   const devices = world.resource(INPUT_STATE);
   const ui = world.resource(UI_MODAL);
   const cases = [
-    ["locked, no UI", { locked: true, freeMouseActive: false }, {}, true],
-    ["locked + main menu", { locked: true, freeMouseActive: false }, { mainMenu: true }, false],
-    ["locked + pause menu", { locked: true, freeMouseActive: false }, { menu: true }, false],
-    ["locked + inventory", { locked: true, freeMouseActive: false }, { inventory: true }, false],
-    ["free mouse, no UI", { locked: false, freeMouseActive: true }, {}, true],
-    ["free mouse + inventory", { locked: false, freeMouseActive: true }, { inventory: true }, false],
-    ["unlocked, no UI", { locked: false, freeMouseActive: false }, {}, false],
+    ["captured, no UI", { locked: true }, {}, true],
+    ["captured + main menu", { locked: true }, { mainMenu: true }, false],
+    ["captured + pause menu", { locked: true }, { menu: true }, false],
+    ["captured + inventory", { locked: true }, { inventory: true }, false],
+    ["not captured, no UI", { locked: false }, {}, false],
   ];
   for (const [label, d, u, expected] of cases) {
-    Object.assign(devices, { locked: false, freeMouseActive: false }, d);
+    Object.assign(devices, { locked: false }, d);
     Object.assign(ui, { mainMenu: false, menu: false, inventory: false }, u);
     equal(canControl(devices, ui), expected, `canControl: ${label}`);
   }
@@ -3214,7 +3244,7 @@ check("the UI modality gate: one predicate, two reasons", () => {
   Object.assign(ui, { mainMenu: false, menu: false, inventory: true });
   equal(isMenuUi(ui), false, "isMenuUi ignores the inventory");
   equal(isModalUi(ui), true, "but the inventory is modal");
-  Object.assign(devices, { locked: false, freeMouseActive: false });
+  Object.assign(devices, { locked: false });
   Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
 });
 
@@ -3236,7 +3266,7 @@ check("a modal UI drops the PLAYER's input but keeps its physics (the gate is pe
     for (let i = 0; i < ticks; i++) schedule.run("fixed", { world, dt: 1 / 120, alpha: 0, tick: i + 1 });
   };
 
-  Object.assign(devices, { locked: true, freeMouseActive: false });
+  Object.assign(devices, { locked: true });
   Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
   // Pin the basis so the two axes are separable: forward = +x, up = +y. Gravity then has NO horizontal
   // component, which is what makes "x did not move" a real statement about the input rather than
@@ -3322,14 +3352,12 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     addEventListener: (type, fn) => {
       domListeners[type] = fn;
     },
-    requestPointerLock: () => undefined,
   };
   const previousDocument = globalThis.document;
   globalThis.document = {
     addEventListener: (type, fn) => {
       handlers[type] = fn;
     },
-    pointerLockElement: null,
   };
   // The race guards' state is the INPUT_TIMING resource now (A3), so the check seeds it and restores it:
   // leaving a grace window armed here would swallow the next check's mousemove.
@@ -3360,12 +3388,15 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     for (const type of ["click"]) {
       assert(typeof domListeners[type] === "function", `the canvas listens for ${type} (lock grab)`);
     }
-    for (const type of ["pointerlockchange", "mousemove", "keydown", "keyup"]) {
+    for (const type of ["mousemove", "keydown", "keyup"]) {
       assert(typeof handlers[type] === "function", `document listens for ${type}`);
     }
+    // P1.72: the engine is native-only, so there is NO pointerlockchange listener left (nothing can
+    // change the capture state behind our back) and no Pointer Lock API call anywhere.
+    assert(handlers.pointerlockchange === undefined, "no pointerlockchange listener exists any more");
     // The click guard is UI_MODAL-driven now (there is no cached "click may grab the lock" field on the
     // input state any more), so this resets the resource that actually decides it.
-    Object.assign(devices, { locked: true, freeMouseActive: false });
+    Object.assign(devices, { locked: true });
     Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
 
     // 1. a held key: handler queues, tick applies.
@@ -3482,13 +3513,13 @@ check("the device handlers only QUEUE; step() is what writes the components", ()
     //    that the gate can SEE it. `prepareUnlock()` is still ONE synchronous call at the same moment
     //    (iron rule 3: nothing about the timing changed); what changed is that "was the grace window
     //    armed" used to require instrumenting the system to answer.
+    //    P1.72 dropped the other two things it used to do (clear free-mouse mode, record "this unlock was
+    //    ours") — both existed only because the browser could cancel a pointer lock behind our back.
     Object.assign(ui, { inventory: false });
-    Object.assign(devices, { locked: true, freeMouseActive: true });
+    Object.assign(devices, { locked: true });
     equal(timing.lockGraceUntil, 0, "no grace window is armed before an intentional unlock");
     input.prepareUnlock();
     assert(timing.lockGraceUntil > performance.now(), "…and arming it is visible IN the resource");
-    equal(timing.unlockIsIntentional, true, "…together with 'this unlock was ours'");
-    equal(devices.freeMouseActive, false, "…while free-mouse mode drops at once, as before");
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -3532,7 +3563,7 @@ check("losing control DROPS the buffered view deltas instead of replaying them",
       .map((v) => v.toFixed(6))
       .join(",");
   try {
-    Object.assign(devices, { locked: true, freeMouseActive: false });
+    Object.assign(devices, { locked: true });
     Object.assign(ui, { mainMenu: false, menu: false, inventory: false });
     // Pin the basis: a forward vector parallel to `up` is invariant under a yaw rotation, which would
     // make "the view turned" unfalsifiable.
@@ -3571,7 +3602,7 @@ check("losing control DROPS the buffered view deltas instead of replaying them",
     near(C.ORIENTATION.pitch[index], 0.5, 1e-6, "…and does not pitch it");
 
     // 4. Not locked and not free-mouse: the same freeze applies (this is the window-blur path).
-    Object.assign(devices, { locked: false, freeMouseActive: false });
+    Object.assign(devices, { locked: false });
     C.VIEW.yawDelta[index] = 0.25;
     controller.step();
     equal(fwd(), turnedTo, "an unlocked player does not turn either");

@@ -17,7 +17,7 @@ export const LOCAL_PLAYER: Resource<Entity> = defineResource<Entity>("localPlaye
 /** The block world. Not a component: one global asset, not per-entity state. */
 export const VOXEL: Resource<VoxelWorld> = defineResource<VoxelWorld>("voxel");
 
-/** Device/pointer-lock state. Owned and written by ecs/systems/input.ts, READ by every gameplay
+/** Device/capture state. Owned and written by ecs/systems/input.ts, READ by every gameplay
  *  system through canControl(): that single gate is what stops a UI click from driving the game.
  *
  *  There is deliberately NO "click may grab the lock" field here any more: that was a CACHE of
@@ -26,11 +26,13 @@ export const VOXEL: Resource<VoxelWorld> = defineResource<VoxelWorld>("voxel");
  *  takeover test) ask UI_MODAL directly now, which is both authoritative and one frame EARLIER than the
  *  cache was — a stale `true` there would have let a click capture the mouse behind an open menu. */
 export interface InputState {
-  /** The game canvas holds the pointer lock */
+  /** **WE hold the mouse** (the native capture: `ClipCursor` + a hidden cursor + raw deltas). This is the
+   *  whole of "the mouse belongs to the game" — one boolean, exactly like Minecraft's `mouseGrabbed`
+   *  (P1.72). It used to be paired with `freeMouseActive`, a second way to be "in control" that existed
+   *  only because the browser could cancel a pointer lock behind our back; with the browser path gone there
+   *  is nothing left that can hand the mouse to another owner without us asking. */
   locked: boolean;
-  /** Chromium cancelled the lock by itself (window partly offscreen) -> MC-style free-mouse mode */
-  freeMouseActive: boolean;
-  /** The raw-input (WM_INPUT) plugin is available, so free-mouse mode can use its deltas */
+  /** The raw-input (WM_INPUT) listener is running: the ONLY source of view deltas while captured. */
   rawInputActive: boolean;
   /** The cursor value the shell last APPLIED ("none" while playing, "default" with a UI up; null before
    *  the first write). `platform/pointerlock.ts` used to keep this in a private field — it is a fact about
@@ -41,7 +43,7 @@ export interface InputState {
 export const INPUT_STATE = defineResource<InputState>("inputState");
 
 export function createInputState(): InputState {
-  return { locked: false, freeMouseActive: false, rawInputActive: false, appliedCursor: null };
+  return { locked: false, rawInputActive: false, appliedCursor: null };
 }
 
 /** The WINDOW'S SIZE in CSS pixels, as data. Written by `platform/viewport.ts` — the ONE resize listener
@@ -95,7 +97,7 @@ export function createPointer(): PointerState {
   return { x: 0, y: 0, buttons: 0 };
 }
 
-/** The DEVICE-TIMING state of the pointer-lock / raw-input layer: the ten fields that make
+/** The DEVICE-TIMING state of the capture / raw-input layer: the fields that make
  *  ecs/systems/input.ts race-sensitive. They used to be private fields of that system, so the only way
  *  to see WHY a mousemove was swallowed — or to replay a race in a test — was to instrument the system.
  *  The values are world state like the rest of the device state; what does NOT move with them is the
@@ -106,20 +108,16 @@ export function createPointer(): PointerState {
  *  there, and nothing outside it may observe a half-applied frame — a resource would be a promise the
  *  system cannot keep. */
 export interface InputTiming {
-  /** Ignore the single synthetic fake delta at lock instant (the first mousemove after locking must not
-   *  rotate the view) */
+  /** Ignore the single synthetic fake delta at capture instant (the first mouse event after taking the
+   *  mouse must not rotate the view). Minecraft's `ignoreFirstMove` — its ONE motion-event rebase — is the
+   *  same idea, and it re-arms it on exactly the same three occasions (a grab, the pointer entering the
+   *  window, a resize). */
   skipFirstMove: boolean;
-  /** Grace window armed before an intentional unlock: swallows synthetic deltas during the
-   *  exitPointerLock / SetCursorPos race (while still locked). Absolute performance.now() deadline. */
+  /** Grace window armed at capture instant: swallows synthetic deltas during the SetCursorPos race (while
+   *  still captured). Absolute performance.now() deadline. */
   lockGraceUntil: number;
-  /** Set by prepareUnlock() when it is about to release a lock we hold, so the pointerlockchange that
-   *  follows knows the unlock was ours and must NOT engage the offscreen fallback. */
-  unlockIsIntentional: boolean;
   /** Raw-input takeover state tracking (logs one line on switch for diagnosis) */
   rawTakeoverActive: boolean;
-  /** Offscreen check result cache (~120ms), so not every mouse event triggers layout/screen queries */
-  offscreenCacheUntil: number;
-  offscreenCached: boolean;
   /** Last Space press (a double tap toggles flying) plus the diagnostic counters behind the F3
    *  SPACE/MOUSE logs the debug forwarder drains. */
   lastSpaceDown: number;
@@ -385,10 +383,7 @@ export function createInputTiming(): InputTiming {
   return {
     skipFirstMove: false,
     lockGraceUntil: 0,
-    unlockIsIntentional: false,
     rawTakeoverActive: false,
-    offscreenCacheUntil: 0,
-    offscreenCached: false,
     lastSpaceDown: 0,
     spaceSeq: 0,
     mouseSeq: 0,
@@ -402,10 +397,9 @@ export function createInputTiming(): InputTiming {
  *
  *  Before this existed the answer was DERIVED, twice over: main.ts OR'd six container booleans at
  *  five different sites, and platform/pointerlock.ts folded that into a second copy on the input state,
- *  which denied control only INDIRECTLY (by suppressing raw-input takeover and by clearing
- *  freeMouseActive inside prepareUnlock). Two consequences: adding a seventh UI surface meant finding
- *  all five OR sites, and between prepareUnlock() and the asynchronous pointerlockchange the player
- *  stayed controllable for a frame with the menu already on screen. */
+ *  which denied control only INDIRECTLY (by suppressing raw-input takeover and by clearing the
+ *  free-mouse flag inside prepareUnlock). Two consequences: adding a seventh UI surface meant finding
+ *  all five OR sites, and the player stayed controllable for a frame with the menu already on screen. */
 export interface UiModalState {
   /** Main menu, including its settings / language / packs / keybinds / world-type sub-panels */
   mainMenu: boolean;
@@ -494,11 +488,10 @@ export function sanitizeFrameCap(cap: number): number {
   return snapped >= CAP_MAX ? 0 : snapped;
 }
 
-/** Whether the local player may be controlled: the pointer is usable AND no modal UI holds the
- *  mouse. Two independent reasons, ONE gate — and the reason a system may bail out early, keeping
- *  its last rendered state. */
+/** Whether the local player may be controlled: WE hold the mouse and no modal UI is up. Two independent
+ *  reasons, ONE gate — and the reason a system may bail out early, keeping its last rendered state. */
 export function canControl(devices: InputState, ui: UiModalState): boolean {
-  return (devices.locked || devices.freeMouseActive) && !isModalUi(ui);
+  return devices.locked && !isModalUi(ui);
 }
 
 // ===== Configuration resources: the settings that are read ON THE TICK =====

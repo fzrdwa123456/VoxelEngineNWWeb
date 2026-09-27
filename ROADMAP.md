@@ -1547,6 +1547,37 @@ Still outstanding:
   state is readable in boot.log, the arming logs one rate-limited line, and the gate pins the rule
   (`invisible_moment`, `owes_centre`, the foreground term, the give-up arming, the spend, the clearing).
   Two new table tests (the Win+L sequence, and "never paid into a running capture"); 31/31 pass.
+- **P1.72 - NATIVE ONLY: the Minecraft model, and the ESC hook loses half its job.** `DONE`. The user's
+  ruling after the Chrome-lock investigation was "keep native only, do it the way MC does". Three findings
+  made that the right call:
+  1. **Chrome's pointer lock does NOT have the "no rotation at the screen edge" problem** — that is the
+     API's headline guarantee, not a bug (W3C Pointer Lock 2.0: "the movement is not limited to the
+     traditional boundaries (such as the user agent's window, or the overall screen)… There will be no limit
+     to movementX/movementY"; MDN: "Without Pointer lock, the rotation stops the moment the pointer reaches
+     the edge"). Its `unadjustedMovement` option only controls OS mouse acceleration.
+  2. What pointer lock DOES impose are policies a page cannot turn off — and those are the whole reason this
+     engine went native: ESC is a mandatory unlock gesture (spec: "a default unlock gesture must always be
+     available… The ESC key is recommended"; Chrome also makes a re-lock need fresh user activation and
+     applies an escape cooldown), focus loss unlocks by itself, and on exit the cursor is restored to where
+     it was when the lock was entered (spec, "Exit Pointer Lock" step 1 + the `cursor position` definition)
+     — so "the pause menu's cursor lands on the crosshair" is impossible there.
+  3. **MC's mechanism is the one this engine already had**: since the 26.3 snapshot MC drives SDL3, and
+     `SDL_SetWindowRelativeMouseMode` is literally `WIN_SetRawMouseEnabled` on Windows — hidden cursor,
+     constrained to the window, deltas from raw HID. MC's Java side is then three calls: grab, release,
+     and ONE `SDL_WarpMouseInWindow(centre)` on release; it never reads or moves the OS cursor while it
+     holds the mouse, never re-derives the grab from focus/geometry (a resize only re-arms `ignoreFirstMove`),
+     and has exactly one place that grabs and releases (`Gui.setScreen`).
+  So: **`requestPointerLock` is gone from the engine** (a gate pin walks the seven mechanism files for
+  `requestPointerLock` / `exitPointerLock` / `pointerLockElement` / `pointerlockchange`), `mousecapture.ts`
+  no longer falls back — a refusal is reported and the mouse stays free, because a capture without raw input
+  would hide and clip the cursor for a view that cannot turn, and `INPUT_STATE` is ONE boolean again
+  (`locked` = "we hold the mouse", MC's `mouseGrabbed`): `canControl` is `locked && !isModalUi`, and
+  `freeMouseActive`, `unlockIsIntentional` and the whole offscreen-window rule went with the browser path.
+  **The low-level keyboard hook lost its ESC half** (it existed only to stop the browser's ESC-unlock from
+  eating the first press) and kept the context-menu half (the menu key / Shift+F10 still make Windows reveal
+  the cursor for a frame), so `esc_hook`/`EscEvent`/the `esc` event bridge/`escHook` are now
+  `menu_hook`/`menuHook`. The mousemove look branch stays as the defence in depth it always was, now marked
+  unreachable by construction.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

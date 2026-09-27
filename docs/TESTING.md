@@ -588,3 +588,34 @@ is DEFERRED to the first moment the system reports no cursor displayed at all. E
 Report back: for Win+L the `foreground LOST/REGAINED` block with the `apply … warp=` line between them, and
 for Win+; whether any `warp=true` line appears at all.
 ```
+
+AFTER NATIVE-ONLY (P1.72 - the Pointer Lock API is gone; one mechanism, MC-style). There is nothing new to
+learn here, and that is the point: every check below should behave exactly as it did, and the FAILURES are
+the interesting ones. The engine now captures the mouse itself (ClipCursor + a hidden cursor) and takes the
+view from raw input; `requestPointerLock` no longer exists anywhere, so the browser can no longer unlock,
+cooldown, or move the cursor back on its own. Start by confirming the mechanism is up: `debug.log` must
+contain `RAWINPUT listener started` and `RAWINPUT active=true` (once per run).
+```
+(1) the basics must be untouched: enter a world -> the cursor is hidden and the view turns; ESC -> pause menu
+    with the cursor ON THE CROSSHAIR; Resume -> captured again with ONE `LOCK request [menu resume]` /
+    `MOUSE CAPTURE on (native ClipCursor; browser pointer lock not used)` and NO `LOCK rejected … retrying`
+(2) **ESC is a plain key now** (this is the visible change): press ESC in a world and the pause menu must
+    open on the FIRST press, with no `esc`-synthesised key event in the log. A key bound to Escape (the bind
+    panel refuses ESC, so nothing to rebind) and ESC inside a settings sub-page keep walking the ladder
+    exactly as before
+(3) **the screen edge must not freeze the view**: hold the mouse against any window edge and keep pushing —
+    the view must keep turning (deltas are WM_INPUT). If it freezes, look at `RAWMON … wmIn=` in debug.log:
+    `wmIn=0` means WM_INPUT is not being delivered, which is the one state this design cannot survive (the
+    game then refuses to capture: `MOUSE CAPTURE refused: raw input is not running`)
+(4) **the menu key must not flash the cursor**: with the mouse captured, press the menu/Apps key and
+    Shift+F10 — the cursor must not blink, and no window menu may appear. `MENU HOOK installed` in debug.log
+    is the happy case; `MENU HOOK NOT installed` means the hook failed (fail open, a flash is expected)
+(5) the standing cursor set: Win-key -> pause menu with the cursor centred and no blinking; Win+L + unlock ->
+    centred on the return; Win+; -> no jump; Alt+Tab away and back -> cursor free, world paused, no
+    auto-recapture; drag/resize the title bar -> no tow, the pause menu comes up
+(6) the backpack (E) opens with the cursor visible and closing it recaptures; the settings panel's
+    fullscreen <-> windowed still does NOT pause; F3 panel and the hotbar are unaffected
+(7) `LOCK skipped […]: window is not foreground` / `the window is being moved or resized` are still the only
+    two refusals of a capture request; there must never be a `falling back to requestPointerLock` line (it
+    does not exist any more)
+```

@@ -1,4 +1,4 @@
-// ===== Pointer lock management =====
+// ===== Mouse-capture and cursor management =====
 import { invoke } from "@tauri-apps/api/core";
 
 // The boot.log channel (P1.59): the front end's cursor diagnostics land in the SAME file as Rust's
@@ -10,13 +10,12 @@ export interface PointerLockDeps {
   input: { lock(): Promise<void> | undefined };
   /** The DEVICE state resource (`INPUT_STATE`): `appliedCursor` is the cursor value this manager last
    *  wrote, i.e. a fact about the window that belongs in the world rather than in a private field.
-   *  `locked` / `freeMouseActive` are read by the P1.59 cursor diagnostics, which has to say WHO ordered a
-   *  hidden cursor and with which inputs — the two fields that can make `canControl()` true with no capture
-   *  behind it are exactly the ones a "the cursor is invisible" report has to rule out. */
+   *  `locked` ("WE hold the mouse") is read by the P1.59 cursor diagnostics, which has to say WHO ordered a
+   *  hidden cursor and with which inputs — that single field is the only way a hidden cursor can be
+   *  legitimate, so it is exactly what a "the cursor is invisible" report has to rule out. */
   state: {
     appliedCursor: "none" | "default" | null;
     locked: boolean;
-    freeMouseActive: boolean;
   };
   /** Whether a modal UI currently owns the mouse. ONE predicate, supplied by the composition root
    *  from the UI_MODAL resource — it replaced two separate callbacks (isMenuOpen / isInvOpen) whose
@@ -97,21 +96,21 @@ export class PointerLock {
       return;
     }
     // Diagnostics (P1.65): the reported "it enters paused, but Resume leaves the cursor visible and the view
-    // dead" is a lock that never SETTLES into `locked=true`. These two lines say whether the request resolved
-    // at all and which mechanism actually took the mouse (the native clip leaves pointerLockElement null; a
-    // fallback sets it).
+    // dead" is a capture that never SETTLES into `locked=true`. These two lines say whether the request
+    // resolved at all (P1.72: the native capture is the only mechanism, so a rejection means the mouse
+    // really is free — not that something else took over).
     cursorBoot(`LOCK attempt [${source}] ${this.stateLine()}`);
     const p = this.deps.input.lock();
     if (p) {
       p.then(() => {
-        cursorBoot(`LOCK OK [${source}] plock=${document.pointerLockElement !== null} ${this.stateLine()}`);
+        cursorBoot(`LOCK OK [${source}] ${this.stateLine()}`);
       }).catch((err) => {
-        cursorBoot(`LOCK FAILED [${source}] ${String(err)} plock=${document.pointerLockElement !== null}`);
+        cursorBoot(`LOCK FAILED [${source}] ${String(err)}`);
         this.deps.logDebug(`LOCK rejected [${source}], retrying in 1300ms`);
         this.deps.scheduleRetry(1300, source);
       });
     } else {
-      cursorBoot(`LOCK no-op [${source}] (the lock path returned nothing)`);
+      cursorBoot(`LOCK no-op [${source}] (no capture was attempted - raw input is not running)`);
     }
   }
 
@@ -168,10 +167,9 @@ export class PointerLock {
   private stateLine(): string {
     const computed =
       typeof getComputedStyle === "function" ? getComputedStyle(document.body).cursor : "?";
-    const held = this.deps.state.locked || document.pointerLockElement !== null;
     return (
       `css=${document.body.style.cursor || "(unset)"} computed=${computed} ` +
-      `locked=${this.deps.state.locked} held=${held} free=${this.deps.state.freeMouseActive} ` +
+      `captured=${this.deps.state.locked} ` +
       `modal=${this.deps.isUiModal()} canControl=${this.deps.canControl()} ` +
       `applied=${this.deps.state.appliedCursor ?? "null"} ` +
       `domFocus=${typeof document.hasFocus === "function" ? document.hasFocus() : "?"}`

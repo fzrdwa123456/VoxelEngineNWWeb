@@ -70,14 +70,14 @@ export interface NavigationDeps {
    *  and a world entry both spend seconds in the `boot` mode with no modal open, and an ESC during them
    *  used to open the pause menu OVER the loading screen (and E opened the backpack behind it). */
   readonly inWorld: () => boolean;
-  /** Pointer-lock effects, injected (this system writes no DOM and no device state by itself) */
+  /** Mouse-capture effects, injected (this system writes no DOM and no device state by itself) */
   readonly prepareUnlock: () => void;
   /** Is a key bind DRAG in progress? (the KEYBIND_GESTURE resource, read through the root). Optional: a
    *  driver that does not model a drag (a test) simply never reports one. */
   readonly dragging?: () => boolean;
   /** Cancel that drag: clear the gesture and end a rebind capture. `reason` is for the log. */
   readonly cancelDrag?: (reason: string) => void;
-  readonly exitPointerLock: () => void;
+  readonly releaseCapture: () => void;
   readonly relock: (reason: string) => void;
   readonly relockSoon: (reason: string) => void;
   readonly applyCursor: () => void;
@@ -200,15 +200,15 @@ export class UiNavigationSystem {
 
     this.paint();
 
-    // Pointer-lock effects, edge-triggered from the state. Opening the backpack releases the mouse and
-    // stops the player's INTENT (canControl reads UI_MODAL); closing it relocks on the next event-loop
-    // turn, which dodges Chromium's "ESC exits lock" default action during the current key dispatch.
+    // Capture effects, edge-triggered from the state. Opening the backpack releases the mouse and
+    // stops the player's INTENT (canControl reads UI_MODAL); closing it recaptures on the next event-loop
+    // turn, so the click that closed the bag is not swallowed by the capture.
     if (ui.inventory !== this.inventoryOpen) {
       this.inventoryOpen = ui.inventory;
       if (ui.inventory) {
         this.deps.prepareUnlock();
         this.deps.log("UNLOCK request (inventory)");
-        this.deps.exitPointerLock();
+        this.deps.releaseCapture();
       } else {
         this.deps.relockSoon("inventory E");
       }
@@ -254,7 +254,7 @@ export class UiNavigationSystem {
     if (!this.deps.inWorld()) return;
     this.deps.prepareUnlock();
     this.deps.log("UNLOCK request (menu)");
-    this.deps.exitPointerLock();
+    this.deps.releaseCapture();
     ui.menu = true;
   }
 

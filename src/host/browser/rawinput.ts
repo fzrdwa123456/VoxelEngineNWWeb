@@ -46,8 +46,8 @@ interface RawStats {
   wmInputTotal: number;
   ridFail: number;
   absoluteDropped: number;
-  /** Whether plan B's ESC hook is installed */
-  escHook: boolean;
+  /** Whether the low-level context-menu hook is installed */
+  menuHook: boolean;
 }
 
 let available = false;
@@ -69,32 +69,6 @@ let available = false;
  *  THE COUNTERS ARE A RESOURCE now (`InputDiagnostics.raw`, ecs/resources.ts): the object is handed to
  *  `startRawInput` by the composition root, and the input system formats the line once a second — so this
  *  module keeps no state of its own and no longer writes to the log. */
-
-/** ===== Plan B: the ESC that Rust's hook swallows =====
- *
- *  Why ESC has to come from here rather than the DOM: ESC is the browser's "default unlock gesture",
- *  handled by the browser process **before** the key is handed to the page (`preventDefault()` cannot
- *  stop it — see #7907, cited by the comment at main.ts:725; that model only holds in NW.js). So the
- *  Rust side installs a WH_KEYBOARD_LL hook that **swallows** it and pushes it over from here, and we
- *  **synthesise a real KeyboardEvent** and dispatch it on document.
- *
- *  That way neither the listener in input.ts that publishes the key edge nor the preventDefault listener
- *  in main.ts changes, and the route is still the original one: KEY_EVENTS -> ui.navigation.
- *  (Every keydown/keyup listener in the game hangs off document and not one of them checks isTrusted, so
- *    a synthetic event is accepted normally.) */
-function installEscBridge(): void {
-  void listen<{ down: boolean; repeat: boolean }>("esc", (event) => {
-    const { down, repeat } = event.payload;
-    document.dispatchEvent(
-      new KeyboardEvent(down ? "keydown" : "keyup", {
-        code: "Escape",
-        key: "Escape",
-        repeat,
-        bubbles: true,
-      }),
-    );
-  });
-}
 
 /** Start the raw-input listener. `onDelta` is called on **every** event that arrives (Rust pushes one
  *  block every 4ms), and the caller (`PlayerInputSystem.rawDelta`) does the takeover/grace/spike decision
@@ -133,10 +107,9 @@ export function startRawInput(
     }
     onDelta(dx, dy);
   });
-  installEscBridge();
-  // A one-off probe (sent by Rust's push thread): whether the hook is ever called at all (seen=0 means
-  // no), and who the foreground window is — the Rust side cannot reach the log root (AppState.root is
-  // private), so it comes as an event and is written into debug.log here.
+  // A one-off probe (sent by Rust's push thread): whether the low-level context-menu hook is ever called
+  // (seen=0 means no), and who the foreground window is — the Rust side cannot reach the log root
+  // (AppState.root is private), so it comes as an event and is written into debug.log here.
   void listen<string>("hook-probe", (event) => logDebug(String(event.payload)));
   // RAWMON: Rust reports once a second "who moved during this second" (emits / wmIn / cursorFix /
   // hookSeen / cursor and capture state)
@@ -148,18 +121,21 @@ export function startRawInput(
       if (stats.available) {
         logDebug("RAWINPUT listener started (Rust thread + raw-input events)");
       } else {
-        logDebug("RAWINPUT unavailable (no raw-input fallback, game unaffected)");
+        // **This is now a hard requirement for playing, not a degradation (P1.72).** The view comes from
+        // WM_INPUT; without it a capture would hide and clip the cursor for a view that cannot turn, so
+        // `input.lock()` refuses to capture at all. There is deliberately no pointer-lock fallback.
+        logDebug("RAWINPUT unavailable -> the mouse CANNOT be captured (no pointer-lock fallback, P1.72)");
       }
       logDebug(
-        stats.escHook
-          ? "ESC HOOK installed (ESC is swallowed natively -> a synthetic key event; the browser can no longer release pointer lock)"
-          : "ESC HOOK NOT installed (fail open: ESC falls back to the browser behaviour - the first press unlocks, only the second reaches the page)",
+        stats.menuHook
+          ? "MENU HOOK installed (the menu key / Shift+F10 are swallowed natively, so Windows never flashes the cursor)"
+          : "MENU HOOK NOT installed (fail open: the menu key may reveal the cursor for a frame)",
       );
       return stats.available;
     })
     .catch((e) => {
-      // A load failure does not affect the game: the mouse takes the ordinary mousemove path
-      logDebug(`RAWINPUT start failed (no raw-input fallback, game unaffected): ${String(e)}`);
+      // A load failure does not affect the menus; it does mean the mouse cannot be captured.
+      logDebug(`RAWINPUT start failed (the mouse cannot be captured): ${String(e)}`);
       return false;
     });
 
