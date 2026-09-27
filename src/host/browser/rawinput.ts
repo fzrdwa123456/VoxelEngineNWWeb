@@ -81,9 +81,16 @@ let available = false;
  *  9~12ms buckets and the sample count per frame jumped between 0/1/2/3 (measured with the `pf` probe).
  *
  *  `raw` is the `InputDiagnostics.raw` counter object (a RESOURCE): this listener is its only writer and
- *  the input system prints it once a second, so the counters have an owner and this module keeps none. */
+ *  the input system prints it once a second, so the counters have an owner and this module keeps none.
+ *
+ *  **`onButtons` is the second channel of the same packets (P1.76)**: the raw mouse stream carries the button
+ *  edges as well (`usButtonFlags`), and they arrive even when the click was DISPATCHED to another window (a
+ *  shell overlay on top, e.g. Win+;), which is the one thing the DOM's `mousedown` cannot do. The two bitmasks
+ *  are decoded by `input.ts::rawButtons`, which is also where the DOM path is switched off so a click can
+ *  never be counted twice. */
 export function startRawInput(
   onDelta: (dx: number, dy: number) => void,
+  onButtons: (down: number, up: number) => void,
   raw: RawTransportCounters,
 ): RawInputHandle {
   // Install the listener before starting collection: the other order loses the first few milliseconds of
@@ -106,6 +113,12 @@ export function startRawInput(
       if (backlog > raw.backlogMax) raw.backlogMax = backlog;
     }
     onDelta(dx, dy);
+  });
+  // **Raw BUTTON edges (P1.76)**: same packets, second channel. They are pushed on their own event so a click
+  // that does not move the mouse still arrives, and they are device-level — the click may have been
+  // dispatched to a shell overlay and we still see it (see the header note).
+  void listen<{ down: number; up: number }>("raw-buttons", (event) => {
+    onButtons(event.payload.down, event.payload.up);
   });
   // A one-off probe (sent by Rust's push thread): whether the low-level context-menu hook is ever called
   // (seen=0 means no), and who the foreground window is — the Rust side cannot reach the log root

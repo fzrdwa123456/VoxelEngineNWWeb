@@ -774,7 +774,13 @@ const delays = createDelaySystem(world, {
 // turns the view unsmoothly").
 // The transport counters live in the INPUT_DIAGNOSTICS resource (a system may not own module-level
 // counters, and the device layer may not import one): `player.input` prints them as RAWLAG once a second.
-const rawInput = startRawInput((dx, dy) => input.rawDelta(dx, dy), world.resource(INPUT_DIAGNOSTICS).raw);
+const rawInput = startRawInput(
+  (dx, dy) => input.rawDelta(dx, dy),
+  // …and the button edges of the same packets (P1.76): the only path that survives a shell overlay taking the
+  // click (see the note in host/browser/rawinput.ts).
+  (down, up) => input.rawButtons(down, up),
+  world.resource(INPUT_DIAGNOSTICS).raw,
+);
 // **The assignment must wait for ready to settle.** In the original, startRawInput() was a synchronous
 // NAPI call, so `available` was true on the spot and this line used to be a synchronous assignment,
 // `input.rawInputActive = rawInput.available`; the Tauri port only sets it in

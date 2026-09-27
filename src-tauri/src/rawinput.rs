@@ -15,7 +15,7 @@
 //
 // dwFlags does not set RIDEV_NOLEGACY: legacy messages are not swallowed, so Chromium's pointer
 // lock is unaffected and the two paths run in parallel.
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -95,6 +95,55 @@ const RAWINPUT_HEADER_SIZE: usize = std::mem::size_of::<RawInputHeader>();
 //   + ulRawButtons(4) + lLastX(4) + lLastY(4) + ulExtraInformation(4) = 24
 const RAWMOUSE_SIZE: usize = 24;
 const OFF_L_LAST_X: usize = RAWINPUT_HEADER_SIZE + 12;
+/// `usButtonFlags` — the half of the packet this file used to skip (see BUTTONS below).
+const OFF_US_BUTTON_FLAGS: usize = RAWINPUT_HEADER_SIZE + 4;
+
+// ===== BUTTONS, from the raw packet instead of from window messages (P1.76) =====
+//
+// Why: with a shell overlay on top of the game (Win+;, the IME candidate window), the click is dispatched to
+// THAT window, so our webview's `mousedown`/`mouseup` never fire and break/place stop working while the panel
+// is up. Minecraft does not have that problem because SDL reads the button edges out of the very same RAWMOUSE
+// packet the motion deltas come from (`rawmouse->usButtonFlags` -> `SDL_SendMouseButton(..., SDL_GetKeyboardFocus(),
+// ...)`, src/video/windows/SDL_windowsevents.c:556-732) - raw input is DEVICE level, so which window the click
+// was dispatched to does not matter at all.
+//
+// We already receive those packets (`RIDEV_INPUTSINK`) and already parse past this field; this is the half that
+// used to be thrown away. The edges are accumulated as two bitmasks and pushed with the deltas, so the ordering
+// inside one 4 ms batch is "all downs, then all ups" (a down+up of the same button inside 4 ms collapses, which
+// no human can do). The wheel lives in the same union (`RI_MOUSE_WHEEL` + `usButtonData`) and is deliberately
+// NOT read yet: nothing in the front end consumes a wheel event.
+const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
+const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+const RI_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
+const RI_MOUSE_MIDDLE_BUTTON_DOWN: u16 = 0x0010;
+const RI_MOUSE_MIDDLE_BUTTON_UP: u16 = 0x0020;
+const RI_MOUSE_BUTTON_4_DOWN: u16 = 0x0040;
+const RI_MOUSE_BUTTON_4_UP: u16 = 0x0080;
+const RI_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
+const RI_MOUSE_BUTTON_5_UP: u16 = 0x0200;
+
+/// One bit per button, in the order the front end's `MouseEvent.button` uses (0 left, 1 middle, 2 right,
+/// 3 = X1, 4 = X2), so the raw path can reuse `buttonToCode`/`buttonToAction` unchanged.
+const BTN_LEFT: u32 = 1 << 0;
+const BTN_MIDDLE: u32 = 1 << 1;
+const BTN_RIGHT: u32 = 1 << 2;
+const BTN_X1: u32 = 1 << 3;
+const BTN_X2: u32 = 1 << 4;
+
+/// `(usButtonFlags bit, our button bit, is_down)` — one table, walked in `wnd_proc`.
+const BUTTON_FLAGS: [(u16, u32, bool); 10] = [
+    (RI_MOUSE_LEFT_BUTTON_DOWN, BTN_LEFT, true),
+    (RI_MOUSE_LEFT_BUTTON_UP, BTN_LEFT, false),
+    (RI_MOUSE_RIGHT_BUTTON_DOWN, BTN_RIGHT, true),
+    (RI_MOUSE_RIGHT_BUTTON_UP, BTN_RIGHT, false),
+    (RI_MOUSE_MIDDLE_BUTTON_DOWN, BTN_MIDDLE, true),
+    (RI_MOUSE_MIDDLE_BUTTON_UP, BTN_MIDDLE, false),
+    (RI_MOUSE_BUTTON_4_DOWN, BTN_X1, true),
+    (RI_MOUSE_BUTTON_4_UP, BTN_X1, false),
+    (RI_MOUSE_BUTTON_5_DOWN, BTN_X2, true),
+    (RI_MOUSE_BUTTON_5_UP, BTN_X2, false),
+];
 
 #[repr(C)]
 struct Msg {
@@ -179,6 +228,12 @@ static ACC_ABS_DROPPED: AtomicI32 = AtomicI32::new(0);
 static ACC_WM_INPUT_TOTAL: AtomicI32 = AtomicI32::new(0);
 /// Diagnostics: number of GetRawInputData failures
 static ACC_RID_FAIL: AtomicI32 = AtomicI32::new(0);
+/// **Raw button edges** (P1.76): bitmasks, OR-ed in by the collector and cleared by the push thread. See the
+/// BUTTONS note above for why these come from the device and not from `mousedown`.
+static ACC_BTN_DOWN: AtomicU32 = AtomicU32::new(0);
+static ACC_BTN_UP: AtomicU32 = AtomicU32::new(0);
+/// Diagnostics: how many packets carried a button edge (shown on the RAWMON line as `btn=`)
+static ACC_BTN_TOTAL: AtomicI32 = AtomicI32::new(0);
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -330,6 +385,31 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
         }
         let dev_type = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
         if dev_type == RIM_TYPEMOUSE {
+            // **BUTTONS FIRST, and INDEPENDENT of the motion flags** (P1.76): a packet can carry a button edge
+            // with no motion at all, and an ABSOLUTE-coordinate packet can carry one too (SDL does the same:
+            // `haveButton` is checked outside its `isAbsolute` branch).
+            let btn = u16::from_ne_bytes([buf[OFF_US_BUTTON_FLAGS], buf[OFF_US_BUTTON_FLAGS + 1]]);
+            if btn != 0 {
+                let mut down: u32 = 0;
+                let mut up: u32 = 0;
+                for (flag, bit, is_down) in BUTTON_FLAGS {
+                    if btn & flag == 0 {
+                        continue;
+                    }
+                    if is_down {
+                        down |= bit;
+                    } else {
+                        up |= bit;
+                    }
+                }
+                if down != 0 {
+                    ACC_BTN_DOWN.fetch_or(down, Ordering::Relaxed);
+                }
+                if up != 0 {
+                    ACC_BTN_UP.fetch_or(up, Ordering::Relaxed);
+                }
+                ACC_BTN_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
             let us_flags = u16::from_ne_bytes([buf[RAWINPUT_HEADER_SIZE], buf[RAWINPUT_HEADER_SIZE + 1]]);
             if us_flags & MOUSE_MOVE_ABSOLUTE == 0 {
                 // relative mode: lLastX/Y are the deltas (standard and gaming mice both take this path)
@@ -372,8 +452,18 @@ pub struct MouseDelta {
     pub t: u64,
 }
 
+/// **Raw button edges** (P1.76): two bitmasks, one bit per button (0 left, 1 middle, 2 right, 3 = X1, 4 = X2),
+/// so a 4 ms batch can carry "left down + right up" without any ordering information being needed.
+#[derive(Clone, Serialize)]
+pub struct RawButtons {
+    pub down: u32,
+    pub up: u32,
+}
+
 /// The payload name of every event pushed to the frontend
 const EVENT: &str = "raw-input";
+/// …and the payload name for the button edges (P1.76)
+const BUTTON_EVENT: &str = "raw-buttons";
 
 /// Starts the listener: the collector thread + the push thread. On failure it returns the reason
 /// and the game runs as usual (merely without raw input as a fallback).
@@ -496,12 +586,14 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         // Purpose: turn "holding a key + turning the view is not smooth" from guesswork into
         // numbers. This line reports **how many times each of four possible paths moved during this
         // second**: emits=IPC events we pushed to the frontend (capped at 250/s); wmIn=raw mouse
-        // packets delivered by the system; cursorFix=how many times the cursor sentinel **actually
-        // corrected** the state (the `CURSOR_ENFORCED` delta — always climbing = a tug of war with
+        // packets delivered by the system; btn=packets that carried a button edge (P1.76: if this stays 0 while
+        // you click, the buttons are not reaching us at all); cursorFix=how many times the cursor sentinel
+        // **actually corrected** the state (the `CURSOR_ENFORCED` delta — always climbing = a tug of war with
         // the system); hookSeen=how many times the low-level keyboard hook was called (always 0 =
         // the hook never reaches the input path). The rest are the state at that moment.
         let mut emits: u32 = 0;
         let mut last_wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
+        let mut last_btn = ACC_BTN_TOTAL.load(Ordering::Relaxed);
         let mut last_fix = crate::win::cursor_enforced_count() as i32;
         let mut last_seen = HOOK_SEEN.load(Ordering::Relaxed);
         let mut last_mon = Instant::now();
@@ -540,6 +632,14 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                 emits += 1;
                 let _ = app.emit(EVENT, MouseDelta { dx, dy, t: t0.elapsed().as_millis() as u64 });
             }
+            // **…and the button edges of the same batch (P1.76)**, on their own channel so a button edge with
+            // no motion still arrives (a click that does not move the mouse is the common case).
+            let down = ACC_BTN_DOWN.swap(0, Ordering::Relaxed);
+            let up = ACC_BTN_UP.swap(0, Ordering::Relaxed);
+            if down != 0 || up != 0 {
+                emits += 1;
+                let _ = app.emit(BUTTON_EVENT, RawButtons { down, up });
+            }
 
             // RAWMON: one line per second (emitted as an event, the frontend writes it to
             // debug.log along the same route as HOOKPROBE)
@@ -550,9 +650,10 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                 let seen = HOOK_SEEN.load(Ordering::Relaxed);
                 let (desired, showing) = crate::win::cursor_state();
                 let line = format!(
-                    "RAWMON emits={} wmIn={} cursorFix={} hookSeen={} ridFail={} desired={} showing={} capture={} fgOurs={}",
+                    "RAWMON emits={} wmIn={} btn={} cursorFix={} hookSeen={} ridFail={} desired={} showing={} capture={} fgOurs={}",
                     emits,
                     wm - last_wm,
+                    ACC_BTN_TOTAL.load(Ordering::Relaxed) - last_btn,
                     fix - last_fix,
                     seen - last_seen,
                     ACC_RID_FAIL.load(Ordering::Relaxed),
@@ -564,6 +665,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
                 let _ = app.emit("raw-mon", line);
                 emits = 0;
                 last_wm = wm;
+                last_btn = ACC_BTN_TOTAL.load(Ordering::Relaxed);
                 last_fix = fix;
                 last_seen = seen;
                 last_mon = now;

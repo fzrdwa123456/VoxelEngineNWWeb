@@ -136,15 +136,11 @@ pub struct CursorProbe {
     pub focused: bool,
     /// does the system report a non-NULL, showing cursor?
     pub showing: bool,
-    /// the client area in screen coordinates (the clip target comes from it)
+    /// the client area in screen coordinates (the centre lock is derived from it)
     pub client: ClipRect,
-    /// **The WHOLE window rect in screen coordinates** (client + frame: title bar and sizing borders). It is
-    /// the fallback clip target while the pointer is on the frame (P1.62d): clamping the pointer into the
-    /// CLIENT then moved the window, because Windows' move/size loop follows the pointer - and a capture
-    /// request can arrive exactly while the user is dragging the window. A rect that already CONTAINS the
-    /// pointer is one `ClipCursor` will not move it into. `ZERO` when it could not be read (then the client is
-    /// used, as before).
-    pub window: ClipRect,
+    // (`window` used to live here: the whole-window rect, the fallback clip target while the pointer sat on the
+    // frame (P1.62d). The centre lock replaced that target in P1.76 and nothing reads the frame rect any more,
+    // so the field - and the `GetWindowRect` on every probe - is gone.)
     // (`remote_session` used to live here: a remote-desktop session needed a larger 1px centre lock. With the
     // client-area clip (P1.62c) the coarse absolute positions an RDP client reports no longer matter, so the
     // field - and the `SM_REMOTESESSION` read on every probe - is gone.)
@@ -188,12 +184,6 @@ pub fn rect_is_zero(r: ClipRect) -> bool {
 
 pub fn rect_is_empty(r: ClipRect) -> bool {
     r.right <= r.left || r.bottom <= r.top
-}
-
-/// Is `p` inside `r`? Half-open on the right/bottom edges, matching the 1px rects `ClipCursor` is given.
-/// Used by the centre lock to decide whether a re-clip would have to MOVE the pointer (P1.62).
-pub fn contains(r: ClipRect, p: ClipPos) -> bool {
-    !rect_is_empty(r) && p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
 }
 
 /// The overlap of two rectangles (`rect_is_empty` reports the "they do not touch" case).
@@ -270,37 +260,40 @@ fn clip_region(p: &CursorProbe) -> ClipRect {
     }
 }
 
-/// The rect to confine the cursor to. PURE (the remote-session flag and the screen bounds arrive in the
-/// probe). Returns `ZERO` when NOTHING can be confined (the window is off the screen).
-pub fn clip_target(p: &CursorProbe) -> ClipRect {
-    let client_visible = intersect(p.client, p.screen);
-    // **THE CLIP IS A RECTANGLE THAT CONTAINS THE POINTER (P1.62c/P1.62d).**
-    //
-    // `ClipCursor` CLAMPS the pointer into the rectangle it is given, so the ONE invariant that matters is:
-    // **the target always contains the pointer.** Everything else follows from it.
-    //   * a target derived from the client CENTRE towed the pointer along with the window (the original report:
-    //     the clip walked 963 -> 639 -> 480 with `relative=true`, dragging the pointer at every step);
-    //   * a 1px lock AT the pointer fixed that inside the client, but a capture request that arrives while the
-    //     user is DRAGGING the window finds the pointer on the title bar - outside the client - and clamping it
-    //     back in moved the WINDOW by the same amount (Windows' move loop follows the pointer); that was the
-    //     last reported "it still moves a little", 6px in the boot.log (`pos=(1166,192)` -> `(1166,198)`).
-    // So: inside the client the clip IS the client; on the frame it is the whole WINDOW rect, which already
-    // contains the pointer; `fit_into` then clips either to the visible part of the screen.
-    let target = if contains(client_visible, p.pos) || rect_is_empty(p.window) {
-        p.client
-    } else {
-        p.window
-    };
-    let visible = intersect(target, p.screen);
-    if rect_is_empty(visible) {
-        return ClipRect::ZERO;
+/// **THE CENTRE LOCK (P1.76) - the clip while we hold the mouse: a 3x1 px box AT THE CROSSHAIR.**
+///
+/// This is SDL's `relative_mode_center`, which is ON by default (`SDL_HINT_MOUSE_RELATIVE_MODE_CENTER`,
+/// `include/SDL3/SDL_hints.h:3032-3051`) and is the whole reason Minecraft's pointer never moves: with
+/// `lock_to_ctr` the clip becomes `data->cursor_ctrlock_rect` (a 1x1 - 3x1 on RDP - box, see
+/// `src/video/windows/SDL_windowswindow.c:397-403` and `:1598-1632`) offset to the client centre, so Windows
+/// itself refuses to move the pointer out of that box. Nothing has to warp, and the shell's overlay cursor
+/// (which is the SYSTEM cursor, drawn wherever the pointer is) is pinned there too - which is why in MC the
+/// cursor that Win+; reveals sits still, exactly on the crosshair.
+///
+/// **This INVERTS the invariant this file was built on.** P1.63's rule was "the rect handed to `ClipCursor`
+/// always CONTAINS the pointer, so the clip can never move it" - that is what made dragging/resizing stop
+/// towing the pointer. With a centre lock the box deliberately does NOT contain the pointer (unless it is dead
+/// centre) and moving it IS the mechanism. The old concerns are covered elsewhere now:
+///   * the drag/resize tow: the whole window session releases the clip anyway (`CLIP_POSTPONED` +
+///     `win-session` -> the front end pauses), which is exactly how SDL handles it (`postpone_clipcursor`
+///     while `in_title_click`, `SDL_windowswindow.c:1543`);
+///   * a capture request that arrives while the pointer is on the title bar: it is REFUSED while the user holds
+///     the frame (`winWindowMoving`), so the clamp can never drag a window that is being moved.
+///
+/// 3x1 rather than SDL's local 1x1: the wider box is SDL's own remote-desktop variant, and +-1 px of freedom
+/// on a coarse remote pointer is invisible locally.
+pub fn centre_lock(p: &CursorProbe) -> ClipRect {
+    let region = clip_region(p);
+    if rect_is_zero(region) {
+        return ClipRect::ZERO; // nothing visible to lock to: the caller releases instead (a minimised window)
     }
-    // The screen-edge margin (it keeps an invisible cursor off the taskbar's auto-hide band) is preferred, but
-    // it must never EXCLUDE the pointer: containing the pointer wins, because a clip that excludes it is a clip
-    // that moves it.
-    let safe = away_from_screen_edges(visible, p.screen, SCREEN_EDGE_MARGIN);
-    let region = if rect_is_empty(safe) || !contains(safe, p.pos) { visible } else { safe };
-    fit_into(target, region)
+    let target = fit_into(crosshair_rect(p), region);
+    ClipRect {
+        left: target.left - 1,
+        top: target.top,
+        right: target.right + 1,
+        bottom: target.bottom,
+    }
 }
 
 /// **Where "opening a menu" wants the pointer: the crosshair** (the client centre), fitted into what can be
@@ -367,33 +360,27 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
     // miss. Every one of P1.58…P1.62g was a patch on ONE such transition.
     //
     // The shape makes three invariants structural (each was a bug a per-transition patch could not kill):
-    //   1. **The rect handed to `ClipCursor` always CONTAINS the pointer** (or the clip is released), so
-    //      `ClipCursor` can never move it. A window drag, a resize, a title-bar press or a stale request
-    //      therefore cannot tow the cursor: the projection releases and re-clips a tick later.
+    //   1. **The rect handed to `ClipCursor` is the CENTRE LOCK** (P1.76, SDL's `relative_mode_center`): a 3x1
+    //      px box at the crosshair, which is what pins the pointer there and makes it immovable - rather than
+    //      P1.63's "a rect that contains the pointer, so the clip can never move it". See `centre_lock`.
     //   2. **The only MOVE in the whole system is the crosshair warp of the hidden -> visible transition**
-    //      (`hand_back_warp`), done while the pointer is still hidden and never on a pointer outside our
-    //      window. It is derived from the PREVIOUS tick's applied shape, so no event has to arm it.
+    //      (`hand_back_warp`), done while the pointer is still hidden - and with the centre lock it normally
+    //      has nothing to do, because the pointer is already on the crosshair.
     //   3. **The shape is compared with the SYSTEM** (`GetCursorInfo`) whenever we are focused, so a dropped
     //      `SetCursor` or Chromium answering from a stale NULL cache is corrected on the next tick.
     let hidden = m.want == 2 && p.focused;
     if hidden {
-        let target = clip_target(p);
-        // The pointer is outside our window (the user is dragging it, or the window has moved away from it).
-        if rect_is_zero(target) || !contains(target, p.pos) {
-            // **THE ONE ENTRY MOVE (P1.64).** TAKING the mouse may move the pointer into our window ONCE,
-            // while it is hidden - the projection's version of SDL's "entering relative mode recentres". It
-            // is needed because the pointer and the window get out of step: after a minimise, a maximise or a
-            // restore it usually sits outside the window (the taskbar, the desktop, another screen position).
-            // Refusing to clip there dropped the request, the front end read that as "the window was lost"
-            // and paused again - so Resume LOOPED: a visible cursor, a view that cannot turn, ESC the only key
-            // that does anything.
-            //
-            // Allowed ONLY on the entry (`m.shape != Hidden`: we were not capturing a tick ago) and only when
-            // the client has a visible part to move into. An ONGOING capture whose pointer leaves the window
-            // is the drag/resize case, and that still RELEASES instead of towing (invariant 1).
-            if m.shape != CursorShape::Hidden && !rect_is_zero(clip_region(p)) {
-                return plan(Some(target), CursorShape::Hidden, true, Some(crosshair_of(p)), true);
-            }
+        // **THE CENTRE LOCK (P1.76).** One target, no "where is the pointer" question at all: `ClipCursor` is
+        // given the 3x1 box at the crosshair, so Windows itself keeps the pointer inside it (that IS the
+        // mechanism - see `centre_lock`). This replaces both P1.62's "drop the capture when the pointer leaves
+        // the window" and P1.64's one-time "entry move": with a centre lock the pointer cannot leave, and a
+        // pointer that starts outside is simply pulled in by the clamp, exactly as MC does it.
+        let target = centre_lock(p);
+        if rect_is_zero(target) {
+            // Nothing visible to lock to (minimised, or the window is off the screen): do NOT pretend to hold
+            // the mouse - release, hand the arrow back and tell the caller. This is now the ONLY `drop_capture`
+            // (P1.62's pointer-left-the-window case cannot happen any more; the drag/resize case is handled by
+            // the window session, which releases the clip before the pointer can be towed).
             let force = m.shape == CursorShape::Hidden || (m.arrow_guard > 0 && !p.showing);
             let release = plan(
                 if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
@@ -402,29 +389,21 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
                 None,
                 force,
             );
-            // **…AND THIS PATH NEVER OWES A CENTRING (P1.71).** The pointer is outside our window because the
-            // user put it there (a drag, a resize, a window that moved away) or because there is nothing
-            // visible to clip to. A debt would later PULL it back in, which is the class of move P1.62…P1.62d
-            // spent four rounds removing.
             return CursorPlan { drop_capture: true, ..release };
         }
-        // **WE CANNOT WIN: STOP FIGHTING (P1.69).** We want it hidden, we are focused, and the system has been
-        // SHOWING a cursor for ~250 ms: an overlay owns the screen (see `lost_fight_ticks`). Hand the mouse
-        // back instead - the front end pauses, the cursor is legitimately visible again, and the 125 pushes a
-        // second stop.
+        // **SOMEBODY ELSE IS DRAWING THE CURSOR: STOP PUSHING, BUT KEEP THE MOUSE (P1.75, by request).**
+        // P1.69 gave up here - release the clip, `drop_capture` -> the front end's "hand the mouse back and
+        // pause" policy - because `SetCursor(0)` cannot win against a shell overlay and the pushes climbed
+        // to 125/s without winning. The report's verdict is that the PAUSE is worse than the fight: pressing
+        // Win+; must not pause the game.
+        //
+        // So the capture stays (the view keeps turning - the deltas are WM_INPUT and do not care where the
+        // cursor is, and the overlay does not take the foreground) and we simply stop pushing the shape:
+        // `force_shape = false` means `apply_shape` makes no call at all (our record already says Hidden),
+        // so the storm is over; the moment the overlay is gone `p.showing` goes false and the normal branch
+        // below resumes with no special case. Nothing is moved and nothing is owed - the cursor is the
+        // overlay's until it closes, and with the centre lock it is pinned on the crosshair while it is up.
         if p.showing && m.lost_fight_ticks >= LOST_FIGHT_TICKS {
-            // **SOMEBODY ELSE IS DRAWING THE CURSOR: STOP PUSHING, BUT KEEP THE MOUSE (P1.75, by request).**
-            // P1.69 gave up here - release the clip, `drop_capture` -> the front end's "hand the mouse back and
-            // pause" policy - because `SetCursor(0)` cannot win against a shell overlay and the pushes climbed
-            // to 125/s without winning. The report's verdict is that the PAUSE is worse than the fight: pressing
-            // Win+; must not pause the game.
-            //
-            // So the capture stays (the view keeps turning - the deltas are WM_INPUT and do not care where the
-            // cursor is, and the overlay does not take the foreground) and we simply stop pushing the shape:
-            // `force_shape = false` means `apply_shape` makes no call at all (our record already says Hidden),
-            // so the storm is over; the moment the overlay is gone `p.showing` goes false and the normal branch
-            // below resumes with no special case. Nothing is moved and nothing is owed - the cursor is the
-            // overlay's until it closes.
             return plan(Some(target), CursorShape::Hidden, true, None, false);
         }
         // …otherwise the disagreement is ours to correct: push the hidden shape (that is how a dropped
@@ -535,18 +514,12 @@ mod tests {
         ClipRect { left: 0, top: 0, right: 1920, bottom: 1080 }
     }
 
-    /// The whole window: a title bar above the client and borders around it (what `GetWindowRect` returns).
-    fn window() -> ClipRect {
-        ClipRect { left: 90, top: 60, right: 910, bottom: 710 }
-    }
-
     /// A probe with the cursor at the client centre (where the crosshair warp puts it).
     fn probe(focused: bool) -> CursorProbe {
         CursorProbe {
             focused,
             showing: true,
             client: client(),
-            window: window(),
             screen: screen(),
             pos: ClipPos { x: 500, y: 400 },
         }
@@ -621,27 +594,32 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_confines_to_the_client_area_and_hides() {
-        // **THE CLIP IS THE CLIENT AREA, NOT A CENTRE LOCK (P1.62c).** Confining it to a pixel at the client
-        // centre meant every window move re-clipped to the NEW centre and `ClipCursor` clamped the pointer
-        // there - the "dragging or resizing the window tows the cursor" report. The pointer is hidden while
-        // capturing and the view comes from raw deltas, so its POSITION does not matter; "it cannot leave the
-        // window" does.
+    fn a_capture_centres_with_the_centre_lock_and_hides() {
+        // **THE CLIP IS A 3x1 BOX AT THE CROSSHAIR (P1.76)** - SDL's `relative_mode_center`, which is what pins
+        // the pointer in Minecraft (see `centre_lock`). The old "the whole client area, so the clip can never
+        // move the pointer" (P1.62c) is deliberately gone: a moving pointer is exactly what the report wanted
+        // removed, and the box cannot tow a window because the drag/resize session releases the clip first.
         let plan = decide(&model(true, ClipRect::ZERO), &probe(true));
         assert_eq!(plan.shape, CursorShape::Hidden);
-        assert_eq!(plan.clip, Some(client()), "the whole client area, minus the screen edges");
+        let clip = plan.clip.expect("a clip");
+        assert_eq!(clip, ClipRect { left: 499, top: 400, right: 502, bottom: 401 });
+        assert!(!rect_is_empty(clip), "3x1 px, on the screen");
     }
 
     #[test]
-    fn the_clip_covers_the_client_area_wherever_the_pointer_is_inside_it() {
-        // …and it does not depend on WHERE the pointer sits either (the P1.62 rule that kept a 1px lock at the
-        // pointer is gone with it): a re-clip cannot drag the pointer, because the target is the window itself.
+    fn the_centre_lock_does_not_depend_on_where_the_pointer_is() {
+        // The pointer's position is not an input to the clip any more: wherever it is, the box is the same one,
+        // and `ClipCursor` pulls it in. (That is the one intentional "the clip may move the pointer" in the
+        // file - see `centre_lock`.)
         let m = model(true, ClipRect::ZERO);
         let mut p = probe(true);
         p.pos = ClipPos { x: 120, y: 640 }; // a corner of the client
-        assert_eq!(decide(&m, &p).clip, Some(client()));
+        assert_eq!(decide(&m, &p).clip, decide(&model(true, ClipRect::ZERO), &probe(true)).clip);
         p.pos = ClipPos { x: 880, y: 120 }; // the opposite corner
-        assert_eq!(decide(&m, &p).clip, Some(client()));
+        assert_eq!(decide(&m, &p).clip, decide(&model(true, ClipRect::ZERO), &probe(true)).clip);
+        // …even for a pointer that is INSIDE the box: same target, no special case.
+        p.pos = ClipPos { x: 500, y: 400 };
+        assert_eq!(decide(&m, &p).clip, decide(&model(true, ClipRect::ZERO), &probe(true)).clip);
     }
 
     #[test]
@@ -654,13 +632,13 @@ mod tests {
     #[test]
     fn a_hidden_intent_also_confines() {
         // (P1.63) There is no "hidden but uncaptured" state any more: asking for the cursor to be hidden IS
-        // asking for it to be confined to our window while the window is foreground. That is what removes the
+        // asking for it to be locked to the crosshair while the window is foreground. That is what removes the
         // whole class of "the intent outlived the capture" bugs.
         let mut m = model(false, ClipRect::ZERO);
         m.want = 2;
         let plan = decide(&m, &probe(true));
         assert_eq!(plan.shape, CursorShape::Hidden);
-        assert_eq!(plan.clip, Some(client()));
+        assert_eq!(plan.clip, decide(&model(true, ClipRect::ZERO), &probe(true)).clip);
         // …and in the background the same intent confines nothing (the projection's `focused` term).
         assert_eq!(decide(&m, &probe(false)).clip, None);
     }
@@ -676,14 +654,15 @@ mod tests {
 
     #[test]
     fn a_half_offscreen_window_is_still_confined() {
-        // The reported bug: the centre (and the 1px target) lands off the screen, ClipCursor refuses the
-        // rectangle, and a client that believed it held a clip let the cursor walk out of the window.
+        // The reported bug: a target that lands off the screen is REFUSED by `ClipCursor`, and a client that
+        // believes it holds a clip then lets the cursor walk out. With the centre lock the box is fitted into
+        // the VISIBLE part of the client first, so a half-off-screen window still gets a lock that is on screen.
         let mut p = probe(true);
         p.client = ClipRect { left: 600, top: 100, right: 1400, bottom: 700 }; // centre x = 1000 = the edge
         p.screen = ClipRect { left: 0, top: 0, right: 1000, bottom: 1080 };
-        p.pos = ClipPos { x: 800, y: 400 }; // INSIDE the window (a pointer outside ends the capture now)
+        p.pos = ClipPos { x: 800, y: 400 };
         let plan = decide(&model(true, ClipRect::ZERO), &p);
-        assert!(plan.confined, "the visible half can still be clipped to");
+        assert!(plan.confined, "the visible half can still be locked to");
         let clip = plan.clip.expect("a clip");
         assert!(!rect_is_empty(clip));
         assert!(clip.right <= 1000 && clip.bottom <= 1080, "inside the screen: {clip:?}");
@@ -715,49 +694,38 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_edge_margin_is_kept_but_never_at_the_pointers_expense() {
-        // The second report: the clip was allowed to reach the last row of the monitor, and a clipped cursor
-        // parked there wakes the auto-hidden taskbar - so the visible part is pulled 2px away from that edge.
+    fn the_screen_edge_margin_is_kept() {
+        // The second report: a clip allowed to reach the last row of the monitor parks the (invisible) cursor
+        // there and wakes the auto-hidden taskbar - so the lock is pulled 2px away from that edge.
         let mut p = probe(true);
         p.client = ClipRect { left: 100, top: 500, right: 900, bottom: 1400 };
-        p.window = ClipRect { left: 90, top: 400, right: 910, bottom: 1500 }; // the frame around that client
         p.pos = ClipPos { x: 500, y: 600 };
         let clip = decide(&model(true, ClipRect::ZERO), &p).clip.expect("a clip");
         assert!(clip.bottom <= 1080 - SCREEN_EDGE_MARGIN, "away from the taskbar edge: {clip:?}");
         assert!(clip.top >= 500, "and still inside the window: {clip:?}");
-        // …but when the pointer itself is inside that band, CONTAINING IT wins: a clip that excludes the
-        // pointer is a clip that moves it, and moving it is what towed the window (P1.62d).
+        // The pointer no longer gets a vote: the box is the box (P1.76). (Its old "the pointer wins" rule was
+        // there because a clip that excluded the pointer moved it - which is now the mechanism, not a bug.)
+        let base = decide(&model(true, ClipRect::ZERO), &p).clip.expect("a clip");
         p.pos = ClipPos { x: 500, y: 1079 };
-        let clip = decide(&model(true, ClipRect::ZERO), &p).clip.expect("a clip");
-        assert!(contains(clip, p.pos), "the clip never excludes the pointer: {clip:?}");
+        assert_eq!(decide(&model(true, ClipRect::ZERO), &p).clip, Some(base));
     }
 
     #[test]
-    fn a_pointer_on_the_title_bar_gets_the_window_clip_and_is_not_moved() {
-        // The last reported residue (P1.62d): a capture request that arrives while the user is DRAGGING the
-        // window finds the pointer on the title bar. Clamping it into the client moved the window by the same
-        // amount (6px in the boot.log) - so the clip becomes the whole WINDOW, which already contains the
-        // pointer and therefore moves nothing.
-        let mut m = model(true, ClipRect::ZERO);
+    fn a_pointer_on_the_title_bar_is_pulled_to_the_crosshair() {
+        // P1.62d made the clip the whole WINDOW rect here so that a capture request arriving on the title bar
+        // (the user is dragging) moved nothing. With the centre lock the box deliberately pulls the pointer to
+        // the crosshair - which is safe because a capture request while the user HOLDS the frame is refused
+        // before it gets here (`winWindowMoving` + `CLIP_POSTPONED`), and SDL does exactly the same thing.
+        let m = model(true, ClipRect::ZERO);
         let mut p = probe(true);
-        p.pos = ClipPos { x: 500, y: 80 }; // inside the window (60..710), above the client (100..)
+        p.pos = ClipPos { x: 500, y: 80 }; // on the title bar: above the client (100..)
         let plan = decide(&m, &p);
-        assert!(!plan.drop_capture, "the request survives: the pointer is still inside our window");
-        assert_eq!(plan.clip, Some(window()), "the clip is the window rect");
-        assert!(contains(plan.clip.expect("a clip"), p.pos), "and it contains the pointer");
-        // Back inside the client, the clip tightens to the client area again (the sentinel's next tick).
+        assert!(!plan.drop_capture, "the request survives: there is something to lock to");
+        assert_eq!(plan.clip, decide(&m, &probe(true)).clip, "the same centre lock as anywhere else");
+        assert_eq!(plan.warp, None, "and the LOCK does the moving: no warp is planned");
+        // A pointer inside the client is not a special case either.
         p.pos = ClipPos { x: 500, y: 400 };
-        assert_eq!(decide(&m, &p).clip, Some(client()));
-        // …and when the window rect could NOT be read, the client is all we can trust: a pointer outside it
-        // is treated as outside (the request is dropped) rather than clipped to a frame we do not know.
-        m.shape = CursorShape::Hidden; // an ongoing capture, not the entry
-        let mut blind = probe(true);
-        blind.window = ClipRect::ZERO;
-        blind.pos = ClipPos { x: 500, y: 80 };
-        assert!(decide(&m, &blind).drop_capture);
-        // …while a pointer INSIDE the client is unaffected by the missing frame rect.
-        blind.pos = ClipPos { x: 500, y: 400 };
-        assert_eq!(decide(&m, &blind).clip, Some(client()));
+        assert_eq!(decide(&m, &p).clip, decide(&m, &probe(true)).clip);
     }
 
     #[test]
@@ -770,7 +738,6 @@ mod tests {
     fn a_window_entirely_off_the_screen_cannot_be_confined() {
         let mut p = probe(true);
         p.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };
-        p.window = ClipRect { left: 2390, top: -40, right: 3410, bottom: 610 }; // the frame goes with it
         let plan = decide(&model(true, ClipRect::ZERO), &p);
         assert!(!plan.confined, "nothing can be held");
         assert_eq!(plan.clip, None, "we hold nothing, so there is nothing to release");
@@ -779,26 +746,30 @@ mod tests {
     }
 
     #[test]
-    fn the_visible_part_wins_over_the_whole_client() {
+    fn the_visible_part_wins() {
+        // The lock is fitted into the VISIBLE part of the client (the screen-edge margin included), so a window
+        // that hangs off the monitor still gets a box that is really on the screen.
         let m = model(true, ClipRect::ZERO);
         let mut p = probe(true);
         p.client = ClipRect { left: 800, top: 100, right: 1800, bottom: 700 };
         p.screen = ClipRect { left: 0, top: 0, right: 1000, bottom: 1080 };
-        p.pos = ClipPos { x: 900, y: 400 }; // inside the window
-        assert_eq!(
-            decide(&m, &p).clip,
-            Some(ClipRect { left: 800, top: 100, right: 1000 - SCREEN_EDGE_MARGIN, bottom: 700 }),
-            "the client is intersected with the screen, and pulled off its right edge"
-        );
+        p.pos = ClipPos { x: 900, y: 400 };
+        let clip = decide(&m, &p).clip.expect("a clip");
+        assert!(clip.left <= 1000 - SCREEN_EDGE_MARGIN && clip.right <= 1000, "on the screen: {clip:?}");
+        assert!(!rect_is_empty(clip), "and never collapsed");
     }
 
     #[test]
-    fn a_visible_window_always_has_a_non_empty_clip_target() {
-        // An EMPTY rect is rejected by Windows, so the target must never collapse for a window that is at
-        // least partly on the screen (the tests above pin the exact rectangle).
-        let t = clip_target(&probe(true));
-        assert!(!rect_is_empty(t));
-        assert_eq!(t, client());
+    fn a_visible_window_always_has_a_non_empty_centre_lock() {
+        // An EMPTY rect is rejected by Windows, so the lock must never collapse for a window that is at least
+        // partly on the screen.
+        let t = centre_lock(&probe(true));
+        assert!(!rect_is_empty(t), "3x1 px at the crosshair: {t:?}");
+        assert_eq!(t, ClipRect { left: 499, top: 400, right: 502, bottom: 401 });
+        // …and a window with nothing visible gives ZERO, which is the caller's cue to release instead.
+        let mut p = probe(true);
+        p.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };
+        assert!(rect_is_zero(centre_lock(&p)));
     }
 
     #[test]
@@ -834,10 +805,10 @@ mod tests {
         m.clipped = ClipRect::ZERO; // what apply_clip(ZERO) records
         m.shape = CursorShape::Arrow;
         // Focus returns and the front end still wants the mouse (it is the pause menu that would flip that):
-        // the projection takes it back - hide and confine again, no event involved.
+        // the projection takes it back - hide and LOCK again, no event involved.
         let back = decide(&m, &probe(true));
         assert_eq!(back.shape, CursorShape::Hidden);
-        assert_eq!(back.clip, Some(client()));
+        assert_eq!(back.clip, decide(&model(true, ClipRect::ZERO), &probe(true)).clip, "the centre lock is back");
     }
 
     #[test]
@@ -968,56 +939,30 @@ mod tests {
     }
 
     #[test]
-    fn taking_the_mouse_moves_the_pointer_into_the_window_once() {
-        // The minimise/maximise report (P1.64): the pointer is outside the restored window when the request
-        // comes in. Dropping the request there paused the game again and Resume looped - so the ENTRY is
-        // allowed to move the pointer in, while it is hidden. An ONGOING capture must not (that is the drag
-        // case), which is the second half of this test.
+    fn taking_the_mouse_locks_the_pointer_and_never_drops_it_for_a_pointer_outside() {
+        // The minimise/maximise report (P1.64) and the P1.62 drop rule both disappear into the centre lock: a
+        // pointer that arrives outside the window is simply pulled into the box (no "entry move" warp, no
+        // request refused), and an ONGOING capture with a pointer outside is not a broken capture any more -
+        // the pointer cannot leave, so "the pointer is outside" is not a state we can be in.
         let mut m = model(true, ClipRect::ZERO); // want = 2
         m.shape = CursorShape::Arrow; // we were not capturing a tick ago
         let mut p = probe(true);
-        p.pos = ClipPos { x: 500, y: 20 }; // outside the window rect (60..710)
+        p.pos = ClipPos { x: 500, y: 20 }; // on the title bar
         let plan = decide(&m, &p);
-        assert!(!plan.drop_capture, "the request is NOT dropped: we are taking the mouse");
+        assert!(!plan.drop_capture, "the request is NOT dropped: there is a box to lock to");
         assert_eq!(plan.shape, CursorShape::Hidden);
-        assert_eq!(plan.warp, Some(ClipPos { x: 500, y: 400 }), "and the pointer comes to the crosshair");
-        assert!(!rect_is_zero(plan.clip.expect("a clip")), "with something to clip to");
-        // Already capturing, and the pointer leaves the window (the user is dragging it): release, never tow.
+        assert_eq!(plan.clip, decide(&m, &probe(true)).clip, "the same centre lock");
+        assert_eq!(plan.warp, None, "the LOCK does the moving (a warp would be a second mechanism)");
+        // An ONGOING capture, same pointer: identical plan - nothing to drop, nothing to move.
         m.shape = CursorShape::Hidden;
-        let plan = decide(&m, &p);
-        assert!(plan.drop_capture, "an ONGOING capture releases instead of towing");
-        assert_eq!(plan.warp, None, "and it never moves the pointer");
-        // …and with nothing visible to move into, even the entry releases (a minimised window).
-        m.shape = CursorShape::Arrow;
+        let ongoing = decide(&m, &p);
+        assert!(!ongoing.drop_capture, "an ongoing capture is not dropped for that either");
+        assert_eq!(ongoing.clip, plan.clip);
+        // …and only a window with NOTHING visible drops the capture (a minimised window).
         let mut tiny = probe(true);
         tiny.pos = ClipPos { x: 500, y: 20 };
         tiny.client = ClipRect { left: 2400, top: 0, right: 3400, bottom: 600 };
-        tiny.window = ClipRect { left: 2390, top: -40, right: 3410, bottom: 610 };
         assert!(decide(&m, &tiny).drop_capture);
-    }
-
-    #[test]
-    fn a_capture_ends_when_the_pointer_leaves_the_window() {
-        // The P1.62 report, second half. A capture that is still held while the user drags the window by its
-        // TITLE BAR (or a sizing border) has a pointer in the NON-CLIENT area: "keep the lock where the
-        // pointer is" cannot apply, and clamping it into the moving client centre is what towed it. So the
-        // capture is DROPPED instead - release the clip, hand the arrow back, and tell the caller.
-        let mut m = model(true, ClipRect::ZERO);
-        m.shape = CursorShape::Hidden; // an ONGOING capture (not the entry)
-        let mut p = probe(true);
-        p.pos = ClipPos { x: 500, y: 20 }; // above client (100,100)-(900,700): the title bar
-        let plan = decide(&m, &p);
-        assert!(plan.drop_capture, "the request is dropped (the front end's pause policy)");
-        assert_eq!(plan.clip, None, "we hold nothing to release");
-        // (the pointer is ABOVE the window rect as well - the window is 60..710 - which is what makes it a
-        // drop rather than a window clip)
-        assert_eq!(plan.shape, CursorShape::Arrow, "with the arrow back");
-        assert_eq!(plan.warp, None, "and NOTHING is moved: the user is holding the window");
-        // Inside the window the capture continues, confined to the client area.
-        p.pos = ClipPos { x: 500, y: 400 };
-        let plan = decide(&m, &p);
-        assert!(!plan.drop_capture);
-        assert_eq!(plan.clip, Some(client()));
     }
 
     #[test]

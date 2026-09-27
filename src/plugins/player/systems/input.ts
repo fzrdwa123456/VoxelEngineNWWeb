@@ -54,7 +54,9 @@ export interface MouseCapture {
 }
 /** Default so a drive-by test can construct this system without a platform. */
 const NO_MOUSE: MouseCapture = { capture: async () => {}, release: () => {} };
-import { buttonToAction, buttonToCode, getBind, isCapturing } from "../../input/keybinds";
+import { buttonToAction, buttonToCode, codeToButton, getBind, isCapturing } from "../../input/keybinds";
+// The raw button encoding (bit index = `MouseEvent.button`), shared with `src-tauri/src/rawinput.rs` (P1.76)
+import { RAW_BUTTONS } from "../../../data/globals/binds";
 import {
   BODY,
   CONTROL,
@@ -294,8 +296,16 @@ export class PlayerInputSystem {
     // Mouse buttons that carry a BIND belong to the device layer too (only this file may listen). They
     // publish an EDGE for the systems that care — the "inventory" bind is read by ui.navigation — and
     // feed the held set through the same queue the keyboard uses.
+    //
+    // **TWO SOURCES, ONE OWNER AT A TIME (P1.76).** While the mouse is CAPTURED the buttons come from the raw
+    // device stream (`rawButtons`, below): that is the only way a click still reaches the game when a shell
+    // overlay (Win+; / the IME candidate window) is on top and takes the click itself — the DOM event simply
+    // never happens there, which is why break/place used to die under the panel. While the mouse is FREE the
+    // DOM path owns them (menus are ordinary pages). The guards below are that switch, and they are what keeps
+    // a click from being counted twice when both paths are alive.
     document.addEventListener("mousedown", (ev) => {
       this.pointer.buttons = ev.buttons;
+      if (this.state.locked && this.state.rawInputActive) return; // the raw path owns it (see above)
       if (isCapturing()) return; // No accidental triggers while a rebind capture is active
       const action = buttonToAction(ev.button);
       if (!action) return;
@@ -307,6 +317,7 @@ export class PlayerInputSystem {
     });
     document.addEventListener("mouseup", (ev) => {
       this.pointer.buttons = ev.buttons;
+      if (this.state.locked && this.state.rawInputActive) return; // the raw path owns it (see above)
       const action = buttonToAction(ev.button);
       const code = buttonToCode(ev.button);
       if (!code || !action || action === "inventory") return;
@@ -315,6 +326,37 @@ export class PlayerInputSystem {
       this.publishEdge(code, false, false);
       this.bindRelease(code);
     });
+  }
+
+  /** **Raw mouse BUTTON edges (P1.76)** — called once per arrival with two bitmasks (bit 0 left, 1 middle,
+   *  2 right, 3 = X1, 4 = X2). This is Minecraft's mechanism: SDL reads `usButtonFlags` out of the same
+   *  RAWMOUSE packet the deltas come from, so the buttons keep working while an overlay owns the click.
+   *
+   *  Ignored unless we hold the mouse (the DOM path owns the buttons while the cursor is free, and the
+   *  `canControl` gate downstream would drop the effect anyway) — and that is also what keeps a click in
+   *  ANOTHER application from editing blocks, because a paused game has `locked == false`. */
+  rawButtons(down: number, up: number): void {
+    if (!this.state.rawInputActive || !this.state.locked) return;
+    this.rawButtonMask(down, true);
+    this.rawButtonMask(up, false);
+  }
+
+  /** One bitmask of the raw batch, as button presses or releases. Mirrors the DOM handlers exactly (same
+   *  `buttonToAction`/`buttonToCode` table, same `isCapturing` guard, same "the inventory bind is an edge
+   *  only" rule), so the two sources cannot disagree about what a button means. */
+  private rawButtonMask(mask: number, pressed: boolean): void {
+    for (const [bit, button] of RAW_BUTTONS) {
+      if ((mask & bit) === 0) continue;
+      if (pressed && isCapturing()) continue;
+      const action = buttonToAction(button);
+      if (!action) continue;
+      const code = buttonToCode(button);
+      if (!code) continue;
+      this.publishEdge(code, pressed, false);
+      if (action === "inventory") continue; // A toggle with no held state: the edge is the whole signal
+      if (pressed) this.bindPress(code);
+      else this.bindRelease(code);
+    }
   }
 
   /** The fixed lane's entry point (registered FIRST: it is the tick's first act). Turns the intents the
@@ -586,6 +628,15 @@ export class PlayerInputSystem {
     if (!this.state.locked) return;
     this.log("MOUSE CAPTURE off (native ClipCursor released)");
     this.state.locked = false;
+    // **A HANDED-BACK MOUSE OWES NO HELD BUTTONS (P1.76).** The buttons can now come from the raw device stream,
+    // and a release that happens while another window owns the click (or after the capture is gone) would never
+    // be matched by a `mouseup` — the break/place bind would stay in `CONTROL.keys` and the next Resume would
+    // start breaking blocks by itself. Minecraft does the same thing (`KeyMapping.releaseAll()` on every screen
+    // change). Only the MOUSE pseudo codes are touched: a keyboard key that is really still down keeps its state
+    // (and its own keyup will arrive).
+    for (const code of [...this.control.keys]) {
+      if (codeToButton(code) !== null) this.control.keys.delete(code);
+    }
     this.mouse.release();
   }
 

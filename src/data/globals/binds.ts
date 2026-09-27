@@ -81,6 +81,14 @@ export const MOUSE_BUTTONS: readonly (readonly [string, number])[] = [
   ["MouseX2", 4],
 ];
 
+/** **The raw-input button encoding (P1.76)**: one bit per button, bit index = the `MouseEvent.button` number,
+ *  so this is DERIVED from the table above and cannot drift from `buttonToCode`. It is an ABI shared with
+ *  `src-tauri/src/rawinput.rs` (`BTN_LEFT`…`BTN_X2`), which turns `usButtonFlags` into the same mask — the one
+ *  place that has to be kept in step by hand. */
+export const RAW_BUTTONS: readonly (readonly [number, number])[] = MOUSE_BUTTONS.map(
+  ([, button]) => [1 << button, button] as const,
+);
+
 /** code -> display name (KeyW->W, Digit1->1, ControlLeft->LCtrl, ArrowUp->Up ...). A TABLE, so it is
  *  built once at import instead of on every keycap that asks (it used to be a literal inside the
  *  function, i.e. one 50-entry object per call per frame). */

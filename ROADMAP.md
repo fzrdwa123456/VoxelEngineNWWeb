@@ -1642,6 +1642,39 @@ Still outstanding:
      back to meaning exactly one thing: the pointer left the window (the drag/resize tow of P1.62).
   Three table tests rewritten (the overlay keeps the capture and stops pushing; a hand-back centres only in
   front; the ordinary capturing state is untouched); 30/30 pass.
+- **P1.76 - the CENTRE LOCK and RAW BUTTONS: the two things Minecraft does that we did not.** `DONE`, by
+  request ("抄过来"), after the user's report that "in MC the cursor never moves no matter what, and the left/right
+  buttons still work with the panel in front". Both came out of reading SDL's Windows backend and the MC sources
+  directly (`E:\SDL-main`, the client/common trees), and both are small once the mechanism is known.
+  1. **The centre lock.** SDL's relative mode does not merely hide and confine the cursor: `WIN_UpdateClipCursor`
+  replaces the clip with `data->cursor_ctrlock_rect` - a **1x1 px box (3x1 on RDP) AT THE CLIENT CENTRE** -
+  whenever `mouse->relative_mode && mouse->relative_mode_center`, and that hint is **on by default**
+  (`include/SDL3/SDL_hints.h:3032-3051`, `src/video/windows/SDL_windowswindow.c:397-403` and `:1598-1632`).
+  Windows itself then refuses to move the pointer out of that box, which is the whole reason MC's cursor is
+  immovable, and why the cursor Win+; reveals (the shell's, i.e. the SYSTEM cursor) sits still exactly on the
+  crosshair. MC calls no mouse rect, never re-centres, and never reads the cursor back - the pin is entirely the
+  clip. We had this and deleted it in P1.62c (the 1px lock of that era towed the pointer whenever the window
+  moved); it is back as `cursor_model::centre_lock`, and the concern that killed it is now covered the way SDL
+  covers it (`postpone_clipcursor` during a title click/size session = our `CLIP_POSTPONED` + `win-session` +
+  `user_holding`). Two rules lost their last case and are gone with it: P1.62's "drop the capture when the pointer
+  leaves the window" (it cannot leave) and P1.64's one-time "entry move" (the clamp does it every tick). The
+  whole-window probe field and its `GetWindowRect` per 4 ms tick went too. **The P1.63 invariant is deliberately
+  inverted** - the rect given to `ClipCursor` no longer contains the pointer; moving it IS the mechanism.
+  2. **Raw buttons.** SDL reads the button edges out of the same `RAWMOUSE` packet the deltas come from
+  (`rawmouse->usButtonFlags` → `SDL_SendMouseButton(..., SDL_GetKeyboardFocus(), ...)`,
+  `src/video/windows/SDL_windowsevents.c:556-573`, `:588`, `:690-732`) and ignores the legacy `WM_*BUTTON*`
+  messages while raw mouse is on - so a click still reaches the game when a shell overlay owns it. `rawinput.rs`
+  was already receiving those packets (`RIDEV_INPUTSINK`) and already documenting the `usButtonFlags` offset in a
+  comment while reading past it; it now parses all five buttons into two bitmasks, pushes them as `raw-buttons`
+  (its own event, so a click with no motion still arrives) and reports `btn=` on the RAWMON line. The front end
+  decodes them in `input.ts::rawButtons` through the SAME `buttonToAction`/`buttonToCode` table the DOM path uses,
+  with an explicit owner switch: **raw while captured, DOM while the cursor is free** (both sides gated, so one
+  click can never be counted twice), and `releaseCapture()` now clears the held MOUSE binds (MC's
+  `KeyMapping.releaseAll()` on a screen change) so a press whose release lands in another window cannot stick a
+  block break across a pause. The wheel lives in the same union and is deliberately unread: nothing consumes a
+  wheel event yet.
+  Three table tests replaced (centre lock, "the clip does not depend on the pointer", "an outside pointer is
+  locked in, never dropped"); 29/29 pass.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

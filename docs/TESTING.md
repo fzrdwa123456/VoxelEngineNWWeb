@@ -620,6 +620,31 @@ contain `RAWINPUT listener started` and `RAWINPUT active=true` (once per run).
     does not exist any more)
 ```
 
+AFTER the centre lock and the raw buttons (P1.76 - the two things Minecraft does). Enter a world (the mouse is
+captured) and check, in this order:
+```
+(1) **THE POINTER MUST NOT MOVE AT ALL.** While captured, push the mouse around as hard as you like - the
+    pointer is pinned by `ClipCursor` to a 3x1 px box on the crosshair (SDL's `relative_mode_center`), so the
+    view turns (raw deltas) and the pointer stays put. Not even the clip rect moves: `boot.log`'s `clipped=` is
+    the same box all session, and the `pos=` values stop changing (they used to roam the whole client area)
+(2) **Win+; / Win+.**: the overlay shows ITS cursor - and it now appears ON THE CROSSHAIR and cannot be moved
+    either (it is the system cursor, and the system cursor is inside our box). The game does NOT pause, the
+    view still turns, and boot.log keeps saying `an overlay is showing the cursor: keeping the capture and
+    pausing nothing (P1.75)`
+(3) **BREAK/PLACE MUST WORK WITH THE PANEL IN FRONT** (this is the point of the raw buttons): with Win+; open,
+    left-click and right-click - blocks must break and place, because the buttons now come from the raw device
+    stream rather than from a DOM event the panel swallowed. debug.log's `RAWMON … btn=` counts them (0 while you
+    click = the parse is not reaching us)
+(4) no double counting: with the mouse FREE (a menu open, the pause menu up) the buttons must behave exactly as
+    before - one click, one action - because the DOM path owns them there. The switch is by state: raw while
+    captured, DOM while free
+(5) no stuck button: hold the LEFT button (breaking), then open the backpack / press ESC / lose focus - and
+    Resume. The block must NOT keep breaking by itself (a handed-back mouse clears its held mouse binds)
+(6) the standing set: ESC -> pause menu (the pointer was already on the crosshair, so nothing may move), Resume,
+    the backpack (E), fullscreen <-> windowed must not pause, drag/resize the title bar -> no tow and the pause
+    menu comes up, Win+L -> nothing moves on the unlock
+```
+
 AFTER the two switches the report asked for (P1.75 - Win+L no longer centres, and Win+; no longer pauses).
 This SUPERSEDES the centring expectations of P1.73/P1.74 below: the centring a hand-back performs now happens
 ONLY while we are in front (the deliberate release: ESC, Resume, the backpack), and the overlay keeps the mouse

@@ -2841,17 +2841,54 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "a title-click / move / size session postpones the clip (SDL WIN_UpdateClipCursor does the same)");
   assert(/CLIP_POSTPONED\.store\(false, Ordering::SeqCst\)/.test(winSrc),
     "\u2026and a capture request clears it, so a swallowed WM_EXITSIZEMOVE cannot wedge the clip off");
-  assert(/pub fn contains\(/.test(modelSrc) && /rect_is_zero\(target\) \|\| !contains\(target, p\.pos\)/.test(modelSrc),
-    "an ONGOING capture whose window no longer contains the pointer is dropped, never clamped back in");
-  // **P1.62c - THE CLIP IS THE CLIENT AREA, AND CENTRING IS A SHOW-TIME THING.** The 1px centre lock (and
-  // then the 1px lock that followed the pointer) both had to MOVE the pointer whenever the window moved; the
-  // client area needs no move at all. The crosshair survives as the WARP target only - and entering a capture
-  // must never be refused for a pointer that is outside, or the front end falls back to the browser's lock.
-  assert(/pub fn clip_target\(p: &CursorProbe\)/.test(modelSrc) && /let target = if contains\(client_visible, p\.pos\)/.test(modelSrc),
-    "the clip target ALWAYS contains the pointer (client inside it, the whole WINDOW on the frame)");
-  assert(/pub window: ClipRect/.test(modelSrc) && /fn window_rect/.test(winSrc) && /GetWindowRect/.test(winSrc),
-    "\u2026which is why the probe reads the whole window rect");
-  assert(/contains\(clip, p\.pos\)/.test(modelSrc), "and no rule may exclude the pointer: moving it is what towed the window");
+  // **P1.76 - THE CENTRE LOCK (SDL's `relative_mode_center`).** The clip is now a 3x1 px box AT THE CROSSHAIR, so
+  // `ClipCursor` itself pins the pointer there - it cannot be moved at all, which is what Minecraft does
+  // (`SDL_HINT_MOUSE_RELATIVE_MODE_CENTER` defaults on; `SDL_windowswindow.c:1598-1632` clips to
+  // `cursor_ctrlock_rect`, a 1x1 / 3x1 box at the client centre). This REPLACES P1.62c's "the client area" and
+  // P1.62d's "the whole window rect" targets, and with them two rules that no longer have a case to fire on:
+  //   * "drop the capture when the pointer leaves the window" - the pointer cannot leave;
+  //   * "the one entry move that pulls the pointer in" - the clamp does that, always.
+  // The drag/resize tow those rules were protecting against is still covered: the window session releases the
+  // clip for its whole duration, which is exactly SDL's `postpone_clipcursor` (asserted just above).
+  assert(/pub fn centre_lock\(p: &CursorProbe\) -> ClipRect/.test(modelSrc) &&
+      /let target = fit_into\(crosshair_rect\(p\), region\);/.test(modelSrc),
+    "the clip is the CENTRE LOCK: the crosshair rect fitted into the visible client");
+  assert(/left: target\.left - 1,/.test(modelSrc) && /right: target\.right \+ 1,/.test(modelSrc),
+    "\u2026a 3x1 px box (SDL's remote-desktop width) - the pointer is pinned, not merely confined");
+  assert(!/pub fn clip_target|pub fn contains\(/.test(modelSrc) && !/pub window: ClipRect/.test(modelSrc),
+    "the pointer-following clip target, `contains` and the whole-window probe field are gone with the rules");
+  assert(/let target = centre_lock\(p\);/.test(modelSrc) &&
+      /if rect_is_zero\(target\) \{/.test(modelSrc) && /return CursorPlan \{ drop_capture: true, \.\.release \};/.test(modelSrc),
+    "\u2026and the ONLY thing that drops a capture now is a window with nothing visible to lock to");
+  assert(!/the entry move should take it in/.test(winSrc), "the entry-move diagnostic is gone with the rule");
+  // **P1.76 - RAW BUTTONS.** SDL reads the button edges out of the same RAWMOUSE packet as the deltas and reports
+  // them to the keyboard-focus window (`SDL_windowsevents.c:556-573`, `:588`, `:690-732`), which is why MC's
+  // left/right buttons keep working while a shell overlay owns the click. We receive those packets already.
+  const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
+  assert(/const OFF_US_BUTTON_FLAGS: usize = RAWINPUT_HEADER_SIZE \+ 4;/.test(rawinputSrc) &&
+      /let btn = u16::from_ne_bytes\(\[buf\[OFF_US_BUTTON_FLAGS\]/.test(rawinputSrc),
+    "the raw packet's `usButtonFlags` is parsed (it used to be read past and thrown away)");
+  assert(/RI_MOUSE_LEFT_BUTTON_DOWN/.test(rawinputSrc) && /RI_MOUSE_BUTTON_5_UP/.test(rawinputSrc) &&
+      /ACC_BTN_DOWN\.fetch_or\(down, Ordering::Relaxed\)/.test(rawinputSrc),
+    "\u2026all five buttons, as two bitmasks (a 4 ms batch needs no ordering)");
+  assert(/let _ = app\.emit\(BUTTON_EVENT, RawButtons \{ down, up \}\);/.test(rawinputSrc) &&
+      /const BUTTON_EVENT: &str = "raw-buttons";/.test(rawinputSrc),
+    "\u2026pushed on their own event, so a click that does not move the mouse still arrives");
+  assert(/void listen<\{ down: number; up: number \}>\("raw-buttons"/.test(stripComments(readSource("src/host/browser/rawinput.ts"))) &&
+      /input\.rawButtons\(down, up\)/.test(main),
+    "\u2026into the front end, through the same listener plumbing the deltas use");
+  const inputSrcRaw = stripComments(readSource("src/plugins/player/systems/input.ts"));
+  assert(/rawButtons\(down: number, up: number\): void \{/.test(inputSrcRaw) &&
+      /if \(!this\.state\.rawInputActive \|\| !this\.state\.locked\) return;/.test(inputSrcRaw),
+    "the input system decodes them ONLY while it holds the mouse (a click in another application must not edit blocks)");
+  assert(
+    countOf(inputSrcRaw, /if \(this\.state\.locked && this\.state\.rawInputActive\) return;/g) === 2,
+    "\u2026and BOTH DOM handlers (press and release) step aside for it, so one click is never counted twice",
+  );
+  assert(/export const RAW_BUTTONS/.test(readSource("src/data/globals/binds.ts")) && /RAW_BUTTONS/.test(inputSrcRaw),
+    "\u2026with the bit encoding DERIVED from the one table that relates mouse codes to button numbers");
+  assert(/if \(codeToButton\(code\) !== null\) this\.control\.keys\.delete\(code\);/.test(inputSrcRaw),
+    "\u2026and a handed-back mouse clears its held buttons (a raw press whose release lands elsewhere cannot stick)");
   // **P1.62e - A WINDOW THE USER IS HOLDING MUST NOT BE CAPTURED.** A held title-bar press produces NO
   // geometry event, so the platform pushes the fact (`win-session`) and the front end reads it synchronously:
   // the entry driver starts on the PAUSE MENU instead of capturing behind the user's back, and the lock
@@ -2917,27 +2954,23 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
     "\u2026the refusal is logged, not silent");
-  assert(/fit_into\(target, region\)/.test(modelSrc), "the capture clips to the client area, or to the window rect on the frame");
-  assert(!/centre_lock/.test(modelSrc), "\u2026the centre-lock knob is gone with it");
-  assert(/crosshair_rect\(p\)/.test(modelSrc), "\u2026and the crosshair is only the warp target");
-  const setCaptureSrc = winSrc.split("pub fn set_mouse_capture")[1].split("pub fn reclip_mouse_capture")[0];
-  assert(/let target = clip_target\(&p\);/.test(setCaptureSrc) && !/decide\(/.test(setCaptureSrc),
-    "entering a capture uses the clip target, NOT decide: the drop rule must not refuse it");
-  assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(target, p\.pos\)/.test(modelSrc),
-    "a capture whose window no longer contains the pointer is DROPPED (the drag/resize tow)");
-  assert(/plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),
-    "\u2026and the platform half tells the front end about it");
-  assert(/m\.shape != CursorShape::Hidden && !rect_is_zero\(clip_region\(p\)\)/.test(modelSrc),
-    "TAKING the mouse may move the pointer into our window ONCE (after a minimise/maximise it starts outside)");
   assert(/pub fn crosshair_of/.test(modelSrc) && /let target = crosshair_of\(p\)/.test(modelSrc),
-    "\u2026and the crosshair is its OWN question: the warp must not follow the pointer");
+    "the crosshair is a question of its own (the warp target, and the centre of the lock)");
+  const setCaptureSrc = winSrc.split("pub fn set_mouse_capture")[1].split("pub fn reclip_mouse_capture")[0];
+  assert(/let target = centre_lock\(&p\);/.test(setCaptureSrc) && !/decide\(/.test(setCaptureSrc),
+    "entering a capture uses the SAME centre lock, not `decide` (whose release/drop branch is about an ongoing capture)");
+  assert(/apply_shape\(&mut m, CursorShape::Hidden\);\s*if !apply_clip/.test(setCaptureSrc),
+    "\u2026and it HIDES FIRST: the clamp that pins the pointer must not be seen");
+  assert(/pub drop_capture: bool/.test(modelSrc) && /plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),
+    "a capture is dropped (and the front end told) only when there is nothing visible to lock to");
+  assert(!/m\.shape != CursorShape::Hidden && !rect_is_zero\(clip_region\(p\)\)/.test(modelSrc),
+    "the one-time entry move is gone: the centre lock pulls the pointer in on every tick, so there is no entry case");
   const reconcileBody = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);
   assert(reconcileBody !== null, "reconcile is read as one block");
   assert(
     reconcileBody[1].indexOf("run_on_main_thread") < reconcileBody[1].indexOf("probe_of(&m)"),
     "…and it decides the plan INSIDE the main-thread closure, from the state it applies it to",
   );
-  const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
   assert(/capture_foreground_check\(&app\)/.test(rawinputSrc) && /emit\("capture-lost"/.test(rawinputSrc),
     "the rust sentinel tears a background capture down and notifies the frontend");
   // **P1.72 - NATIVE ONLY, the Minecraft model.** One mechanism: our own ClipCursor + a hidden cursor,
@@ -3032,8 +3065,9 @@ check("the LAST module-level state is a resource too (icons, material, counters,
     0, "rawinput.ts keeps no transport counters");
   assert(/export function startRawInput\(/.test(rawSrc) && /raw: RawTransportCounters,/.test(rawSrc),
     "they arrive as an argument (a resource object)");
-  assert(/startRawInput\(\(dx, dy\) => input\.rawDelta\(dx, dy\), world\.resource\(INPUT_DIAGNOSTICS\)\.raw\)/.test(main),
-    "the composition root hands the device layer the resource");
+  assert(/startRawInput\(/.test(main) && /world\.resource\(INPUT_DIAGNOSTICS\)\.raw,/.test(main) &&
+      /input\.rawDelta\(dx, dy\)/.test(main) && /input\.rawButtons\(down, up\)/.test(main),
+    "the composition root hands the device layer the resource (and wires BOTH channels: deltas + raw buttons)");
   assert(!/rawLagLine/.test(main), "…and nothing calls the deleted formatter");
 
   // 4. The LOOK counters: private fields of player.input, printed by it once a second.

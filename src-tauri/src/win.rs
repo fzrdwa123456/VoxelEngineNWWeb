@@ -57,16 +57,9 @@ unsafe fn client_rect_on_screen(hwnd: isize) -> Option<Rect> {
     Some(Rect { left: tl.x, top: tl.y, right: br.x, bottom: br.y })
 }
 
-/// The WHOLE window rectangle in screen coordinates (client + title bar + borders), for the fallback clip
-/// target (P1.62d). `GetWindowRect` already answers in screen coordinates, so there is nothing to convert.
-/// Returns None on failure (the caller then uses the client rect, as before).
-unsafe fn window_rect(hwnd: isize) -> Option<Rect> {
-    let mut rc = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-    if GetWindowRect(hwnd, &mut rc) == 0 {
-        return None;
-    }
-    Some(rc)
-}
+// (`window_rect` and the `GetWindowRect` declaration lived here: the whole-window rect was the fallback clip
+// target while the pointer sat on the frame (P1.62d). The centre lock made that unnecessary (P1.76) and the
+// probe no longer reads it, so both are gone.)
 
 /// Turn native mouse capture on/off. Returns whether it worked (P1.72: a failure means the mouse simply
 /// stays free — there is no second mechanism to fall back to).
@@ -99,16 +92,12 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     m.want = 2; // …and the request sets want=2 (see the note above)
     m.relative = true;
     let p = probe_of(&m);
-    // **THE CLIP TARGET, NOT `decide` (P1.62c).** `decide` carries rule 2's "the pointer has left the window"
-    // DROP, which is about an ONGOING capture. Applying it here REFUSED the capture whenever the pointer
-    // happened to be outside the client at the moment of the request - and a pointer on the title bar is
-    // exactly where it is right after the user has been dragging the window. The refusal used to send the
-    // front end to `requestPointerLock` (Chromium's own client-area clip, which tows the pointer on a
-    // geometry change just as happily and brought ESC-unlock back with it); P1.72 deleted that fallback, so
-    // this refusal would now leave the player with no mouse at all. Entering a capture may move the pointer
-    // into the window ONCE - that is what capture means - and it is invisible, because we hide it first
-    // (below).
-    let target = clip_target(&p);
+    // **THE CENTRE LOCK, NOT `decide` (P1.62c/P1.76).** Entering a capture wants the same target the projection
+    // uses every tick - the 3x1 box at the crosshair - and NOT `decide`'s release/drop branch (that one is about
+    // an ONGOING capture that has nothing to lock to). Using the pointer-following client rect here is what once
+    // refused the capture whenever the pointer happened to be on the title bar, and the refusal sent the front
+    // end to `requestPointerLock` (deleted in P1.72); now it would simply leave the player with no mouse.
+    let target = centre_lock(&p);
     if rect_is_zero(target) {
         // Nothing visible to clip to (the window is off the screen): do NOT pretend to be capturing. The front
         // end sees `false` and falls back, instead of the cursor escaping the window while the game still
@@ -330,7 +319,7 @@ pub fn kick_cursor_repaint() {
 // The RULES live in `cursor_model.rs` (pure data + one pure decision, testable without a window); this
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
-    arm_arrow_guard, clip_target, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard,
+    arm_arrow_guard, centre_lock, decide, forget_intent, rect_is_empty, rect_is_zero, tick_arrow_guard,
     LOST_FIGHT_TICKS, ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 
@@ -479,19 +468,16 @@ fn probe_of(m: &CursorModel) -> CursorProbe {
         }
     };
     // Where the cursor is right now: the model needs it to decide whether becoming visible has anything to
-    // move (P1.55 - the centre lock normally means it does not).
+    // move (P1.55 - with the centre lock it normally does not).
     let mut pt = Point { x: 0, y: 0 };
     let _ = unsafe { GetCursorPos(&mut pt) };
-    let window = if m.hwnd == 0 {
-        ClipRect::ZERO
-    } else {
-        unsafe { window_rect(m.hwnd) }.map(as_clip_rect).unwrap_or_default()
-    };
+    // (The whole-window rect used to be probed here too: it was the fallback clip target while the pointer sat
+    // on the frame, which the centre lock made unnecessary in P1.76 - and dropping it removes a
+    // `GetWindowRect` from every 4 ms tick.)
     CursorProbe {
         focused,
         showing,
         client,
-        window,
         screen,
         pos: ClipPos { x: pt.x, y: pt.y },
     }
@@ -660,10 +646,8 @@ fn reconcile(app: &tauri::AppHandle) {
         // symptom's shape.
         if m.want == 2 && m.hwnd != 0 && rect_is_zero(m.clipped) && trace_gap_ok(500) {
             let p = probe_of(&m);
-            let why = if rect_is_zero(clip_target(&p)) {
-                "nothing to clip to (no visible part of the window)"
-            } else if p.focused {
-                "the pointer is outside our window (the entry move should take it in)"
+            let why = if rect_is_zero(centre_lock(&p)) {
+                "nothing to lock to (no visible part of the window)"
             } else {
                 "the window is not foreground"
             };
@@ -1144,7 +1128,6 @@ struct Input {
 extern "system" {
     fn ClipCursor(rect: *const Rect) -> i32;
     fn GetClientRect(hwnd: isize, rect: *mut Rect) -> i32;
-    fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
     fn ClientToScreen(hwnd: isize, point: *mut Point) -> i32;
     fn GetCursorPos(point: *mut Point) -> i32;
     fn GetCursorInfo(info: *mut CursorInfo) -> i32;
