@@ -352,7 +352,7 @@ pub fn kick_cursor_repaint() {
 // file is the PLATFORM half: it gathers the probe, applies the plan, and owns the one table.
 use crate::cursor_model::{
     arm_arrow_guard, clip_target, decide, forget_intent, hand_back_warp, rect_is_empty, rect_is_zero,
-    tick_arrow_guard,
+    tick_arrow_guard, LOST_FIGHT_TICKS,
     ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
 
@@ -368,6 +368,7 @@ static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
     fg_mismatch_ticks: 0,
     centre_on_show: true,
     arrow_guard: 0,
+    lost_fight_ticks: 0,
 });
 
 fn model() -> std::sync::MutexGuard<'static, CursorModel> {
@@ -696,7 +697,17 @@ fn reconcile(app: &tauri::AppHandle) {
         // side alone would leave it believing it still holds the mouse, which is the trap
         // `capture_foreground_check` documents).
         if plan.drop_capture {
+            if m.lost_fight_ticks >= LOST_FIGHT_TICKS {
+                crate::boot_line(
+                    &handle,
+                    &format!(
+                        "[cursor] cannot hide the cursor (an overlay is showing it) -> handing the mouse back [{}]",
+                        trace_of(&m)
+                    ),
+                );
+            }
             m.relative = false;
+            m.lost_fight_ticks = 0;
             arm_arrow_guard(&mut m);
         }
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
@@ -726,6 +737,16 @@ fn reconcile(app: &tauri::AppHandle) {
         // The ARROW GUARD counts down once per reconciler tick (P1.60). It lives here, not in `decide`, so
         // that the rule set stays pure.
         tick_arrow_guard(&mut m);
+        // **COUNT THE TICKS WE SPEND FIGHTING A CURSOR SOMEBODY ELSE SHOWS (P1.69).** `want` hidden + focused +
+        // the system still showing one is the overlay state; `decide` gives up on it after ~250 ms.
+        {
+            let p = probe_of(&m);
+            if m.want == 2 && p.focused && p.showing {
+                m.lost_fight_ticks = m.lost_fight_ticks.saturating_add(1);
+            } else {
+                m.lost_fight_ticks = 0;
+            }
+        }
         // **WHAT THE RECONCILER REALLY DID (P1.59).** Only ticks that CHANGED something are logged (rule 3:
         // a tick whose plan changes nothing makes no Win32 call either), so this line answers "who pushed the
         // cursor away, and how many times". `forced=true` is the disagreement loop - the system keeps showing

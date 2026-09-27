@@ -95,7 +95,18 @@ pub struct CursorModel {
     /// application that legitimately hides the cursor is not fought forever - which is the reason rule 1
     /// compares against our own record in the first place.
     pub arrow_guard: u8,
+    /// **THE LOST FIGHT (P1.69)**: ticks in a row where we want the cursor HIDDEN, we are focused, and the
+    /// system keeps SHOWING it. That combination means somebody else is displaying a cursor - a system overlay
+    /// that never takes the foreground (the emoji/IME panel, the touch keyboard, the volume OSD...), because
+    /// Chromium pushes NULL while the CSS says `none`. Pushing `SetCursor(0)` does NOT win: the boot.log had
+    /// `enforced` climbing 1145 -> 1671 (a push every 8 ms) with the cursor visible the whole time. After
+    /// `LOST_FIGHT_TICKS` of it the projection gives up and hands the mouse back, i.e. the front end pauses -
+    /// which is what the player expects once the system has taken the screen.
+    pub lost_fight_ticks: u8,
 }
+
+/// ~250 ms at the sentinel's 8 ms tick: "we have been trying to hide a cursor somebody else keeps showing".
+pub const LOST_FIGHT_TICKS: u8 = 32;
 
 /// How long the ARROW GUARD stays armed, in reconciler ticks (the sentinel ticks every 8 ms, so ~1 s).
 pub const ARROW_GUARD_TICKS: u8 = 125;
@@ -387,7 +398,22 @@ pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
             );
             return CursorPlan { drop_capture: true, ..release };
         }
-        // We want it HIDDEN, so a system that still shows it is the disagreement to correct.
+        // **WE CANNOT WIN: STOP FIGHTING (P1.69).** We want it hidden, we are focused, and the system has been
+        // SHOWING a cursor for ~250 ms: an overlay owns the screen (see `lost_fight_ticks`). Hand the mouse
+        // back instead - the front end pauses, the cursor is legitimately visible again, and the 125 pushes a
+        // second stop.
+        if p.showing && m.lost_fight_ticks >= LOST_FIGHT_TICKS {
+            let release = plan(
+                if rect_is_zero(m.clipped) { None } else { Some(ClipRect::ZERO) },
+                CursorShape::Arrow,
+                false,
+                None,
+                m.shape == CursorShape::Hidden,
+            );
+            return CursorPlan { drop_capture: true, ..release };
+        }
+        // …otherwise the disagreement is ours to correct: push the hidden shape (that is how a dropped
+        // `SetCursor` or a stale Chromium cache gets fixed).
         return plan(Some(target), CursorShape::Hidden, true, None, p.showing);
     }
     // Not hidden: no world, a modal UI, or another application in front. Release what we hold, show the
@@ -465,6 +491,7 @@ mod tests {
             fg_mismatch_ticks: 0,
             centre_on_show: true,
             arrow_guard: 0,
+            lost_fight_ticks: 0,
         }
     }
 
@@ -815,6 +842,25 @@ mod tests {
         assert_eq!(ticks, ARROW_GUARD_TICKS as i32);
         tick_arrow_guard(&mut m); // saturating: never wraps around into "armed again"
         assert_eq!(m.arrow_guard, 0);
+    }
+
+    #[test]
+    fn a_cursor_a_system_overlay_keeps_showing_ends_the_fight() {
+        // P1.69: the emoji/IME overlay never takes the foreground, so the projection keeps wanting hidden while
+        // the system keeps showing a cursor (the log had `enforced` climb 1145 -> 1671 without winning). After
+        // ~250 ms it gives up and hands the mouse back, which makes the front end pause.
+        let mut m = model(true, ClipRect::ZERO);
+        let p = probe(true); // showing = true: somebody else is drawing a cursor
+        assert!(!decide(&m, &p).drop_capture, "the first ticks keep trying");
+        m.lost_fight_ticks = LOST_FIGHT_TICKS;
+        let plan = decide(&m, &p);
+        assert!(plan.drop_capture, "…and then it gives up");
+        assert_eq!(plan.shape, CursorShape::Arrow);
+        assert_eq!(plan.warp, None, "and it does not move a cursor that is not ours to place");
+        // A cursor the system already hides is never a lost fight: that is the normal capturing state.
+        let mut shown = probe(true);
+        shown.showing = false;
+        assert!(!decide(&m, &shown).drop_capture);
     }
 
     #[test]

@@ -1482,6 +1482,21 @@ Still outstanding:
   a boot.log line), which the front end already handles, and ENUMERATION stops being necessary: Win+L, Win+;,
   UAC, the task manager, the task view and anything else are all "somebody else is foreground". A message can
   be missed; a poll cannot.
+- **P1.69 - a cursor an overlay keeps showing ends the fight.** `DONE`. The Win+; (emoji/symbol panel) report
+  was answered by the logs in one number: `foreground LOST (measured)` happened ONCE in a whole session (the
+  Win+L case) - so the overlay **never takes the foreground**, and P1.67's mechanism cannot see it by
+  definition. What the same log DID show is the shape of the problem: `apply … shape=Hidden forced=true`
+  repeated with `showing=true hCursor=65539`, `enforced` climbing 1145 -> 1671 - a `SetCursor(0)` every 8 ms
+  that never wins, because the overlay (a shell window) is the one drawing a cursor. Chromium pushes NULL
+  while the CSS says `none`, so "we want hidden, we are focused, and the system keeps SHOWING a cursor" is a
+  measurable statement about SOMEBODY ELSE - and it is the same fact for the emoji panel, the IME candidate
+  window, the touch keyboard, the volume OSD and every other overlay. After `LOST_FIGHT_TICKS` (32 ticks
+  ~= 250 ms) the projection gives up: it releases the clip, hands the request back (`drop_capture` -> the
+  front end's pause policy) and logs `[cursor] cannot hide the cursor (an overlay is showing it) -> handing
+  the mouse back`. That covers the whole class without enumerating it, stops the 125 pushes a second, and
+  resets the counter on the drop so a front end that ignores the hint is re-told at most every 250 ms.
+  One new table test pins it (and that a cursor the system already hides - the normal capturing state - is
+  never a lost fight).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
