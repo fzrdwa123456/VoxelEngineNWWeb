@@ -120,6 +120,20 @@ fn cursor_trace() -> String {
     win::cursor_trace()
 }
 
+/// **Is the user moving or resizing the window right now?** (P1.62f)
+///
+/// The front end is told about it as it changes (`win-session`), but a PUSH is only current if the JS event
+/// loop has been idle since it happened - and the world entry's last stages generate and mesh the spawn
+/// window in long synchronous stretches, so the push can still be sitting in the queue when the entry takes
+/// its decision. That is exactly what happened: the platform's own log said `moving=true` 158ms before the
+/// entry captured the mouse anyway. The entry therefore ASKS (this command) at the instant it decides. The
+/// lock manager keeps using the pushed flag: it only ever decides from an idle event loop (a click, ESC,
+/// closing the backpack). Read-only.
+#[tauri::command]
+fn window_session_active() -> bool {
+    win::clip_is_postponed()
+}
+
 #[tauri::command]
 fn preload_packs(state: State<'_, AppState>) -> packs::PackSnapshot {
     packs::snapshot(&state.root)
@@ -241,6 +255,7 @@ pub fn run() {
             mouse_capture,
             cursor_intent,
             cursor_trace,
+            window_session_active,
             window_is_fullscreen,
             set_vsync_disabled,
             rawinput_start,

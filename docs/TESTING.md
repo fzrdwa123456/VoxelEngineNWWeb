@@ -454,6 +454,20 @@ smooth: enter a world (captured), press Win, and **watch the cursor while the po
     we hold the mouse) and no `[cursor] apply … forced=true` storm
 ```
 
+AFTER the QUERIED session check (P1.62f - the entry asks instead of trusting the push). The report was "if I
+do not move it, it does not pause; the moment I move, it pauses", with boot.log saying `window session
+moving=true` 158ms before the entry captured anyway:
+```
+(1) hold the title bar (do not move it) and enter a world: the pause menu must come up, and debug.log must
+    read `WORLD entered while the window is being moved/resized -> pause menu (no capture) [moving=true …]`
+    - `moving=true` is the QUERIED value; if it is `false` while `pushed=true`, the query is the problem
+(2) the same for a held border (resize)
+(3) `WINSESSION pushed moving=…` must appear in debug.log for each press/release; compare its timestamp with
+    the platform's own `[cursor] window session moving=…` in boot.log - they should be milliseconds apart. A
+    large gap (or a missing line) is a delivery problem, not a policy problem
+(4) release and click Resume: it must capture normally (the session is over)
+```
+
 AFTER the held-window entry (P1.62e - a hand on the frame starts paused). The report was "hold the title bar,
 enter, let go: it does not pause; it pauses only once I move". Walk:
 ```

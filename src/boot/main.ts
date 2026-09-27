@@ -66,7 +66,7 @@ import { PointerLock } from "../host/browser/pointerlock";
 import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS, type Lang } from "../data/assets/i18n";
 import { loadUIScaleMode, getUIScaleMode, currentRootFontPx } from "../data/globals/uiscale";
 import { loadFont, getFontId, currentFontCss } from "../data/globals/fonts";
-import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
+import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
@@ -1000,7 +1000,14 @@ async function enterWorld(mode: string): Promise<void> {
   //     on the first movement. `winWindowMoving()` is the platform's own view of that (pushed as
   //     `win-session`), and `geometryDuringLoad` covers "they fiddled with it at some point while it was
   //     loading" — where there was nothing to pause yet.
-  const moving = winWindowMoving();
+  // **ASK THE PLATFORM, DO NOT TRUST THE PUSHED FLAG (P1.62f).** `win-session` is an EVENT, and a push is
+  // only current if the JS event loop has been idle since it happened - while THIS decision is taken at the
+  // end of the entry, whose stages generate and mesh the spawn window in long synchronous stretches. That is
+  // exactly how a world entered with a hand on the title bar still captured the mouse while the platform's
+  // own log (boot.log, `[cursor] window session moving=true`) said otherwise 158ms earlier. The query gives
+  // the value at THIS instant, and awaiting it also lets any queued push drain on the way.
+  const moving = await windowSessionActiveNow();
+  const pushed = winWindowMoving();
   const fiddled = loop.geometryDuringLoad;
   if (winFocused() && !moving && !fiddled) {
     pointerLock.relock("world entered");
@@ -1011,7 +1018,9 @@ async function enterWorld(mode: string): Promise<void> {
       : moving
         ? "the window is being moved/resized"
         : "the window was moved during loading";
-    logDebug(`WORLD entered while ${why} -> pause menu (no capture)`);
+    // The values go in the line: if this ever fires wrongly again it says whether the QUERY was wrong or the
+    // PUSH was late (they are both in the log, and the platform's own `window session` line is in boot.log).
+    logDebug(`WORLD entered while ${why} -> pause menu (no capture) [moving=${moving} pushed=${pushed} fiddled=${fiddled}]`);
   }
 }
 

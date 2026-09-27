@@ -50,6 +50,10 @@ export async function preloadShell(): Promise<ShellSnapshot> {
   // else to say about it.
   void listen("win-session", (ev) => {
     state.windowMoving = ev.payload === true;
+    // One line, because the whole point of this fact is WHEN the front end learns it (P1.62f): the platform
+    // logs its own transition as `[cursor] window session moving=…` in boot.log, and the two lines together
+    // say whether a push was late (or never arrived).
+    logDebug(`WINSESSION pushed moving=${state.windowMoving}`);
   });
   // The Rust-side backstop: capture is on but the window is not foreground (`ClipCursor` does not look
   // at the foreground), so within ~32ms it is torn down and this side is notified.
@@ -261,6 +265,16 @@ export function winFocused(): boolean {
  *  Synchronous, like `winFocused()`: it is a device fact the PLATFORM pushed, not a query. */
 export function winWindowMoving(): boolean {
   return state.windowMoving;
+}
+
+/** **Ask the platform RIGHT NOW** whether the window is being moved or resized (P1.62f).
+ *
+ *  `winWindowMoving()` answers from the PUSHED flag, which is only current if the JS event loop has been
+ *  idle since the push - fine for a decision taken from a click or a key (the lock manager), NOT fine for the
+ *  world entry, whose stages block the thread in long stretches. Resolves `false` when the IPC fails (the
+ *  cautious answer: capture as usual, and `onWinGeometry` still pauses on the first movement). */
+export function windowSessionActiveNow(): Promise<boolean> {
+  return invoke<boolean>("window_session_active").catch(() => false);
 }
 
 export function focusWindow(): void {

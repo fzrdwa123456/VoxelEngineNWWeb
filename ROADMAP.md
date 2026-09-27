@@ -1412,6 +1412,23 @@ Still outstanding:
   the pause menu instead of handing the mouse over behind the user's back (our own mode switch is excluded -
   it returns earlier). The entry's log line names the reason: `WORLD entered while the window is being
   moved/resized -> pause menu (no capture)`.
+- **P1.62f - a PUSHED platform flag is only current when the JS event loop was idle.** `DONE`. P1.62e's
+  mechanism worked - the log proves it (`[cursor] window session moving=true` from the platform) - but the
+  entry still captured the mouse 158ms later, i.e. the front end's copy of the flag was still `false` while
+  the platform's was `true`. The push (`win-session`) is an EVENT, and the world entry's last stages
+  generate and mesh the spawn window in long synchronous stretches: the push can still be sitting in the JS
+  event queue when the entry takes its decision, which is taken in the same task continuum as the last
+  stage. The user's own words pinned the symptom ("if I do not move it, it does not pause; the moment I
+  move, it pauses" - the geometry event arrives when the loop is finally idle).
+  So the entry now ASKS: a read-only `window_session_active` command (`win::clip_is_postponed()`) is awaited
+  at the moment of the decision (`windowSessionActiveNow()`), and awaiting it also lets any queued push
+  drain first. The lock manager KEEPS the pushed flag - it only ever decides from an idle event loop (a
+  click, ESC, closing the backpack) - and the entry's log line now carries all three values
+  (`[moving=… pushed=… fiddled=…]`) so a wrong decision says WHICH of them was wrong. The push itself is
+  logged too (`WINSESSION pushed moving=…` in debug.log), so a late or missing delivery is visible instead of
+  being inferred. **The general rule, worth keeping: a pushed device fact is trustworthy only when nothing
+  long has blocked the loop since it was pushed; a decision taken at the end of a loading sequence must
+  QUERY.**
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

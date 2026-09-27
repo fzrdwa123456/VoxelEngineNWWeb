@@ -2858,6 +2858,11 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "\u2026read synchronously by the lock manager and the entry driver");
   assert(/geometryDuringLoad/.test(main),
     "\u2026and a window fiddled with during the LOADING starts the world PAUSED (there was nothing to pause yet)");
+  assert(/window_session_active/.test(stripComments(readSource("src-tauri/src/lib.rs"))) &&
+      /windowSessionActiveNow/.test(main),
+    "\u2026and the world entry ASKS the platform instead of trusting the push (the stages block the loop)");
+  assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
+    "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
     "\u2026the refusal is logged, not silent");
   assert(/fit_into\(target, region\)/.test(modelSrc), "the capture clips to the client area, or to the window rect on the frame");
