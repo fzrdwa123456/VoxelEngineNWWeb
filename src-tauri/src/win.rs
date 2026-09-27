@@ -570,6 +570,16 @@ fn reconcile(app: &tauri::AppHandle) {
         };
         let before = (m.clipped, m.shape, m.want, m.relative);
         apply_clip(&mut m, plan.clip);
+        // **THE CAPTURE IS OVER WHEN THE POINTER HAS LEFT THE WINDOW (P1.62).** `decide` says so because a
+        // capture whose window no longer contains the pointer cannot be honoured without clamping it back
+        // in - and clamping is what towed the cursor along with a window being dragged. Clearing the
+        // request here is the platform half; the event below is what tells the FRONT END (releasing on this
+        // side alone would leave it believing it still holds the mouse, which is the trap
+        // `capture_foreground_check` documents).
+        if plan.drop_capture {
+            m.relative = false;
+            arm_arrow_guard(&mut m);
+        }
         // **WARP WHILE HIDDEN** (P1.55). The product wants "opening a menu lands the cursor on the
         // crosshair", and the only way to make that move invisible is to do it with a NULL shape. It is also
         // why the old separate `center_cursor` command could still flash: it raced the visible intent through
@@ -587,6 +597,13 @@ fn reconcile(app: &tauri::AppHandle) {
             m.shape = CursorShape::Unknown;
         }
         apply_shape(&mut m, plan.shape);
+        if plan.drop_capture {
+            crate::boot_line(
+                &handle,
+                &format!("[cursor] capture dropped: the pointer left the client [{}]", trace_of(&m)),
+            );
+            let _ = tauri::Emitter::emit(&handle, "capture-lost", ());
+        }
         // The ARROW GUARD counts down once per reconciler tick (P1.60). It lives here, not in `decide`, so
         // that the rule set stays pure.
         tick_arrow_guard(&mut m);
@@ -600,11 +617,12 @@ fn reconcile(app: &tauri::AppHandle) {
             crate::boot_line(
                 &handle,
                 &format!(
-                    "[cursor] apply clip={:?} shape={:?} forced={} warp={} [{}]",
+                    "[cursor] apply clip={:?} shape={:?} forced={} warp={} drop={} [{}]",
                     plan.clip,
                     plan.shape,
                     plan.force_shape,
                     plan.warp.is_some(),
+                    plan.drop_capture,
                     trace_of(&m)
                 ),
             );

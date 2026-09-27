@@ -1341,6 +1341,19 @@ Still outstanding:
   position and never fired - the `becoming_visible_elsewhere_plans_a_warp` table test caught that.
   Two new table tests (26 total) pin the pointer rule from both sides (the lock follows the pointer; a
   moved window keeps the pointer where it is).
+- **P1.62b - and the CAPTURE IS DROPPED when the pointer has left the window.** `DONE`. The first version of
+  P1.62 was not enough, and the user's next log said why: `relative=true` for FOUR SECONDS while the user
+  dragged the window (a late `LOCK request [world entered]` re-took the capture right after the geometry
+  release, so the front end believed it held the mouse again), and the clip walked `963 -> 639 -> 480`,
+  dragging the pointer along at every step. The rule "keep the lock where the POINTER is" cannot help there,
+  because during a title-bar or border drag the pointer is in the NON-CLIENT area - outside the client
+  rectangle the rule tests. So rule 2 now says: **a capture whose window no longer contains the pointer is
+  OVER** (`CursorPlan::drop_capture`): release the clip, hand the arrow back, clear the capture request and
+  emit `capture-lost` so the front end does its full "hand the mouse back + pause" routine (releasing on the
+  Rust side alone is the documented trap). The hidden -> visible warp gets the same guard: a pointer outside
+  the window is never moved (it is a pointer the user is holding a window by). Four older table tests had to
+  change with it - they had encoded the OLD "clamp it back into the window" behaviour, which is exactly the
+  tow - and two new ones pin the drop and the no-warp rule (28 total).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

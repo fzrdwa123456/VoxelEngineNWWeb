@@ -2838,6 +2838,10 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "\u2026and a capture request clears it, so a swallowed WM_EXITSIZEMOVE cannot wedge the clip off");
   assert(/pub fn contains\(/.test(modelSrc) && /contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
     "re-clipping never moves the pointer while it is inside the window");
+  assert(/pub drop_capture: bool/.test(modelSrc) && /!contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
+    "a capture whose window no longer contains the pointer is DROPPED (the drag/resize tow)");
+  assert(/plan\.drop_capture/.test(winSrc) && /capture-lost/.test(winSrc),
+    "\u2026and the platform half tells the front end about it");
   assert(/pub fn crosshair_of/.test(modelSrc) && /Some\(crosshair_of\(p\)\)/.test(modelSrc),
     "\u2026and the crosshair is its OWN question: the warp must not follow the pointer");
   const reconcileBody = /fn reconcile\(app: &tauri::AppHandle\)([\s\S]*?)\n\}/.exec(winSrc);

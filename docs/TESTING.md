@@ -467,7 +467,16 @@ the mouse captured:
     `apply clip=Some(...)` line between the start and the end of the drag; `reclip` is skipped for the whole
     session
 (4) after the drag: the cursor must be visible (the arrow guard was armed but not ticked) and the pause
-    menu's Resume must capture again with one LOCK request
+    menu's Resume must capture again with one LOCK request. `boot.log` should carry exactly one
+    `[cursor] capture dropped: the pointer left the client [...]` per drag and NO `apply clip=Some(...)`
+    line with a moving rectangle: that clamp is the tow. If a drag still tows the pointer, that line is
+    what tells us WHERE the capture was still alive
+(4b) the case the log exposed: start a drag while a world is ENTERING (the entry 's `LOCK request [world
+    entered]` can land right after the geometry release). The capture must be dropped within a tick, the
+    pause menu must be up, and the pointer must not be towed - the 4-second, 324-px-at-a-time walk in the
+    P1.62b log is the bug
+(4c) fullscreen <-> windowed from the settings panel still must NOT pause: the windowed client stays centred
+    on the screen, so the parked pointer is still inside it (a drop only happens when it is genuinely outside)
 (5) the suppressed case - switch fullscreen/windowed from the settings panel: no pause, no yank, and the
     clip must follow the new geometry (the pointer is inside the new client, so rule 2 keeps it put)
 (6) Aero Snap (drag the title bar to a screen edge and release): same as (1), and the clip must be right
