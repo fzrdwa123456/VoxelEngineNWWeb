@@ -579,6 +579,27 @@ fn reconcile(app: &tauri::AppHandle) {
         // and a world entered in that state captured the mouse and paused only once the window moved. The
         // flag itself is set inside the window procedure (which has no AppHandle), so the TRANSITION is
         // noticed and emitted here, on the main thread, before the session branch below returns.
+        // **THE FOREGROUND IS A MEASURED FACT, SO LET THE PLATFORM SPEAK (P1.67).**
+        //
+        // Windows does NOT deliver `WM_KILLFOCUS` / Tauri's `Focused(false)` for every way we can lose the
+        // foreground: locking the session (Win+L, the secure desktop), the emoji/symbol overlay (Win+;), a UAC
+        // prompt and others leave the front end believing it is still in front - so it never ran its "hand the
+        // mouse back + pause" policy, while this side (which asks `GetForegroundWindow` every tick) already knew.
+        // The two reported shapes were exactly that: after Win+L the cursor came back hidden (the projection
+        // re-hid it on unlock, with no pause menu to keep it visible), and Win+; showed the cursor with no
+        // pause at all.
+        //
+        // The fix is not another event to miss: the POLLED transition is what notifies. One `capture-lost` per
+        // loss, which the front end already handles (release + pause when a world is running), and that covers
+        // Win+L, Win+;, UAC, the task manager, the task view and anything else that becomes foreground.
+        let focused_now = m.hwnd != 0 && unsafe { GetForegroundWindow() } == m.hwnd;
+        if LAST_FOCUSED.swap(focused_now, Ordering::SeqCst) && !focused_now {
+            crate::boot_line(
+                &handle,
+                &format!("[cursor] foreground LOST (measured) -> telling the front end [{}]", trace_of(&m)),
+            );
+            let _ = tauri::Emitter::emit(&handle, "capture-lost", ());
+        }
         let moving = clip_is_postponed();
         if moving != SESSION_PUSHED.load(Ordering::SeqCst) {
             SESSION_PUSHED.store(moving, Ordering::SeqCst);
@@ -813,6 +834,10 @@ static CLIP_POSTPONED: AtomicBool = AtomicBool::new(false);
 
 /// The value last PUSHED to the front end (`win-session`), so the transition is emitted once (P1.62e).
 static SESSION_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Was our window the FOREGROUND one on the previous tick? (P1.67) The polled mirror that lets the platform
+/// TELL the front end about a foreground loss it would otherwise never hear about.
+static LAST_FOCUSED: AtomicBool = AtomicBool::new(false);
 
 /// Is the user moving or resizing the window right now? Read by `reclip_mouse_capture` and `reconcile`, and
 /// PUSHED to the front end (`win-session`, P1.62e) - a held title-bar press produces no geometry event, so

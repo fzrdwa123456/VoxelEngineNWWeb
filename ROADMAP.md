@@ -1470,6 +1470,18 @@ Still outstanding:
   system's "that modal loop is over", the partner of `WM_ENTERSIZEMOVE`). The front end needed no change: its
   query simply starts telling the truth again, and the transition push logs `moving=false` where the old run
   logged nothing.
+- **P1.67 - a foreground loss is MEASURED and announced (Win+L, Win+;).** `DONE`. Two more boundary cases
+  came in - "Win+L hides the cursor (it is hidden by default after unlocking)" and "Win+; (the emoji/symbol
+  overlay) neither pauses nor hides it" - and they are ONE bug: Windows does not deliver `WM_KILLFOCUS` /
+  Tauri's `Focused(false)` for every way the foreground can leave (the secure desktop of a session lock, the
+  emoji overlay, UAC, the task manager), so the front end never ran its "hand the mouse back + pause" policy
+  while the platform (which asks `GetForegroundWindow` every tick) already knew. P1.63 had deleted the
+  platform-side notice (`capture_foreground_check` + `capture-lost`) in favour of the window event - and these
+  two cases are exactly where the event is missing.
+  The platform now announces the POLLED transition (a `LAST_FOCUSED` mirror: one `capture-lost` per loss, with
+  a boot.log line), which the front end already handles, and ENUMERATION stops being necessary: Win+L, Win+;,
+  UAC, the task manager, the task view and anything else are all "somebody else is foreground". A message can
+  be missed; a poll cannot.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

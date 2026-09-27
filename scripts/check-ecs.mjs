@@ -2851,6 +2851,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // geometry event, so the platform pushes the fact (`win-session`) and the front end reads it synchronously:
   // the entry driver starts on the PAUSE MENU instead of capturing behind the user's back, and the lock
   // manager refuses the request with a line saying why.
+  assert(/LAST_FOCUSED/.test(winSrc) && /emit\(&handle, "capture-lost"/.test(winSrc),
+    "a foreground loss is POLLED and announced: Win+L and the Win+; overlay never send a blur event");
   assert(/fn left_button_down/.test(winSrc) && /WM_CANCELMODE/.test(winSrc),
     "the \"a hand is on the window\" flag heals itself: the caption buttons used to leave it set for the whole run");
   assert(/win-session/.test(winSrc) && /pub fn clip_is_postponed/.test(winSrc),
