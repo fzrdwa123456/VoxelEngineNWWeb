@@ -1453,6 +1453,23 @@ Still outstanding:
   window is still the drag case and still releases instead of towing, so invariant 1 is untouched. One new
   table test covers all three halves (the entry moves, an ongoing capture releases, a minimised window
   releases).
+- **P1.66 - the "a hand is on the window" flag heals itself.** `DONE`. Reported as "minimise or maximise
+  during the loading: it enters PAUSED, but then the cursor never disappears and the view cannot turn - only
+  ESC works". Both logs showed the cause in one line: `WINSESSION pushed moving=true` and then NO
+  `moving=false` for the rest of the run - `CLIP_POSTPONED` was WEDGED. It is set by `WM_NCLBUTTONDOWN`,
+  which includes a click on the window's MINIMISE/MAXIMISE button, and the matching
+  `WM_EXITSIZEMOVE`/`WM_NCLBUTTONUP` never reaches the window procedure (Windows hands the modal loop to the
+  system around the state change). Every rule downstream then behaved "correctly": the world entry queries
+  the flag and PAUSED, and every Resume was refused (`LOCK skipped [menu resume]: the window is being moved
+  or resized`) - a visible cursor, a dead view, ESC the only working key. The self-heal that existed
+  (`set_mouse_capture(on = true)` clearing it) could never run, because the gate that reads the flag refuses
+  the request before that command is called.
+  Now the truth is POLLED as well: `clip_is_postponed()` heals itself whenever the LEFT BUTTON is up
+  (`GetAsyncKeyState(VK_LBUTTON)`) - a title-bar drag or a border resize always holds it, a caption-button
+  click never does, and a polled fact cannot miss a message. `WM_CANCELMODE` is also a clear signal now (the
+  system's "that modal loop is over", the partner of `WM_ENTERSIZEMOVE`). The front end needed no change: its
+  query simply starts telling the truth again, and the transition push logs `moving=false` where the old run
+  logged nothing.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

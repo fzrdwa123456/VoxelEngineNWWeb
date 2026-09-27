@@ -803,6 +803,10 @@ const WM_ENTERSIZEMOVE: u32 = 0x0231;
 const WM_EXITSIZEMOVE: u32 = 0x0232;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
 const WM_NCLBUTTONUP: u32 = 0x00A2;
+/// The system cancelling the move/size modal loop (see the match arm) - P1.66.
+const WM_CANCELMODE: u32 = 0x001F;
+/// `GetAsyncKeyState(VK_LBUTTON)`: the polled truth about "a hand on the frame" (P1.66).
+const VK_LBUTTON: i32 = 0x01;
 
 /// See `WM_ENTERSIZEMOVE`: true while the window is in a title-click / move / size session.
 static CLIP_POSTPONED: AtomicBool = AtomicBool::new(false);
@@ -813,8 +817,31 @@ static SESSION_PUSHED: AtomicBool = AtomicBool::new(false);
 /// Is the user moving or resizing the window right now? Read by `reclip_mouse_capture` and `reconcile`, and
 /// PUSHED to the front end (`win-session`, P1.62e) - a held title-bar press produces no geometry event, so
 /// this is the only way the front end can know that a hand is on the frame.
+///
+/// **AND IT HEALS ITSELF (P1.66).** The flag is set by `WM_NCLBUTTONDOWN` and cleared by
+/// `WM_EXITSIZEMOVE`/`WM_NCLBUTTONUP` - and clicking the window's MINIMISE or MAXIMISE button sets it while
+/// the matching release never reaches the window procedure (Windows hands the modal loop to the system
+/// around the state change). A stuck flag then made every rule downstream behave "correctly": the world
+/// entry PAUSED (it queries this flag), and every Resume was refused (`LOCK skipped [menu resume]: the
+/// window is being moved or resized`) - so the game came up with a visible cursor and a dead view, and the
+/// only thing that worked was ESC. Both boot logs showed `WINSESSION pushed moving=true` with no
+/// `moving=false` for the rest of the run.
+///
+/// So the truth is POLLED as well: a hand on the frame always means the LEFT BUTTON IS DOWN, and a click on
+/// a caption button releases it immediately. `GetAsyncKeyState` cannot miss a message, so no path can wedge
+/// this flag any more. (The old self-heal - clearing it in `set_mouse_capture(on = true)` - could never run:
+/// the gate that reads the flag refuses the request before that command is ever called.)
 pub fn clip_is_postponed() -> bool {
+    if CLIP_POSTPONED.load(Ordering::SeqCst) && !left_button_down() {
+        CLIP_POSTPONED.store(false, Ordering::SeqCst);
+    }
     CLIP_POSTPONED.load(Ordering::SeqCst)
+}
+
+/// Is the left mouse button down right now? (`GetAsyncKeyState`'s high bit.) The one fact that cannot be
+/// missed: a title-bar drag or a border resize holds it, anything else does not.
+fn left_button_down() -> bool {
+    unsafe { (GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000) != 0 }
 }
 /// The keyboard's "context menu" gesture (the menu key / Shift+F10) also reaches the window as
 /// WM_CONTEXTMENU at the system level: the default handling "gets ready to pop up a menu", and
@@ -851,7 +878,10 @@ unsafe extern "system" fn menu_suppressor_proc(
     // These messages are still FORWARDED (the window needs them to move at all).
     match msg {
         WM_ENTERSIZEMOVE | WM_NCLBUTTONDOWN => CLIP_POSTPONED.store(true, Ordering::SeqCst),
-        WM_EXITSIZEMOVE | WM_NCLBUTTONUP => CLIP_POSTPONED.store(false, Ordering::SeqCst),
+        // `WM_CANCELMODE` is the system's "that modal loop is over" (it is the partner of
+        // `WM_ENTERSIZEMOVE` for every way the loop can end, including the caption buttons that used to
+        // leave the flag set - P1.66). The polled `left_button_down` covers anything still missed.
+        WM_EXITSIZEMOVE | WM_NCLBUTTONUP | WM_CANCELMODE => CLIP_POSTPONED.store(false, Ordering::SeqCst),
         _ => {}
     }
     let old = OLD_WNDPROC.load(Ordering::SeqCst);
@@ -1033,6 +1063,7 @@ extern "system" {
     fn GetCursorInfo(info: *mut CursorInfo) -> i32;
     fn GetForegroundWindow() -> isize;
     fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+    fn GetAsyncKeyState(v_key: i32) -> i16;
 fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
