@@ -33,11 +33,29 @@ export function captureMouse(dom: HTMLElement): Promise<void> {
     .then((ok) => {
       if (ok) return;
       logDebug("MOUSE CAPTURE native refused, falling back to requestPointerLock");
-      return dom.requestPointerLock() as unknown as Promise<void>;
+      // Diagnostics (P1.65): this is the path that used to be silent about FAILING - and a fallback that
+      // REJECTS is exactly "the cursor stays and the view is dead".
+      return (dom.requestPointerLock() as unknown as Promise<void>)
+        .then(() => {
+          logDebug(`MOUSE CAPTURE fallback engaged: pointerLockElement=${document.pointerLockElement !== null}`);
+        })
+        .catch((err: unknown) => {
+          logDebug(`MOUSE CAPTURE fallback FAILED: ${String(err)}`);
+          throw err;
+        });
     })
     .catch((err) => {
       logDebug(`MOUSE CAPTURE native failed (${String(err)}), falling back to requestPointerLock`);
-      return dom.requestPointerLock() as unknown as Promise<void>;
+      // Diagnostics (P1.65): this is the path that used to be silent about FAILING - and a fallback that
+      // REJECTS is exactly "the cursor stays and the view is dead".
+      return (dom.requestPointerLock() as unknown as Promise<void>)
+        .then(() => {
+          logDebug(`MOUSE CAPTURE fallback engaged: pointerLockElement=${document.pointerLockElement !== null}`);
+        })
+        .catch((err: unknown) => {
+          logDebug(`MOUSE CAPTURE fallback FAILED: ${String(err)}`);
+          throw err;
+        });
     });
 }
 

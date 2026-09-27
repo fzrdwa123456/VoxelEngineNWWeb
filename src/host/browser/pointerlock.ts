@@ -96,12 +96,22 @@ export class PointerLock {
       this.deps.logDebug(`LOCK skipped [${source}]: the window is being moved or resized`);
       return;
     }
+    // Diagnostics (P1.65): the reported "it enters paused, but Resume leaves the cursor visible and the view
+    // dead" is a lock that never SETTLES into `locked=true`. These two lines say whether the request resolved
+    // at all and which mechanism actually took the mouse (the native clip leaves pointerLockElement null; a
+    // fallback sets it).
+    cursorBoot(`LOCK attempt [${source}] ${this.stateLine()}`);
     const p = this.deps.input.lock();
     if (p) {
-      p.catch(() => {
+      p.then(() => {
+        cursorBoot(`LOCK OK [${source}] plock=${document.pointerLockElement !== null} ${this.stateLine()}`);
+      }).catch((err) => {
+        cursorBoot(`LOCK FAILED [${source}] ${String(err)} plock=${document.pointerLockElement !== null}`);
         this.deps.logDebug(`LOCK rejected [${source}], retrying in 1300ms`);
         this.deps.scheduleRetry(1300, source);
       });
+    } else {
+      cursorBoot(`LOCK no-op [${source}] (the lock path returned nothing)`);
     }
   }
 

@@ -443,6 +443,23 @@ fn trace_of(m: &CursorModel) -> String {
     )
 }
 
+/// A "at most one line per `gap` ms" guard, for the diagnostics that describe a STATE rather than an action.
+fn trace_gap_ok(gap_ms: u64) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < gap_ms {
+        return false;
+    }
+    LAST.store(now, Ordering::Relaxed);
+    true
+}
+
 /// A flood guard for the APPLY trace below: at most 8 lines per 500 ms. The reconciler ticks every 8 ms, and
 /// the very loop we are hunting (a stale intent fighting the system: `desired=2 showing=1`) would otherwise
 /// write 125 lines a second - the repetition IS the symptom, so it is capped, not silenced.
@@ -617,6 +634,22 @@ fn reconcile(app: &tauri::AppHandle) {
         };
         let before = (m.clipped, m.shape, m.want, m.relative);
         apply_clip(&mut m, plan.clip);
+        // **DIAGNOSTICS (P1.65): "we WANT the mouse and we hold no clip".** That is the reported state where
+        // the game enters (or resumes) with a visible cursor and a view that cannot turn. One line names the
+        // branch that refused: nothing visible to clip to, or the pointer is outside our window. Rate-limited
+        // to one line per 500 ms - it repeats for as long as the state lasts, and the repetition is the
+        // symptom's shape.
+        if m.want == 2 && m.hwnd != 0 && rect_is_zero(m.clipped) && trace_gap_ok(500) {
+            let p = probe_of(&m);
+            let why = if rect_is_zero(clip_target(&p)) {
+                "nothing to clip to (no visible part of the window)"
+            } else if p.focused {
+                "the pointer is outside our window (the entry move should take it in)"
+            } else {
+                "the window is not foreground"
+            };
+            crate::boot_line(&handle, &format!("[cursor] want=hidden but NOT confined: {why} [{}]", trace_of(&m)));
+        }
         // **THE CAPTURE IS OVER WHEN THE POINTER HAS LEFT THE WINDOW (P1.62).** `decide` says so because a
         // capture whose window no longer contains the pointer cannot be honoured without clamping it back
         // in - and clamping is what towed the cursor along with a window being dragged. Clearing the

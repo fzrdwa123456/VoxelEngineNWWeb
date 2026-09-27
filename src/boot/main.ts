@@ -892,6 +892,9 @@ const menu = createPauseMenu(world, {
   // so no call site has to remember to say so, and a sub-panel needs no flag of its own.
   onResume: () => {
         // Back to game: relock the mouse (cooldown after ESC, auto-retry on failure)
+        // Diagnostics (P1.65): the timeline around a Resume - it says whether the lock resolved, whether the
+        // Rust table ever wanted the cursor hidden, and whether it ever held a clip.
+        probeCursorTimeline("resume");
         pointerLock.relock("menu resume");
     pointerLock.applyCursor();
         logDebug("RESUME back to game -> relock");
