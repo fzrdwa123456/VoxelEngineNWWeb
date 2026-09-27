@@ -556,3 +556,26 @@ the mouse captured:
 (6) Aero Snap (drag the title bar to a screen edge and release): same as (1), and the clip must be right
     afterwards
 ```
+
+AFTER the ONE hand-back warp (P1.70 - the cursor must come back ON THE CROSSHAIR on every path, at once).
+The report was "Win+; pauses but the cursor is not centred, and sometimes it jumps to the middle later on its
+own". Enter a world (captured), then walk every way OUT of the capture, and each time look at the cursor the
+moment the pause menu appears - it must be ON THE CROSSHAIR, and it must not move again afterwards:
+```
+(1) Win+; (the emoji/symbol overlay) - THE reported case: the overlay never takes the foreground, so this
+    goes through P1.69's give-up branch. The cursor must be on the crosshair as soon as the menu is up, and
+    boot.log must show the `cannot hide the cursor (an overlay is showing it) -> handing the mouse back`
+    line TOGETHER WITH one `apply … warp=true` whose `pos=` is the client centre; `showing=false` at that
+    moment is what proves the move happened while the pointer was still hidden
+(2) Win+. (the same overlay family) and Win (Start menu), and a click on the IME candidate window: same as (1)
+(3) ESC -> pause menu, and Resume -> capture -> ESC again: still centred (this path always worked; it is the
+    regression check for "one rule, not two")
+(4) Alt+Tab away and back, and Win+L + unlock: nothing may move on its own AFTER the menu is up. A cursor
+    that drifts to the middle a second later is the deleted `restore_arrow` path back (boot.log would show
+    the warp in a later line than the menu, from the window event, not from an `apply`)
+(5) the one case that must NOT centre: HOLD THE TITLE BAR (or a border) and then release the mouse - with
+    `user_holding=true` the hand-back warp refuses, because moving the pointer drags the window with it.
+    boot.log shows the refusal by the ABSENCE of `warp=true` while `moving=true`
+(6) the standing ones: drag/resize never tows the pointer, the backpack opens with a visible centred cursor,
+    fullscreen <-> windowed does not pause, and while captured nothing new appears in the log
+```

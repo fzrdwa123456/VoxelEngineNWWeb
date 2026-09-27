@@ -1497,6 +1497,29 @@ Still outstanding:
   resets the counter on the drop so a front end that ignores the hint is re-told at most every 250 ms.
   One new table test pins it (and that a cursor the system already hides - the normal capturing state - is
   never a lost fight).
+- **P1.68 - the foreground REGAIN is measured and announced too.** `DONE`. P1.67's mirror only announced the
+  LOSS, so a Win+L unlock (which never sends the focus event either) came back to a window where nothing had
+  repainted the cursor: it stayed hidden until the physical mouse moved. The same `LAST_FOCUSED` mirror now
+  emits `win-focus` on the measured REGAIN, and the platform pushes the arrow itself
+  (`refresh_cursor()` + `kick_cursor_repaint()`) before the front end's `reassertCursor("focus gain")` runs.
+- **P1.70 - ONE hand-back: the crosshair is where the mouse comes back, on EVERY path.** `DONE`. Reported as
+  "Win+; pauses but the cursor is not centred, and sometimes it jumps to the middle later for no reason" - two
+  halves of one mistake, plus a third that only the logs showed.
+  1. There were TWO centring paths. `decide`'s warp needs the hidden -> visible TRANSITION (`m.shape ==
+     Hidden`), which the overlay path (P1.69's give-up) did not have, so a new platform helper
+     (`win::restore_arrow`) was added in P1.62g to centre "on the release" - from the WINDOW EVENT, i.e. at a
+     moment nobody controls. That is the "莫名其妙自己跑到中间": the move landed up to a second after the menu
+     appeared, sometimes after the player had already moved the mouse. `restore_arrow()` is DELETED; the
+     give-up branch calls `hand_back_warp` like every other hidden -> visible transition, in the same plan that
+     shows the arrow (so the move is done while the pointer is still hidden).
+  2. `hand_back_warp` used to refuse a pointer OUTSIDE our window (P1.62d, the title-bar case). The Win+; /
+     IME overlay leaves the pointer over ITS OWN window, so that guard silently turned the centring off exactly
+     on the path the report was about. The refusal is now ONLY `m.user_holding` (a real hand on the frame, read
+     from the platform's postponed-clip flag) - "where the pointer is on the way in" is not a statement about
+     what the player wants; "the mouse is mine again" is.
+  3. The platform model gained the `user_holding` mirror so the rule is table-testable, and the ONE rule is
+     pinned by the gate (`no fn restore_arrow`, `hand_back_warp` + `user_holding`, and every hidden -> visible
+     transition using it). Three table tests updated, one added; 29/29 pass.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

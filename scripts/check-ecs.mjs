@@ -2815,8 +2815,13 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "the model carries the arrow guard (a BOUNDED \"we owe an arrow\")");
   assert(/m\.arrow_guard > 0 && !p\.showing/.test(modelSrc),
     "…and the unfocused branch keeps pushing while it runs");
-  assert(/arm_arrow_guard/.test(winSrc) && /win::restore_arrow\(\);/.test(libSrc),
-    "a release also hands the arrow back IN THE SAME CALL (P1.57, symmetrically)");
+  // P1.70 moved the hand-back to the model's ONE warp: the release ARMS the guard (still in the same call),
+  // and the guard's give-up branch lands the pointer on the crosshair while it is still hidden.
+  const releaseSrc = winSrc.split("pub fn release_mouse_capture")[1].split("pub fn on_foreground_lost")[0];
+  assert(/arm_arrow_guard\(&mut m\);/.test(releaseSrc),
+    "a release also hands the arrow back IN THE SAME CALL (P1.57, symmetrically) - it ARMS the guard");
+  assert(!/restore_arrow/.test(libSrc) && !/restore_arrow/.test(winSrc),
+    "\u2026and there is exactly ONE hand-back warp (P1.70 deleted the second, timing-dependent centring path)");
   assert(/GetAncestor\(under, GA_ROOT\)/.test(winSrc),
     "\"our window\" is judged by its ROOT: WebView2 is multi-process, so the process test never matched");
   const plSrc = stripComments(readSource("src/host/browser/pointerlock.ts"));
@@ -2836,7 +2841,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "a title-click / move / size session postpones the clip (SDL WIN_UpdateClipCursor does the same)");
   assert(/CLIP_POSTPONED\.store\(false, Ordering::SeqCst\)/.test(winSrc),
     "\u2026and a capture request clears it, so a swallowed WM_EXITSIZEMOVE cannot wedge the clip off");
-  assert(/pub fn contains\(/.test(modelSrc) && /contains\(intersect\(p\.client, p\.screen\), p\.pos\)/.test(modelSrc),
+  assert(/pub fn contains\(/.test(modelSrc) && /rect_is_zero\(target\) \|\| !contains\(target, p\.pos\)/.test(modelSrc),
     "an ONGOING capture whose window no longer contains the pointer is dropped, never clamped back in");
   // **P1.62c - THE CLIP IS THE CLIENT AREA, AND CENTRING IS A SHOW-TIME THING.** The 1px centre lock (and
   // then the 1px lock that followed the pointer) both had to MOVE the pointer whenever the window moved; the
@@ -2873,7 +2878,6 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/pub fn hand_back_warp/.test(modelSrc) && /m\.user_holding/.test(modelSrc),
     "\u2026and its one exception is a HAND ON THE FRAME, not where the pointer happens to be");
   assert(/hand_back_warp\(m, p\)/.test(modelSrc), "\u2026which every hidden -> visible transition uses");
-    "handing the arrow back also lands the pointer on the CROSSHAIR (while it is hidden) - it cannot be left to `decide`, whose warp needs the hidden -> visible transition");
   assert(/WINSESSION pushed moving=/.test(readSource("src/host/desktop/shell.ts")),
     "\u2026with the push itself logged, so a LATE push is visible in the log");
   assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
