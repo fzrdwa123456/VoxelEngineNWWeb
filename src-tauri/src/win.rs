@@ -539,6 +539,17 @@ fn reconcile(app: &tauri::AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let mut m = model();
+        // **PUSH THE WINDOW-SESSION FACT TO THE FRONT END (P1.62e).** A held title-bar press produces NO
+        // geometry event, so the front end cannot tell "a hand is on the frame" from "the user is waiting" -
+        // and a world entered in that state captured the mouse and paused only once the window moved. The
+        // flag itself is set inside the window procedure (which has no AppHandle), so the TRANSITION is
+        // noticed and emitted here, on the main thread, before the session branch below returns.
+        let moving = clip_is_postponed();
+        if moving != SESSION_PUSHED.load(Ordering::SeqCst) {
+            SESSION_PUSHED.store(moving, Ordering::SeqCst);
+            crate::boot_line(&handle, &format!("[cursor] window session moving={moving} [{}]", trace_of(&m)));
+            let _ = tauri::Emitter::emit(&handle, "win-session", moving);
+        }
         // **THE USER IS MOVING OR RESIZING THE WINDOW (P1.62).** Hand the pointer back ONCE, then leave the
         // cursor completely alone until the session ends:
         //   * re-clipping during the session is what tows the pointer (see `WM_ENTERSIZEMOVE`), and Windows is
@@ -745,8 +756,13 @@ const WM_NCLBUTTONUP: u32 = 0x00A2;
 /// See `WM_ENTERSIZEMOVE`: true while the window is in a title-click / move / size session.
 static CLIP_POSTPONED: AtomicBool = AtomicBool::new(false);
 
-/// Is the user moving or resizing the window right now? Read by `reclip_mouse_capture` and `reconcile`.
-fn clip_is_postponed() -> bool {
+/// The value last PUSHED to the front end (`win-session`), so the transition is emitted once (P1.62e).
+static SESSION_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Is the user moving or resizing the window right now? Read by `reclip_mouse_capture` and `reconcile`, and
+/// PUSHED to the front end (`win-session`, P1.62e) - a held title-bar press produces no geometry event, so
+/// this is the only way the front end can know that a hand is on the frame.
+pub fn clip_is_postponed() -> bool {
     CLIP_POSTPONED.load(Ordering::SeqCst)
 }
 /// The keyboard's "context menu" gesture (the menu key / Shift+F10) also reaches the window as
@@ -853,7 +869,7 @@ pub fn cursor_sentinel(app: &tauri::AppHandle) {
         // (P1.60) - that is the whole point of it: after a release the front end may never speak again, and
         // the arrow must still be pushed until it sticks (or the guard runs out). Cost of asking: nothing,
         // because a tick whose plan changes nothing makes no Win32 call (rule 3).
-        if m.want == 0 && !m.relative && m.arrow_guard == 0 {
+        if m.want == 0 && !m.relative && m.arrow_guard == 0 && !clip_is_postponed() {
             return;
         }
     }

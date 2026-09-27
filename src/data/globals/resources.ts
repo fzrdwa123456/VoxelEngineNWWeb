@@ -180,6 +180,11 @@ export interface LoopState {
   rendererReady: boolean;
   /** Until this wall-clock time, a window geometry change is OUR OWN switch and must not pause */
   suppressGeometryUntil: number;
+  /** **A geometry change arrived while NO world was running** (the startup, or a world entry): the entry
+   *  driver starts PAUSED if it is set (P1.62e). While the loading screen is up there is nothing to pause,
+   *  so the pause has to be deferred to the moment the world is ready - and a window the user fiddled with
+   *  during the loading must not hand the mouse over behind their back. Reset by `enterWorld` itself. */
+  geometryDuringLoad: boolean;
 }
 
 export const LOOP_STATE = defineResource<LoopState>("loopState");
@@ -194,6 +199,7 @@ export function createLoopState(): LoopState {
     appliedViewportH: 0,
     rendererReady: false,
     suppressGeometryUntil: 0,
+    geometryDuringLoad: false,
   };
 }
 

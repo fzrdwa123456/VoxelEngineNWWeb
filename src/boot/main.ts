@@ -66,7 +66,7 @@ import { PointerLock } from "../host/browser/pointerlock";
 import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS, type Lang } from "../data/assets/i18n";
 import { loadUIScaleMode, getUIScaleMode, currentRootFontPx } from "../data/globals/uiscale";
 import { loadFont, getFontId, currentFontCss } from "../data/globals/fonts";
-import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
+import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
@@ -801,6 +801,9 @@ pointerLock = new PointerLock({
   // Capture only opens while foregrounded (native ClipCursor does not look at focus; the browser's
   // requestPointerLock refuses on its own anyway).
   focused: winFocused,
+  // …and not while the user is holding the window (P1.62e): a capture taken then would end on the first
+  // movement anyway (`onWinGeometry` pauses), so it is refused with a line saying why.
+  windowMoving: winWindowMoving,
   logDebug,
   // A REJECTED LOCK IS RETRIED through a **delayed intent**, not a timer of this module: the deadline goes
   // into DELAYED_INTENTS and is applied by `ui.delays`. (The old `scheduleCursor` - the two extra cursor
@@ -929,6 +932,9 @@ const menu = createPauseMenu(world, {
  *  A RE-entry into a window that is still built skips the screen entirely (see `needsWarmUp`). */
 async function enterWorld(mode: string): Promise<void> {
   const entryStart = performance.now();
+  // The entry watches the window for fiddling of its own (P1.62e): a drag during the loading is remembered
+  // and makes this entry start on the pause menu instead of capturing behind the user's back.
+  loop.geometryDuringLoad = false;
   // The menu stops owning the display first: `hide()` publishes into UI_MODAL, so ui.navigation takes
   // it down in the same ui lane that paints the screen.
   mainMenu.hide();
@@ -983,18 +989,29 @@ async function enterWorld(mode: string): Promise<void> {
   world.commands.send(SetLoadingStage, { active: false });
   setLoopMode("game");
   pointerLock.applyCursor();
-  // Entering a world **must be foregrounded** to capture. Switching to another app during the load
-  // would make this relock open native capture on a **background** window (the cursor clamped into that
-  // screen region while another app is over it; raw input is collected in the background too, so the
-  // view keeps turning; and the cursor is globally hidden) — and **no** blur event will come to rescue
-  // it, because focus was lost long ago. So the treatment is "not foreground ⇒ pause": into the pause
-  // menu at once, and on switching back onWinFocus sees a UI open and does not auto-capture (a menu
-  // does not auto-close, resume manually — the existing convention).
-  if (winFocused()) {
+  // **Entering a world must be a DELIBERATE "give me the mouse" moment.** Two things can make it wrong,
+  // and both end in the same place: no capture, and the pause menu.
+  //   * the window is not FOREGROUND: the relock would open native capture on a background window (the
+  //     cursor clamped into a screen region another app is over; raw input is collected in the background
+  //     too, so the view keeps turning; and the cursor is globally hidden) — and no blur event will come to
+  //     the rescue, because focus was lost long ago;
+  //   * the user has a HAND ON THE WINDOW (P1.62e): holding a title bar or a border produces NO geometry
+  //     event until it MOVES, so the game used to come up "playing" with a hand on the frame and pause only
+  //     on the first movement. `winWindowMoving()` is the platform's own view of that (pushed as
+  //     `win-session`), and `geometryDuringLoad` covers "they fiddled with it at some point while it was
+  //     loading" — where there was nothing to pause yet.
+  const moving = winWindowMoving();
+  const fiddled = loop.geometryDuringLoad;
+  if (winFocused() && !moving && !fiddled) {
     pointerLock.relock("world entered");
   } else {
     menu.show();
-    logDebug("WORLD entered while not foreground -> pause menu (no capture)");
+    const why = !winFocused()
+      ? "not foreground"
+      : moving
+        ? "the window is being moved/resized"
+        : "the window was moved during loading";
+    logDebug(`WORLD entered while ${why} -> pause menu (no capture)`);
   }
 }
 
@@ -1226,7 +1243,13 @@ onWinGeometry(() => {
   // NOT IN A WORLD: nothing is captured and there is nothing to pause, so do (and LOG) nothing. This used
   // to run on every geometry event regardless of the mode, which meant hundreds of debug.log lines for one
   // window drag at the main menu (and a pointless native-capture release per event).
-  if (!inWorld()) return;
+  // **BUT REMEMBER IT (P1.62e)**: a world ENTRY is exactly this state, and a window the user fiddled with
+  // while the loading screen was up must not hand the mouse over behind their back - the entry driver reads
+  // this flag and starts on the pause menu. (Our own mode switch returned above, so it never counts.)
+  if (!inWorld()) {
+    loop.geometryDuringLoad = true;
+    return;
+  }
   const open = uiOpen();
   // …and a menu already owns the mouse: release anything stale, but do not pause (there is nothing to
   // pause) and do not log per event — a drag would flood the log the same way.

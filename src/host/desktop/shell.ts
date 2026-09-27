@@ -45,6 +45,12 @@ export async function preloadShell(): Promise<ShellSnapshot> {
   void listen("win-geometry", () => {
     geometryListeners.forEach((cb) => cb());
   });
+  // The window is being MOVED or RESIZED by the user (P1.62e): pushed by the cursor code's own session flag,
+  // because a held title-bar press produces no geometry event. A plain boolean payload - there is nothing
+  // else to say about it.
+  void listen("win-session", (ev) => {
+    state.windowMoving = ev.payload === true;
+  });
   // The Rust-side backstop: capture is on but the window is not foreground (`ClipCursor` does not look
   // at the foreground), so within ~32ms it is torn down and this side is notified.
   void listen("capture-lost", () => {
@@ -249,6 +255,12 @@ export function trackWindowFocus(): void {
 
 export function winFocused(): boolean {
   return state.windowFocused;
+}
+
+/** Is the user moving or resizing the window right now? (P1.62e - see `ShellState.windowMoving`.)
+ *  Synchronous, like `winFocused()`: it is a device fact the PLATFORM pushed, not a query. */
+export function winWindowMoving(): boolean {
+  return state.windowMoving;
 }
 
 export function focusWindow(): void {

@@ -454,6 +454,23 @@ smooth: enter a world (captured), press Win, and **watch the cursor while the po
     we hold the mouse) and no `[cursor] apply … forced=true` storm
 ```
 
+AFTER the held-window entry (P1.62e - a hand on the frame starts paused). The report was "hold the title bar,
+enter, let go: it does not pause; it pauses only once I move". Walk:
+```
+(1) HOLD the title bar (mouse button down, do not move) and enter a world: the pause menu must come up as
+    soon as the loading finishes, with NO capture at all (debug.log: `WORLD entered while the window is being
+    moved/resized -> pause menu (no capture)`, and no `LOCK request [world entered]`); boot.log must show
+    `[cursor] window session moving=true` from the press and `moving=false` when you let go
+(2) the same with a BORDER (resize) held
+(3) drag the window at some point DURING the loading and let go before it finishes: the entry must still
+    start PAUSED (`the window was moved during loading` in the log line)
+(4) hold the frame and click Resume from the pause menu with the other hand? Impossible - the click needs the
+    window - but a Resume click right after letting go must capture (the session is over by then)
+(5) the lock manager's new refusal: with the window being moved (hold the title bar), any path that asks for
+    the mouse - closing the backpack, the world entry - must log `LOCK skipped […]: the window is being moved
+    or resized` and NOT fall back to `requestPointerLock`
+```
+
 AFTER the window-rect clip (P1.62d - the clip must contain the pointer). The one to walk first:
 ```
 (1) START A DRAG AND ENTER A WORLD IN THE MIDDLE OF IT (grab the title bar, then click Singleplayer/Resume

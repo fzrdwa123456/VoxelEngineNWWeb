@@ -1393,7 +1393,26 @@ Still outstanding:
   screen-edge margin (which keeps an invisible cursor off the taskbar's auto-hide band) yields when the
   pointer itself is in that band - containing the pointer wins, because a clip that excludes it is a clip
   that MOVES it.
-— write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
+- **P1.62e - a world entered with a hand on the window starts PAUSED.** `DONE`. Reported as "holding the
+  title bar or a border without moving, then entering: it does not pause - it pauses only once I move". The
+  reason is that a HELD press produces **no geometry event at all**, so `onWinGeometry` (the only signal the
+  front end had for "the user is fiddling with the window") never fired: the entry captured the mouse with
+  the user's hand still on the frame, and the first movement then paused it. The rule the user asked for is
+  the one the project already applies to the foreground, so it took the same shape: **not foreground, OR a
+  hand on the window, OR the window was fiddled with while loading => no capture, and the pause menu.**
+  The platform half already existed: `WM_ENTERSIZEMOVE`/`WM_NCLBUTTONDOWN` set `CLIP_POSTPONED` (P1.62, for
+  the clip), which is exactly "a hand is on the frame". It became `pub fn clip_is_postponed()`, and
+  `reconcile` now notices its TRANSITION and pushes it to the front end as `win-session` (the window
+  procedure has no AppHandle, so it cannot emit itself; the sentinel also runs while a session is active even
+  with no intent). The front end keeps it in `SHELL_STATE.windowMoving`, next to `windowFocused` - a device
+  fact pushed by the platform and read SYNCHRONOUSLY, which is what the lock manager needs (`PointerLock`
+  refuses a capture while the window is moving: `LOCK skipped […]: the window is being moved or resized`) and
+  what the entry driver needs. `LOOP_STATE.geometryDuringLoad` covers the other half of the same story: a
+  geometry change while NOT in a world has nothing to pause yet, so it is REMEMBERED and the entry starts on
+  the pause menu instead of handing the mouse over behind the user's back (our own mode switch is excluded -
+  it returns earlier). The entry's log line names the reason: `WORLD entered while the window is being
+  moved/resized -> pause menu (no capture)`.
+- **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
   constants or system fields are components now too (BODY, REACH, INTERACTION), so "only one entity

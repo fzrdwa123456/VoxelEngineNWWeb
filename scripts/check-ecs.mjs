@@ -2774,8 +2774,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/focused: \(\) => boolean/.test(pointerlockSrc), "the lock manager takes a foreground predicate");
   assert(/if \(!this\.deps\.focused\(\)\)/.test(pointerlockSrc), "…and refuses to capture without it");
   assert(/focused: winFocused/.test(main), "…which the composition root ships from the shell");
-  assert(/if \(winFocused\(\)\) \{[\s\S]{0,120}relock\("world entered"\)/.test(main),
-    "the world entry captures only in the foreground (otherwise it pauses)");
+  assert(/if \(winFocused\(\) && !moving && !fiddled\) \{[\s\S]{0,140}relock\("world entered"\)/.test(main),
+    "the world entry captures only when foregrounded, with no hand on the window and no fiddling during loading");
   assert(/onCaptureLost\(/.test(main), "…and a rust-side teardown is handled as a lost window");
   // **A FOCUS EVENT NEVER RE-REQUESTS CAPTURE (P1.58).** The root cure of the Win-key flap the boot.log
   // pinned: `focus LOST` -> `focus GAIN` several times per keypress, and the handler re-opened the native
@@ -2847,6 +2847,19 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/pub window: ClipRect/.test(modelSrc) && /fn window_rect/.test(winSrc) && /GetWindowRect/.test(winSrc),
     "\u2026which is why the probe reads the whole window rect");
   assert(/contains\(clip, p\.pos\)/.test(modelSrc), "and no rule may exclude the pointer: moving it is what towed the window");
+  // **P1.62e - A WINDOW THE USER IS HOLDING MUST NOT BE CAPTURED.** A held title-bar press produces NO
+  // geometry event, so the platform pushes the fact (`win-session`) and the front end reads it synchronously:
+  // the entry driver starts on the PAUSE MENU instead of capturing behind the user's back, and the lock
+  // manager refuses the request with a line saying why.
+  assert(/win-session/.test(winSrc) && /pub fn clip_is_postponed/.test(winSrc),
+    "the platform pushes the window-session fact");
+  assert(/export function winWindowMoving/.test(readSource("src/host/desktop/shell.ts")) &&
+      /windowMoving: winWindowMoving/.test(main),
+    "\u2026read synchronously by the lock manager and the entry driver");
+  assert(/geometryDuringLoad/.test(main),
+    "\u2026and a window fiddled with during the LOADING starts the world PAUSED (there was nothing to pause yet)");
+  assert(/the window is being moved or resized/.test(stripComments(readSource("src/host/browser/pointerlock.ts"))),
+    "\u2026the refusal is logged, not silent");
   assert(/fit_into\(target, region\)/.test(modelSrc), "the capture clips to the client area, or to the window rect on the frame");
   assert(!/centre_lock/.test(modelSrc), "\u2026the centre-lock knob is gone with it");
   assert(/crosshair_rect\(p\)/.test(modelSrc), "\u2026and the crosshair is only the warp target");

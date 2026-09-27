@@ -43,6 +43,11 @@ export interface PointerLockDeps {
    *  see `win.rs::capture_foreground_check`, which is the system-level backstop; this is the gate on the
    *  normal path. */
   focused: () => boolean;
+  /** **Is the user moving or resizing the window right now?** (`win-session`, P1.62e) A capture taken then is
+   *  taken out of a window the user is holding: it would end on the first movement anyway (main.ts's
+   *  `onWinGeometry` pauses), so the request is refused here — with a line saying why, instead of a capture
+   *  that silently appears and disappears. Read synchronously, like `focused`. */
+  windowMoving: () => boolean;
   logDebug: (line: string) => void;
   /** Retry a rejected lock: **the deadline goes into the world** (`DELAYED_INTENTS::schedule`, see
    *  ecs/systems/delays.ts), applied by `ui.delays` on the next frame. This used to be
@@ -85,6 +90,10 @@ export class PointerLock {
     if (this.deps.isUiModal()) return;
     if (!this.deps.focused()) {
       this.deps.logDebug(`LOCK skipped [${source}]: window is not foreground`);
+      return;
+    }
+    if (this.deps.windowMoving()) {
+      this.deps.logDebug(`LOCK skipped [${source}]: the window is being moved or resized`);
       return;
     }
     const p = this.deps.input.lock();

@@ -35,6 +35,14 @@ export interface ShellState {
   pending: Record<string, string[]>;
   diagLogEnabled: boolean;
   windowFocused: boolean;
+  /** **Is the user moving or resizing the window right now?** (P1.62e)
+   *
+   *  The PLATFORM pushes it (`win-session`, from the same `WM_ENTERSIZEMOVE`/`WM_NCLBUTTONDOWN` flag the
+   *  cursor code already keeps), because a **held** title-bar press produces NO geometry event at all: the
+   *  front end otherwise cannot tell "the user has a hand on the frame" from "the user is waiting", and a
+   *  world entered in that state captured the mouse and paused only once the window moved. Read
+   *  synchronously by the lock manager and the entry driver, exactly like `windowFocused`. */
+  windowMoving: boolean;
 }
 
 export const SHELL_STATE: Resource<ShellState> = defineResource<ShellState>("shellState");
@@ -55,6 +63,7 @@ const state: ShellState = {
   pending: { debug: [], renderer: [] },
   diagLogEnabled: true,
   windowFocused: false,
+  windowMoving: false,
 };
 
 /** The one instance: the host module reads and writes it, and the composition root inserts it. */
