@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 mod cursor_model;
 mod game;
 mod packs;
-mod rawinput;
+mod rawinput_session;
 mod cursor_session;
 mod platform;
 
@@ -74,7 +74,7 @@ fn preload_shell(state: State<'_, AppState>, window: tauri::WebviewWindow) -> Sh
         window_mode,
         vsync_disabled: game::read_vsync_disabled(&root),
         focused: window.is_focused().unwrap_or(false),
-        browser_args: std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default(),
+        browser_args: platform::browser_args_in_force(),
         platform: format!("tauri/{} {}", tauri::VERSION, std::env::consts::OS),
     }
 }
@@ -154,7 +154,7 @@ fn focus_window(window: tauri::WebviewWindow) {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
-    rawinput::stop();
+    rawinput_session::stop();
     app.exit(0);
 }
 
@@ -165,29 +165,23 @@ fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
 
 /// Native mouse capture switch (**the only mechanism: the engine does not use the Pointer Lock API at
 /// all**, see src/host/browser/mousecapture.ts). See the notes in
-/// win.rs: ClipCursor + SetCursor(NULL) pin the system cursor inside the window, so there is no ESC
+/// cursor_session.rs + platform/windows: ClipCursor + SetCursor(NULL) pin the system cursor in the window, so there is no ESC
 /// unlock gesture, no cooldown after an unlock, and none of the "the browser took the lock away"
 /// class of problems. `false` means the mouse stays free — the frontend reports it and does NOT fall
 /// back to another mechanism.
 /// The frontend tells us the **desired** cursor visibility (called once whenever
 /// `pointerlock.applyCursor()`'s value changes).
 /// After that `cursor_session::cursor_sentinel()` reconciles and corrects it every 8 ms — see that note in
-/// win.rs.
+/// cursor_session.rs.
 #[tauri::command]
 fn cursor_intent(app: AppHandle, window: tauri::WebviewWindow, visible: bool) {
-    let hwnd = match window.hwnd() {
-        Ok(h) => h.0 as isize,
-        Err(_) => 0,
-    };
+    let hwnd = platform::native_window(&window).map_or(0, |h| h.0);
     cursor_session::set_cursor_intent(&app, hwnd, visible);
 }
 
 #[tauri::command]
 fn mouse_capture(state: State<'_, AppState>, window: tauri::WebviewWindow, on: bool) -> bool {
-    let hwnd = match window.hwnd() {
-        Ok(h) => h.0 as isize,
-        Err(_) => 0,
-    };
+    let hwnd = platform::native_window(&window).map_or(0, |h| h.0);
     // Diagnostics: measure the native cursor state before and after capture (whether the shape
     // really follows)
     let before = cursor_session::cursor_trace();
@@ -213,14 +207,14 @@ fn set_vsync_disabled(state: State<'_, AppState>, disabled: bool) -> bool {
 }
 
 #[tauri::command]
-fn rawinput_start(app: AppHandle) -> Result<rawinput::RawStats, String> {
-    rawinput::start(app)?;
-    Ok(rawinput::stats())
+fn rawinput_start(app: AppHandle) -> Result<rawinput_session::RawStats, String> {
+    rawinput_session::start(app)?;
+    Ok(rawinput_session::stats())
 }
 
 #[tauri::command]
-fn rawinput_stats() -> rawinput::RawStats {
-    rawinput::stats()
+fn rawinput_stats() -> rawinput_session::RawStats {
+    rawinput_session::stats()
 }
 
 #[tauri::command]
@@ -277,9 +271,9 @@ pub fn run() {
                 // thread (every Tauri event piles up: the view stops turning, the cursor stops
                 // refreshing).
                 let diag_root0 = app.state::<AppState>().root.clone();
-                match w.hwnd() {
-                    Ok(h) => {
-                        let ok = platform::install_menu_suppressor(h.0 as isize);
+                match platform::native_window(&w) {
+                    Some(h) => {
+                        let ok = platform::install_menu_suppressor(h.0);
                         game::append_boot(
                             &diag_root0,
                             &format!(
@@ -288,9 +282,9 @@ pub fn run() {
                             ),
                         );
                     }
-                    Err(e) => game::append_boot(
+                    None => game::append_boot(
                         &diag_root0,
-                        &format!("win32: no HWND, Alt menu suppression NOT installed: {e}"),
+                        "no native window handle: Alt menu suppression NOT installed",
                     ),
                 }
 
@@ -358,7 +352,7 @@ pub fn run() {
                     }
                     WindowEvent::Destroyed => {
                         cursor_session::release_mouse_capture();
-                        rawinput::stop();
+                        rawinput_session::stop();
                     }
                     // Window geometry changed (resize / move / DPI). **This is the only reliable
                     // signal that "the user is fiddling with the window".**

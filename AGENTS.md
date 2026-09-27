@@ -622,13 +622,15 @@ JS objects a Worker can only clone; the voxel Map is not shareable), written out
 There is no Pointer Lock API anywhere in the engine (P1.72 deleted even the fallback: a failed capture leaves
 the mouse free, and `input.lock()` refuses outright when the raw-input listener is not running, because a
 capture without deltas would hide and confine the cursor for a view that cannot turn). The cursor's rules are
-`src-tauri/src/cursor_model.rs` - pure, table-tested - plus the two files that serve it:
-`src-tauri/src/cursor_session.rs` (the cross-platform state machine: when to ask, what to do with the
-answer, what to log) and `src-tauri/src/platform/windows.rs` (the backend - every Win32 call).
-**That split is the port's shape (P1.79).** The seam is `src-tauri/src/platform/mod.rs`, whose header
-lists the exact functions a backend must provide; a new operating system writes ONE file under
-`src-tauri/src/platform/`, and a target with no backend fails with a `compile_error!` naming it.
-`cursor_model.rs`, `cursor_session.rs` and the whole front end stay untouched by a port.
+`src-tauri/src/cursor_model.rs` - pure, table-tested - plus the two session layers that serve it
+(`cursor_session.rs` for the pointer, `rawinput_session.rs` for the device) and the backends under
+`src-tauri/src/platform/`. **That split is the port's shape (P1.79/P1.80).** The seam is
+`platform/mod.rs`, and it is **three traits** - `CursorBackend`, `RawInputBackend`,
+`WebviewBackend` - not prose, because a trait is what the compiler checks: implement them for your
+target and the error names the method you left out. A new operating system writes ONE
+`platform/<os>/mod.rs`, adds its `cfg` arm in `platform/mod.rs` and deletes the `compile_error!`;
+`cursor_model.rs`, both `*_session.rs` files, `game.rs`, `lib.rs` and the whole front end stay
+untouched. Verified: the two session layers contain no `cfg`, no Win32 name and no `unsafe`.
 
 - **The centre lock is the mechanism** (P1.76/P1.77; copied from SDL3, which is what Minecraft uses). While we
   hold the mouse the clip handed to `ClipCursor` is a **1x1 px box on the crosshair** (5x1 over a remote
@@ -644,7 +646,7 @@ lists the exact functions a backend must provide; a new operating system writes 
     it by measurement, "Win+L does not centre", "Win+; does not centre") is obsolete, and `hand_back_warp` is a
     permanent no-op kept as a safety net. **Do not reintroduce a "where is the cursor" rule**: with the lock
     there is no such variable.
-- **The view comes from raw input** (`rawinput.rs`: a hidden `HWND_MESSAGE` window + `RIDEV_INPUTSINK` +
+- **The view comes from raw input** (`platform/windows/rawinput.rs`: a hidden `HWND_MESSAGE` window + `RIDEV_INPUTSINK` +
   `WM_INPUT`), which is why the pointer's position is irrelevant and why holding it against a window edge does
   not freeze the view.
 - **The buttons come from raw input too** (P1.76): the same packet's `usButtonFlags` -> two bitmasks -> the
@@ -666,6 +668,15 @@ lists the exact functions a backend must provide; a new operating system writes 
   background, so "capture only while foreground" is explicit - the front end's `focused` gate, the entry driver's
   refusal, and `cursor_session::capture_foreground_check` as the system-level backstop that releases and emits
   `capture-lost`.
+- **The launch arguments belong to the WINDOW HOST** (P1.80): WebView2 reads
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` before the webview exists, and a non-empty value REPLACES the
+  list in the config - so `game.rs` asks `platform::browser_args_base()` and the host repeats its own
+  base verbatim.
+- **NEVER move a window flag into `tauri.windows.conf.json`** (learned the hard way, P1.80): the platform
+  overlay is merged with `json_patch::merge` (RFC 7386) - objects merge recursively, **arrays are REPLACED
+  wholesale** - so a partial `app.windows: [{ label, ... }]` entry silently drops `center`, the size,
+  `visible: false` and `title`, and the window stops being centred. Overlaying a window means repeating
+  the whole object. Non-array keys (a future `bundle.targets`) are safe.
 
 ## Testing
 
@@ -803,7 +814,7 @@ When work lands, move the entry here and delete it there.
   event-time half (which listener fires, when the shield arms) — and NOTHING ELSE: the rubber band is a
   widget whose geometry `ui.keybind` writes, and the pointer position comes from the `POINTER` resource,
   so this file creates no element and listens for no mousemove.
-- **The low-level keyboard hook is for the CONTEXT-MENU gestures only.** `rawinput.rs::menu_hook` swallows the
+- **The low-level keyboard hook is for the CONTEXT-MENU gestures only.** `platform/windows/rawinput.rs::menu_hook` swallows the
   menu/Apps key and Shift+F10, and only while our window is the foreground: Windows answers those gestures by
   entering menu mode and switching the cursor to an arrow, which no page-side `preventDefault` can cancel. The
   ESC half is GONE (P1.72) - it existed only because the browser's pointer lock treats ESC as its default unlock

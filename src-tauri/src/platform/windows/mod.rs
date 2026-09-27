@@ -1,12 +1,16 @@
-// ===== THE WINDOWS BACKEND (P1.79) =====
+// ===== THE WINDOWS CURSOR BACKEND (P1.79/P1.80) =====
 //
-// Everything in this file touches Win32. It is the platform half of the cursor mechanism: it reads
-// the state into a `CursorProbe`, applies a `CursorPlan`/`ClipRect`/shape, and owns the window
-// procedure subclass. It was `win.rs` before the seam existed; the rules it serves are in
-// `cursor_model.rs` and the policy that drives it is in `cursor_session.rs`.
+// Everything in this file touches Win32 for the POINTER: it reads the state into a `CursorProbe`,
+// applies a `CursorPlan`/`ClipRect`/shape, moves the pointer and owns the window-procedure
+// subclass. It was `win.rs` before the seam existed; the rules it serves are in `cursor_model.rs`,
+// the policy that drives it is in `cursor_session.rs`, and the contract it implements is
+// `crate::platform::CursorBackend`.
 //
 // Copied from SDL3 (zlib) where noted: `WIN_UpdateClipCursor` / `WIN_SetCursorPos`
 // (SDL_windowswindow.c), `SDL_RedrawCursor` (SDL_mouse.c) and `SDL_HINT_MOUSE_RELATIVE_MODE_CENTER`.
+//
+// The raw-input collector and the WebView2 half are siblings of this file (`rawinput.rs`,
+// `webview.rs`); all three implement a trait from `crate::platform`.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
@@ -15,6 +19,12 @@ use tauri::WebviewWindow;
 use crate::cursor_model::{
     rect_is_empty, rect_is_zero, ClipPos, ClipRect, CursorModel, CursorProbe, CursorShape,
 };
+use crate::platform::{CursorBackend, NativeWindow};
+
+mod rawinput;
+mod webview;
+pub use rawinput::WindowsRawInput;
+pub use webview::WindowsWebview;
 
 /// Is that window the FOREGROUND one right now? (the platform fact the policy keeps asking for)
 pub fn is_foreground(hwnd: isize) -> bool {
@@ -74,8 +84,8 @@ pub fn kick_cursor_repaint() {
             // "the position really did change once" effect (the means originally used to force the
             // system to repaint the cursor overlay), but makes it symmetric, so the player cannot
             // see it and it never accumulates.
-            let _ = crate::rawinput::SetCursorPos(p.x + 1, p.y);
-            let _ = crate::rawinput::SetCursorPos(p.x, p.y);
+            let _ = SetCursorPos(p.x + 1, p.y);
+            let _ = SetCursorPos(p.x, p.y);
         }
         // Then toggle the visibility once more: showing↔hiding itself forces a repaint, and
         // stacking the two means is the most reliable.
@@ -190,9 +200,9 @@ fn remote_session() -> bool {
 /// makes the move invisible (P1.55).
 pub fn warp_to(x: i32, y: i32) {
     unsafe {
-        let _ = crate::rawinput::SetCursorPos(x, y);
-        let _ = crate::rawinput::SetCursorPos(x + 1, y);
-        let _ = crate::rawinput::SetCursorPos(x, y);
+        let _ = SetCursorPos(x, y);
+        let _ = SetCursorPos(x + 1, y);
+        let _ = SetCursorPos(x, y);
     }
 }
 
@@ -519,7 +529,7 @@ extern "system" {
     fn GetForegroundWindow() -> isize;
     fn GetAncestor(hwnd: isize, flags: u32) -> isize;
     fn GetAsyncKeyState(v_key: i32) -> i16;
-fn GetSystemMetrics(index: i32) -> i32;
+    fn GetSystemMetrics(index: i32) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn SendMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
     // These two are also declared in rawinput.rs (not pub there, so they are declared again here;
@@ -527,6 +537,7 @@ fn GetSystemMetrics(index: i32) -> i32;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
     fn GetCurrentProcessId() -> u32;
     fn SetCursor(cursor: isize) -> isize;
+    fn SetCursorPos(x: i32, y: i32) -> i32;
     fn LoadCursorW(hinst: isize, name: *const u16) -> isize;
     fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> isize;
@@ -540,64 +551,68 @@ fn GetSystemMetrics(index: i32) -> i32;
 // nudges that predate it - `refresh_cursor` (a synthetic `WM_SETCURSOR`) and `kick_cursor_repaint` (the
 // symmetric `SetCursorPos` jog) - are still here and change nothing about visibility: the P1.73 boot.log shows
 // the cursor staying undrawn for 1.5 s with both of them running.)
-/// ===== Option A: turn off WebView2's **browser accelerator keys** =====
-///
-/// WebView2 defaults to `AreBrowserAcceleratorKeysEnabled = true`, so these keys are taken over by
-/// the browser:
-///   F3 -> pops up "Find" (in this project F3 is the debug panel / the F3+F4 game-mode picker hotkey!)
-///   Ctrl+F -> find bar, F5 -> reload, F12 -> DevTools, Ctrl+P -> print ...
-///
-/// Tauri 2.11 does **not** expose this switch (in `tauri-2.11.5/src` there is only the menu
-/// accelerator, no `accelerator_keys`). wry does (`with_browser_accelerator_keys`, landing on
-/// `SetAreBrowserAcceleratorKeysEnabled(false)`), so this goes through Tauri's official
-/// `with_webview` to obtain `ICoreWebView2Controller` and set it once.
-///
-/// The cost (informed consent): **Ctrl+C / Ctrl+V / Ctrl+A and the like are disabled with it**.
-/// The game does not need them.
-/// The result is written to logs\boot.log, so it is easy to confirm whether it was set or not.
-pub fn disable_browser_accelerator_keys(window: &WebviewWindow, log_root: std::path::PathBuf) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
-    use windows::core::Interface;
 
-    // The closure must be 'static, so root has to be moved in; the outer Err branch still needs
-    // it, so keep a copy first.
-    let root_for_outer_log = log_root.clone();
-    match window.with_webview(move |webview| {
-        // SAFETY: with_webview guarantees this callback runs while the webview is alive, and on
-        // the right thread.
-        // On Windows `PlatformWebview::controller()` **returns** ICoreWebView2Controller directly
-        // (not a raw pointer — that is the macOS branch's signature).
-        let result = unsafe {
-            webview
-                .controller()
-                .CoreWebView2()
-                .and_then(|core| core.Settings())
-                .and_then(|settings| settings.cast::<ICoreWebView2Settings3>())
-                .and_then(|settings3| settings3.SetAreBrowserAcceleratorKeysEnabled(false))
-                // **WebView2's own context menu must be disabled as well**. It is popped up by the
-                // **host** (not by the page), so preventDefault on the page's `contextmenu` cannot
-                // block it; and it pops a window on the menu key / Shift+F10 / right-click —
-                // Windows gives that popup a **visible cursor**, our 8ms cursor sentinel then
-                // presses it back to hidden, and what the player sees is "the mouse flashes".
-                // In the game right-click is "place a block", so no context menu is needed at all.
-                .and_then(|_| {
-                    webview
-                        .controller()
-                        .CoreWebView2()
-                        .and_then(|core| core.Settings())
-                        .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(false))
-                })
-        };
-        let line = match result {
-            Ok(()) => "webview2: browser accelerator keys + DEFAULT CONTEXT MENUS disabled".to_string(),
-            Err(e) => format!("webview2: FAILED to disable browser accelerator keys / context menus: {e}"),
-        };
-        crate::game::append_boot(&log_root, &line);
-    }) {
-        Ok(()) => {}
-        Err(e) => crate::game::append_boot(
-            &root_for_outer_log,
-            &format!("webview2: with_webview failed: {e}"),
-        ),
+// ===== THE TRAIT: one implementation of the seam's pointer contract =====
+/// The Windows cursor backend. A unit struct: the state lives in the model table and in this
+/// module's flags, so there is nothing to construct.
+pub struct WindowsCursor;
+
+impl CursorBackend for WindowsCursor {
+    fn native_window(&self, window: &WebviewWindow) -> Option<NativeWindow> {
+        // The HWND is what every Win32 call in this backend needs; `isize` is how the model stores
+        // it, so the shared layer only ever passes an opaque handle around.
+        window.hwnd().ok().map(|h| NativeWindow(h.0 as isize))
+    }
+
+    fn probe_of(&self, m: &CursorModel) -> CursorProbe {
+        probe_of(m)
+    }
+
+    fn trace_of(&self, m: &CursorModel) -> String {
+        trace_of(m)
+    }
+
+    fn is_foreground(&self, hwnd: isize) -> bool {
+        is_foreground(hwnd)
+    }
+
+    fn apply_clip(&self, m: &mut CursorModel, clip: Option<ClipRect>) -> bool {
+        apply_clip(m, clip)
+    }
+
+    fn apply_shape(&self, m: &mut CursorModel, shape: CursorShape) -> bool {
+        apply_shape(m, shape)
+    }
+
+    fn apply_cursor(&self, visible: bool) {
+        apply_cursor(visible)
+    }
+
+    fn warp_to(&self, x: i32, y: i32) {
+        warp_to(x, y)
+    }
+
+    fn cursor_visible_now(&self) -> bool {
+        cursor_visible_now()
+    }
+
+    fn refresh_cursor(&self) -> bool {
+        refresh_cursor()
+    }
+
+    fn kick_cursor_repaint(&self) {
+        kick_cursor_repaint()
+    }
+
+    fn clip_is_postponed(&self) -> bool {
+        clip_is_postponed()
+    }
+
+    fn clear_clip_postponed(&self) {
+        clear_clip_postponed()
+    }
+
+    fn install_menu_suppressor(&self, hwnd: isize) -> bool {
+        install_menu_suppressor(hwnd)
     }
 }

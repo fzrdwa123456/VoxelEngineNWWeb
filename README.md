@@ -96,7 +96,7 @@ game\saves\
 | 原来（NW.js） | 现在（Tauri v2） |
 |---|---|
 | `platform/shell.ts`：`eval("require")("node:fs")` 同步读写 + `nw.Window.get()` | 重写：启动一次 `invoke("preload_shell")` 把设置/窗口/vsync 取进内存，**`readSettings()` 保持同步**；窗口操作走自定义命令 |
-| `platform/rawinput.ts`：`require("rawinput.node")` 这个 NAPI 插件 | 重写：采集在 Rust（`src-tauri/src/rawinput.rs`），Rust 每 4ms `emit("raw-input")` 推增量；前端逐条做判定（事件期）并累加，**每帧 `frameLook()` 应用一次** —— 视角路径上没有任何定时器 |
+| `platform/rawinput.ts`：`require("rawinput.node")` 这个 NAPI 插件 | 重写：采集在 Rust（`src-tauri/src/rawinput_session.rs` + 平台采集器 `src-tauri/src/platform/windows/rawinput.rs`），Rust 每 4ms `emit("raw-input")` 推增量；前端逐条做判定（事件期）并累加，**每帧 `frameLook()` 应用一次** —— 视角路径上没有任何定时器 |
 | `rendering/textures.ts`：`node:fs` 列目录 + 读 zip | 字节由 Rust 扫好（`packs.rs`）一次性取来，**MC 命名空间归一化/优先级/layering 一行没动** |
 | `main.ts` 顶部 `initShell()` | 多了两行 `await preloadShell(); await preloadPacks();` —— Tauri 命令是异步的，而后面所有读都是同步的 |
 
@@ -132,7 +132,7 @@ game\saves\
    所以 `index.html` 里有一个 classic inline 脚本（在 module 之前）直接打 IPC 全局报错，
    `main.ts` 的 preload 也包了 try/catch。内容是 `html loaded` / `error: ...` / `rejection: ...`。
    **排查"窗口不出来"先看这个文件。**
-7. **关掉了 WebView2 的浏览器加速键**（`platform/windows.rs::disable_browser_accelerator_keys`）。
+7. **关掉了 WebView2 的浏览器加速键**（`platform/windows/webview.rs::disable_browser_accelerator_keys`）。
    WebView2 默认 `AreBrowserAcceleratorKeysEnabled = true`，于是 **F3 会弹出"查找"**
    （本项目里 F3 是调试面板 + F3/F4 游戏模式选择器的热键）、Ctrl+F 弹查找栏、F5 刷新、F12 开 DevTools。
    Tauri 2.11 没暴露这个开关（只有菜单 accelerator），所以走官方的 `with_webview` 拿到

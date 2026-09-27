@@ -64,12 +64,22 @@ src-tauri/src/lib.rs       the command bus + Builder + focus-event forwarding
 src-tauri/src/game.rs      game root / settings.json / logs / the vsync switch / WebView2 arguments
 src-tauri/src/packs.rs     resource-pack and mod scanning (lists directories and reads bytes only, no normalisation)
 src-tauri/src/cursor_session.rs   the cursor STATE MACHINE: the one table, the capture lifecycle, reconcile, diagnostics
-src-tauri/src/platform/mod.rs      the SEAM: cfg + the interface a backend implements (+ fullscreen, pure Tauri API)
-src-tauri/src/platform/windows.rs  the WINDOWS backend: probe / ClipCursor / SetCursor / warp / the window subclass
-src-tauri/src/rawinput.rs  raw mouse input (a direct translation of the original rawinput/src/lib.rs, NAPI -> Tauri events)
+src-tauri/src/rawinput_session.rs  the raw-input SESSION: the accumulators, the 4 ms push thread, the RAWMON line
+src-tauri/src/platform/mod.rs      the SEAM: the three traits a backend implements + the cfg arms (+ fullscreen, pure Tauri)
+src-tauri/src/platform/windows/mod.rs      the WINDOWS pointer backend: probe / ClipCursor / SetCursor / warp / window subclass
+src-tauri/src/platform/windows/rawinput.rs the WINDOWS device backend: RIDEV_INPUTSINK + WM_INPUT + the keyboard hook
+src-tauri/src/platform/windows/webview.rs  the WINDOWS webview host: launch arguments + accelerator-key/context-menu switch
 ```
 
-### How rawinput.rs changed
+**Do not use `tauri.windows.conf.json` for a window flag**: the overlay is merged with `json_patch::merge`,
+which replaces arrays, so a partial `app.windows` entry drops `center`/size/`visible` (P1.80 reverted exactly
+that). Non-array overlay keys are fine.
+
+**Neither `*_session.rs` file names a platform**: no `cfg`, no Win32 name, no `unsafe` (verified in
+non-comment code). Everything OS-specific is one of the three traits in `platform/mod.rs`, and a new target
+is a new `platform/<os>/mod.rs` implementing them - nothing else in the crate changes.
+
+### How the raw input changed
 
 The collection half is **copied line for line** from the original `rawinput/src/lib.rs`: an `HWND_MESSAGE` hidden window +
 `RegisterRawInputDevices(RIDEV_INPUTSINK)` + `WM_INPUT` -> `RAWMOUSE.lLastX/Y` -> `AtomicI32`.

@@ -1,27 +1,26 @@
-// Raw mouse input — the NAPI version in the original rawinput/src/lib.rs ported to Tauri.
+// ===== THE WINDOWS RAW-INPUT COLLECTOR (P1.80) =====
 //
-// The original shape: JS calls pollDelta() every frame to actively **pull** (a synchronous NAPI
-// call that reads and writes in-process atomics).
-// Tauri has no synchronous IPC, so the direction is inverted: the Rust side **pushes** —
-// the collector thread still accumulates into the atomics, and a separate throttling thread takes
-// the accumulated value and zeroes it every BATCH_MS, sending it to the frontend through the Tauri
-// event "raw-input"; the frontend accumulates in the event callback, and poll() still takes it
-// synchronously.
+// Everything here touches Win32 for the DEVICE: a hidden \`HWND_MESSAGE\` window registered with
+// \`RIDEV_INPUTSINK\` (global input, even in the background), a message loop that parses every
+// \`WM_INPUT\` packet into deltas and button edges, and a low-level keyboard hook that exists solely
+// to swallow the context-menu gestures. It was \`rawinput.rs\` before the seam existed.
 //
-// The semantics are unchanged: both consume relative deltas in per-frame batches — only the
-// transport changed from pull to push.
-// Throttling is necessary: WM_INPUT can arrive hundreds of times a second, and one IPC event per
-// message would drown the webview.
+// It PUSHES into \`crate::rawinput_session\`'s accumulators and decides nothing: what a delta means,
+// how often the page hears about it and every rule live in the session (and in \`cursor_session\`).
 //
-// dwFlags does not set RIDEV_NOLEGACY: legacy messages are not swallowed, so Chromium's pointer
-// lock is unaffected and the two paths run in parallel.
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
-use std::sync::{mpsc, Mutex, OnceLock};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+// Copied from the original NW.js \`rawinput/src/lib.rs\` where noted; the Raw Input reading mirrors
+// SDL's \`SDL_windowsevents.c\` (see the BUTTONS note below).
 
-use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use crate::platform::RawInputBackend;
+use crate::rawinput_session::{
+    ACC_ABS_DROPPED, ACC_BTN_DOWN, ACC_BTN_TOTAL, ACC_BTN_UP, ACC_DX, ACC_DY, ACC_RID_FAIL,
+    ACC_WM_INPUT_TOTAL,
+};
 
 const WM_CLOSE: u32 = 0x0010;
 const WM_DESTROY: u32 = 0x0002;
@@ -31,10 +30,6 @@ const RIM_TYPEMOUSE: u32 = 0;
 const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
 const RIDEV_INPUTSINK: u32 = 0x00000100;
 const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
-
-/// Push throttle: at most one event per 4 ms (≈250/s) — denser than one frame, which is enough
-/// and does not flood IPC
-const BATCH_MS: u64 = 4;
 
 // ===== A low-level keyboard hook, solely to swallow the CONTEXT-MENU gestures =====
 // The menu/Apps key and Shift+F10 make Windows enter menu state and switch the cursor to an arrow; the
@@ -202,7 +197,6 @@ extern "system" {
     fn PostMessageW(hwnd: isize, msg: u32, w_param: usize, l_param: isize) -> i32;
     fn GetCurrentThread() -> isize;
     fn SetThreadPriority(thread: isize, priority: i32) -> i32;
-    pub fn SetCursorPos(x: i32, y: i32) -> i32;
     // ===== Used by the low-level context-menu hook =====
     fn SetWindowsHookExW(
         id_hook: i32,
@@ -219,24 +213,6 @@ extern "system" {
     fn GetAncestor(hwnd: isize, flags: u32) -> isize;
     fn GetCurrentProcessId() -> u32;
 }
-
-// ===== Global accumulators (single instance; multiple instances merge counts, harmless in a game) =====
-static ACC_DX: AtomicI32 = AtomicI32::new(0);
-static ACC_DY: AtomicI32 = AtomicI32::new(0);
-static ACC_ABS_DROPPED: AtomicI32 = AtomicI32::new(0);
-/// Diagnostics: total WM_INPUT messages received (including the filtered absolute-coordinate events)
-static ACC_WM_INPUT_TOTAL: AtomicI32 = AtomicI32::new(0);
-/// Diagnostics: number of GetRawInputData failures
-static ACC_RID_FAIL: AtomicI32 = AtomicI32::new(0);
-/// **Raw button edges** (P1.76): bitmasks, OR-ed in by the collector and cleared by the push thread. See the
-/// BUTTONS note above for why these come from the device and not from `mousedown`.
-static ACC_BTN_DOWN: AtomicU32 = AtomicU32::new(0);
-static ACC_BTN_UP: AtomicU32 = AtomicU32::new(0);
-/// Diagnostics: how many packets carried a button edge (shown on the RAWMON line as `btn=`)
-static ACC_BTN_TOTAL: AtomicI32 = AtomicI32::new(0);
-
-static RUNNING: AtomicBool = AtomicBool::new(false);
-static REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// Hook handle (0 = not installed -> **fail open**: the gesture is not swallowed and Windows may reveal
 /// the cursor for a moment)
@@ -443,44 +419,12 @@ unsafe extern "system" fn wnd_proc(hwnd: isize, msg: u32, w_param: usize, l_para
     DefWindowProcW(hwnd, msg, w_param, l_param)
 }
 
-#[derive(Clone, Serialize)]
-pub struct MouseDelta {
-    pub dx: i32,
-    pub dy: i32,
-    /// Emission time (milliseconds since the push thread started). The frontend uses it to estimate
-    /// "how long this event sat in the queue" — see the RAWLAG line.
-    pub t: u64,
-}
-
-/// **Raw button edges** (P1.76): two bitmasks, one bit per button (0 left, 1 middle, 2 right, 3 = X1, 4 = X2),
-/// so a 4 ms batch can carry "left down + right up" without any ordering information being needed.
-#[derive(Clone, Serialize)]
-pub struct RawButtons {
-    pub down: u32,
-    pub up: u32,
-}
-
-/// The payload name of every event pushed to the frontend
-const EVENT: &str = "raw-input";
-/// …and the payload name for the button edges (P1.76)
-const BUTTON_EVENT: &str = "raw-buttons";
-
-/// Starts the listener: the collector thread + the push thread. On failure it returns the reason
-/// and the game runs as usual (merely without raw input as a fallback).
-pub fn start(app: AppHandle) -> Result<(), String> {
-    {
-        let guard = state().lock().unwrap();
-        if guard.is_some() {
-            return Ok(()); // already started
-        }
-    }
-
-    let running = std::sync::Arc::new(AtomicBool::new(true));
-    let registered = std::sync::Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<Result<isize, String>>();
+/// **Start the collector** and block until it has reported. The thread's own stop flag and the
+/// hidden window it created are kept in the registry `stop_collector` reads.
+fn spawn_collector() -> Result<(isize, bool), String> {
+    let (tx, rx) = mpsc::channel::<Result<(isize, bool), String>>();
+    let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
-    let registered_clone = registered.clone();
-
     let handle = std::thread::spawn(move || unsafe {
         let class_name = wide("VoxelRawMouseListener");
         let h_instance = GetModuleHandleW(std::ptr::null());
@@ -543,9 +487,8 @@ pub fn start(app: AppHandle) -> Result<(), String> {
             hwnd_target: hwnd,
         };
         let ok = RegisterRawInputDevices(&device, 1, std::mem::size_of::<RawInputDevice>() as u32);
-        registered_clone.store(ok != 0, Ordering::SeqCst);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        let _ = tx.send(Ok(hwnd));
+        let _ = tx.send(Ok((hwnd, ok != 0)));
 
         // Message loop: blocks waiting for WM_INPUT / WM_CLOSE; when running=false, stop() sends
         // WM_CLOSE to wake it and exit
@@ -566,161 +509,58 @@ pub fn start(app: AppHandle) -> Result<(), String> {
         // Note: UnregisterClassW is deliberately not called — leaking one class name per process is
         // harmless and avoids multiple instances treading on each other
     });
-
-    let hwnd = rx
+    let out = rx
         .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "rawinput thread init timeout".to_string())?
-        .map_err(|e| e)?;
-
-    RUNNING.store(true, Ordering::SeqCst);
-    // Whether raw input actually registered is taken from what the thread reported (the context-menu
-    // hook works even when it fails)
-    REGISTERED.store(registered.load(Ordering::SeqCst), Ordering::SeqCst);
-
-    // Push thread: at a fixed rate it takes and zeroes the accumulated values and emits events
-    // (the frontend's synchronous poll() reads its own accumulator)
-    std::thread::spawn(move || {
-        let mut tick: u32 = 0;
-        let t0 = Instant::now();
-        // ===== RAWMON diagnostics (one line per second) =====
-        // Purpose: turn "holding a key + turning the view is not smooth" from guesswork into
-        // numbers. This line reports **how many times each of four possible paths moved during this
-        // second**: emits=IPC events we pushed to the frontend (capped at 250/s); wmIn=raw mouse
-        // packets delivered by the system; btn=packets that carried a button edge (P1.76: if this stays 0 while
-        // you click, the buttons are not reaching us at all); cursorFix=how many times the cursor sentinel
-        // **actually corrected** the state (the `CURSOR_ENFORCED` delta — always climbing = a tug of war with
-        // the system); hookSeen=how many times the low-level keyboard hook was called (always 0 =
-        // the hook never reaches the input path). The rest are the state at that moment.
-        let mut emits: u32 = 0;
-        let mut last_wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
-        let mut last_btn = ACC_BTN_TOTAL.load(Ordering::Relaxed);
-        let mut last_fix = crate::cursor_session::cursor_enforced_count() as i32;
-        let mut last_seen = HOOK_SEEN.load(Ordering::Relaxed);
-        let mut last_mon = Instant::now();
-        while RUNNING.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(BATCH_MS));
-            tick = tick.wrapping_add(1);
-            // Cursor sentinel: reconcile visibility every second tick (≈8 ms), forcing the expected
-            // value back onto a state that Windows menu mode / Chromium's push timing has scrambled.
-            // In steady state GetCursorInfo agrees and nothing extra happens.
-            // Cursor sentinel: reconcile visibility **every tick (≈4 ms)** (it used to be every
-            // second tick) — the "menu key flashes the cursor" is exactly the interval between "the
-            // system lights the cursor up -> the sentinel forces it back"; halving the period halves
-            // that interval (the frontend also rewrites the hidden state on the key edge itself, so
-            // both sides fight over that same frame).
-            crate::cursor_session::cursor_sentinel(&app);
-            if tick % 2 == 0 {
-                // Capture must stay on only while in the foreground: when it is not, tear it down
-                // and tell the frontend (which "releases the mouse + pauses if it should").
-                // Releasing on the Rust side alone is not enough — the frontend's
-                // INPUT_STATE.locked is still true, so the view keeps turning and the cursor stays
-                // hidden.
-                if crate::cursor_session::capture_foreground_check(&app) {
-                    let _ = app.emit("capture-lost", ());
-                }
-                // Probe: emitted once each at 4s / 8s / 12s (the old "once 1.5 seconds after
-                // startup" fired before any key was pressed, which answered nothing). If seen does
-                // not climb while keys are pressed, the hook truly is never called; hook=0x0 means
-                // the install never succeeded.
-                if tick == 1000 || tick == 2000 || tick == 3000 {
-                    let _ = app.emit("hook-probe", hook_probe_line());
-                }
-            }
-            let dx = ACC_DX.swap(0, Ordering::Relaxed);
-            let dy = ACC_DY.swap(0, Ordering::Relaxed);
-            if dx != 0 || dy != 0 {
-                emits += 1;
-                let _ = app.emit(EVENT, MouseDelta { dx, dy, t: t0.elapsed().as_millis() as u64 });
-            }
-            // **…and the button edges of the same batch (P1.76)**, on their own channel so a button edge with
-            // no motion still arrives (a click that does not move the mouse is the common case).
-            let down = ACC_BTN_DOWN.swap(0, Ordering::Relaxed);
-            let up = ACC_BTN_UP.swap(0, Ordering::Relaxed);
-            if down != 0 || up != 0 {
-                emits += 1;
-                let _ = app.emit(BUTTON_EVENT, RawButtons { down, up });
-            }
-
-            // RAWMON: one line per second (emitted as an event, the frontend writes it to
-            // debug.log along the same route as HOOKPROBE)
-            let now = Instant::now();
-            if now.duration_since(last_mon).as_millis() >= 1000 {
-                let wm = ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed);
-                let fix = crate::cursor_session::cursor_enforced_count() as i32;
-                let seen = HOOK_SEEN.load(Ordering::Relaxed);
-                let (desired, showing) = crate::cursor_session::cursor_state();
-                let line = format!(
-                    "RAWMON emits={} wmIn={} btn={} cursorFix={} hookSeen={} ridFail={} desired={} showing={} capture={} fgOurs={}",
-                    emits,
-                    wm - last_wm,
-                    ACC_BTN_TOTAL.load(Ordering::Relaxed) - last_btn,
-                    fix - last_fix,
-                    seen - last_seen,
-                    ACC_RID_FAIL.load(Ordering::Relaxed),
-                    desired,
-                    if showing { 1 } else { 0 },
-                    if crate::cursor_session::capture_active() { 1 } else { 0 },
-                    if unsafe { foreground_is_ours() } { 1 } else { 0 },
-                );
-                let _ = app.emit("raw-mon", line);
-                emits = 0;
-                last_wm = wm;
-                last_btn = ACC_BTN_TOTAL.load(Ordering::Relaxed);
-                last_fix = fix;
-                last_seen = seen;
-                last_mon = now;
-            }
-        }
-    });
-
+        .map_err(|_| "rawinput thread init timeout".to_string())??;
     *state().lock().unwrap() = Some(Listener {
         running,
         handle: Mutex::new(Some(handle)),
-        hwnd: AtomicIsize::new(hwnd),
+        hwnd: AtomicIsize::new(out.0),
     });
-    Ok(())
+    Ok(out)
 }
 
-/// Diagnostics data. The field names are deliberately camelCase — serde then serialises straight
-/// into the shape of the frontend's RawStats interface.
-#[derive(Serialize)]
-#[allow(non_snake_case)]
-pub struct RawStats {
-    pub available: bool,
-    pub wmInputTotal: i32,
-    pub ridFail: i32,
-    pub absoluteDropped: i32,
-    /// Whether the low-level context-menu hook is installed (false = fail open: the menu key /
-    /// Shift+F10 reach Windows and may flash the cursor for a frame)
-    pub menuHook: bool,
-}
+/// **The Windows raw-input backend.** A unit struct: the device state is the atomics and the
+/// registry above.
+pub struct WindowsRawInput;
 
-pub fn stats() -> RawStats {
-    RawStats {
-        available: RUNNING.load(Ordering::SeqCst) && REGISTERED.load(Ordering::SeqCst),
-        wmInputTotal: ACC_WM_INPUT_TOTAL.load(Ordering::Relaxed),
-        ridFail: ACC_RID_FAIL.load(Ordering::Relaxed),
-        absoluteDropped: ACC_ABS_DROPPED.load(Ordering::Relaxed),
-        menuHook: MENU_HOOK.load(Ordering::SeqCst) != 0,
+impl RawInputBackend for WindowsRawInput {
+    fn start_collector(&self) -> Result<(isize, bool), String> {
+        spawn_collector()
     }
-}
 
-pub fn stop() {
-    RUNNING.store(false, Ordering::SeqCst);
-    // Remove the hook (an unremoved low-level hook keeps being called until the process exits)
-    let hook = MENU_HOOK.swap(0, Ordering::SeqCst);
-    if hook != 0 {
-        unsafe { UnhookWindowsHookEx(hook) };
+    fn stop_collector(&self) {
+        // Remove the hook (an unremoved low-level hook keeps being called until the process exits)
+        let hook = MENU_HOOK.swap(0, Ordering::SeqCst);
+        if hook != 0 {
+            unsafe { UnhookWindowsHookEx(hook) };
+        }
+        let mut guard = state().lock().unwrap();
+        if let Some(l) = guard.take() {
+            l.running.store(false, Ordering::SeqCst);
+            let hwnd = l.hwnd.swap(0, Ordering::SeqCst);
+            if hwnd != 0 {
+                unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            }
+            if let Some(h) = l.handle.lock().unwrap().take() {
+                let _ = h.join();
+            }
+        }
     }
-    let mut guard = state().lock().unwrap();
-    if let Some(l) = guard.take() {
-        l.running.store(false, Ordering::SeqCst);
-        let hwnd = l.hwnd.swap(0, Ordering::SeqCst);
-        if hwnd != 0 {
-            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
-        }
-        if let Some(h) = l.handle.lock().unwrap().take() {
-            let _ = h.join();
-        }
+
+    fn hook_probe_line(&self) -> String {
+        hook_probe_line()
+    }
+
+    fn hook_seen(&self) -> i32 {
+        HOOK_SEEN.load(Ordering::Relaxed)
+    }
+
+    fn foreground_is_ours(&self) -> bool {
+        unsafe { foreground_is_ours() }
+    }
+
+    fn menu_hook_installed(&self) -> bool {
+        MENU_HOOK.load(Ordering::SeqCst) != 0
     }
 }

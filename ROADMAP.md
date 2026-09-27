@@ -1726,6 +1726,47 @@ Still outstanding:
   **`rawinput.rs` is deliberately NOT cut in this round**: it is the same seam, but it shares no code with the
   cursor path, so folding it into this diff would only make a regression harder to localise. It is step 2; turning
   the free functions into `trait`s (so the compiler names what a port is missing) is step 3.
+- **P1.80 - the whole Windows-native side moves behind the seam: raw input joins the cursor, and the seam
+  becomes TRAITS.** `DONE`, by request ("把这两步弄好让我再次测试"). P1.79 cut the POINTER out of `win.rs`; this
+  round cuts the DEVICE and finishes the contract.
+  1. **`rawinput.rs` (726 lines) is now two files.** `rawinput_session.rs` (cross-platform: the accumulators the
+     platform pushes into, the 4 ms push thread that drains them into `raw-input`/`raw-buttons`, the RAWMON line,
+     `RawStats`, start/stop) and `platform/windows/rawinput.rs` (the device: the hidden `HWND_MESSAGE` window,
+     `RIDEV_INPUTSINK`, the `WM_INPUT` parser, the `WH_KEYBOARD_LL` context-menu hook). The data direction is the
+     design: **the collector never emits and the push thread never touches the device.**
+  2. **The seam is three traits** (`CursorBackend`, `RawInputBackend`, `WebviewBackend`) instead of a documented
+     function list, so a port gets a COMPILE error naming the method it forgot rather than a prose list that can
+     drift. `platform/mod.rs` keeps one-line delegations (`platform::probe_of(..)`), which is why
+     `cursor_session.rs` did not change by a single line in this round.
+  3. **The backend is a directory**: `platform/windows/{mod,rawinput,webview}.rs` - pointer / device / webview host.
+     The WebView2 half left `game.rs` and `lib.rs` too: `game.rs::apply_browser_args` now asks
+     `platform::browser_args_base()` and publishes through `platform::publish_browser_args()`.
+     **The Windows-only WINDOW FLAGS stayed in `tauri.conf.json`, and that is now a rule, not a choice.**
+     This round first moved `additionalBrowserArgs` into Tauri's platform overlay `tauri.windows.conf.json`
+     and had to REVERT it: `tauri-utils/src/config/parse.rs:185` merges the overlay with
+     `json_patch::merge` (RFC 7386), where objects merge recursively but **ARRAYS ARE REPLACED WHOLESALE** -
+     so a partial `app.windows: [{ label, additionalBrowserArgs }]` entry silently threw away `center`,
+     `width`/`height`, `visible: false`, `title` and every other window field with it, and the window
+     stopped being centred (**reported the same round: "每次启动窗口位置不同"**). The "verification" that
+     missed it only grepped the built exe for the flag - presence, not absence-of-damage, which is exactly
+     the wrong check for a merge. Overlaying a window requires repeating the WHOLE window object (a drift
+     trap), and `additionalBrowserArgs` is documented Windows-only anyway, so the shared file is its home.
+     Non-array overlay keys (a future `bundle.targets`) are safe.
+  4. **No platform handle leaks upwards any more**: `lib.rs`'s three `window.hwnd()` sites became
+     `platform::native_window(&window)` returning an opaque `NativeWindow`; `isize` survives only inside the
+     model (`CursorModel.hwnd`, deliberately frozen).
+  5. **The seam is now verifiable by grep**, and it is clean: `cursor_session.rs`, `rawinput_session.rs`,
+     `lib.rs`, `game.rs` and `main.rs` contain **zero** non-comment platform traces; `#[cfg]` appears only in
+     `platform/mod.rs`. `SetCursorPos` was also pulled back where it belongs (it used to be declared in
+     `rawinput.rs` and borrowed by the cursor backend - a reverse dependency across the seam).
+  Behaviour is unchanged: the moves are line-range copies, and the only edits are the seam plumbing. Gates: tsc 0,
+  check:ecs 69 groups OK (its Rust-source assertions read the four files in order, and the two diagnostic-probe
+  table rows were repointed), 29 pure model tests pass.
+  **Still open**: turning the Windows `extern "system"` declarations into typed bindings (`windows` crate,
+  `core-graphics`, `x11rb`) is a per-backend preference, not part of the seam. And the two browser-argument
+  lists disagree in one place (the config carries `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`
+  and `game.rs`'s append does not repeat it, so switching vsync off silently drops those three flags) - noted,
+  not changed.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

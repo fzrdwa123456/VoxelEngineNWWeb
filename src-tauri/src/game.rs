@@ -162,8 +162,9 @@ pub fn append_boot(root: &Path, message: &str) {
 // ===== GPU vsync switch =====
 // The original NW.js build wrote --disable-gpu-vsync into its own package.json's chromium-args, which
 // takes effect on restart. Tauri's WebView2 arguments can only be supplied at launch, so this leaves a
-// switch file that run() reads before creating the window to decide whether to stuff
-// --disable-gpu-vsync into WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS. Same semantics: effective on restart.
+// switch file that run() reads before creating the window to decide whether to append
+// --disable-gpu-vsync to the window host's launch arguments (the host owns the variable's name -
+// see `platform::browser_args_base`). Same semantics: effective on restart.
 // The default matches the NW.js build: vsync is off by default (the original app/package.json's
 // chromium-args already carried this flag).
 pub fn read_vsync_disabled(root: &Path) -> bool {
@@ -184,18 +185,15 @@ pub fn write_vsync_disabled(root: &Path, disabled: bool) -> bool {
     )
     .is_ok()
 }
-/// Must be called before tauri::Builder. additionalBrowserArgs in tauri.conf.json are the **base**
-/// arguments; this only appends --disable-gpu-vsync when the switch asks for it.
+/// Must be called before tauri::Builder. The **base** launch arguments belong to the window host
+/// (\`crate::platform::browser_args_base\` — WebView2 reads them from the environment before the
+/// webview exists, and a non-empty value REPLACES the list in tauri.conf.json, which is why the
+/// host repeats its base verbatim); this only appends --disable-gpu-vsync when the switch asks for
+/// it. A host that takes no arguments publishes nothing.
 pub fn apply_browser_args(root: &Path) {
     if !read_vsync_disabled(root) {
         return;
     }
-    const BASE: &str = "--autoplay-policy=no-user-gesture-required \
---no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist \
---disable-gesture-requirement-for-presentation \
---disable-blink-features=RateLimitPointerLockRequests";
-    std::env::set_var(
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        format!("{BASE} --disable-gpu-vsync"),
-    );
+    let args = format!("{} --disable-gpu-vsync", crate::platform::browser_args_base());
+    crate::platform::publish_browser_args(&args);
 }

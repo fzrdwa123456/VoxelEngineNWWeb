@@ -2498,8 +2498,8 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
     ["src/plugins/render/systems/diagnostics.ts", /`PHYS mode=/, "PHYS "],
     ["src/boot/main.ts", /`FRAME n=/, "FRAME "],
     ["src/boot/main.ts", /`STALL gap=/, "STALL "],
-    ["src-tauri/src/rawinput.rs", /"RAWMON emits=\{/, "RAWMON "],
-    ["src-tauri/src/rawinput.rs", /"HOOKPROBE seen=\{/, "HOOKPROBE "],
+    ["src-tauri/src/rawinput_session.rs", /"RAWMON emits=\{/, "RAWMON "],
+    ["src-tauri/src/platform/windows/rawinput.rs", /"HOOKPROBE seen=\{/, "HOOKPROBE "],
     // The key bind gestures fire on ordinary clicks, so they are probes too (a click must not write a
     // line into a log whose switch is off).
     ["src/plugins/input/bind-gesture.ts", /`KBCAP mousedown/, "KBCAP "],
@@ -2792,7 +2792,10 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     // P1.79 split win.rs into the cross-platform SESSION and the Windows BACKEND. The assertions
     // below are unchanged; they just read both halves - the session FIRST, so the two `split()`
     // slices further down still see the capture lifecycle in its original order.
-    readSource("src-tauri/src/cursor_session.rs") + readSource("src-tauri/src/platform/windows.rs"),
+    readSource("src-tauri/src/cursor_session.rs") +
+      readSource("src-tauri/src/platform/windows/mod.rs") +
+      readSource("src-tauri/src/platform/windows/rawinput.rs") +
+      readSource("src-tauri/src/platform/windows/webview.rs"),
   );
   assert(/pub fn on_foreground_lost\(\)/.test(winSrc) && /forget_intent\(&mut m\)/.test(winSrc),
     "a foreground loss releases the capture AND forgets the hidden intent (cursor_session.rs)");
@@ -2873,7 +2876,11 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   // **P1.76 - RAW BUTTONS.** SDL reads the button edges out of the same RAWMOUSE packet as the deltas and reports
   // them to the keyboard-focus window (`SDL_windowsevents.c:556-573`, `:588`, `:690-732`), which is why MC's
   // left/right buttons keep working while a shell overlay owns the click. We receive those packets already.
-  const rawinputSrc = stripComments(readSource("src-tauri/src/rawinput.rs"));
+  const rawinputSrc = stripComments(
+    // P1.80 split rawinput.rs into the cross-platform SESSION and the Windows COLLECTOR.
+    readSource("src-tauri/src/rawinput_session.rs") +
+      readSource("src-tauri/src/platform/windows/rawinput.rs"),
+  );
   assert(/const OFF_US_BUTTON_FLAGS: usize = RAWINPUT_HEADER_SIZE \+ 4;/.test(rawinputSrc) &&
       /let btn = u16::from_ne_bytes\(\[buf\[OFF_US_BUTTON_FLAGS\]/.test(rawinputSrc),
     "the raw packet's `usButtonFlags` is parsed (it used to be read past and thrown away)");
