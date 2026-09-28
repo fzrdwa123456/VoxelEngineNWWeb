@@ -1,22 +1,22 @@
 // ===== THE WINDOWS RAW-INPUT COLLECTOR (P1.80) =====
 //
-// Everything here touches Win32 for the DEVICE: a hidden \`HWND_MESSAGE\` window registered with
-// \`RIDEV_INPUTSINK\` (global input, even in the background), a message loop that parses every
-// \`WM_INPUT\` packet into deltas and button edges, and a low-level keyboard hook that exists solely
-// to swallow the context-menu gestures. It was \`rawinput.rs\` before the seam existed.
+// Everything here touches Win32 for the DEVICE: a hidden `HWND_MESSAGE` window registered with
+// `RIDEV_INPUTSINK` (global input, even in the background), a message loop that parses every
+// `WM_INPUT` packet into deltas and button edges, and a low-level keyboard hook that exists solely
+// to swallow the context-menu gestures. It was `rawinput.rs` before the seam existed.
 //
-// It PUSHES into \`crate::rawinput_session\`'s accumulators and decides nothing: what a delta means,
-// how often the page hears about it and every rule live in the session (and in \`cursor_session\`).
+// It PUSHES into `crate::rawinput_session`'s accumulators and decides nothing: what a delta means,
+// how often the page hears about it and every rule live in the session (and in `cursor_session`).
 //
-// Copied from the original NW.js \`rawinput/src/lib.rs\` where noted; the Raw Input reading mirrors
-// SDL's \`SDL_windowsevents.c\` (see the BUTTONS note below).
+// Copied from the original NW.js `rawinput/src/lib.rs` where noted; the Raw Input reading mirrors
+// SDL's `SDL_windowsevents.c` (see the BUTTONS note below).
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::platform::RawInputBackend;
+use crate::platform::{NativeWindow, RawInputBackend};
 use crate::rawinput_session::{
     ACC_ABS_DROPPED, ACC_BTN_DOWN, ACC_BTN_TOTAL, ACC_BTN_UP, ACC_DX, ACC_DY, ACC_RID_FAIL,
     ACC_WM_INPUT_TOTAL,
@@ -525,8 +525,9 @@ fn spawn_collector() -> Result<(isize, bool), String> {
 pub struct WindowsRawInput;
 
 impl RawInputBackend for WindowsRawInput {
-    fn start_collector(&self) -> Result<(isize, bool), String> {
-        spawn_collector()
+    fn start_collector(&self) -> Result<(NativeWindow, bool), String> {
+        // The collector works with the raw Win32 value; this is where it becomes opaque.
+        spawn_collector().map(|(hwnd, registered)| (NativeWindow::from_raw(hwnd), registered))
     }
 
     fn stop_collector(&self) {

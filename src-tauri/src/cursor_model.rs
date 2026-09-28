@@ -58,11 +58,53 @@ pub enum CursorShape {
     Hidden,
 }
 
+/// **THE NATIVE WINDOW HANDLE, AS AN OPAQUE TYPE (P1.82).** Every platform has one - an `HWND` on
+/// Windows, an `NSWindow*` on macOS, an XID or a `GtkWindow*` on Linux - and the model has to remember
+/// WHICH window it manages. The field is PRIVATE on purpose: the shared layers may pass this value
+/// around and ask whether it exists, but they cannot see or invent the integer inside it, so "a
+/// handle is a number" stays inside the backend that has to convert it.
+///
+/// It is an `isize` underneath because that is what every target we build for fits a pointer into
+/// (and what a `static AtomicIsize` can hold). Only `platform/<os>/` calls `from_raw`/`raw`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NativeWindow(isize);
+
+impl NativeWindow {
+    /// No window (yet) - what the old `hwnd == 0` tests meant, with a name.
+    pub const NONE: NativeWindow = NativeWindow(0);
+
+    /// Wrap a raw platform handle. **Backends only.**
+    pub const fn from_raw(raw: isize) -> NativeWindow {
+        NativeWindow(raw)
+    }
+
+    /// The raw value, for the platform call that needs one. **Backends only.**
+    pub const fn raw(&self) -> isize {
+        self.0
+    }
+
+    /// Do we have a window at all?
+    pub const fn is_none(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// The inverse, for the places that read better that way.
+    pub const fn is_some(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl Default for NativeWindow {
+    fn default() -> Self {
+        NativeWindow::NONE
+    }
+}
+
 /// The MODEL: one table. Every field is either an intent, a record of what we did, or a diagnostic.
 #[derive(Clone, Copy, Default)]
 pub struct CursorModel {
-    /// the window we manage (0 = none yet)
-    pub hwnd: isize,
+    /// the window we manage (`NativeWindow::NONE` until the front end hands one over)
+    pub window: NativeWindow,
     /// the front end's INTENT: 0 unknown / 1 visible / 2 hidden
     pub want: u8,
     /// the game wants the mouse for look control (capture / relative mode)
@@ -359,7 +401,7 @@ pub fn hand_back_warp(m: &CursorModel, p: &CursorProbe) -> Option<ClipPos> {
 
 /// The whole rule set. PURE: no Win32, no globals - this is what the table test drives.
 pub fn decide(m: &CursorModel, p: &CursorProbe) -> CursorPlan {
-    if m.hwnd == 0 {
+    if m.window.is_none() {
         return plan(None, CursorShape::Unknown, false, None, false);
     }
     // ===== THE PROJECTION (P1.63) =====
@@ -505,7 +547,7 @@ mod tests {
 
     fn model(relative: bool, clipped: ClipRect) -> CursorModel {
         CursorModel {
-            hwnd: 42,
+            window: NativeWindow::from_raw(42),
             // (P1.63) The front end's boolean: `relative` in this helper means "the game wants the mouse",
             // which is `want == 2` now - the model no longer has a separate capture request.
             want: if relative { 2 } else { 1 },
@@ -666,7 +708,7 @@ mod tests {
     #[test]
     fn an_unmanaged_window_plans_nothing() {
         let mut m = model(false, client());
-        m.hwnd = 0;
+        m.window = NativeWindow::NONE;
         let plan = decide(&m, &probe(true));
         assert_eq!(plan.clip, None);
         assert_eq!(plan.shape, CursorShape::Unknown);

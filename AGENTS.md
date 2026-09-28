@@ -630,7 +630,13 @@ capture without deltas would hide and confine the cursor for a view that cannot 
 target and the error names the method you left out. A new operating system writes ONE
 `platform/<os>/mod.rs`, adds its `cfg` arm in `platform/mod.rs` and deletes the `compile_error!`;
 `cursor_model.rs`, both `*_session.rs` files, `game.rs`, `lib.rs` and the whole front end stay
-untouched. Verified: the two session layers contain no `cfg`, no Win32 name and no `unsafe`.
+untouched.
+- **A window handle is an OPAQUE TYPE outside the backend** (P1.82): `cursor_model::NativeWindow` -
+  a private `isize`, `NativeWindow::NONE`, and `from_raw`/`raw` for backends only. So the shared
+  layers pass a handle around and ask `is_none()`; they cannot see or invent the integer, and the
+  Windows word for it does not appear at all. `isize` survives on exactly three lines, all inside
+  that definition. Verified: outside `platform/windows/`, `hwnd` and `isize` appear ZERO times in
+  non-comment code; inside it, freely (it is the real Win32 parameter there).
 
 - **The centre lock is the mechanism** (P1.76/P1.77; copied from SDL3, which is what Minecraft uses). While we
   hold the mouse the clip handed to `ClipCursor` is a **1x1 px box on the crosshair** (5x1 over a remote
@@ -668,15 +674,57 @@ untouched. Verified: the two session layers contain no `cfg`, no Win32 name and 
   background, so "capture only while foreground" is explicit - the front end's `focused` gate, the entry driver's
   refusal, and `cursor_session::capture_foreground_check` as the system-level backstop that releases and emits
   `capture-lost`.
-- **The launch arguments belong to the WINDOW HOST** (P1.80): WebView2 reads
-  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` before the webview exists, and a non-empty value REPLACES the
-  list in the config - so `game.rs` asks `platform::browser_args_base()` and the host repeats its own
-  base verbatim.
+- **The launch arguments belong to the WINDOW HOST, and they live in exactly ONE place** (P1.80/P1.81):
+  WebView2 reads `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` before the webview exists, and a non-empty value
+  REPLACES whatever the host was configured with (wry's default included) - so `game.rs` publishes
+  `platform::browser_args_base()` **unconditionally** and the host owns the complete list. `tauri.conf.json`
+  no longer carries `additionalBrowserArgs` at all: it used to be a second copy, and the copies had drifted
+  (the config had `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`, the host's list did not,
+  so switching vsync off silently re-enabled those three components).
 - **NEVER move a window flag into `tauri.windows.conf.json`** (learned the hard way, P1.80): the platform
   overlay is merged with `json_patch::merge` (RFC 7386) - objects merge recursively, **arrays are REPLACED
   wholesale** - so a partial `app.windows: [{ label, ... }]` entry silently drops `center`, the size,
   `visible: false` and `title`, and the window stops being centred. Overlaying a window means repeating
   the whole object. Non-array keys (a future `bundle.targets`) are safe.
+
+## Building: one command per platform
+
+`npm run app:windows` and `npm run app:android` are the whole build, each ending in a distribution
+directory that mirrors the other:
+
+| | desktop | android |
+|---|---|---|
+| command | `npm run app:windows` | `npm run app:android` |
+| script | `scripts/build-windows.mjs` | `scripts/build-android.mjs` |
+| step 1 | the frontend gate (`build-all.mjs`) | same |
+| step 2 | `cargo build --release --features custom-protocol` | cross-compile with the NDK |
+| step 3 | `package-portable.mjs` | `gradlew assemble<Flavor><Type>` |
+| output | `release\VoxelEngineTauri\` | `release\VoxelEngineTauri-android\` |
+
+**Step 1 is in both chains on purpose.** `tauri-codegen` embeds `dist\` with `include_bytes!`, so cargo
+does rebuild when those files change - but only once they HAVE changed: a chain that skips the
+frontend step compiles the PREVIOUS frontend into the exe or the `.so` and nothing downstream notices.
+(`tauri build` gets it for free from `beforeBuildCommand`; a bare `cargo build` does not, and the
+Android chain only did it as a side effect of generating the Gradle glue.) Both scripts share
+`scripts/run.mjs`, which owns that step.
+
+The Android script also patches the generated project, cross-compiles with the NDK, copies the `.so`
+into `jniLibs`, runs Gradle and publishes the APK. It is idempotent and every anchor it patches is
+checked.
+
+Two facts worth remembering, because both cost an afternoon to find:
+- `src-tauri/gen/` is git-ignored, and **`tauri android init` does NOT generate the whole project**:
+  `tauri.settings.gradle`, `app/tauri.build.gradle.kts`, `app/tauri.properties` and ten Kotlin files
+  under `app/src/main/java/.../generated/` are written by a BUILD. After a fresh clone: init once, then
+  run the script (it asks the CLI for the glue itself).
+- `tauri android build` places the `.so` with a **symbolic link**, which Windows refuses without
+  Developer Mode ("Creation symbolic link is not allowed for this system"). The script copies the file
+  instead and removes the Gradle dependency on the CLI task, so no machine-wide setting is needed.
+
+The port itself needed ONE new file (`src/platform/android/mod.rs`) plus a `cfg` arm: Android has no
+system cursor to capture and no raw-input device, so nearly every trait method is empty - and NOTHING in
+`cursor_model.rs`, either `*_session.rs`, `game.rs` or `src/` changed for it. That is the seam paying
+off.
 
 ## Testing
 
@@ -686,7 +734,7 @@ settings check, the world, the movement modes, every menu, the key binds, the in
 `docs/TESTING.md`**, together with what a failure at each step means. Read it before saying a change
 works, and extend it when a behaviour lands.
 
-**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 55
+**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 69
 assertion groups, ends with `RESULT: OK` / `RESULT: FAILED`). It compiles the ECS plus the fixed lane
 with the same `tsc` the build uses into `node_modules/.cache/voxelengine-ecs-check` (git-ignored, so
 it writes nothing tracked; Node still resolves the real `three`), then asserts what no type-checker

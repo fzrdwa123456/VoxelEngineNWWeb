@@ -175,17 +175,17 @@ fn set_window_mode(window: tauri::WebviewWindow, fullscreen: bool) -> bool {
 /// cursor_session.rs.
 #[tauri::command]
 fn cursor_intent(app: AppHandle, window: tauri::WebviewWindow, visible: bool) {
-    let hwnd = platform::native_window(&window).map_or(0, |h| h.0);
-    cursor_session::set_cursor_intent(&app, hwnd, visible);
+    let native = platform::native_window(&window).unwrap_or(platform::NativeWindow::NONE);
+    cursor_session::set_cursor_intent(&app, native, visible);
 }
 
 #[tauri::command]
 fn mouse_capture(state: State<'_, AppState>, window: tauri::WebviewWindow, on: bool) -> bool {
-    let hwnd = platform::native_window(&window).map_or(0, |h| h.0);
+    let native = platform::native_window(&window).unwrap_or(platform::NativeWindow::NONE);
     // Diagnostics: measure the native cursor state before and after capture (whether the shape
     // really follows)
     let before = cursor_session::cursor_trace();
-    let ok = cursor_session::set_mouse_capture(hwnd, on);
+    let ok = cursor_session::set_mouse_capture(native, on);
     game::append_boot(
         &state.root,
         &format!(
@@ -222,6 +222,9 @@ fn game_root_of(state: State<'_, AppState>) -> String {
     state.root.display().to_string()
 }
 
+/// The entry point. **On mobile the runtime calls THIS**, not `main.rs` (the binary target is
+/// desktop-only) - `mobile_entry_point` generates the JNI symbol the Android activity looks up.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let root = game::game_root();
     game::ensure_dirs(&root);
@@ -273,7 +276,7 @@ pub fn run() {
                 let diag_root0 = app.state::<AppState>().root.clone();
                 match platform::native_window(&w) {
                     Some(h) => {
-                        let ok = platform::install_menu_suppressor(h.0);
+                        let ok = platform::install_menu_suppressor(h);
                         game::append_boot(
                             &diag_root0,
                             &format!(

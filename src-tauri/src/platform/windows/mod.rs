@@ -27,8 +27,8 @@ pub use rawinput::WindowsRawInput;
 pub use webview::WindowsWebview;
 
 /// Is that window the FOREGROUND one right now? (the platform fact the policy keeps asking for)
-pub fn is_foreground(hwnd: isize) -> bool {
-    hwnd != 0 && unsafe { GetForegroundWindow() } == hwnd
+pub fn is_foreground(window: NativeWindow) -> bool {
+    window.is_some() && unsafe { GetForegroundWindow() } == window.raw()
 }
 
 /// A capture request ends any move/size session: a session that somehow ends without
@@ -106,7 +106,7 @@ fn as_win_rect(c: ClipRect) -> Rect {
 /// would deadlock, so the guard is passed in instead).
 pub fn trace_of(m: &CursorModel) -> String {
     let (showing, hcursor) = cursor_info();
-    let focused = m.hwnd != 0 && unsafe { GetForegroundWindow() } == m.hwnd;
+    let focused = is_foreground(m.window);
     let mut pt = Point { x: 0, y: 0 };
     let _ = unsafe { GetCursorPos(&mut pt) };
     let under = unsafe {
@@ -145,11 +145,11 @@ pub fn trace_of(m: &CursorModel) -> String {
 /// Win32 reads only. Thread-agnostic.
 pub fn probe_of(m: &CursorModel) -> CursorProbe {
     let (showing, _) = cursor_info();
-    let focused = m.hwnd != 0 && unsafe { GetForegroundWindow() } == m.hwnd;
-    let client = if m.hwnd == 0 {
+    let focused = is_foreground(m.window);
+    let client = if m.window.is_none() {
         ClipRect::ZERO
     } else {
-        unsafe { client_rect_on_screen(m.hwnd) }.map(as_clip_rect).unwrap_or_default()
+        unsafe { client_rect_on_screen(m.window.raw()) }.map(as_clip_rect).unwrap_or_default()
     };
     let screen = unsafe {
         let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -430,12 +430,12 @@ unsafe extern "system" fn menu_suppressor_proc(
 }
 
 /// Install the "menu suppressor" on a top-level window. Returns whether it worked.
-pub fn install_menu_suppressor(hwnd: isize) -> bool {
-    if hwnd == 0 {
+pub fn install_menu_suppressor(window: NativeWindow) -> bool {
+    if window.is_none() {
         return false;
     }
     unsafe {
-        let old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, menu_suppressor_proc as isize);
+        let old = SetWindowLongPtrW(window.raw(), GWLP_WNDPROC, menu_suppressor_proc as isize);
         if old == 0 {
             return false;
         }
@@ -561,7 +561,7 @@ impl CursorBackend for WindowsCursor {
     fn native_window(&self, window: &WebviewWindow) -> Option<NativeWindow> {
         // The HWND is what every Win32 call in this backend needs; `isize` is how the model stores
         // it, so the shared layer only ever passes an opaque handle around.
-        window.hwnd().ok().map(|h| NativeWindow(h.0 as isize))
+        window.hwnd().ok().map(|h| NativeWindow::from_raw(h.0 as isize))
     }
 
     fn probe_of(&self, m: &CursorModel) -> CursorProbe {
@@ -572,8 +572,8 @@ impl CursorBackend for WindowsCursor {
         trace_of(m)
     }
 
-    fn is_foreground(&self, hwnd: isize) -> bool {
-        is_foreground(hwnd)
+    fn is_foreground(&self, window: NativeWindow) -> bool {
+        is_foreground(window)
     }
 
     fn apply_clip(&self, m: &mut CursorModel, clip: Option<ClipRect>) -> bool {
@@ -612,7 +612,7 @@ impl CursorBackend for WindowsCursor {
         clear_clip_postponed()
     }
 
-    fn install_menu_suppressor(&self, hwnd: isize) -> bool {
-        install_menu_suppressor(hwnd)
+    fn install_menu_suppressor(&self, window: NativeWindow) -> bool {
+        install_menu_suppressor(window)
     }
 }

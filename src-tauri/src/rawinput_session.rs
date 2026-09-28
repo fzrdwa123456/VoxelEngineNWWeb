@@ -77,7 +77,7 @@ pub fn start(app: AppHandle) -> Result<(), String> {
     }
 
     // The collector reports (native handle, did raw input really register) - or why it could not.
-    let (_hwnd, registered) = platform::rawinput_start_collector()?;
+    let (_window, registered) = platform::rawinput_start_collector()?;
 
     RUNNING.store(true, Ordering::SeqCst);
     REGISTERED.store(registered, Ordering::SeqCst);

@@ -185,15 +185,20 @@ pub fn write_vsync_disabled(root: &Path, disabled: bool) -> bool {
     )
     .is_ok()
 }
-/// Must be called before tauri::Builder. The **base** launch arguments belong to the window host
-/// (\`crate::platform::browser_args_base\` — WebView2 reads them from the environment before the
-/// webview exists, and a non-empty value REPLACES the list in tauri.conf.json, which is why the
-/// host repeats its base verbatim); this only appends --disable-gpu-vsync when the switch asks for
-/// it. A host that takes no arguments publishes nothing.
+/// Must be called before `tauri::Builder`: the window host reads its launch arguments from the
+/// environment **before the webview exists**, so this is the only moment they can be set.
+///
+/// The host owns the list (`crate::platform::browser_args_base`); this only appends
+/// `--disable-gpu-vsync` when the switch asks for it. **Publish unconditionally (P1.81)** - the
+/// arguments used to live in `tauri.conf.json` as a second copy, so "publish nothing" still meant
+/// "the config's list applies". That key is gone now, so a host that takes arguments must always be
+/// handed them.
 pub fn apply_browser_args(root: &Path) {
-    if !read_vsync_disabled(root) {
-        return;
-    }
-    let args = format!("{} --disable-gpu-vsync", crate::platform::browser_args_base());
+    let base = crate::platform::browser_args_base();
+    let args = if read_vsync_disabled(root) {
+        format!("{base} --disable-gpu-vsync")
+    } else {
+        base.to_string()
+    };
     crate::platform::publish_browser_args(&args);
 }

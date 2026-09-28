@@ -22,7 +22,8 @@ npm run app:dev                            # = tauri dev：起 vite(1420) + 编�
 ```powershell
 npm run app:build        # = tauri build：前端产物 + release 壳（+ NSIS 安装包，见下）
 npm run app:exe          # = cargo build --release --features custom-protocol
-npm run app:portable     # 打包成 release\VoxelEngineTauri\：exe + WebView2Loader.dll + game\
+npm run app:windows      # 一条龙：前端门禁 + release 构建 + 打包 -> release\VoxelEngineTauri\
+npm run app:android      # 一条龙：前端门禁 + 交叉编译 + Gradle -> release\VoxelEngineTauri-android\
 ```
 
 > ⚠️ **不要用裸 `cargo build --release`。** Tauri 只在启用 `tauri/custom-protocol` feature 时
@@ -61,6 +62,58 @@ npm run check                          # tsc --noEmit(strict) + check:ecs（69 �
 npm run build                          # tsc && vite build -> dist\
 node scripts/build-all.mjs --cargo     # 再带上 cargo check
 ```
+
+## 一条龙构建（两个平台各一条命令）
+
+```powershell
+npm run app:windows                     # 桌面：门禁 -> cargo release -> release\VoxelEngineTauri\
+npm run app:windows -- --debug          # 桌面 debug：嵌了前端的 debug exe（**可双击运行**，不打包）
+npm run app:windows -- --skip-frontend  # 信任现有 dist\（快速重打包）
+npm run app:windows -- --skip-build     # 只重打包已编好的 exe
+npm run app:windows -- --no-packs       # 不带示例包
+
+npm run app:android                     # 安卓：门禁 -> 交叉编译 -> Gradle -> release\VoxelEngineTauri-android\
+npm run app:android -- --release        # release APK（小很多）
+npm run app:android -- --target all     # 全部 ABI
+```
+
+**两条链的第一步都是同一个"前端门禁"**：`tsc --noEmit` + `check:ecs`（69 组）+ `vite build`。
+**这一步不能省**：`tauri-codegen` 用 `include_bytes!` 把 `dist\` 嵌进二进制，cargo 会追踪它，
+但前提是 **`dist\` 已经重新生成过** —— 跳过它就会把**上一次的前端**编进 exe / `.so`，而且不报错。
+（`npm run app:build` = `tauri build` 白拿这一步，因为 Tauri 会跑 `beforeBuildCommand`；
+裸 `cargo build` 和安卓链都不会，所以现在由脚本负责。）
+
+细粒度的老命令仍然保留：`app:exe`（只编译）、`app:portable`（只打包）。
+
+## 安卓（实验性：能启动，还不能玩）
+
+```
+npm run app:android                     # debug APK，arm64-v8a（现代手机都是）
+npm run app:android -- --release        # release APK（小很多）
+npm run app:android -- --target all     # 全部 ABI（4 次 Rust 编译 + 4 个包，慢）
+npm run app:android -- --skip-frontend  # 信任现有 dist\（快速重打包）
+npm run app:android -- --skip-build     # 只把已编好的 APK 重新发布到 release\
+```
+
+产物：`release\VoxelEngineTauri-android\VoxelEngine-<abi>-<profile>.apk`（+ 一份 README.txt）。
+装法：把 APK 传手机点安装，或 `adb install -r <apk>`。
+
+需要三件事：
+1. **Android SDK + NDK + JDK 17**，并设好 `ANDROID_HOME` / `JAVA_HOME`（`NDK_HOME` 可省，脚本取
+   `%ANDROID_HOME%\ndk\` 里最新那个）
+2. **WebGPU**：渲染器**没有 WebGL 回退**，设备不支持就是黑屏。手机 Chrome 打开 `chrome://gpu` 看
+   "WebGPU"（Chrome 和系统 WebView 是同一份 Chromium）
+3. 首次 clone 后先跑一次 `npm run tauri -- android init`（`src-tauri/gen/` 被 gitignore，脚本会自己打补丁）
+
+**现在能用的**：加载屏、主菜单、所有 DOM 界面（点按 = 点击）。
+**现在不能用的**：**没有触摸操作** —— 没摇杆、没视角拖动、没屏上按钮，所以能进世界但不能玩。
+
+脚本自己处理的三件麻烦事（换台机器也需要）：
+- 生成的安卓工程里 Gradle 用 `services.gradle.org`（这里只有 ~20KB/s）→ 换腾讯镜像；Maven → 阿里云
+- 安卓那层"胶水"（`tauri.settings.gradle`、`app/tauri.build.gradle.kts`、`generated/*.kt`）**不在
+  `android init` 里**，是构建期由 CLI 生成的 → 脚本会调一次 CLI 生成它（并在符号链接那步失败，属预期）
+- Tauri 用**符号链接**把 `.so` 放进 `jniLibs`，Windows 没开开发者模式就会失败 → 脚本改成**真实复制**，
+  并断开 Gradle 对 CLI 任务的依赖
 
 ## 数据目录
 
@@ -194,26 +247,50 @@ game\saves\
 | 项目 | 结果 |
 |---|---|
 | `tsc --noEmit`（strict） | **0 errors** |
-| `npm run check:ecs` | **54 assertion groups passed / RESULT: OK** |
-| `vite build` | **✓ 67 modules transformed，456ms** |
-| `cargo check`（`x86_64-pc-windows-gnu`） | **exit 0，3m42s** |
-| `cargo build`（链接 exe） | **exit 0，17s → `voxelengine-tauri.exe`** |
-| `npm run app:build` | release 3m22s 编成 exe；NSIS 那步下载超时失败（不影响 exe） |
-| `npm run app:portable` | **13.7 MB 便携目录，双击可跑**（exe + WebView2Loader.dll + game\） |
+| `npm run check:ecs` | **69 assertion groups passed / RESULT: OK** |
+| `rustc --test src-tauri/src/cursor_model.rs` | **29 passed**（纯规则层，不需要窗口/GPU） |
+| `vite build` | **✓ 132 modules transformed，478ms** |
+| `cargo check` / `cargo build`（`x86_64-pc-windows-gnu`） | **exit 0**，只有两个既有警告 |
+| `npm run app:windows` | **一条龙：门禁 → release exe → 13.8 MB 便携目录（25 文件）** |
+| `npm run app:windows -- --debug` | **可双击运行的 debug exe**（219 MB，嵌了前端；实测启动出窗口且前端日志正常） |
+| `npm run app:build` | release 编成 exe；NSIS 那步要从 GitHub 下 nsis-3.11.zip，网络不好会超时（不影响 exe） |
+| `npm run app:android` | **一条龙：交叉编译 → Gradle → `release\VoxelEngineTauri-android\`，APK 133.7 MB**（arm64-v8a / minSdk 24） |
 | 实跑（dev） | **窗口 `VoxelEngine` 显示、主菜单渲染、包/mod 加载、原始输入线程启动，`BOOT ready in 835ms`** |
 | 实跑（release 便携） | **`title='VoxelEngine'`、25 线程、包/mod 加载、`BOOT ready in 434ms`** |
 
-### 工具链：没有 MSVC 也编出来了
+### 工具链：没有 MSVC 也编出来了，但 `cdylib` 有个只出现在 debug 的坑
 
 Tauri 官方文档要求 Windows 上装 Visual Studio 的「使用 C++ 的桌面开发」工作负载（MSVC + Windows SDK）。
-本机只有 mingw-w64 的 `x86_64-pc-windows-gnu`，**实测 `cargo check` 和 `cargo build` 全程通过**，
-exe 可以直接运行。唯一一个真的坑跟 MSVC 无关：Tauri 模板的
-`[lib] crate-type = ["staticlib", "cdylib", "rlib"]` 里那个 `cdylib` 在 Windows + GNU 下会
-`error: export ordinal too large: 90414`（导出全部符号撑爆 mingw 的 ld），桌面版改成
-`crate-type = ["rlib"]` 即可。细节见 [docs/PORT-TAURI.md](docs/PORT-TAURI.md)。
+本机只有 mingw-w64 的 `x86_64-pc-windows-gnu`，**实测 `cargo check` / `cargo build` 全程通过**，
+exe 可以直接运行。唯一一个真的坑跟 MSVC 无关，是**模板的 crate-type**：
 
-### 注意：debug 构建不能双击运行
+```toml
+# Tauri 模板默认（这里不要照抄）
+crate-type = ["staticlib", "cdylib", "rlib"]
+```
 
-`cargo build` 的 debug exe 加载的是 `devUrl`（`http://localhost:1420`），不是嵌进去的 `dist\`，
-所以裸跑会得到一个空白窗口。用 `npm run app:dev`（tauri dev，自己起 vite）或
-`npm run app:build`（release + 嵌入产物，可独立运行）。
+`crate-type` 是**属于整个 package** 的（Cargo 不支持按目标区分），所以清单里写了 `cdylib`，
+**每一次桌面构建也会去链接那个 `.dll`**，而 Windows + GNU 工具链**链接不了 debug 的那一份**：
+
+```
+ld.exe: error: export ordinal too large: 90913
+```
+
+release 能扛过去（LTO + `opt-level="s"` + `strip` 把导出符号数压到 binutils 的 ordinal 上限之下），
+但 debug 不行 —— 而 debug 正是 `tauri dev` 用的 profile，所以**模板那行会连带弄坏 `npm run app:dev`**。
+
+所以这里的做法是：**清单只留 `crate-type = ["rlib"]`**，安卓需要的 `.so` 由
+`scripts/build-android.mjs` 用 **`cargo rustc --lib --crate-type cdylib`** 单独产出（一次调用级别的
+覆盖，不碰清单、不影响桌面）。细节见 [docs/PORT-TAURI.md](docs/PORT-TAURI.md)。
+
+### debug 构建：默认不能双击，但现在有一条命令
+
+裸 `cargo build` 的 debug exe 加载的是 `devUrl`（`http://localhost:1420`），不是嵌进去的 `dist\`，
+所以直接双击会得到**空白窗口**（进程活着、WebView2 都起来了、日志一行没有，看起来像"卡在加载器"）。
+三种可用方式：
+
+| 想干什么 | 用什么 |
+|---|---|
+| 开发（热重载） | `npm run app:dev`（tauri dev 自己起 vite） |
+| **一个能双击的 debug exe** | `npm run app:windows -- --debug`（debug profile + 嵌入产物） |
+| 发布 | `npm run app:windows`（release + 嵌入产物 + 打包） |

@@ -75,6 +75,12 @@ src-tauri/src/platform/windows/webview.rs  the WINDOWS webview host: launch argu
 which replaces arrays, so a partial `app.windows` entry drops `center`/size/`visible` (P1.80 reverted exactly
 that). Non-array overlay keys are fine.
 
+The browser arguments are no longer in `tauri.conf.json` at all (P1.81): `platform/windows/webview.rs` owns
+the complete list and `game::apply_browser_args` publishes it before the Builder runs. The one Windows-only
+value still in the shared config is `bundle.targets: ["nsis"]`, which is deliberately left alone: the bundler
+step cannot be exercised in this checkout (it downloads NSIS), so moving it into an overlay would be an
+unverifiable config change - the exact class of change that broke the window in P1.80.
+
 **Neither `*_session.rs` file names a platform**: no `cfg`, no Win32 name, no `unsafe` (verified in
 non-comment code). Everything OS-specific is one of the three traits in `platform/mod.rs`, and a new target
 is a new `platform/<os>/mod.rs` implementing them - nothing else in the crate changes.
@@ -184,6 +190,39 @@ The built-in `default.zip` still enters the layers first (lowest priority).
 cut into the dependency-free `src/platform/settings-diff.ts`, and `shell.ts` only forwards it with `export { diffSettings } from ...`.
 The call sites and the assertions are still where they were; only `check-ecs.mjs`'s compile list changed to this one file.
 
+## 3b. The Android side (P1.83)
+
+```
+src-tauri/src/platform/android/mod.rs       the whole Android backend: three trait impls, mostly empty
+src-tauri/gen/android/                      the generated Gradle project (GIT-IGNORED)
+src-tauri/gen/android/app/build/outputs/    where Gradle writes the APK (its own fixed layout)
+scripts/run.mjs                            the process helpers both chains share (runShell / runCapture / buildFrontend)
+scripts/build-windows.mjs                   frontend gate + cargo + package-portable (the desktop one-command)
+scripts/build-android.mjs                   init-check + patches + cross-compile + Gradle + publish
+```
+
+Why a port is cheap here: **Android has no system cursor and no raw input device.** `native_window()`
+returns `None`, which the seam already models as "no capture possible, the pointer stays free" - so
+`CursorBackend` is almost entirely empty, `RawInputBackend::start_collector` reports the honest failure
+(the front end already falls back to DOM events, which is exactly right for touch) and `WebviewBackend`
+does nothing. What a touch build really needs is a front-end interaction model (stick, look-drag,
+on-screen buttons) - presentation, not platform.
+
+Android ALSO needs things Tauri cannot infer:
+- the Android library is built with **`cargo rustc --lib --crate-type cdylib`**, NOT with a
+  manifest `crate-type`. A manifest crate-type belongs to the package, so declaring `cdylib` there
+  also makes every DESKTOP build link a `.dll` - and on Windows + the GNU toolchain the debug one
+  cannot be linked at all (`ld.exe: error: export ordinal too large: 90913`; the release profile
+  survives it because LTO + `opt-level="s"` + `strip` cut the export count under binutils' ordinal
+  limit, but `tauri dev` does not). The command-line flag emits the `.so` for that one invocation
+  and leaves the manifest alone.
+- `#[cfg_attr(mobile, tauri::mobile_entry_point)]` on `run()`, because the mobile entry point is the
+  LIBRARY, not `main.rs`
+- `set_fullscreen`/`is_fullscreen` split by `#[cfg(desktop)]`/`#[cfg(mobile)]`: the Tauri API does not
+  exist in a mobile build
+- a writable data root: `game_root()` writes next to the executable, which is read-only on Android, so
+  `game\logs\` stays empty there (use `adb logcat` until that is fixed)
+
 ## 4. What was deleted
 
 | Deleted | Why |
@@ -201,8 +240,8 @@ The call sites and the assertions are still where they were; only `check-ecs.mjs
 | Step | Command | Result |
 |---|---|---|
 | type check | `tsc --noEmit -p tsconfig.json` | 0 errors |
-| ECS gate | `node scripts/check-ecs.mjs` | 54 assertion groups passed / RESULT: OK |
-| front-end bundle | `vite build` | ✓ 67 modules transformed, 456ms |
+| ECS gate | `node scripts/check-ecs.mjs` | 69 assertion groups passed / RESULT: OK |
+| front-end bundle | `vite build` | ✓ 132 modules transformed, 478ms |
 | Rust check | `cargo check` (`x86_64-pc-windows-gnu`) | exit 0, 3m42s |
 | Rust link | `cargo build` (after the `crate-type` change) | **exit 0, 17s -> `voxelengine-tauri.exe` (208MB debug)** |
 | actual run | vite(1420) + the debug exe | **the `VoxelEngine` window shows, the main menu renders, `BOOT ready in 835ms`** |
@@ -240,7 +279,7 @@ The **only** real pitfall in the process had nothing to do with MSVC:
 
 ```
 error: linking with `x86_64-w64-mingw32-gcc` failed: exit code: 1
-ld.exe: error: export ordinal too large: 90414
+ld.exe: error: export ordinal too large: 90913
 ```
 
 Cause: Tauri v2's template writes `[lib] crate-type` as `["staticlib", "cdylib", "rlib"]`

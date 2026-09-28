@@ -1,9 +1,10 @@
 // ===== THE PLATFORM SEAM (P1.79, traits since P1.80) =====
 //
-// Every operating-system call the engine needs lives behind this module. Today there is exactly ONE
-// backend (`platform/windows/`), and that is deliberate: the contract was derived from what Windows
-// really needed rather than guessed ahead of a second implementation. A port adds `platform/<os>/`
-// and one `cfg` arm below.
+// Every operating-system call the engine needs lives behind this module. Today there are TWO
+// backends - `platform/windows/` (the original) and `platform/android/` (the first port, P1.83, where
+// almost every method is empty because a phone has no cursor to capture and no raw-input device) - and
+// adding the second one was exactly the promised cost: one new folder and one `cfg` arm below.
+// A new target adds `platform/<os>/` the same way.
 //
 // **THE CONTRACT IS THREE TRAITS, not prose - because a trait is what the compiler checks.**
 // Implement the three for your target and forget nothing: the error names the method you left out.
@@ -39,10 +40,19 @@ use tauri::WebviewWindow;
 
 use crate::cursor_model::{ClipRect, CursorModel, CursorProbe, CursorShape};
 
+/// The handle type lives in `cursor_model` because the pure model stores one; this is a re-export so
+/// a backend only ever has to name `crate::platform::NativeWindow`.
+pub use crate::cursor_model::NativeWindow;
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 use windows::{WindowsCursor, WindowsRawInput, WindowsWebview};
+
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+use android::{AndroidCursor, AndroidRawInput, AndroidWebview};
 
 #[cfg(target_os = "windows")]
 static CURSOR: WindowsCursor = WindowsCursor;
@@ -51,18 +61,19 @@ static RAWINPUT: WindowsRawInput = WindowsRawInput;
 #[cfg(target_os = "windows")]
 static WEBVIEW: WindowsWebview = WindowsWebview;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "android")]
+static CURSOR: AndroidCursor = AndroidCursor;
+#[cfg(target_os = "android")]
+static RAWINPUT: AndroidRawInput = AndroidRawInput;
+#[cfg(target_os = "android")]
+static WEBVIEW: AndroidWebview = AndroidWebview;
+
+#[cfg(not(any(target_os = "windows", target_os = "android")))]
 compile_error!(
     "no backend for this target yet: implement CursorBackend + RawInputBackend + WebviewBackend in \
      platform/<os>/ (the three traits below are the whole contract), add its #[cfg] arm in \
      platform/mod.rs, and delete this compile_error!"
 );
-
-/// **An opaque native window handle.** The shared layers pass this around; only a backend knows what
-/// it is. It is an `isize` because `CursorModel.hwnd` (the pure policy table, deliberately frozen)
-/// stores one and every target we build for fits a pointer in it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct NativeWindow(pub isize);
 
 /// The pointer's platform half. See the module header for why each method exists.
 pub trait CursorBackend: Sync {
@@ -75,7 +86,7 @@ pub trait CursorBackend: Sync {
     /// The ONE boot.log line describing that state (what we want / what we did / what we saw).
     fn trace_of(&self, m: &CursorModel) -> String;
     /// Is that window the FOREGROUND one right now?
-    fn is_foreground(&self, hwnd: isize) -> bool;
+    fn is_foreground(&self, window: NativeWindow) -> bool;
     /// Apply the clip, and report whether we really hold one. This is the only place that clips,
     /// and it must never clear another application's clip.
     fn apply_clip(&self, m: &mut CursorModel, clip: Option<ClipRect>) -> bool;
@@ -101,7 +112,7 @@ pub trait CursorBackend: Sync {
     /// must not be able to wedge the clip off for the rest of the run.
     fn clear_clip_postponed(&self);
     /// Swallow the system menu gestures in the window procedure (Windows). May be a no-op.
-    fn install_menu_suppressor(&self, hwnd: isize) -> bool;
+    fn install_menu_suppressor(&self, window: NativeWindow) -> bool;
 }
 
 /// The device's platform half: it PUSHES into `rawinput_session`'s accumulators, and never decides
@@ -110,7 +121,7 @@ pub trait RawInputBackend: Sync {
     /// Start the collector and block until it has reported what it created:
     /// `(native handle, did raw input really register)`, or the reason it failed. The context-menu
     /// hook may still be running when this returns an Err - the two paths are independent.
-    fn start_collector(&self) -> Result<(isize, bool), String>;
+    fn start_collector(&self) -> Result<(NativeWindow, bool), String>;
     /// Stop the collector: remove hooks, wake its message loop, join its thread.
     fn stop_collector(&self);
     /// The context-menu hook's probe line (`HOOKPROBE ...`). Windows-specific content, worded so a
@@ -143,13 +154,31 @@ pub trait WebviewBackend: Sync {
 /// Window mode switch (the original's kiosk fullscreen toggle, no restart at runtime).
 /// Pure Tauri API - this one is NOT platform code, it only lives here because `lib.rs` should not
 /// have to know which module a window call came from.
+///
+/// **Desktop-only, and that is a Tauri fact, not a choice**: `WebviewWindow::set_fullscreen` does not
+/// exist in a mobile build (the window IS the screen there), so the mobile arm answers honestly -
+/// "there is nothing to switch" - and `is_fullscreen` says `true`, because a mobile window does cover
+/// the screen. Both are one-liners next to the real implementation so the caller in `lib.rs` stays
+/// platform-free.
+#[cfg(desktop)]
 pub fn set_fullscreen(window: &WebviewWindow, fullscreen: bool) -> bool {
     window.set_fullscreen(fullscreen).is_ok()
 }
 
+#[cfg(mobile)]
+pub fn set_fullscreen(_window: &WebviewWindow, _fullscreen: bool) -> bool {
+    false
+}
+
 /// Whether we are fullscreen right now (the original read win.isFullscreen)
+#[cfg(desktop)]
 pub fn is_fullscreen(window: &WebviewWindow) -> bool {
     window.is_fullscreen().unwrap_or(false)
+}
+
+#[cfg(mobile)]
+pub fn is_fullscreen(_window: &WebviewWindow) -> bool {
+    true
 }
 
 pub fn native_window(window: &WebviewWindow) -> Option<NativeWindow> {
@@ -164,8 +193,8 @@ pub fn trace_of(m: &CursorModel) -> String {
     CURSOR.trace_of(m)
 }
 
-pub fn is_foreground(hwnd: isize) -> bool {
-    CURSOR.is_foreground(hwnd)
+pub fn is_foreground(window: NativeWindow) -> bool {
+    CURSOR.is_foreground(window)
 }
 
 pub fn apply_clip(m: &mut CursorModel, clip: Option<ClipRect>) -> bool {
@@ -204,11 +233,11 @@ pub fn clear_clip_postponed() {
     CURSOR.clear_clip_postponed()
 }
 
-pub fn install_menu_suppressor(hwnd: isize) -> bool {
-    CURSOR.install_menu_suppressor(hwnd)
+pub fn install_menu_suppressor(window: NativeWindow) -> bool {
+    CURSOR.install_menu_suppressor(window)
 }
 
-pub fn rawinput_start_collector() -> Result<(isize, bool), String> {
+pub fn rawinput_start_collector() -> Result<(NativeWindow, bool), String> {
     RAWINPUT.start_collector()
 }
 

@@ -1767,6 +1767,145 @@ Still outstanding:
   lists disagree in one place (the config carries `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`
   and `game.rs`'s append does not repeat it, so switching vsync off silently drops those three flags) - noted,
   not changed.
+- **P1.81 - the WebView2 launch arguments get ONE owner, and the shared config stops carrying them.**
+  `DONE`, by request ("该放到windows的就放到windows，不可以的就不理"). `additionalBrowserArgs` is deleted from
+  `tauri.conf.json`; `platform/windows/webview.rs`'s `BROWSER_ARGS_BASE` is now the complete list and
+  `game::apply_browser_args` publishes it **unconditionally** (it used to return early when vsync stayed on,
+  which was only correct while the config held a second copy).
+  **It also fixes a real bug the old duplication had already caused**: WebView2's variable REPLACES whatever
+  the host was configured with - wry's default `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`
+  included (`tauri-utils/src/config.rs:2080` says so in as many words) - and `game.rs`'s list omitted that flag,
+  so **turning vsync off silently re-enabled those three components**. The flag is now in the host's list, so
+  there is one source of truth and the two can no longer disagree.
+  **What was deliberately NOT moved** (and why): `bundle.targets: ["nsis"]` stays in the shared config. The
+  overlay mechanism works (P1.80 proved it the hard way), but `tauri build`'s bundler step cannot run in this
+  checkout - it downloads `nsis-3.11.zip` and times out offline - so moving `bundle.targets` into
+  `tauri.windows.conf.json` would be an **unverifiable config change to a documented workflow**
+  (`npm run app:build`), and if it silently did not apply, Windows would try to bundle `msi` too and need WiX.
+  Unverifiable is the one thing a config change may not be here. Also left alone because they are impossible
+  or pointless to move: `main.rs`'s `windows_subsystem` (a crate-level attribute; Rust forbids it anywhere but
+  the crate root, and it is already `cfg`-conditional), `Cargo.toml`'s
+  `[target.'cfg(windows)'.dependencies]` (the only place Cargo accepts it), `package-portable.mjs` (a Node
+  script - it needs a sibling per platform at port time) and `tools/*.bat` (they ARE Windows files).
+  Verified: the packaged exe still contains `--disable-features=msWebOOUI`, and three launches still put the
+  window at the same rect as P1.80's fix (title VoxelEngine, 1296x759 outer, (312,164)).
+- **P1.82 - the native window handle becomes an OPAQUE TYPE: the last Windows-shaped thing leaves the
+  shared layer.** `DONE`, by request ("那就只弄那个句柄"). This is the item the P1.79/P1.80 reports kept
+  deferring ("only worth doing before a port"), and the reason it was deferred is the reason it is worth
+  recording carefully: it had to touch `cursor_model.rs`, which the two earlier rounds deliberately froze
+  as the regression anchor.
+  1. **`NativeWindow` moved into `cursor_model.rs`** (the shared vocabulary module, where `ClipRect`,
+     `ClipPos`, `CursorShape`, `CursorProbe` and `CursorPlan` already live) and `platform/mod.rs`
+     re-exports it, so a backend only ever names one path. **The field is PRIVATE**: `NONE`, `from_raw`,
+     `raw`, `is_none` and `is_some` are the whole API, and `from_raw`/`raw` are documented
+     "backends only". `isize` remains the representation because that is what a pointer fits in on every
+     target we build for and what a `static AtomicIsize` can hold - a raw `*mut c_void` would have needed
+     an `unsafe impl Send/Sync` to live in the model's `Mutex`, i.e. `unsafe` in the shared layer, which
+     is exactly what this round is removing.
+  2. **The model field is `window`, not `hwnd`** - the word was the last Windows vocabulary in a
+     platform-free file. `CursorModel.window: NativeWindow`, and "0 = no window" became
+     `NativeWindow::NONE` / `is_none()`.
+  3. The seam's signatures followed: `is_foreground(NativeWindow)`, `install_menu_suppressor(NativeWindow)`,
+     `RawInputBackend::start_collector() -> Result<(NativeWindow, bool), String>`. The two session layers,
+     `lib.rs` and `game.rs` no longer unwrap anything (`lib.rs` used to do
+     `platform::native_window(&window).map_or(0, |h| h.0)`); `hwnd` now appears ONLY in
+     `platform/windows/`, where it is the genuine Win32 parameter (extern declarations, the window
+     procedure, `WebviewWindow::hwnd()`).
+  4. **`cursor_model.rs` was edited for the first time since the freeze, and the 29 table tests came
+     through**: the fixture's `hwnd: 42` is `window: NativeWindow::from_raw(42)`, and the count is still
+     29/29. Acceptance is by grep: outside `platform/windows/` there are **zero** non-comment uses of
+     `hwnd` or `isize`; inside, 14/20 and 23/35 respectively.
+  Gates: tsc 0, check:ecs 69 groups OK, 29 model tests pass, release build with only the two pre-existing
+  warnings.
+- **P1.83 - THE FIRST PORT: Android boots, and it cost one file.** `DONE`, by request ("什么都不管直接先弄出
+  一个apk先"). This is the round that tests whether the P1.79-P1.82 seam was worth it, and the answer is
+  measured rather than claimed: `src-tauri/src/platform/android/mod.rs` is **the only new file**, and
+  `cursor_model.rs`, `cursor_session.rs`, `rawinput_session.rs`, `game.rs`, `lib.rs` and the whole front
+  end needed **no Android-specific change at all**.
+  1. **The backend is almost empty, and that is the point.** A phone has no system cursor to capture
+     (`native_window() -> None`, which the seam already reads as "capture impossible, pointer stays
+     free") and no raw-input device (`start_collector` returns the honest error; the front end already
+     treats "no raw input" as "use the DOM events", which is exactly right for touch). The remaining
+     methods are no-ops. What a touch build actually needs is a front-end interaction model - stick,
+     look-drag, on-screen buttons - i.e. presentation, not platform.
+  2. Four small platform facts had to be handled: the Android library has to exist as `lib<name>.so`;
+     `run()` gained `#[cfg_attr(mobile, tauri::mobile_entry_point)]` (the mobile entry point is the
+     library, not `main.rs`); `set_fullscreen`/`is_fullscreen` split into
+     `#[cfg(desktop)]`/`#[cfg(mobile)]` arms, because that Tauri API does not exist in a mobile build;
+     and the toolchain (SDK 36 + NDK r27c + JDK 17) went to `E:\android\`.
+     **`crate-type` note, CORRECTED in P1.85**: this round changed the manifest to
+     `["staticlib", "cdylib", "rlib"]` and claimed the old "export ordinal too large" failure no longer
+     reproduces - the claim was made from a RELEASE build only, and it is WRONG for debug (see P1.85).
+  3. **`scripts/build-android.mjs` + `npm run app:android` = one command to an APK in `release\`**,
+     the mirror of `package-portable.mjs`. Gradle writes the APK into its own fixed
+     `gen/android/app/build/outputs/apk/<flavor>/<type>/` and Tauri never copies it anywhere, which is
+     why the desktop had a `release\` folder and Android had nothing. The script is idempotent
+     (`--skip-build`, `--skip-patch`, `--release`, `--target all`) and it also absorbs the three
+     environment traps that each cost real time here:
+     (a) `services.gradle.org` serves the Gradle distribution at ~20 KB/s and the plugin portal/Maven
+     Central stall, so the wrapper and every repository list get Tencent/Aliyun mirrors first;
+     (b) **`tauri android init` does not generate the whole project** - `tauri.settings.gradle`,
+     `app/tauri.build.gradle.kts`, `app/tauri.properties` and ten Kotlin files under
+     `app/src/main/java/.../generated/` are written by a BUILD, so the script asks the CLI for them
+     (the outer `tauri android build`; the inner `android-studio-script` panics standalone on a missing
+     `...-server-addr` file) and tolerates the CLI's own symlink failure;
+     (c) `tauri android build` places the `.so` with a **symbolic link**, which Windows refuses
+     without Developer Mode, so the script COPIES the file and edits `buildSrc/.../RustPlugin.kt` to
+     drop the Gradle dependency on the CLI task.
+  4. **Verified from a pristine template**, not on a hand-patched tree: `gen/android` was moved away,
+     regenerated with `tauri android init`, and ONE command produced
+     `release\VoxelEngineTauri-android\VoxelEngine-arm64-v8a-debug.apk` (133.7 MB, `com.voxelengine.tauri`,
+     minSdk 24, arm64-v8a). A second run takes 13 s and patches nothing.
+  5. The user's verdict on the device: **"完美…操作逻辑和安卓的web部分默认行为没有禁用"** - it boots to the
+     menu and Android's WebView defaults (long-press, overscroll, pinch zoom) are still active, which is
+     what they want.
+  **Still open**: touch controls (the real work), a writable game root so logs and settings survive, and
+  a smaller release APK (the debug `.so` alone is 126.8 MB).
+- **P1.84 - two one-command build chains, and the frontend step they both need.** `DONE`, by request
+  ("弄好一条龙服务"). The desktop needed three commands in a specific order (frontend -> cargo ->
+  package) and two of them fail quietly-ish when run out of order or against a stale `dist\`; Android
+  already had one command since P1.83 but was missing that first step.
+  1. **`scripts/run.mjs`** is the shared process helper (`runShell` through the shell for
+     `cargo`/`gradlew.bat`, `runCapture` WITHOUT a shell for `process.execPath`), and it owns
+     `buildFrontend()` - the gate both chains now run first. Why it is a step and not a README note:
+     `tauri-codegen` embeds `dist\` with `include_bytes!` (`embedded_assets.rs:401`), so cargo DOES
+     rebuild when those files change - but only once they have changed. Skipping the gate compiles the
+     previous frontend into the exe or the `.so`, silently. `tauri build` gets it free from
+     `beforeBuildCommand`; a bare `cargo build` never did, and the Android chain only got it as a side
+     effect of generating the Gradle glue (which also ran it once per ABI).
+  2. **`scripts/build-windows.mjs` + `npm run app:windows`**: frontend gate -> `cargo build`
+     (`--release`, or `--debug`) -> `package-portable.mjs`. `--debug` is new capability, not just a
+     flag: it produces a **debug exe with the frontend embedded**, which - unlike a bare `cargo build` -
+     runs by double-click (the bare one looks for `devUrl` and shows a blank window). It is built but
+     not packaged, because `package-portable.mjs` reads the release profile.
+  3. **`build-android.mjs` gained the same frontend step** (plus `--skip-frontend`), and its
+     glue-generation call now passes `-c '{"build":{"beforeBuildCommand":""}}'` so the CLI does not run
+     `npm run build` again per ABI.
+  4. Verified end to end: `npm run app:windows` -> gate OK, cargo 2m04s, `release\VoxelEngineTauri\`
+     25 files / 13.8 MB; `npm run app:android` -> gate OK, Gradle 13s,
+     `release\VoxelEngineTauri-android\VoxelEngine-arm64-v8a-debug.apk` 133.7 MB; `--skip-build` and
+     `--skip-patch` re-publish without recompiling.
+  **Not done on purpose**: there is no single command that builds BOTH platforms - a desktop release and
+  an APK have nothing in common after the frontend gate, and running one while debugging the other is
+  the common case.
+- **P1.85 - the crate-type change from P1.83 broke `tauri dev`, and the fix is a command-line flag.**
+  `DONE` (found while verifying P1.84's `--debug`). P1.83 put `["staticlib", "cdylib", "rlib"]` in the
+  manifest, which is what the Tauri template does. A manifest `crate-type` belongs to the PACKAGE, not
+  to a target, so every desktop build then also linked `libvoxelengine_tauri_lib.dll` - and on Windows
+  + the GNU toolchain the DEBUG one cannot be linked:
+  `ld.exe: error: export ordinal too large: 90913`. The release profile survives (LTO +
+  `opt-level = "s"` + `strip` cut the export count under binutils' ordinal limit), which is exactly
+  why the release build had "verified" it and why the failure hid for a whole round: **`cargo build`
+  and `npm run app:dev` were broken, and nothing in the shipped chains noticed.**
+  The fix is the one the old comment had hinted at, minus the guesswork: `crate-type = ["rlib"]` is
+  back, and `scripts/build-android.mjs` emits the Android `.so` with
+  `cargo rustc --lib --crate-type cdylib` - a per-invocation override that leaves the manifest, and
+  therefore every desktop build, untouched. (`cargo build --bin voxelengine-tauri` does NOT help: cargo
+  still links the lib target's declared crate types.)
+  Verified: desktop debug builds again (17s), `tauri dev`'s profile is usable again, the Android
+  `.so` is still produced (127 MB) and the full Android chain still ends with a 133.7 MB APK. The
+  `--debug` chain was then checked for real: the exe starts standalone and `game\logs\boot.log`
+  contains the FRONT END's own probe lines, i.e. the embedded frontend really is running.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

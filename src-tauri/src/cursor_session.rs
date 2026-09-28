@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use crate::cursor_model::{
     arm_arrow_guard, centre_lock, decide, forget_intent, rect_is_zero, tick_arrow_guard, ClipRect,
-    CursorModel, CursorShape, LOST_FIGHT_TICKS,
+    CursorModel, CursorShape, NativeWindow, LOST_FIGHT_TICKS,
 };
 use crate::platform::{
     apply_clip, apply_cursor, apply_shape, clear_clip_postponed, clip_is_postponed,
@@ -50,7 +50,7 @@ use crate::platform::{
 /// The ONE table. A lock rather than five statics: the reconciler, the raw-input thread and the Tauri
 /// commands all touch it, and "who owns the cursor" has to be one answer.
 static MODEL: Mutex<CursorModel> = Mutex::new(CursorModel {
-    hwnd: 0,
+    window: NativeWindow::NONE,
     want: 0,
     relative: false,
     clipped: ClipRect::ZERO,
@@ -89,7 +89,7 @@ fn model() -> std::sync::MutexGuard<'static, CursorModel> {
 // cursor stays locked inside the window after Alt-Tab.
 /// Turn native mouse capture on/off. Returns whether it worked (P1.72: a failure means the mouse simply
 /// stays free — there is no second mechanism to fall back to).
-pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
+pub fn set_mouse_capture(window: NativeWindow, on: bool) -> bool {
     if !on {
         // **SET THE ONE INPUT THE PROJECTION READS (P1.63).** `mouse_capture` and `cursor_intent` are two
         // views of the same boolean now, and writing it here means the hand-back (visible + centred, via the
@@ -99,7 +99,7 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
         release_mouse_capture();
         return true;
     }
-    if hwnd == 0 {
+    if window.is_none() {
         return false;
     }
     // **A CAPTURE REQUEST ENDS ANY MOVE/SIZE SESSION (P1.62).** The flag is set by `WM_ENTERSIZEMOVE` and
@@ -108,11 +108,11 @@ pub fn set_mouse_capture(hwnd: isize, on: bool) -> bool {
     // is the one signal that says "the user is back in the game".
     clear_clip_postponed();
     let mut m = model();
-    m.hwnd = hwnd;
+    m.window = window;
     // Capture while NOT the foreground window is refused: the clip would sit over somebody else is screen
     // area and the cursor would be hidden globally (see `capture_foreground_check`). The front end has the
     // same gate; this is the backstop. (SDL puts the same condition in WIN_UpdateClipCursor.)
-    if !is_foreground(hwnd) {
+    if !is_foreground(window) {
         return false;
     }
     m.want = 2; // …and the request sets want=2 (see the note above)
@@ -170,7 +170,7 @@ pub fn reclip_mouse_capture() -> bool {
         return false;
     }
     let mut m = model();
-    if m.hwnd == 0 {
+    if m.window.is_none() {
         return false;
     }
     let p = probe_of(&m);
@@ -252,11 +252,11 @@ pub fn on_foreground_lost() {
 pub fn capture_foreground_check(app: &tauri::AppHandle) -> bool {
     {
         let mut m = model();
-        if !m.relative || m.hwnd == 0 {
+        if !m.relative || m.window.is_none() {
             m.fg_mismatch_ticks = 0;
             return false;
         }
-        if is_foreground(m.hwnd) {
+        if is_foreground(m.window) {
             m.fg_mismatch_ticks = 0;
             return false;
         }
@@ -353,7 +353,7 @@ fn reconcile(app: &tauri::AppHandle) {
         // The fix is not another event to miss: the POLLED transition is what notifies. One `capture-lost` per
         // loss, which the front end already handles (release + pause when a world is running), and that covers
         // Win+L, Win+;, UAC, the task manager, the task view and anything else that becomes foreground.
-        let focused_now = is_foreground(m.hwnd);
+        let focused_now = is_foreground(m.window);
         if LAST_FOCUSED.swap(focused_now, Ordering::SeqCst) != focused_now {
             if !focused_now {
                 crate::boot_line(
@@ -439,7 +439,7 @@ fn reconcile(app: &tauri::AppHandle) {
         // branch that refused: nothing visible to clip to, or the pointer is outside our window. Rate-limited
         // to one line per 500 ms - it repeats for as long as the state lasts, and the repetition is the
         // symptom's shape.
-        if m.want == 2 && m.hwnd != 0 && rect_is_zero(m.clipped) && trace_gap_ok(500) {
+        if m.want == 2 && m.window.is_some() && rect_is_zero(m.clipped) && trace_gap_ok(500) {
             let p = probe_of(&m);
             let why = if rect_is_zero(centre_lock(&p)) {
                 "nothing to lock to (no visible part of the window)"
@@ -557,11 +557,11 @@ static LAST_FOCUSED: AtomicBool = AtomicBool::new(false);
 /// happened. With the centre lock the cursor never left the crosshair, so the product feel ("opening a
 /// menu lands on the crosshair") follows from the CLIP instead of from a warp - and the explicit
 /// `center_cursor` command still exists for the paths that really do want a move.
-pub fn set_cursor_intent(app: &tauri::AppHandle, hwnd: isize, visible: bool) {
+pub fn set_cursor_intent(app: &tauri::AppHandle, window: NativeWindow, visible: bool) {
     let new_want = if visible { 1 } else { 2 };
     {
         let mut m = model();
-        m.hwnd = hwnd;
+        m.window = window;
         m.want = new_want;
     }
     // **WHO ASKED FOR WHAT, AND WHEN (P1.59).** This is the line that names the culprit when the cursor is

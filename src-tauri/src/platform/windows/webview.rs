@@ -3,8 +3,11 @@
 // The two things the WebView2 HOST (not the page, not the pointer) needs from Win32:
 //
 //   1. the LAUNCH ARGUMENTS - WebView2 reads them from an environment variable before the webview is
-//      created, and the appends that `--disable-gpu-vsync` needs cannot go through
-//      `tauri.conf.json` (that file is read at build time);
+//      created. **This list is the ONE source of truth (P1.81)**: it used to be duplicated in
+//      `tauri.conf.json`, and the two copies had already drifted apart (the config carried the three
+//      `ms*` flags below and this list did not, so switching vsync off silently re-enabled those
+//      components - wry's own default is replaced, not extended, by anything that sets the variable).
+//      The config key is gone; the backend publishes the whole list at startup.
 //   2. `SetAreBrowserAcceleratorKeysEnabled(false)` + no default context menus, which Tauri 2.11
 //      does not expose (wry does).
 //
@@ -23,13 +26,19 @@ use crate::platform::WebviewBackend;
 /// The WebView2 backend. A unit struct: the two switches are set once, on the host.
 pub struct WindowsWebview;
 
-/// The **base** arguments WebView2 is launched with. They are repeated here rather than read back
-/// from `tauri.conf.json` because a non-empty `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` REPLACES the
-/// configured list - so anything that appends must repeat the base verbatim.
+/// The **base** arguments WebView2 is launched with - the complete list, because a non-empty
+/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` **replaces** whatever the host was configured with
+/// (wry's default included), so anything that appends must repeat the base verbatim.
+///
+/// The last flag is not optional: wry passes `--disable-features=msWebOOUI,msPdfOOUI,
+/// msSmartScreenProtection` by default (`tauri-utils` documents exactly this), and setting the
+/// variable replaces that default - so it has to be spelled out here or those three components come
+/// back the moment anything appends to this list.
 const BROWSER_ARGS_BASE: &str = "--autoplay-policy=no-user-gesture-required \
 --no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist \
 --disable-gesture-requirement-for-presentation \
---disable-blink-features=RateLimitPointerLockRequests";
+--disable-blink-features=RateLimitPointerLockRequests \
+--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 
 /// The environment variable the WebView2 loader reads **before the webview is created**
 /// (`game::apply_browser_args` runs before `tauri::Builder` for exactly that reason).

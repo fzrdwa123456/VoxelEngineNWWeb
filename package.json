@@ -15,6 +15,8 @@
     "app:build": "tauri build",
     "app:exe": "cargo build --release --manifest-path src-tauri/Cargo.toml --features custom-protocol",
     "app:portable": "node scripts/package-portable.mjs",
+    "app:windows": "node scripts/build-windows.mjs",
+    "app:android": "node scripts/build-android.mjs",
     "game:dirs": "node scripts/rearrange.mjs",
     "packs:install": "node scripts/rearrange.mjs --with-packs"
   },

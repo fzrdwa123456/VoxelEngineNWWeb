@@ -10,11 +10,23 @@ rust-version = "1.77.2"
 # The Tauri v2 template convention: the logic lives in the lib (testable, multi-platform entry),
 # main.rs only calls run()
 name = "voxelengine_tauri_lib"
-# **rlib only.** The template writes ["staticlib", "cdylib", "rlib"] (that is for iOS/Android),
-# but on Windows + the GNU toolchain cdylib makes the linker export every symbol and mingw's ld
-# blows up: `error: export ordinal too large: 90414`.
-# A desktop build needs neither cdylib nor staticlib, so drop them (with the MSVC toolchain they
-# would be harmless, but there is no reason to keep them).
+# **rlib only, and Android's `.so` is produced by a COMMAND-LINE FLAG instead** (P1.85).
+#
+# A manifest `crate-type` is a property of the PACKAGE, not of the target, so there is no way to say
+# "cdylib for Android, rlib for Windows" here. Declaring `["staticlib", "cdylib", "rlib"]` - what the
+# Tauri template does - makes EVERY build of this crate link a `libvoxelengine_tauri_lib.dll` too, and
+# on Windows + the GNU toolchain the DEBUG one cannot be linked:
+#
+#     ld.exe: error: export ordinal too large: 90913
+#
+# (The release profile survives it: LTO + `opt-level = "s"` + `strip` cut the export count below
+# binutils' ordinal limit. Debug does not, and that is precisely the profile `tauri dev` uses - so the
+# template's crate-type breaks `npm run app:dev` and `npm run app:android -- --debug` on this
+# toolchain.)
+#
+# `scripts/build-android.mjs` therefore builds the Android library with
+# `cargo rustc --lib --crate-type cdylib`, which emits the `.so` for that one invocation and leaves the
+# manifest - and every desktop build - alone.
 crate-type = ["rlib"]
 
 [build-dependencies]
