@@ -687,3 +687,80 @@ cursor is visible but not on the crosshair, and clicking puts it back on the cro
 (4) ESC → pause menu, Resume → capture → ESC again: centred at once
 (5) the standing set: drag/resize the title bar → no tow; the backpack (E); fullscreen <-> windowed must not pause
 ```
+
+---
+
+## Resource pack reload (P1.49ab) — F7, or a pack toggle in the settings panel
+
+The chain used to be read once at boot, so a pack change needed a restart. It can now be re-run while the
+game is running, the MC way: rescan -> re-run the content phase -> drop the derived caches -> mark the
+world's chunks stale (they are re-meshed at the per-frame budget, not in one hitch).
+
+**A. At the main menu (no world needed)**
+1. Start the game and let the main menu appear.
+2. Look at `game\logs\debug.log`: line 1 is `PACKS installed: ... files=N`, and the boot prints
+   `PALETTE <n> block(s) numbered, <k> added`.
+3. Create a file the chain did not have: `game\resourcepacks\VoxelEngineNWWebrp\assets\voxel\lang\fr.json`,
+   containing `{"main.single": "Solo"}` (save it as UTF-8 **without** a BOM — a BOM makes `JSON.parse`
+   fail and the layer is ignored, which is itself worth seeing once).
+4. Press **F7**. Expected: the loading screen appears with four stages
+   (`重新扫描资源包…` / `重建语言与方块表…` / `应用新资源包…` / `重画区块…`), then a toast
+   `pack reload OK — PACKS installed: ... files=N+1; I18N ... fr=1; BLOCKREG ...; palette ...; M chunk(s) marked stale`.
+5. The log gets one `PACKS reloaded #1: ...` line with the SAME summary. `files` and the language list are
+   the proof that the folders were re-read (this was verified by hand: `files=12 ... zh/en/ja/fr` at boot
+   became `files=13 ... zh/en/ja/de=1/fr=2` after a reload that ran while a new `de.json` was created).
+6. **Failure path**: put a deliberately broken `data/blocks.json` (`{ this is not json`) in a pack, press F7.
+   Expected: the toast says `pack reload FAILED — ...`, the log says the previous chain is still in force,
+   and the game keeps running on the OLD chain (nothing is half-applied).
+
+**B. In a world (the part that proves the world is not rebuilt)**
+7. Enter a world and walk around until the chunks are meshed.
+8. Edit a texture a visible block uses (e.g. `assets/voxel/textures/block/grass_block_top.png` in a pack),
+   then press **F7**. Expected: the loading screen comes and goes, the toast reports
+   `N chunk(s) marked stale` with N > 0, and the blocks change appearance over the next second or two
+   (`chunk.stream` rebuilds `MESH_BUDGET_PER_FRAME` = 24 per frame) — the player keeps walking, nothing
+   freezes, and the position/inventory are untouched.
+9. Add a block to a pack's `data/blocks.json`, F7, then look in the backpack: the new block is there and
+   placing it puts the right texture in the world (the palette MERGES, so the blocks already placed keep
+   their numbers — that is the MC lesson this copies, see `VoxelWorld.mergePalette`).
+
+**B2. The main menu background (the case that shipped broken)**
+
+The sample pack ships `backgrounds/background.json` with `mode: panorama`, and the backdrop used to be decided
+once at wiring time — so a reload left the old picture up and never showed the new one. It is re-derived now.
+
+- At the main menu, note the background (the spinning panorama).
+- While the game runs, edit
+  `game\resourcepacks\VoxelEngineNWWebrp\assets\voxel\textures\backgrounds\background.json` to
+  `{"mode": "static"}`, then press **F7**. Expected: the log gets
+  `PACKS menu backdrop re-derived: kind=static`, and the panorama is replaced by the pack's
+  `backgrounds/mainmenu.png` — the old panorama must NOT stay behind it.
+- Switch it back to `{"mode": "panorama"}` and press **F7** again: the image goes away and the panorama
+  comes back (its scene is rebuilt lazily, from the new chain).
+- Still in `panorama`: edit `panorama.png` (or drop in a pack that ships a different one) and press **F7** —
+  the panorama changes, and the previous scene is disposed (no leaked texture per reload).
+- Switch every pack off in the settings panel so nothing supplies `background.json`: the backdrop must fall to
+  the magenta/black checkerboard — no stale image, no black hole.
+
+**C. The settings toggle**
+10. Pause menu -> Settings -> Resource Packs: switch one off. Expected: the choice is saved AND a reload
+    starts at once (the note under the list says so; it used to say "after a restart"), so the pack's
+    textures/language are gone without relaunching.
+
+
+**D. Inventory icons + files added/removed inside a pack (P1.49ac)**
+
+- Enter a world, look at the hotbar icons, then change one of those blocks' textures in a pack
+  (`assets/voxel/textures/block/...png`) and press **F7**: the hotbar/backpack icons must change too (they are
+  re-baked — one checker frame is expected while the bake runs), and the log must show
+  `chain gen N` + `inventory memory cleared (36 slot signature(s))`.
+- Add a file to a pack (e.g. a new `textures/block/x.png`) and press F7: the reload summary's `files=` goes up
+  by one. Remove it, press F7 again: `files=` goes back down.
+- Add a BLOCK to `data/blocks.json`, press F7: the block is placeable and draws (the palette merges), but it
+  does NOT appear in the hotbar — that is deliberate (the starting stack set is seeded at spawn; MC needs a
+  creative inventory for the same reason).
+- Open Settings -> Resource Packs, keep that page OPEN, press **F7** (or toggle a pack): the rows and their
+  file counts must refresh instead of showing the previous chain's numbers.
+**F3+T equivalent / gotcha**: F7 is handled by `ui.navigation` like the hot-plug keys, so it works at the
+main menu too. Synthetic keys sent from another process (SendKeys) do NOT reach the WebView — press it on
+the real keyboard.

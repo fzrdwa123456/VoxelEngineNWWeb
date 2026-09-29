@@ -8,7 +8,7 @@
 import * as THREE from "three/webgpu";
 // The view size and the size clamp are DATA (`data/globals/gfx.ts`), like every other GPU-layer number.
 import { ICON_SIZE_MAX, ICON_SIZE_MIN, ICON_VIEW_HALF, type IconBakeState } from "../../data/globals/gfx";
-import { resolveTexture } from "../../data/assets/textures";
+import { packChainGeneration, resolveTexture } from "../../data/assets/textures";
 import { getBlockDef } from "../../data/assets/blockregistry";
 
 /** Block type id (alias from the old blocks.ts; block world removed, registry ids remain strings) */
@@ -66,10 +66,21 @@ export function clampIconSize(sizePx: number): number {
   return Math.max(ICON_SIZE_MIN, Math.min(ICON_SIZE_MAX, Math.round(sizePx)));
 }
 
-/** The cache key for one bake. Exported, and used by BOTH readers below, because a second place
- *  computing this key by hand is exactly how a cache silently stops hitting. */
+/** The cache key for one bake: **the chain generation**, the block type and the size.
+ *
+ *  WHY THE GENERATION IS PART OF IT (P1.49ac): the key used to be `type@size`, which made the cache blind to a
+ *  resource pack reload. Two things went wrong with that, and both are silent:
+ *   * a bake that was still IN FLIGHT when the chain changed landed afterwards and overwrote the new icon with
+ *     the previous chain's pixels — the same key, so nothing could tell them apart;
+ *   * a consumer that had already drawn a slot had no way to say "that is the old chain's icon", so it never
+ *     asked again.
+ *  With the generation in the key, a stale hit is impossible by construction. The OLD entries are dropped by the
+ *  reload driver (`ICON_BAKE.cache.clear()`), so this does not accumulate.
+ *
+ *  Exported, and used by BOTH readers below, because a second place computing this key by hand is exactly
+ *  how a cache silently stops hitting. */
 export function iconCacheKey(type: BlockType, sizePx: number): string {
-  return `${type}@${clampIconSize(sizePx)}`;
+  return `${packChainGeneration()}|${type}@${clampIconSize(sizePx)}`;
 }
 
 /** The icon for (type, size) IF it is already baked, else null. Synchronous on purpose: a caller that

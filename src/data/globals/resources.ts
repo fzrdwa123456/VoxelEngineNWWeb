@@ -694,6 +694,28 @@ export function createLoadingState(): LoadingState {
   return { active: false, progress: 0, key: "", noteKey: "", noteValue: "" };
 }
 
+// ===== 4b. The PACK RELOAD request: a plain flag + a per-frame check (the MC shape) =====
+// Minecraft's F3+T does not run its reload from a tick state machine either: the key handler STARTS it and
+// `pendingReload` is checked once per frame (`Minecraft.reloadResourcePacks` / `runTick`). This is that shape.
+//
+// It is DATA because the raiser (`ui.navigation`, on a key EDGE) is a system in the ui lane: it may not call
+// into the composition root, and the root may not be reached from a lane. So the lane only RAISES the flag
+// through the `ReloadPacks` command, and the root's frame check runs the driver.
+export interface PackReloadState {
+  /** A reload was ASKED for and has not been started yet. */
+  requested: boolean;
+  /** The driver is running right now, so the frame check never starts a second one (MC's `pendingReload`). */
+  running: boolean;
+  /** How many reloads have completed this session (the log/probe line, and what a test reads). */
+  count: number;
+}
+
+export const PACK_RELOAD = defineResource<PackReloadState>("packReload");
+
+export function createPackReloadState(): PackReloadState {
+  return { requested: false, running: false, count: 0 };
+}
+
 // ===== 5. Delayed intents: "do this in a moment" as DATA =====
 // Four `setTimeout` calls were the only way this process could say "in a moment": closing the backpack
 // relocked the mouse on the next event-loop turn, the lock manager retried a rejected lock after 1300 ms,

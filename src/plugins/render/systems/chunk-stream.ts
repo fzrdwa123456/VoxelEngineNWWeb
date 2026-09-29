@@ -219,6 +219,16 @@ export class ChunkStreamSystem {
     // a frame.
     for (const key of this.voxel.takeDirty()) this.rebuild(key);
 
+    // A PACK RELOAD marks every loaded chunk stale (P1.49ab): the LOOKS a chunk resolves come from the block
+    // table and the textures, so a new chain changes every mesh's material list. Budgeted, unlike a block
+    // edit: the player is not waiting on any one chunk here, and rebuilding ~2000 of them in a single frame is
+    // the hitch Minecraft avoids by invalidating the geometry and rebuilding over the following frames.
+    let reloadBudget = MESH_BUDGET_PER_FRAME;
+    for (const key of this.voxel.takeStale(reloadBudget)) {
+      reloadBudget--;
+      this.rebuild(key);
+    }
+
     let budget = MESH_BUDGET_PER_FRAME;
     for (const key of this.wanted) {
       if (budget <= 0) break;

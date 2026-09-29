@@ -443,6 +443,15 @@ export function buildSettingsPanel(
   onUiAction(actions, `${id}.packOff`, (value) => togglePack(offShown[Number(value)]));
   onUiAction(actions, `${id}.packOn`, (value) => togglePack(onShown[Number(value)]));
 
+  // A PACK RELOAD RE-RENDERS THE LIST (P1.49ac). The rows above are written when the page is SHOWN (and after a
+  // toggle), so a reload raised from outside this view — F7, or a driver that re-installed the chain — would
+  // otherwise leave the previous chain's names and file counts on screen. It goes through the config bus because
+  // that is the existing way a VALUE tells its surfaces it changed (the value-composed labels subscribe the same
+  // way); the guard keeps a reload that happens while another settings page is up from touching this one.
+  onConfigChange("packs", () => {
+    if (world.resource(UI_MODAL).settings === "pack") renderPacks();
+  });
+
   // --- THE PAGE HOST (P1.29): this panel does not know which pages exist. It registers WHERE a page may be
   //     mounted (this list, this root, this action-id prefix, this `show`), and `ui.pages` materializes every
   //     page a plugin contributes — including one contributed by a plugin installed while the game runs.

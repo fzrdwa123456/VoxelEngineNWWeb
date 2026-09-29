@@ -9,7 +9,7 @@
 import { SLOT_COMMANDS, SLOT_COMPONENTS, SLOT_RESOURCES } from "../../core/extension/slots";
 import { definePlugin } from "../../core/plugin/descriptor";
 import type { World } from "../../core/world";
-import { SelectSlot, SwapSlots, Teleport } from "../../core/effect/commands";
+import { SelectSlot, SwapSlots, Teleport } from "./commands";
 import { BlockInteractionSystem, INTERACTION_ACCESS } from "./systems/interaction";
 import { COLLISION_ACCESS, CollisionSystem } from "./systems/collision";
 import { CONTROLLER_ACCESS, PlayerControllerSystem } from "./systems/controller";

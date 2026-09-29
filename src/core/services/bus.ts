@@ -13,14 +13,17 @@
 // cannot be paged from outside the loop. The bus is the smallest thing that keeps the data modules free
 // of behaviour while the subscribers stay exactly where the effects belong.
 
-/** The configuration values that can raise a change notification. */
-export type ConfigKind = "lang" | "font" | "uiScale" | "binds";
+/** The configuration values that can raise a change notification. `packs` is not a settings FILE value: it
+ *  says "the resource pack chain was re-installed" (P1.49ac), which the surfaces that LIST the chain have to
+ *  hear — the settings panel's pack rows show names and file counts, and those come from the chain in force. */
+export type ConfigKind = "lang" | "font" | "uiScale" | "binds" | "packs";
 
 const listeners: Record<ConfigKind, Set<() => void>> = {
   lang: new Set(),
   font: new Set(),
   uiScale: new Set(),
   binds: new Set(),
+  packs: new Set(),
 };
 
 /** Subscribe to one configuration value's changes (the composition root saves; the settings panel

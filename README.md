@@ -1,7 +1,8 @@
 # VoxelEngineTauri
 
-VoxelEngine 的 **Tauri v2** 版。前端（TypeScript + three.js WebGPU + 手写 ECS）与原
-`VoxelEngineNWWeb` 一致，**壳从 NW.js 换成了 Tauri**（Windows 上是 WebView2）。
+VoxelEngine 的 **Tauri v2** 版。壳从 NW.js 换成了 Tauri（Windows 上是 WebView2），前端同时完成了
+**微内核插件化**改造：TypeScript + three.js WebGPU + 手写 ECS，**12 个插件各带自己的数据、各自构造并声明
+自己的系统**，加一个功能 = 加一个 `plugins/<id>/` 文件夹（不需要改装配根的任何名单）。
 
 > 逐文件的移植对照在 **[docs/PORT-TAURI.md](docs/PORT-TAURI.md)**；
 > **架构与编程思想的正式说明在 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**

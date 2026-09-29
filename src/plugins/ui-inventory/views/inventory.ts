@@ -26,7 +26,7 @@
 // Open/closed is not component data either: the state is `UI_MODAL.inventory` (flipped by ui.navigation,
 // which also paints it), so there is no second copy of "the backpack is open" to drift.
 import { HOTBAR_SLOTS, INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../../player/components";
-import { SwapSlots } from "../../../core/effect/commands";
+import { SwapSlots } from "../../player/commands";
 import { UI_MODAL } from "../../../data/globals/resources";
 import { UI_PAINT } from "../../../data/globals/paint";
 import { onUiAction, UI_ACTIONS, ACTION_BAG_CLICK } from "../../../data/globals/actions";

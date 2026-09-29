@@ -136,11 +136,16 @@ The data lives in the game\\ directory next to it:
   game\\config\\settings.bad.json  backup of an unreadable settings file
   game\\logs\\debug.log            engine log (look here first when the startup misbehaves)
   game\\logs\\renderer.log         console.error / warn
-  game\\resourcepacks\\            resource packs (folder or .zip; restart to apply)
+  game\\resourcepacks\\            resource packs (folder or .zip; F7 reloads them while the game runs)
   game\\mods\\                     block mods (assets/<ns>/data/blocks.json + textures)
   game\\saves\\
 
 Environment variable: VOXEL_GAME_ROOT forces the data root (handy when diagnosing).
+
+RESOURCE PACKS RELOAD WHILE THE GAME RUNS (F7, or toggling a pack in the settings panel): the chain is
+rescanned, the languages/block table/palette are re-derived and the world re-meshes over the next frames.
+TWO THINGS STILL NEED A RESTART, and they are spawned once at wiring: a NEW language ROW in the language
+picker, and a new BLOCK's hotbar slot (the starting stacks are seeded at spawn).
 
 Plugin toggles (double-click one, then RESTART the game — the manifest is read at boot):
   plugins-status.bat               show the current plugins.json and the PLUGIN lines of the log

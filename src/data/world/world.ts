@@ -103,16 +103,68 @@ export class VoxelWorld {
   /** Chunk identities whose MESH is stale because a block was written (see setBlock).
    *  The render layer drains this with takeDirty(); the voxel layer never touches meshes. */
   private readonly dirty = new Set<string>();
+  /** Chunk identities whose mesh is stale because the RESOURCE CHAIN changed (P1.49ab, the pack reload).
+   *  Separate from `dirty` on purpose: a block edit is one chunk the player is waiting for and is rebuilt
+   *  UNBUDGETED, while a texture change touches every loaded chunk and must be spread over frames — the
+   *  chunk stream drains this at MESH_BUDGET_PER_FRAME via takeStale(). */
+  private readonly stale = new Set<string>();
 
   /** The block ids a voxel value names, in value order (1..N). DERIVED: the composition root hands the block
    *  registry ids in right after it builds them (P1.47), so every block an install ships is both placeable and
    *  drawable. Until that call (a gate test, a world without the content plugin) it is FALLBACK_PALETTE. */
   private palette: readonly string[] = FALLBACK_PALETTE;
 
-  /** Install the palette in force. The root calls this during boot: chunks generated before it keep the values
-   *  they were built with, and there are none before the world is entered. */
+  /** Install the palette in force, REPLACING it. Boot-only now: the pack reload uses `mergePalette`, because
+   *  a replacement is exactly what re-points every existing voxel at another block. */
   setPalette(ids: readonly string[]): void {
     if (ids.length > 0) this.palette = [...ids];
+  }
+
+  /** MERGE a block-id list into the palette in force, keeping every number already handed out (P1.49ab).
+   *
+   *  THE POINT — and the MC lesson this copies: a voxel stores a NUMBER, so "which number means which block"
+   *  must be owned by the ENGINE, never by the resource chain. `setPalette` REPLACED the list, so a pack that
+   *  reordered or dropped an entry silently re-pointed every existing voxel at a different block (in MC the
+   *  registry is static and a reload never touches it). Merging only ever APPENDS: a block the install no
+   *  longer names keeps its number (its chunks stay readable and draw as the missing block), and a block a
+   *  new pack adds gets the next free number. That is what makes a running reload safe. */
+  mergePalette(ids: readonly string[]): { readonly added: readonly string[]; readonly total: number } {
+    const next = [...this.palette];
+    const added: string[] = [];
+    for (const id of ids) {
+      if (next.includes(id)) continue;
+      next.push(id);
+      added.push(id);
+    }
+    this.palette = next;
+    return { added, total: next.length };
+  }
+
+  /** Mark EVERY loaded chunk's mesh stale (P1.49ab). Returns how many. */
+  markAllStale(): number {
+    let n = 0;
+    for (const key of this.chunks.keys()) {
+      this.stale.add(key);
+      n++;
+    }
+    return n;
+  }
+
+  /** Up to `limit` stale identities, removed from the set. Takes a LIMIT rather than draining everything,
+   *  because the caller is on a per-frame budget: what it does not take stays queued for the next frame. */
+  takeStale(limit: number): string[] {
+    const out: string[] = [];
+    for (const key of this.stale) {
+      if (out.length >= limit) break;
+      out.push(key);
+    }
+    for (const key of out) this.stale.delete(key);
+    return out;
+  }
+
+  /** Stale identities still queued (the reload's progress, and what the gate reads). */
+  get staleCount(): number {
+    return this.stale.size;
   }
 
   /** The value a block id has in the palette in force: 0 when it is not named there (place nothing). */

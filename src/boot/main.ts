@@ -2,28 +2,29 @@ import * as THREE from "three/webgpu";
 import { World } from "../core/world";
 import { CONTROL, HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "../data/globals/resources";
-import { SetLoadingStage, SetFpsCap, SetMode, ShowToast, Teleport } from "../core/effect/commands";
-import { INPUT_ACCESS, PlayerInputSystem } from "../plugins/player/systems/input";
-import { CONTROLLER_ACCESS, PlayerControllerSystem } from "../plugins/player/systems/controller";
-import { MOVEMENT_ACCESS, PlayerMovementSystem } from "../plugins/player/systems/movement";
-import { COLLISION_ACCESS, CollisionSystem } from "../plugins/player/systems/collision";
-import { BlockInteractionSystem, INTERACTION_ACCESS } from "../plugins/player/systems/interaction";
-import { BlockOutlineSystem, OUTLINE_ACCESS } from "../plugins/render/systems/outline";
+import { SetLoadingStage, SetFpsCap, ShowToast } from "../core/effect/commands";
+import { SetMode, Teleport } from "../plugins/player/commands";
+// (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/player/systems/movement" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/player/systems/collision" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/player/systems/interaction" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/render/systems/outline" was dead after P1.18b: the plugin owns it now)
 import { BOOT_FLOW, createBootFlow, type BootStage } from "../data/globals/boot";
 import { runBootFlow, type BootFlowDeps } from "../core/flow/boot";
-import { CHUNK_STREAM_ACCESS, ChunkStreamSystem } from "../plugins/render/systems/chunk-stream";
-import { PositionSnapshotSystem, SNAPSHOT_ACCESS } from "../plugins/player/systems/snapshot";
-import { DiagnosticsSystem, DIAGNOSTICS_ACCESS } from "../plugins/render/systems/diagnostics";
-import { DELAYS_ACCESS, DelaySystem } from "../plugins/ui/systems/delays";
-import { CAMERA_VIEW_ACCESS, CameraViewSystem } from "../plugins/render/systems/camera";
+// (every import of "../plugins/render/systems/chunk-stream" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/player/systems/snapshot" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/render/systems/diagnostics" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/ui/systems/delays" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/render/systems/camera" was dead after P1.18b: the plugin owns it now)
 import { MenuBackgroundSystem } from "../plugins/render/systems/menu-background";
 import { defaultUiTheme, UI_THEME } from "../data/assets/theme";
-import { UI_RENDER_ACCESS, UiRenderSystem } from "../plugins/ui/systems/reconcile";
+// (every import of "../plugins/ui/systems/reconcile" was dead after P1.18b: the plugin owns it now)
 import { createUiActions, UI_ACTIONS } from "../data/globals/actions";
 import { createUiOrder, UI_ORDER } from "../plugins/ui/components";
 import { createUiPaint, UI_PAINT } from "../data/globals/paint";
 import { createUiSources, UI_SOURCES } from "../data/globals/sources";
-import { UI_BINDING_ACCESS, UiBindingSystem } from "../plugins/ui/systems/bindings";
+// (every import of "../plugins/ui/systems/bindings" was dead after P1.18b: the plugin owns it now)
 import { BLOCK_OUTLINE, CAMERA3D, CANVAS_HOST, CHUNK_MATERIAL, CHUNK_MESHES, ICON_BAKE, MENU_BACKGROUND, PERF_SAMPLER, RENDERER3D, SCENE3D, UI_MOUNT } from "../data/globals/gfx";
 import { createBlockOutline, createChunkMaterial, createChunkMeshCache, createIconBake, createMenuBackground, createUiMount } from "../host/browser/presentation";
 import { createKeybindGesture, KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
@@ -36,8 +37,8 @@ import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
 import { createPickerSystem } from "../plugins/ui-debug";
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
-import { SLOT_BLOCKS, SLOT_LANGUAGES, SLOT_UI_HUD, SLOT_UI_PAGES } from "../core/extension/slots";
-import { UI_HUD_PAINTED, type UiHudElement } from "../data/globals/ui-hud";
+import { SLOT_BLOCKS, SLOT_LANGUAGES, SLOT_UI_HUD } from "../core/extension/slots";
+import { UI_HUD_PAINTED } from "../data/globals/ui-hud";
 import { UI_PAGE_HOSTS, UI_PAGES_MOUNTED } from "../data/globals/ui-pages";
 import type { Plugin } from "../core/plugin/descriptor";
 import type { Entity } from "../core/world";
@@ -45,27 +46,22 @@ import type { Entity } from "../core/world";
 // it can be plugged in and out at runtime in BOTH directions (unlike the key bind tab, which lives inside a
 // view's layout). The root still spawns the widgets — it does the wiring — through the plugin's helper.
 import { createToastSystem, spawnToastPanel } from "../plugins/ui-toast";
-import { UI_LOADING_ACCESS, UiLoadingSystem } from "../plugins/ui/systems/loading";
-import { UI_HUD_ACCESS, UiHudSystem } from "../plugins/ui/systems/hud";
-import { UI_NAVIGATION_ACCESS, UiNavigationSystem, type NavigationTrees } from "../plugins/ui/systems/navigation";
-import { LoadingScreen } from "../plugins/ui/views/loading";
+// (every import of "../plugins/ui/systems/loading" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/ui/systems/hud" was dead after P1.18b: the plugin owns it now)
+import { type NavigationTrees } from "../plugins/ui/systems/navigation";
+// (every import of "../plugins/ui/views/loading" was dead after P1.18b: the plugin owns it now)
 // The INVENTORY layer is its own plugin (P1.31): the bag, the hotbar they share data with, and their system.
-import {
-  createInventorySystem,
-  createInventoryView,
-
-  declareUiInventorySystems,
-} from "../plugins/ui-inventory";
+import { createInventorySystem, createInventoryView } from "../plugins/ui-inventory";
 import { Menu, spawnMenuBackdrop } from "../plugins/ui/views/menu";
 // The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
 // them from THERE: the ui plugin exports none of it any more.
 import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, spawnKeybindLine } from "../plugins/ui-keybind/views/keybind";
 import { MainMenu } from "../plugins/ui/views/mainmenu";
-import { Hud } from "../plugins/ui/views/hud";
+// (every import of "../plugins/ui/views/hud" was dead after P1.18b: the plugin owns it now)
 import { PointerLock } from "../host/browser/pointerlock";
-import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS, type Lang } from "../data/assets/i18n";
-import { loadUIScaleMode, getUIScaleMode, currentRootFontPx } from "../data/globals/uiscale";
-import { loadFont, getFontId, currentFontCss } from "../data/globals/fonts";
+import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS } from "../data/assets/i18n";
+import { loadUIScaleMode, getUIScaleMode } from "../data/globals/uiscale";
+import { loadFont, getFontId } from "../data/globals/fonts";
 import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput } from "../host/browser/rawinput";
@@ -76,21 +72,35 @@ import { captureMouse, releaseMouse } from "../host/browser/mousecapture";
 import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../host/browser/blockicons";
 import { ChunkGeometry, getChunkMaterial } from "../host/browser/chunkmesh";
 import { RENDER_HANDLES } from "../data/globals/render-handles";
-import { adoptViewport, currentViewport, onViewportChange } from "../host/browser/viewport";
+import { PLAYER_HANDLES } from "../data/globals/player-handles";
+import { UI_HANDLES } from "../data/globals/ui-handles";
+import { adoptViewport, onViewportChange } from "../host/browser/viewport";
 import { DebugLogForwarder } from "../host/desktop/debuglog";
 import { PerfSampler } from "../core/services/perf";
-import { loadBinds, getBind, getBindsAll, getCapturing, isCapturing, buttonToAction, buttonToCode, setBind, endCapture, adoptKeybindGesture } from "../plugins/input/keybinds";
+import { loadBinds, getBind, getBindsAll, getCapturing, setBind, endCapture, adoptKeybindGesture } from "../plugins/input/keybinds";
 // The configuration CHANGE BUS: a config value announces itself through here (the notification is
 // behaviour; the values live under data/). The root subscribes to persist each one.
-import { onConfigChange } from "../core/services/bus";
-import { menuBgKind, menuBgState, MENU_BG_KIND } from "../data/assets/background";
+import { onConfigChange, notifyConfigChange } from "../core/services/bus";
+import { menuBgState, MENU_BG_KIND } from "../data/assets/background";
 import {
   getDisabledPacks,
   resolveAllBytes,
   resolveTexture,
   setDisabledPacks,
 } from "../data/assets/textures";
-import { preloadPacks } from "../host/desktop/packs";
+import { preloadPacks, rescanPacks } from "../host/desktop/packs";
+// ===== The pack RELOAD's imports (P1.49ab) =====
+// The reload re-runs the CONTENT PHASE: rescan (Rust) -> install the chain -> re-derive what the chain
+// declares (languages, the block table, the palette) -> drop the caches those derived -> mark the chunks
+// stale. Every piece below is one of those steps, and every one of them already existed for the BOOT: the
+// reload is the same path with a different trigger, which is what makes it small.
+import { installPacks, packChainGeneration, type PackSnapshotPayload } from "../data/assets/textures";
+import { discoverBlockEntries } from "../data/assets/blocks";
+import { declaredLanguages } from "../data/assets/languages";
+import { invalidateDictionaries } from "../data/assets/i18n";
+import { resetBlockRegistry } from "../data/assets/blockregistry";
+import { invalidateMenuBackground, menuBgKind } from "../data/assets/background";
+import { PACK_RELOAD, createPackReloadState } from "../data/globals/resources";
 
 import { allBlockIds, buildBlockRegistry, blockRegistryState, BLOCK_REGISTRY } from "../data/assets/blockregistry";
 import { discoveredBlockIds, discoveredBlockLayers } from "../data/assets/blocks";
@@ -100,32 +110,19 @@ import { VoxelWorld, WORLD_SURFACE_Y } from "../data/world/world";
 // the six plugins themselves (each owns its declarations; the systems are still built below and
 // contributed under their plugin's id).
 import { ExtensionRegistry } from "../core/extension/registry";
-import { SLOT_RESOURCES, SLOT_SYSTEMS } from "../core/extension/slots";
+import { SLOT_SYSTEMS } from "../core/extension/slots";
 import { installPlugins, startPlugins, stopPlugins } from "../core/plugin/lifecycle";
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { discoverPlugins } from "./plugin-catalog";
 import type { PluginHost } from "../core/plugin/host";
-import { worldPlugin } from "../plugins/world";
-import { createPlayerPlugin } from "../plugins/player";
+// The render plugin's MESHER type (a `host/` object the root builds and hands in as a host instance).
 import type { ChunkMeshFactory } from "../plugins/render";
-// (the diagnostics plugin is discovered now too: see plugins/diagnostics/plugin.ts)
-import {
-  createRenderSystem,
-  createBindingSystem,
-  createLoadingSystem,
-  createHudSystem,
-  createPagesSystem,
-  createNavigationSystem,
-  createDelaySystem,
-  createMainMenu,
-  createPauseMenu,
-  createUiViews,
-  declareUiSystems,
-  uiPlugin,
-} from "../plugins/ui";
-import { inputPlugin } from "../plugins/input";
-import { contentDefaultPlugin } from "../plugins/content-default";
+// (the diagnostics, world, player, input and content-default plugins are DISCOVERED now: each folder owns a
+//  `plugin.ts` that builds it from the host's instances — see `boot/plugin-catalog.ts` and P1.18b.)
+import { createMainMenu, createPauseMenu, createUiViews } from "../plugins/ui";
+// (every import of "../plugins/input" was dead after P1.18b: the plugin owns it now)
+// (every import of "../plugins/content-default" was dead after P1.18b: the plugin owns it now)
 
 // Pixel font (Fusion Pixel, OFL open source): proportional font for general UI, monospace for F3/count panels
 import "@fontsource/fusion-pixel-12px-proportional-sc";
@@ -141,9 +138,19 @@ import "@fontsource/fusion-pixel-12px-monospaced-sc";
 // **Wrap it in try/catch**: a throw out of here kills the whole module while initShell() has not run
 // yet, and the error then lands nowhere — the symptom is the silent failure "process alive, no window,
 // 0-byte log".
+// The chain the engine is on RIGHT NOW. Kept so a reload that fails half-way can put it back (MC's
+// `rollbackResourcePacks`); null only before the startup install.
+let lastGoodSnapshot: PackSnapshotPayload | null = null;
 try {
   await preloadShell();
-  await preloadPacks();
+  // THE STARTUP INSTALL IS THE SAME PATH A RELOAD TAKES (P1.49ab): rescan -> install, and the snapshot is
+  // KEPT. It used to be `preloadPacks()`, which did this and threw the snapshot away.
+  try {
+    lastGoodSnapshot = await rescanPacks();
+    logDebug(installPacks(lastGoodSnapshot, readSettings().disabledPacks));
+  } catch (packErr) {
+    logDebug(`PACKS preload failed (engine fallbacks only): ${String(packErr)}`);
+  }
 } catch (err) {
   const msg = `preload failed: ${String(err)}`;
   bootReport(msg);
@@ -459,21 +466,9 @@ const chunkMeshFactory: ChunkMeshFactory = { createGeometry: () => new ChunkGeom
 // THE RENDER HANDLES COME FROM THE PLUGIN THAT PUBLISHES THEM (P1.45): the render plugin is DISCOVERED
 // now, so the root no longer CONSTRUCTS it - but the boot driver still primes and warms the chunk stream,
 // and the published resource is how it reaches the very instance the plugin registered.
-// The reconciler that owns every widget's DOM element. It mounts roots on the world's UI_MOUNT resource
-// (the same element the hand-written HUD/menus used) and gets the i18n lookup injected, so ecs/ never
-// imports src/ui/.
-// `fontCss` / `rootFontPx` come along for the same reason: the FONT and UI_SCALE resources hold the
-// values, and the reconciler — the one system allowed to write the DOM — is what applies them to the
-// document root (see its reconcileAppliedStyle).
-const uiRender = createRenderSystem(world, {
-  translate: t,
-  fontCss: currentFontCss,
-  rootFontPx: currentRootFontPx,
-  log: logDebug,
-});
-// Resolves every BOUND widget's value from its source (ecs/ui/bindings.ts), so a slider that shows
-// shared state never holds a private copy of it.
-const uiBindings = createBindingSystem(world, logDebug);
+// The reconciler that owns every widget's DOM element — it is the UI plugin's now (P1.18b), so the root reads
+// it through the handle the plugin publishes. It mounts roots on the world's UI_MOUNT resource (the same
+// element the hand-written HUD/menus used) and gets the i18n lookup injected, so `core/` never imports `ui/`.
 // The F3+F4 picker: the F3 debug panel and the mode chord are GAMEPLAY UI, so they are gated on
 // `inWorld()` — outside a world (the main menu, and the loading screen while a world is built) it
 // consumes the key edges and does nothing, and it takes its own panels down. The HUD toast below is
@@ -492,13 +487,8 @@ const uiPicker = createPickerSystem(world, {
 });
 const toastPanel = spawnToastPanel(world);
 const uiToast = createToastSystem(world, toastPanel.panel, toastPanel.body);
-// The page host. `pages` is late-bound on purpose: the registry is declared further down the file, and this
-// getter is only ever called from the lane.
-const uiPages = createPagesSystem(world, { pages: () => registry.list(SLOT_UI_PAGES) });
-// The startup screen's painter: it reads LOADING_STATE and writes the boot tree's widgets, so it is in
-// the ui lane with the other widget-data writers — that lane is also the only one that runs in `load`
-// mode, which is exactly the mode the screen is shown in.
-const uiLoading = createLoadingSystem(world, loadingScreen);
+// The page host and the startup screen's painter are the UI plugin's systems now (P1.18b): it constructs them
+// from the registry and the views the root spawns (see plugins/ui/plugin.ts).
 // The key bind drag's data: derived every frame from the bind table + the GESTURE + the POINTER resource,
 // with the platform reads injected so this layer stays free of platform imports (and so the gate can drive
 // it with fakes). `line` is the rubber-band WIDGET the view only spawns — the system writes its geometry.
@@ -519,10 +509,11 @@ const uiKeybind = createKeybindSystem(world, {
   entries: keybindEntries,
   keycapAt: keycapAtPoint,
 });
-// The key bind drag asks the UI SYSTEM what is under the cursor: only it owns the elements (the
-// hand-written panel kept its own cross-instance table of keycap elements to do this).
+// The key bind drag asks the UI SYSTEM what is under the cursor: only it owns the elements. That system is the
+// UI plugin's now, so the question goes through the handle it publishes (UI_HANDLES) — resolved when the drag
+// asks, which is long after the plugins were installed.
 bindKeybindDrag({
-  log: logDebug, world, hitTest: (x, y) => uiRender.hitTest(x, y), gesture: keybindGesture });
+  log: logDebug, world, hitTest: (x, y) => world.resource(UI_HANDLES).uiRender.hitTest(x, y), gesture: keybindGesture });
 // No callback into the UI any more: the interaction system reads the entity's INVENTORY component
 // itself, so the hand you see and the hand that places a block cannot disagree. It writes the local
 // player's TARGET_HIT component; `block.outline` (render lane) draws the wireframe from it — the mesh
@@ -561,19 +552,13 @@ const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peek
 // happens at a barrier (the host defers it).
 // "Is the inventory layer installed right now" — the SAME set `hotInstall`/`hotUninstall` maintain. Only the
 // BAG's gate reads it (ui.navigation's E key and its mouse bind): the strip is that plugin's OWN element, so it
-// does not need to be asked about at all.
+// does not need to be asked about at all. The UI plugin reads this through a host instance.
 const inventoryOn = (): boolean => livePlugins.has("ui-inventory");
-// THE HUD TABLE (P1.32/P1.34, plugin-owned elements in P1.35): each element carries its own gate AND its own
-// build. The core contributes NO element of its own any more (P1.48): every one of them - the crosshair and
-// the HOTBAR included - arrives through `SLOT_UI_HUD` (armor, xp, a boss bar...), which is why the getter
-// simply lists what the registry holds.
-const hudElements = (): readonly UiHudElement[] => [
-  ...registry.list(SLOT_UI_HUD),
-  // NO core element: the crosshair is the ui-crosshair plugin now (P1.48), like every other HUD element.
-  // NO hotbar row: it is contributed by the `ui-inventory` plugin (SLOT_UI_HUD, order 20), which is what makes
-  // uninstalling that layer DESPAWN the strip instead of leaving hidden widgets behind.
-];
-const uiHud = createHudSystem(world, { elements: hudElements, log: logDebug });
+// THE HUD TABLE (P1.32/P1.34, plugin-owned elements in P1.35) is read by the UI plugin's `ui.hud` straight
+// from the registry (SLOT_UI_HUD) — the root contributes NO element of its own any more (P1.48).
+// The MODAL TREES `ui.navigation` paints are built further down (the menus' callbacks close over the world
+// driver), so they travel to the plugin in this BOX: it reads `.trees` every frame, never at construction.
+const uiTrees: { trees: NavigationTrees | null } = { trees: null };
 
 // ===== System registration =====
 // Registration order IS the default execution order; `after`/`before` state the constraints that are
@@ -606,38 +591,60 @@ const uiHud = createHudSystem(world, { elements: hudElements, log: logDebug });
 // plugins this run installs. The SYSTEM definitions still live in this file — they close over the wiring
 // built above — but every one of them is contributed UNDER ITS PLUGIN'S ID, so turning a plugin off in
 // plugins.json keeps its systems out of the schedule entirely.
+world.insertResource(PACK_RELOAD, createPackReloadState());
 const registry = new ExtensionRegistry();
-// The player plugin is built FIRST: it constructs the six fixed-lane systems and declares them, and the
-// root keeps the handles it still wires by hand.
-const playerPlugin = createPlayerPlugin({
-  world,
-  log: logDebug,
-  // Late-bound on purpose: `inWorld` is declared further down the file, and the plugin only calls it.
-  inWorld: () => inWorld(),
-  mouse: { capture: (dom) => captureMouse(dom), release: releaseMouse },
-});
-const { input, snapshot, controller, movement, collision, interaction } = playerPlugin.systems;
+// ===== The plugin system =====
+// (The player plugin is built FIRST — see `plugins/player/index.ts`. The root keeps the handles it still wires
+// by hand: the input system the raw-input thread and the frame loop drive, and the views it spawns.)
 
 // ===== The hot-plug host (P1.24) =====
 // Which plugins may be installed WITHOUT a restart, and the door the `HotPlugPlugin` command reads. Note WHO
-// builds the plugin: the ROOT does, from the instance it constructed — and the plugin still declares its own
-// system, because that is the property that makes it hot-pluggable at all. It is the SAME value the boot
-// installs below, so the boot path and the runtime path cannot drift apart.
+// builds the plugin: the plugin's own `plugin.ts` does, from the instances the host publishes — and the plugin
+// still declares its own system, because that is the property that makes it hot-pluggable at all. It is the
+// SAME value the boot installs below, so the boot path and the runtime path cannot drift apart.
 // THE PLUGIN CATALOGUE IS DISCOVERED (P1.40): `plugins/<id>/plugin.ts` is the opt-in, so the four optional
 // surfaces are no longer listed here and adding a plugin folder does not touch this file. The HOST publishes
 // what a plugin may need BY NAME (see core/plugin/host.ts); each plugin's own plugin.ts narrows it to its
 // factory's types, which is why the root can hand over instances it does not model.
+// THE PLAYER PLUGIN IS DISCOVERED TOO (P1.18b): it constructs its six fixed-lane systems itself and publishes
+// the ONE the root drives (PLAYER_HANDLES) — the platform halves it may not import (the native mouse capture)
+// arrive here as a host instance.
 const pluginHost: PluginHost = {
   world,
   log: logDebug,
   inWorld: () => inWorld(),
-  instances: { uiPicker, uiToast, uiInventory, inv, uiKeybind, keybindEntries, chunkMeshFactory },
+  instances: {
+    uiPicker,
+    uiToast,
+    uiInventory,
+    inv,
+    uiKeybind,
+    keybindEntries,
+    chunkMeshFactory,
+    mouseCapture: { capture: (dom: HTMLElement) => captureMouse(dom), release: releaseMouse },
+    // ===== The UI plugin's instances (P1.18b) =====
+    // The framework's registry (the page host and the HUD host read what other plugins contributed), the
+    // loading-screen VIEW the root spawns, the modal-trees box the root fills further down, and the two
+    // closures over things a plugin may not see (the live plugin set; `ui-keybind`'s drag, which is optional).
+    registry,
+    loadingScreen,
+    uiTrees,
+    inventoryOn,
+    cancelDrag: (reason: string) => cancelKeybindDrag(reason, logDebug),
+    // The native capture is a `host/` object: this proxies the ONE PointerLock the root owns (it is created
+    // below, because it holds the input system the player plugin publishes — only ever CALLED from a lane).
+    lock: {
+      relock: (reason: string) => pointerLock.relock(reason),
+      retry: (reason: string) => pointerLock.retry(reason),
+      reassertCursor: (reason: string) => pointerLock.reassertCursor(reason),
+      applyCursor: () => pointerLock.applyCursor(),
+    },
+  },
 };
 const discoveredPlugins = discoverPlugins(pluginHost);
-// (the toast, keybind and inventory plugin factories are no longer called here: see the catalogue below)
 
-// The catalogue order is the LANE order of the optional surfaces (debug -> toast -> keybind), which is what
-// the core's slot anchors encode; the list itself is only what may be installed at runtime.
+// The hot-plug catalogue is the DISCOVERED set filtered by the `hot` flag — the list is only "what may be
+// installed at runtime"; the order the surfaces appear in is the core's slot anchors, not this array.
 
 const hotCatalog: readonly Plugin[] = discoveredPlugins.filter((p) => p.hot).map((p) => p.plugin);
 const livePlugins = new Set<string>();
@@ -660,18 +667,7 @@ const hotHost: HotPlugHost = {
 };
 world.insertResource(HOT_PLUG, hotHost);
 
-const PLUGINS = [
-  contentDefaultPlugin,
-  worldPlugin,
-  playerPlugin.plugin,
-
-  uiPlugin,
-  ...discoveredPlugins.map((p) => p.plugin),
-
-
-
-  inputPlugin,
-];
+const PLUGINS = [...discoveredPlugins.map((p) => p.plugin)];
 const manifestRead = readManifest(resolveAllBytes(MANIFEST_FILE), logDebug);
 const manifest = manifestRead.manifest;
 const unknownPluginIds = unknownPlugins(manifest, PLUGINS.map((p) => p.id));
@@ -695,6 +691,11 @@ const installOutcome = installPlugins(PLUGINS, {
 // reads this list — so it sees the boot's plugins and the runtime ones in one place.
 for (const id of installOutcome.installed) livePlugins.add(id);
 for (const line of registry.report()) logDebug(`REGISTRY ${line}`);
+// THE INPUT SYSTEM THE ROOT DRIVES COMES FROM THE PLAYER PLUGIN (P1.18b). The plugin constructed it while the
+// catalogue built the plugins above and published it as PLAYER_HANDLES: the raw-input device thread feeds it,
+// the frame loop drains it, the win-focus handlers read its lock state, and `ui.navigation` takes and gives the
+// native capture through it. A second instance would drive nothing — that is why the handle comes from here.
+const input = world.resource(PLAYER_HANDLES).input;
 // THE LANGUAGE SET IS CONTENT, AND THE INSTALL IS WHAT DECLARES IT (P1.36). This used to run in the config
 // block above with a literal set, which is exactly why a pack shipping `lang/fr.json` could never be
 // selected: i18n built its dictionaries for a hard-coded zh/en/ja. It runs HERE, where `SLOT_LANGUAGES` has
@@ -714,53 +715,22 @@ logDebug(
 // THE PALETTE IS THE REGISTRY ID LIST (P1.47): from here on a voxel value names a real block, so every
 // block this install ships can be placed and drawn (texture, else colour, else the engine checker). The
 // generator reads the same list for the layers of the default world.
-voxel.setPalette(allBlockIds());
+// MERGED, not replaced (P1.49ab): a voxel stores a NUMBER, so the number -> block mapping is owned by the
+// ENGINE and only ever grows. That is what makes a pack reload safe — a pack that reorders or drops an entry
+// cannot re-point the blocks already in the world (see VoxelWorld.mergePalette).
+const bootPalette = voxel.mergePalette(allBlockIds());
+logDebug(
+  `PALETTE ${bootPalette.total} block(s) numbered, ${bootPalette.added.length} added: [${bootPalette.added.join(", ")}]`,
+);
 /** Contribute one system under its plugin's id. A plugin the manifest disabled contributes NOTHING. */
 const contributeSystem = (owner: string, def: SystemDef): void => {
   if (!installOutcome.has(owner)) return;
   registry.contribute(SLOT_SYSTEMS, owner, [def]);
 };
-// ui.navigation steps LAST in the ui lane and needs the modal widget trees, which the surfaces build
-// further down — so it is registered HERE (before ui.widgets, which must follow it) and its trees arrive
-// through a getter that is filled once they exist. The schedule resolves edges at start(), so an `after`
-// naming a system registered later would silently drop the edge.
-let navTrees: NavigationTrees | null = null;
-const navigation = createNavigationSystem(world, {
-  get trees(): NavigationTrees {
-    if (!navTrees) throw new Error("navTrees not wired");
-    return navTrees;
-  },
-  inventoryCode: () => getBind("inventory"),
-  inventoryOn,
-  capturing: isCapturing,
-  // "A world is running" — the pause menu and the backpack are refused while the loading screen is up
-  // (the startup, and the world being built behind it during an entry).
-  inWorld,
-  prepareUnlock: () => input.prepareUnlock(),
-  // A key bind DRAG owns ESC while it is live: this system (the ONE decision-maker for ESC) cancels it
-  // instead of stepping back through the ladder.
-  dragging: () => keybindGesture.drag !== null,
-  cancelDrag: (reason) => cancelKeybindDrag(reason, logDebug),
-  // Native capture: there is no `document.exitPointerLock` to call (see platform/mousecapture.ts)
-  releaseCapture: () => input.releaseCapture(),
-  relock: (reason) => pointerLock.relock(reason),
-  // "Relock, but not in this key dispatch": the DEADLINE goes into the world and `ui.delays` applies it
-  // (it used to be a `setTimeout(…, 0)` here — a timer owned by the composition root).
-  relockSoon: (reason) => delayedIntents.schedule("relock", 0, reason),
-  applyCursor: () => pointerLock.applyCursor(),
-  log: logDebug,
-});
-// The delayed intents (ecs/systems/delays.ts): whatever deadline has passed is applied HERE — after the
-// system that decided it, before the frame is painted. Both halves of that order are FORCED rather than
-// stylistic: it writes the two targets ui.navigation writes (`pointerLock` / `cursor`), which the schedule
-// refuses to leave unordered, and the reconciler must stay the last system in the lane.
-const delays = createDelaySystem(world, {
-  relock: (reason) => pointerLock.relock(reason),
-  lockRetry: (source) => pointerLock.retry(source),
-  cursor: () => pointerLock.reassertCursor("delayed"),
-  log: logDebug,
-});
-// The size the draw last applied to the renderer — this system's own state (it owns the framebuffer).
+// `ui.navigation` and `ui.delays` are the UI plugin's systems now (P1.18b): they are constructed in
+// `plugins/ui/plugin.ts` from a handful of instances, and the two things they need LATE — the modal widget
+// trees (built further down) and the native capture (created below, because it holds the input system the
+// player plugin publishes) — arrive through the `uiTrees` box and the `lock` proxy.
 
 // (world.start() moved below: ui.navigation needs the widget trees the surfaces build during wiring.)
 
@@ -882,13 +852,16 @@ const onSetWindowMode = (mode: WindowMode): void => {
 };
 
 /** The resource packs the user switched OFF (P1.49aa). Written to settings.json AT ONCE and applied when
- *  the pack chain is installed, i.e. at the next launch: the chain is built once at boot and every asset
- *  (dictionaries, block registry, textures, menu background) is derived from it, so swapping it while the
- *  game runs is the "pack hot reload" item in ROADMAP, not this. The section says so on screen. */
+ *  the pack chain is installed: every asset (dictionaries, block registry, textures, menu background) is
+ *  derived from the chain, so this only RECORDS the choice. Applying it is the pack reload driver below
+ *  (P1.49ab, raised with F7), which re-runs the whole content phase; the note on screen says so. */
 const onSetPacks = (names: readonly string[]): void => {
   setDisabledPacks(names);
   saveSettings();
-  logDebug(`PACKS disabled: ${getDisabledPacks().join(", ") || "none"} (takes effect on the next launch)`);
+  // MC applies the new selection at once (its pack screen triggers the reload when the list changes), so the
+  // toggle only RECORDS the choice and the reload driver below does the work — no restart, no relaunch.
+  world.resource(PACK_RELOAD).requested = true;
+  logDebug(`PACKS disabled: ${getDisabledPacks().join(", ") || "none"} (press F7 to reload now, or restart)`);
 };
 
 const menu = createPauseMenu(world, {
@@ -1073,9 +1046,11 @@ const mainMenu = createMainMenu(world, {
   onSetPacks,
 });
 
-// ===== ui.navigation's widget trees (registered above, wired here) =====
-// The state machine is in the schedule from boot; these are the handles it paints.
-navTrees = {
+// ===== ui.navigation's widget trees (the plugin reads them through the box) =====
+// The state machine is in the schedule from boot; these are the handles it paints. They are published into
+// `uiTrees`, the box the UI plugin was handed at construction — the menus are built HERE because their
+// callbacks close over the world-entry driver.
+uiTrees.trees = {
   pauseRoot: menu.rootEntity,
   pauseMain: menu.mainPanelEntity,
   pausePanels: menu.panelEntities,
@@ -1089,20 +1064,15 @@ navTrees = {
   inventoryPanel: inv.panelEntity,
 };
 
-// Everything the installed plugins contributed, contributed order — the schedule resolves and verifies
-// the order from the declared after/before edges, so the registration order carries no meaning.
-// The ui lane's ten declarations belong to the ui PLUGIN (plugins/ui/index.ts): the root builds the
-// instances (they wrap the views it creates) and the plugin says what they are, where they run and what
-// they touch. One call, before the schedule is fed from the registry.
-const uiApi = installOutcome.apiOf("ui");
+// The ui lane's eleven declarations belong to the ui PLUGIN (plugins/ui/index.ts, called from its own
+// `plugin.ts` setup — P1.18b): the plugin constructs its seven systems and says what they are, where they run
+// and what they touch. The root declares NOTHING by hand any more.
 // The ui plugin is OPTIONAL for the boot: the manifest may disable it, and the engine then runs with
 // nothing painting the screen (the views are widget DATA — without the ui systems nothing turns them into
 // DOM). What it must not do is crash, which is what an unconditional apiOf("ui")! did.
-if (!uiApi) {
+if (!installOutcome.has("ui")) {
   logDebug("PLUGIN ui is not installed - the ui lane is off: nothing will be painted (the loading screen and the menus are ui surfaces)");
-} else {
-  declareUiSystems(uiApi, { uiPages, uiHud, uiLoading, uiBindings, navigation, delays, uiRender });
-
+}
 // The backpack + hotbar system belongs to the ui-inventory plugin, and the PLUGIN declares it in its own `setup`
 // — the shape that makes a plugin self-installing and hot-pluggable. The ROOT must not declare it again: the
 // registry refuses a duplicate id, and doing it twice threw `"ui.inventory" is already contributed by
@@ -1112,7 +1082,6 @@ if (!installOutcome.has("ui-inventory")) {
   // layer takes it out of the table and `ui.hud` never builds it. The bag panel's widgets still exist (the view
   // is wired by the root), but nothing can open it: ui.navigation's E key and its mouse bind are gated too.
   logDebug("PLUGIN ui-inventory is not installed - NO hotbar element is built, and the backpack is off (the crosshair stays)");
-}
 }
 
 // The DEBUG surface's system is declared by the plugin itself now (`createUiDebugPlugin`), which is what makes
@@ -1467,6 +1436,9 @@ function frameProbe(): void {
 function frame(): void {
   try {
     applyViewportSize(); // before the mode body: the canvas follows the window whoever is drawing
+    // THE PACK RELOAD CHECK (P1.49ab): Minecraft's shape — a plain flag set by the key handler and checked
+    // once per frame (`pendingReload` + `runTick`), never a tick state machine. It only STARTS the driver.
+    maybeReloadPacks();
     // THE LOOK IS APPLIED ONCE PER FRAME, here, before any fixed step: the raw deltas that arrived since
     // the last frame become ONE `look` intent, so a frame's rotation is exactly that frame's mouse
     // movement. It used to be an 8 ms `setInterval` poll feeding several intents per frame, which the
@@ -1536,6 +1508,167 @@ function announceStage(stage: BootStage): void {
     ...(stage.withNote ? { noteKey: bootFlow.noteKey, noteValue: bootFlow.noteValue } : {}),
   });
   world.renderUi(); // the barrier + the ui lane: the same pump a menu frame uses
+}
+
+// ===== The RESOURCE PACK RELOAD driver (P1.49ab) — Minecraft's resource reload, adapted =====
+// WHAT IT COPIES FROM MC, in the order MC does it:
+//   1. THE TRIGGER IS EXPLICIT AND THE REQUEST IS A FLAG. F7 (ui.navigation) only raises
+//      `PACK_RELOAD.requested`; a per-frame check starts the driver — `Minecraft.pendingReload` + `runTick`,
+//      not a tick state machine.
+//   2. RESCAN AND REBUILD ARE TWO STEPS. `PackRepository.reload()` only re-walks the folders; loading the
+//      resources is a separate act. Here: `rescanPacks()` re-reads `mods/` + `resourcepacks/` and returns a
+//      fresh snapshot, then `installPacks` puts it in force.
+//   3. THE CONTENT PHASE IS RE-RUN, then the caches are dropped — in that order, so nothing answers with the
+//      previous chain's bytes afterwards.
+//   4. THE WORLD IS NOT REBUILT. Success only marks every loaded chunk STALE, and the chunk stream re-meshes
+//      them at `MESH_BUDGET_PER_FRAME` — MC's `allChanged()` -> "invalidate compiled geometry" -> rebuild
+//      over the following frames, for the same reason (doing it in one frame is the hitch).
+//   5. A FAILURE KEEPS THE OLD CHAIN: the previous snapshot is re-installed and re-derived before the error is
+//      reported — MC's `rollbackResourcePacks`. Nothing is ever left half-applied.
+//   6. THE PLAYER SEES AN OVERLAY, not a frozen frame: the LOADING SCREEN is raised through the same
+//      `SetLoadingStage` command the startup and the world entry use, one announce-paint-yield per stage.
+// WHAT IT DELIBERATELY DOES NOT COPY YET: MC's prepare/apply split across a worker pool (this engine is
+// single-threaded by design, AGENTS.md iron rule 4) and MC's shared-state dependency graph between reload
+// listeners (there is ONE producer here — the chain — so the order is written out below).
+
+/** Re-derive everything the pack chain declares, in dependency order, and return a one-line summary.
+ *  Reads whatever chain is in force; each step is the same call the startup makes. */
+function rebuildDerivedFromChain(): string {
+  // 1. the LANGUAGES the chain delivers, and the dictionaries built for them (the set is the cache key, and
+  //    the invalidation is what makes a pack that only EDITED lang/zh.json take effect).
+  invalidateDictionaries();
+  const langLine = loadLang(locale, readSettings().language, declaredLanguages());
+  // 2. the BLOCK TABLE, from the entries the chain delivers (the content plugin's discovery, re-run).
+  resetBlockRegistry();
+  const blockLine = buildBlockRegistry(discoverBlockEntries());
+  // 3. the PALETTE — merged, never replaced: a voxel stores a number (see VoxelWorld.mergePalette).
+  const merged = voxel.mergePalette(allBlockIds());
+  return (
+    `${langLine}; ${blockLine}; palette ${merged.total} block(s)` +
+    (merged.added.length > 0 ? `, ${merged.added.length} new: [${merged.added.join(", ")}]` : "")
+  );
+}
+
+/** Drop every cache that holds a RESULT derived from the chain. Called after the new chain is in force. */
+function dropPackDerivedCaches(): void {
+  // Chunk materials are cached per block LOOK and the key is the resolved texture path, so the map has to go:
+  // the re-mesh asks again and resolves the new chain's images.
+  const material = world.resource(CHUNK_MATERIAL);
+  for (const made of material.materials.values()) made.dispose();
+  material.materials.clear();
+  material.material?.dispose();
+  material.material = null;
+  // Baked block ICONS are pictures of block looks (the inventory and the hotbar read them). Clearing the cache
+  // is only HALF of it — see the consumers' memory below, which is what decides whether a slot is drawn again.
+  const icons = world.resource(ICON_BAKE);
+  icons.cache.clear();
+  icons.pending.clear();
+  // ===== THE CONSUMERS' MEMORY, not just the data (P1.49ac) =====
+  // `ui.inventory` draws a slot only when its SIGNATURE changes, and that signature is "block type + count" — it
+  // says nothing about the ICON. So after a reload it kept the previous chain's baked icon forever: no redraw,
+  // and therefore no new bake either (the request lives at the END of the draw path). The sentinel below is the
+  // same one `collectFinishedBakes` uses to force exactly one redraw, because no real signature equals "\u0000".
+  const inventoryPaint = world.resource(UI_PAINT).inventory;
+  inventoryPaint.drawn.fill("\u0000");
+  inventoryPaint.waiting.fill(0);
+  // …and the surfaces that LIST the chain (the settings panel's pack rows: names + file counts) hear about the
+  // new install through the config bus, the same way a value-composed label hears about its value changing.
+  notifyConfigChange("packs");
+  // The MENU BACKGROUND — TWO halves, because it is drawn two different ways (P1.49ab):
+  //   * the PANORAMA is a three.js scene the menu frame renders. Drop it (so the next menu frame rebuilds it
+  //     from the new chain) AND dispose its GPU objects first: dropping the reference alone leaks a texture,
+  //     a geometry and a material per reload.
+  //   * the IMAGE / checker backdrop is a WIDGET whose recipe and UI_IMAGE were decided when the menu was
+  //     BUILT, so the view that owns them re-derives them — that is the bug this fixes: a reload used to leave
+  //     the old picture up (the recipe still said `menu.backdropImage`, the URL was the previous chain's) and
+  //     could not show the new one.
+  invalidateMenuBackground();
+  const bg = world.resource(MENU_BACKGROUND);
+  if (bg.scene) {
+    bg.scene.traverse((object) => {
+      const drawable = object as THREE.Mesh;
+      drawable.geometry?.dispose?.();
+      const material = drawable.material as THREE.Material | THREE.Material[] | undefined;
+      for (const one of Array.isArray(material) ? material : material ? [material] : []) {
+        (one as THREE.MeshBasicMaterial).map?.dispose();
+        one.dispose();
+      }
+    });
+    bg.scene = null;
+  }
+  bg.camera = null;
+  bg.appliedAspect = Number.NaN;
+  mainMenu.refreshBackdrop();
+  logDebug(
+    `PACKS menu backdrop re-derived: kind=${menuBgKind()}; inventory memory cleared ` +
+      `(${inventoryPaint.drawn.length} slot signature(s)), chain gen ${packChainGeneration()}`,
+  );
+}
+
+/** ONE reload, start to finish. Returns the summary line; throws when the reload AND its rollback failed. */
+async function reloadPacksNow(): Promise<string> {
+  const previous = lastGoodSnapshot;
+  try {
+    // ---- 1. RESCAN: the folders, from Rust (stateless, so this really re-walks them) ----
+    announceStage({ progress: 0.05, key: "loading.packs.scan" });
+    await paint();
+    const snap = await rescanPacks();
+    // ---- 2. REBUILD: install the chain and re-run the content phase ----
+    announceStage({ progress: 0.35, key: "loading.packs.build" });
+    await paint();
+    const chainLine = installPacks(snap, getDisabledPacks());
+    const derivedLine = rebuildDerivedFromChain();
+    // ---- 3. DROP the caches that hold the previous chain's results ----
+    announceStage({ progress: 0.7, key: "loading.packs.apply" });
+    await paint();
+    dropPackDerivedCaches();
+    // ---- 4. MARK THE WORLD STALE (do NOT rebuild it here) ----
+    announceStage({ progress: 0.85, key: "loading.packs.mesh" });
+    await paint();
+    const stale = voxel.markAllStale();
+    lastGoodSnapshot = snap;
+    return `${chainLine}; ${derivedLine}; ${stale} chunk(s) marked stale`;
+  } catch (err) {
+    // ROLLBACK: put the last good chain back and re-derive from it, so a bad pack leaves the engine exactly
+    // as it was (MC's rollbackResourcePacks) instead of half-swapped.
+    if (previous) {
+      installPacks(previous, getDisabledPacks());
+      rebuildDerivedFromChain();
+      dropPackDerivedCaches();
+      voxel.markAllStale();
+      lastGoodSnapshot = previous;
+    }
+    throw err;
+  }
+}
+
+/** The per-frame check: at most ONE reload at a time, and never started from inside a lane. */
+function maybeReloadPacks(): void {
+  const req = world.resource(PACK_RELOAD);
+  if (!req.requested || req.running) return;
+  req.requested = false;
+  req.running = true;
+  const previousMode = loop.mode;
+  setLoopMode("load"); // the loading screen is the overlay: nothing simulates or draws under it
+  world.commands.send(SetLoadingStage, { active: true, progress: 0, key: "loading.packs.scan" });
+  void reloadPacksNow()
+    .then((summary) => {
+      req.count += 1;
+      logDebug(`PACKS reloaded #${req.count}: ${summary}`);
+      world.commands.send(ShowToast, { key: `pack reload OK — ${summary}`, raw: true });
+    })
+    .catch((err) => {
+      const why = String((err as Error)?.message || err);
+      logDebug(`PACKS reload FAILED (the previous chain is still in force): ${why}`);
+      world.commands.send(ShowToast, { key: `pack reload FAILED — ${why}`, raw: true });
+    })
+    .finally(() => {
+      // Take the screen down in the SAME ui lane the last stage painted in, then hand the mode back.
+      world.commands.send(SetLoadingStage, { active: false, progress: 1, key: "loading.ready" });
+      world.renderUi();
+      req.running = false;
+      setLoopMode(previousMode);
+    });
 }
 
 /** The walker's dependencies: the loading screen is driven through the COMMAND barrier (which only this

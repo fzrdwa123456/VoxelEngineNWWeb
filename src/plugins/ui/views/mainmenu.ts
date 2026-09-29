@@ -5,8 +5,11 @@
 //   static   = backgrounds/mainmenu.png covers (missing image falls to black)
 //   checker  = no config/invalid config, straight to the procedural magenta/black checkerboard (not
 //              overridable)
-// The decision is made ONCE at wiring time (as it was before), because it selects the root's recipe:
-// `menu.backdrop` for the panorama, `menu.backdropImage` + a UI_IMAGE for the two painted modes.
+// The decision is RE-DERIVABLE now (P1.49ab): the root's recipe and its UI_IMAGE are widget DATA that the
+// reconciler reads every frame, so `refreshBackdrop()` writes them again and the background follows the chain
+// in force. It used to be decided once in the constructor — which is exactly why a resource pack reload left
+// the OLD image on screen (the recipe still said `menu.backdropImage` and the URL was still the previous
+// chain's) and never showed the new one.
 //
 // VISIBILITY IS NOT DECIDED HERE. Which surface and which sub-page is up is `UI_MODAL`'s navigation
 // fields (`mainMenu`, `settings`, `gen`); this file writes them and `ui.navigation` paints the widget
@@ -19,7 +22,7 @@ import type { Entity, World } from "../../../core/world";
 import { UI_MODAL } from "../../../data/globals/resources";
 import { stepBackSettings } from "../systems/navigation";
 import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
-import { setUiImage, spawnButton, spawnLabel, spawnPanel } from "../components";
+import { setUiImage, spawnButton, spawnLabel, spawnPanel, UI_LOOK } from "../components";
 
 /** World type (main-menu singleplayer choice; world generation removed, only the selection semantics remain) */
 type WorldGenMode = "superflat" | "noise";
@@ -43,20 +46,14 @@ export class MainMenu {
     // The background decision (shared with main.ts's render loop). The reconciler mounts roots itself
     // (on the UI_MOUNT stage), so this file never touches the DOM to place itself.
     const kind = menuBgKind();
+    // The root always carries a UI_IMAGE (an empty one for the panorama) and its recipe is decided again by
+    // `refreshBackdrop()` below — the ONE place that answers "which background, which image", so the pack
+    // reload can move the menu to a different background without a restart.
     this.root = spawnPanel(world, null, kind === "panorama" ? "menu.backdrop" : "menu.backdropImage", {
       hidden: true,
-      image: kind === "panorama" ? undefined : { url: "", scrim: true },
+      image: { url: "", scrim: false },
     });
-    if (kind !== "panorama") {
-      // checker uses the procedural checkerboard directly (no config = magenta/black, not overridable);
-      // static resolves the pack image (a missing image would have decided checker already).
-      setUiImage(
-        world,
-        this.root,
-        kind === "checker" ? CHECKER_TEXTURE_URL : resolveTexture("backgrounds/mainmenu.png"),
-        true,
-      );
-    }
+    this.refreshBackdrop();
 
     this.mainPanel = spawnPanel(world, this.root, "menu.panel");
     spawnLabel(world, this.mainPanel, "menu.title", "voxelcraft", { raw: true }); // the game's name
@@ -120,6 +117,35 @@ export class MainMenu {
     if (ui.settings === null && !ui.gen) return;
     // The SAME ladder ESC uses (one mapping, see ecs/ui/navigation.ts) — it used to be copied here.
     stepBackSettings(ui);
+  }
+
+  /** Re-derive the backdrop from the pack chain IN FORCE and write it onto the root widget (P1.49ab).
+   *
+   *  The choice is two pieces of widget DATA — the root's recipe and its `UI_IMAGE` — and the reconciler reads
+   *  both every frame, so writing them again is the whole mechanism. Called by the constructor (the boot) and
+   *  by the pack RELOAD driver (after it drops the pack-derived caches), which is what makes a swapped
+   *  `background.json` / `mainmenu.png` / `panorama.png` take effect without a restart.
+   *
+   *  IMPORTANT (the bug this replaces): the panorama case must clear the image, and the image cases must set
+   *  it. Leaving the previous chain's URL in place is what kept the old picture on screen forever — the recipe
+   *  is opaque (`menu.backdropImage` paints black behind the image), so it also HID the panorama behind it. */
+  refreshBackdrop(): void {
+    const kind = menuBgKind();
+    const look = this.world.get(this.root, UI_LOOK);
+    if (look) look.recipe = kind === "panorama" ? "menu.backdrop" : "menu.backdropImage";
+    if (kind === "panorama") {
+      // This recipe is only a dimmer: nothing is painted, so the canvas (the panorama) shows through.
+      setUiImage(this.world, this.root, "", false);
+      return;
+    }
+    // checker uses the procedural checkerboard directly (no config = magenta/black, not overridable);
+    // static resolves the pack image (a missing image would have decided checker already).
+    setUiImage(
+      this.world,
+      this.root,
+      kind === "checker" ? CHECKER_TEXTURE_URL : resolveTexture("backgrounds/mainmenu.png"),
+      true,
+    );
   }
 
   show(): void {

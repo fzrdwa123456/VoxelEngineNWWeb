@@ -27,6 +27,9 @@ const OUT = path.join(ROOT, "node_modules", ".cache", "voxelengine-ecs-check");
 const SOURCES = [
   "src/core/world.ts",
   "src/plugins/player/components.ts",
+  // The PLAYER's commands (P1.18b): they read/write this plugin's own components, so they live next to
+  // them and `core/effect/commands.ts` no longer imports `plugins/` at all.
+  "src/plugins/player/commands.ts",
   "src/core/effect/commands.ts",
   // The boot / world-entry FLOW: the stage list is data and `runBootFlow` is the only logic (its deps are
   // injected, so it needs no DOM and no World).
@@ -229,7 +232,10 @@ const {
   UI_MODAL,
   VOXEL,
 } = load("data/globals/resources.js");
-const { SelectSlot, SetLoadingStage, SetMode, ShowToast, SwapSlots, Teleport } = load("core/effect/commands.js");
+const { SetLoadingStage, ShowToast } = load("core/effect/commands.js");
+// The four PLAYER commands moved to the plugin that owns the components they write (P1.18b): `core/` no
+// longer imports `plugins/`, and the gate loads each from the module that declares it.
+const { SelectSlot, SetMode, SwapSlots, Teleport } = load("plugins/player/commands.js");
 const { TERRAIN_TOP_Y, VoxelWorld } = load("data/world/world.js");
 
 // ===== 1. core: handles, storage, queries =====
@@ -585,6 +591,8 @@ check("the chunk stream can say whether a window still needs warming", () => {
     getChunk: () => null,
     isSolid: () => false,
     takeDirty: () => [],
+  takeStale: () => [], // P1.49ab: the pack reload's budgeted queue
+  markAllStale: () => 0,
   });
   // The player HANDLE from the world above: resources are per World, and the POSITION column is shared
   // per definition (a second World may not INSERT a component �?the one-World rule �?but the chunk
@@ -1236,10 +1244,25 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   // The bake's state is a RESOURCE (ecs/presentation.ts::ICON_BAKE): the two readers operate on it, so
   // they can be driven here with no GPU and no browser �?the renderer is created on the first real bake.
   const bake = P.createIconBake();
-  equal(icons.iconCacheKey("stone", 40), "stone@40", "the key is type@size");
-  equal(icons.iconCacheKey("stone", 40.4), "stone@40", "…with the size rounded");
-  equal(icons.iconCacheKey("stone", 20), "stone@32", "…and clamped up to MIN_SIZE");
-  equal(icons.iconCacheKey("stone", 1000), "stone@256", "…and down to MAX_SIZE");
+  const gen = load("data/assets/textures.js").packChainGeneration();
+  equal(icons.iconCacheKey("stone", 40), `${gen}|stone@40`, "the key is <chain generation>|type@size");
+  equal(icons.iconCacheKey("stone", 40.4), `${gen}|stone@40`, "…with the size rounded");
+  equal(icons.iconCacheKey("stone", 20), `${gen}|stone@32`, "…and clamped up to MIN_SIZE");
+  equal(icons.iconCacheKey("stone", 1000), `${gen}|stone@256`, "…and down to MAX_SIZE");
+  // A NEW CHAIN MUST INVALIDATE WHAT THE OLD ONE PRODUCED (P1.49ac). Two independent halves, and BOTH are silent
+  // when missing: the KEY has to carry the chain generation (so a bake that was in flight when the chain changed
+  // cannot land on the new one — same key, older pixels — and a stale hit is impossible), and the reload driver
+  // has to clear the CONSUMERS' memory, because `ui.inventory` redraws a slot only when its signature changes
+  // and that signature holds no icon (so a cleared cache alone is never read again).
+  assert(/chainGeneration \+= 1/.test(stripComments(readSource("src/data/assets/textures.ts"))),
+    "installing a chain bumps the generation");
+  assert(/`\$\{packChainGeneration\(\)\}/.test(stripComments(readSource("src/host/browser/blockicons.ts"))),
+    "…and the icon key is built from it");
+  const reloadDriver = stripComments(readSource("src/boot/main.ts"));
+  assert(/inventoryPaint\.drawn\.fill\("\\u0000"\)/.test(reloadDriver),
+    "the reload clears the inventory's reconcile memory (or the slot is never drawn again)");
+  assert(/notifyConfigChange\("packs"\)/.test(reloadDriver),
+    "…and tells the surfaces that LIST the chain (the settings panel's pack rows)");
   equal(icons.clampIconSize(40.4), 40, "the bake size comes from the same function");
   // Nothing is baked in this process, so this is a pure miss that never touches the GPU.
   equal(icons.peekBlockIcon(bake, "stone", 40), null, "an unbaked icon peeks as null");
@@ -4120,12 +4143,11 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and the diagnostics plugin declares exactly one system itself (api.system)");
   const declared = /const PLUGINS = \[([^\]]+)\]/.exec(bootSrc);
   assert(declared !== null, "the composition root declares its plugin list");
-  for (const core of ["contentDefaultPlugin", "worldPlugin", "playerPlugin",
-    "uiPlugin", "inputPlugin"]) {
-    assert(declared[1].includes(core), `the CORE plugin list still names ${core}`);
+  assert(/^\s*\.\.\.discoveredPlugins\.map\(\(p\) => p\.plugin\)\s*$/.test(declared[1]),
+    "…and the list is ENTIRELY the discovered set (P1.18b): the root names no plugin by hand any more");
+  for (const gone of ["contentDefaultPlugin", "worldPlugin", "playerPlugin", "uiPlugin", "inputPlugin"]) {
+    assert(declared[1].indexOf(gone) < 0, `the root no longer names ${gone}: its own plugin.ts builds it`);
   }
-  assert(/\.\.\.discoveredPlugins\.map\(\(p\) => p\.plugin\)/.test(bootSrc),
-    "…appending the DISCOVERED ones: the four optional surfaces are no longer listed here (P1.40)");
   assert(/installPlugins\(PLUGINS, \{/.test(bootSrc), "…through installPlugins, not by hand");
   assert(/registry\.list\(SLOT_SYSTEMS\)\) world\.addSystem\(def\)/.test(bootSrc),
     "the schedule is fed from the registry, so a disabled plugin contributes nothing");
@@ -4176,7 +4198,7 @@ check("the plugin system: extension points, the registry, the install and the ma
     "the content plugin declares the language set (it used to be a literal in the i18n module)");
   // The ui lane is OPTIONAL: disabling it in the manifest must log and carry on, never throw.
   const bootSrcNow = stripComments(readSource("src/boot/main.ts"));
-  assert(/if \(!uiApi\) \{/.test(bootSrcNow) && !/if \(!uiApi\) throw/.test(bootSrcNow),
+  assert(/if \(!installOutcome\.has\("ui"\)\) \{/.test(bootSrcNow) && !/apiOf\("ui"\)!/.test(bootSrcNow),
     "the composition root degrades when the ui plugin is not installed (it used to THROW)");
   assert(/the ui lane is off/.test(bootSrcNow), "…and it says so in the log");
   assert(/api\.system\(\{/.test(readSource("src/plugins/diagnostics/index.ts")),
@@ -4213,10 +4235,13 @@ check("the plugin system: extension points, the registry, the install and the ma
   const firstRegistration = lineOf('contributeSystem("');
   assert(lastInsert < installLine,
     `the plugin install runs AFTER the whole resource table (insert ${lastInsert} < install ${installLine})`);
-  const declareLine = lineOf("declareUiSystems(uiApi,");
-  assert(firstRegistration === 0 && declareLine > installLine,
-    `…and BEFORE the declarations are contributed (install ${installLine} < declare ${declareLine}; the root\n` +
-      ` registers nothing by hand, firstRegistration=${firstRegistration})`);
+  const declareLine = lineOf("declareUiSystems(");
+  assert(firstRegistration === 0 && declareLine === 0,
+    `the root declares NO system by hand any more (P1.18b): the ui plugin calls declareUiSystems from its own\n` +
+      ` setup (firstRegistration=${firstRegistration}, declare in the root=${declareLine})`);
+  const uiPluginSrc = stripComments(readSource("src/plugins/ui/plugin.ts"));
+  assert(/declareUiSystems\(api, s\)/.test(uiPluginSrc),
+    "…and plugins/ui/plugin.ts is what declares them, from the systems IT constructed");
 
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
   //    declared graph must be acyclic �?otherwise the install order it implies does not exist. Reading

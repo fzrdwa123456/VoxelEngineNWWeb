@@ -40,7 +40,7 @@ voxel world** and nothing else in it yet.
 | Three movement modes (walk / creative fly / spectator), fixed 120 Hz step + render interpolation | `src/plugins/player/systems/movement.ts`, `src/plugins/render/systems/camera.ts` |
 | Pointer lock, raw mouse input fallback, keybinds, inventory UI, 3 languages, settings | `src/logic/host/window/`, `src/logic/host/dom/` |
 | **Input is a scheduled system** (fixed lane, first): the DOM listeners decide every guard at EVENT time and queue a named INTENT (`key`/`look`/`motion`); `step()` writes CONTROL/VIEW/MOTION, so no gameplay component is written outside a system run and the schedule orders input against the controller/movement/collision that read it. It also OWNS the mouse-button listeners (a button bound to "inventory" publishes an edge and nothing else). The raw-input deltas arrive per event and are applied ONCE PER FRAME (`frameLook`, no timer at all — §5.2 P1.11), and their transport/LOOK counters live in the `INPUT_DIAGNOSTICS` resource, which this system also prints from (§5.2 P1.12) | `src/plugins/player/systems/input.ts` (`INPUT_ACCESS`), `src/host/browser/rawinput.ts` |
-| A **pure ECS**: generation-checked entity handles, SOA typed-array columns, cached sparse-set queries, resources, deferred commands, a three-stage schedule whose declared order is verified at boot | `src/logic/engine/`, `src/core/world.ts` |
+| A **pure ECS**: generation-checked entity handles, SOA typed-array columns, cached sparse-set queries, resources, deferred commands, a three-stage schedule whose declared order is verified at boot | `src/core/data/`, `src/core/flow/`, `src/core/world.ts` |
 | The schedule also **derives parallelism**: systems declare access (components + external targets), `world.batchesOf(stage)` returns the groups that may run in any order, a stage whose systems touch the same thing without a declared edge throws at boot, and the grouping is logged as `SCHEDULE ...` | `src/core/flow/schedule.ts`, `world.scheduleReport()` |
 | The player's ENTIRE state is components — position, previous position, orientation, buffered view deltas, motion, control, body box, reach, interaction cooldowns, inventory (stacks + selection) and a zero-size PLAYER marker; its DOM view reconciles from that data once per frame | `src/plugins/player/components.ts`, `src/plugins/ui/views/inventory.ts` |
 | **UI modality is EXPLICIT**: every modal surface publishes its visibility into the `UI_MODAL` resource, and one gate (`canControl(devices, ui)`) takes the input away from the local player (its body keeps being simulated) — instead of six container booleans OR'd at five call sites. Which settings sub-page is up is the same resource (`UI_MODAL.settings`/`gen`), so no view keeps a visibility field of its own | `data/globals/resources.ts`, `plugins/ui/views/menu.ts`, `ui/mainmenu.ts`, `plugins/ui/views/inventory.ts` |
@@ -49,8 +49,10 @@ voxel world** and nothing else in it yet.
 | The UI's **behaviour** is scheduled too, not just its data: the F3+F4 picker (`ui.picker`, driven by key EDGES the device layer publishes), the HUD toast (`ui.toast`, a wall-clock deadline in a resource, armed by the `ShowToast` command), the key bind panels + drag gesture (`ui.keybind`, panels derived every frame, gesture state in `KEYBIND_GESTURE`) and the modal navigation (`ui.navigation`) — the old `ui/gamemode.ts` class is gone, and the ESC if-chain that lived in `main.ts` is gone with it | `src/plugins/ui/systems/picker.ts`, `toast.ts`, `keybind.ts`, `navigation.ts` |
 | One-command build with a greppable verdict | `scripts/build-all.mjs` (`RESULT: OK / INCOMPLETE / FAILED`) |
 
-**What it is NOT:** there is no terrain generator, no second block type, no saving, no entities
-besides the player, no tests, and no planet/sphere/space anything.
+**What it is NOT:** the terrain generator is a FLAT layered fill (grass/dirt/stone by height, no heightmap,
+biomes or ores), there is no saving, there are no entities besides the player, and there is no
+planet/sphere/space anything. (There IS more than one block type since P1.46/P1.47: a voxel value is a
+palette index derived from the block registry, so a pack's blocks place and draw.)
 
 ---
 
@@ -325,7 +327,7 @@ or building a sphere before there is any terrain to put on it.
   what makes it testable by hand. `inForce` doubles as the schema; `check:ecs` asserts the repair
   rules and the wiring.
 
-## 3.9 ECS core (`src/logic/engine/`)
+## 3.9 ECS core (`src/core/data/` + `src/core/flow/`)
 Everything here is a **deliberate omission with a trigger**, not an oversight — each one is
 unused machinery today, and unused machinery is what makes a codebase unreadable.
 - **GAP** No **change detection** (`Changed<T>`). The store tracks `structuralVersion` only, so a
@@ -920,11 +922,9 @@ Still outstanding:
   change (the `World` has to exist earlier, and the plugin contributions become an input to the config
   loaders instead of a consumer of them). That is the next slice; hot reload of the pack chain comes after
   it, because a reload is "re-run the content phase", which needs the same shape.
-- **P1.18b, continued — the declarations follow the constructions.** `PARTLY DONE`: `player` (6) and
-  `render` (4) declare their own systems through `api.system({...})` now, so **18 of the 21** systems are
-  constructed AND declared by the plugin that owns them; the ten ui ones are the remainder, and they need
-  the VIEW construction to move with them (they are built around the hud, the loading screen and the panel
-  entities the root creates). Two lessons this stretch produced, both worth keeping:
+- **P1.18b, continued — the declarations follow the constructions.** `DONE` (`player` 6 + `render` 4 here;
+  the ui eleven and the three remaining core plugins in the entry below). Two lessons this stretch produced,
+  both worth keeping:
   (1) the boot-order invariant — a plugin factory CONSTRUCTS its systems and a system resolves its resources
   in the constructor, so the install block must sit AFTER the whole resource table and BEFORE the first
   registration; that was violated for two commits and no gate could see it, so `check:ecs` now asserts the
@@ -933,6 +933,108 @@ Still outstanding:
   system NAMES inside string literals (`name: "cameraView.render"`) and the EDGES that name a system; the
   schedule parser caught both immediately, which is the argument for a gate that re-resolves the real
   schedule instead of counting assertions.
+- **P1.18b, finished — every plugin is DISCOVERED, and `core/` imports no plugin.** `DONE`. The
+  composition root's plugin array is now exactly `[...discoveredPlugins.map((p) => p.plugin)]`: `world`,
+  `input`, `content-default`, `player` and `ui` each gained a `plugin.ts`, and `ui` CONSTRUCTS its seven
+  lane systems itself (the root used to build them and hand them over). Three reusable shapes came out of
+  it:
+  (1) **publish-back resources.** `PluginHost.instances` only goes root -> plugin, so anything the ROOT
+  drives comes back as a resource the plugin inserts while the catalogue builds it: `RENDER_HANDLES`
+  (P1.45), `PLAYER_HANDLES` (the input system the raw-input thread, the frame loop and the pointer lock
+  drive) and `UI_HANDLES` (the reconciler, which owns the widget elements the bind drag hit-tests).
+  (2) **the kernel stopped knowing a game word.** `SetMode` / `Teleport` / `SelectSlot` / `SwapSlots` moved
+  to `plugins/player/commands.ts`, so `core/effect/commands.ts` holds only the entity-free commands
+  (toast, frame cap, loading screen, hot-plug) — and `core/ -> plugins/` is 0 imports again (a direct
+  grep, not a ratchet).
+  (3) **what the root still owns, and why.** The VIEWS and panels it spawns (spawning is a structural
+  change, so WHEN belongs to wiring) and the four hot-pluggable surfaces' system instances, which wrap
+  those panels — that is exactly what makes them installable at runtime. Moving those too is P1.18c.
+  Verified: `tsc` 0 errors, `check:ecs` 69/69, the boot logs `PLUGIN installed 12/12` and
+  `REGISTRY systems: 26 from [8 owners]` (22 systems + the 4 slot gaps), and the three `SCHEDULE` lines are
+  byte-identical to the run before the migration — the strongest evidence that no order changed.
+- **P1.49ab — the resource pack RELOAD (the MC mechanism, adapted).** `DONE`. The chain used to be read once
+  at boot and every asset derived from it, so a pack change needed a restart (the settings panel said so on
+  screen). It is MC-shaped now, and every piece of it already existed for the boot:
+  * TWO STEPS, not one: `rescanPacks()` re-walks `mods/` + `resourcepacks/` (Rust is stateless —
+    `preload_packs` is `packs::snapshot(&root)`, so a second call really re-reads the disk) and `installPacks`
+    puts the new snapshot in force. That is MC's `PackRepository.reload()` vs `createReload`, in two calls.
+  * THE REQUEST IS A FLAG CHECKED ONCE PER FRAME (`PACK_RELOAD.requested` + `maybeReloadPacks()`), the shape
+    of MC's `pendingReload` + `runTick`; the raiser is a system (`ui.navigation`, on the F7 edge), because a
+    lane may not call into the composition root.
+  * THE CONTENT PHASE IS RE-RUN in dependency order: the declared language set (with the dictionaries
+    INVALIDATED first, so a pack that only edited `lang/zh.json` takes effect), then the block table, then
+    the palette.
+  * THE PALETTE IS MERGED, NEVER REPLACED (`VoxelWorld.mergePalette`). This is the MC lesson that makes a
+    reload SAFE: a voxel stores a NUMBER, so the number -> block mapping belongs to the ENGINE and only ever
+    grows. `setPalette` re-pointed every existing voxel the moment a pack reordered its blocks; a merge
+    cannot, and a block an install no longer names keeps its number (it just draws as the missing block).
+  * THE WORLD IS NOT REBUILT: success only marks every loaded chunk STALE (`markAllStale`), and the chunk
+    stream re-meshes them at `MESH_BUDGET_PER_FRAME` — MC's `allChanged()` -> "invalidate compiled geometry"
+    -> rebuild over the following frames. Block edits keep their UNBUDGETED path (that IS one chunk the
+    player is waiting for), which is why the two queues are separate sets on the voxel world.
+  * THE PLAYER SEES THE LOADING SCREEN, not a frozen frame: four stages (`loading.packs.scan/build/apply/
+    mesh`) through the SAME `SetLoadingStage` command the startup and the world entry use, one
+    announce-paint-yield per stage, then the outcome as a raw toast.
+  * A FAILURE KEEPS THE OLD CHAIN: the previous snapshot is re-installed and re-derived before the error is
+    reported (MC's `rollbackResourcePacks`), so a bad pack can never leave the engine half-swapped.
+  THE MAIN-MENU BACKDROP WAS THE ONE THING THE FIRST VERSION MISSED, and it is worth writing down because it
+  is a CLASS of bug, not a slip: the backdrop's "which kind, which image" was decided in the `MainMenu`
+  CONSTRUCTOR and baked into widget data (the root's recipe and its `UI_IMAGE` URL). The reload only cleared
+  the three.js panorama scene, so after a reload the old picture stayed — the recipe still said
+  `menu.backdropImage` (which paints opaque black) with the previous chain's URL, so it also HID the panorama
+  behind it — while the new one never appeared. The panorama -> panorama case "worked" only because that
+  scene is built LAZILY, so it does re-resolve on its own.
+  FIX: `MainMenu.refreshBackdrop()` re-derives the whole answer (recipe + `UI_IMAGE`, and the panorama case
+  CLEARS the image so the canvas shows through) and the reload driver calls it. The rule it generalises:
+  **anything derived from the pack chain must be RE-DERIVABLE, not baked at wiring time** — the reconciler
+  reads widget data every frame, so writing it again IS the mechanism. The scene teardown also disposes the
+  old geometry/material/texture now, which it did not (that was a GPU leak per reload).
+  VERIFIED BY HAND (debug build): with the game running, changing the pack's `background.json` from
+  `panorama` to `static` and reloading logged `PACKS menu backdrop re-derived: kind=static` — the menu
+  followed the new chain with no restart.
+  Triggers: **F7** anywhere (including the main menu), and toggling a pack in the settings panel — MC applies
+  a new selection at once, and the note on screen says that now instead of "after a restart".
+  VERIFIED BY HAND (debug build): with the game RUNNING, creating `resourcepacks/.../lang/de.json` and
+  reloading turned the boot line `files=12 ... zh/en/ja/fr` into `files=13 ... zh/en/ja/de=1/fr=2` — the
+  rescan really re-read the disk, the new language was discovered and the dictionaries were rebuilt with no
+  restart (no `frame error`, no reload failure). The in-world half (chunks re-meshed with the new textures)
+  is a manual step in `docs/TESTING.md`.
+  NOT COPIED (deliberately): MC's prepare/apply split across a worker pool (this engine is single-threaded by
+  design, iron rule 4) and MC's shared-state dependency graph between reload listeners (there is ONE producer
+  here — the chain — so the order is written out in the driver).
+- **P1.49ac — a reload must invalidate what the CONSUMERS remember, not only the data.** `DONE`. The first
+  reload added the missing half of "reload": it dropped the caches that held pack-derived RESULTS (chunk
+  materials, baked icons, the menu backdrop). Two reports proved that is only half of it — the inventory icons
+  kept the old look, and adding/removing a file in a pack looked like it did nothing — and the reason is the
+  same in both cases: **a consumer that decides "nothing changed here" never comes back to read the new data.**
+  * `ui.inventory` draws a slot only when its signature changes, and the signature was `type|count` — no icon.
+    So a cleared icon cache was never read again, and the REQUEST for a new bake (it lives at the end of the
+    draw path) never happened either. The reload now fills the paint array with the same `"\u0000"` sentinel
+    `collectFinishedBakes` already used to force exactly one redraw.
+  * THE ICON CACHE KEY was `type@size`, i.e. blind to the chain. A bake that was still IN FLIGHT when the chain
+    changed landed afterwards and overwrote the new icon with the previous chain's pixels (same key). The key
+    is now `<chain generation>|type@size`: the generation is a counter `installPacks` bumps, so a stale hit is
+    impossible by construction and an in-flight stale result lands under a key nobody reads.
+  * THE SETTINGS PANEL'S PACK ROWS (names + file counts) are written when the page is SHOWN, so a reload while
+    that page is open showed the previous chain's rows. The reload announces itself on the config bus (a new
+    `packs` kind) and the panel re-renders — the same mechanism the value-composed labels already use.
+  THE RULE, generalized: for every cache that holds a RESULT derived from the pack chain, ask TWO questions —
+  "is the KEY still valid?" and "will the CONSUMER ever ask again?". The first is now answered by the chain
+  generation, the second by invalidating the reconcile memory (and, where the data is baked at wiring time, by
+  re-deriving it: see the backdrop fix above).
+  STILL OPEN (a design decision, not a bug): adding a BLOCK to a pack makes it placeable and drawable, but the
+  hotbar holds the stack set that `spawnPlayer` seeded at spawn, so a newly declared block has no slot. MC has
+  the same behaviour and solves it with a creative inventory built from the registry.
+  VERIFIED BY HAND (debug build): a reload now logs `chain gen 2` and `inventory memory cleared (36 slot
+  signature(s))`; `tsc` 0, `check:ecs` 69/69 (with new assertions pinning the generation in the key and the
+  two invalidations in the driver).
+- **P1.18c — the last construction: the optional surfaces' panels.** `TODO`. `ui-debug`, `ui-toast`,
+  `ui-inventory` and `ui-keybind` still receive a system instance the ROOT built around a panel it spawned
+  (`spawnPickerPanel`, `spawnToastPanel`, `createInventoryView`, `spawnKeybindLine`). Finishing means moving
+  the PANEL spawn into each plugin too — legal (spawning is allowed during wiring, and the catalogue runs
+  after the resource table) but it changes WHEN those widget entities exist, so the resource-table order has
+  to be re-checked: the F3 panel's entities must be in the world before the `diagnostics` plugin is
+  constructed, which is the boot-order trap `check:ecs` already guards for the install block.
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`
@@ -1987,13 +2089,14 @@ gone with the kiosk path, `plugins/ui/views/inventory.ts`'s never-called `refres
      --types node --lib es2022,dom,dom.iterable
    # then a .cjs file that requires the output and asserts; delete .tmp afterwards
    ```
-   For `src/logic/engine/` add `src\ecs\World.ts` to the file list, point `--outDir` at its own folder,
+   For `src/core/` add `src\core\world.ts` (plus the `data/`/`flow/` files it imports) to the file list, point
+   `--outDir` at its own folder,
    and drop a `{"type":"commonjs"}` package.json in that folder — the repo root is
    `"type":"module"`, so without it Node refuses `require()` on the emitted `.js`. The full command
    is in `AGENTS.md` §Testing.
    `--ignoreConfig` is required (TypeScript 7 errors without it when files are named on the command
    line), and `src/data/world/*` deliberately has **no three.js and no ECS imports**, which is what makes
    this possible. `src/host/browser/chunkmesh.ts` can be tested the same way because Node resolves the
-   real `three`; `src/logic/engine/*` imports no three.js at all, on purpose.
+   real `three`; `src/core/*` imports no three.js at all, on purpose.
 6. Reminder: `rearrange.mjs` **clears** `game\mods` and `game\resourcepacks` on every build. Re-copy
    `packs\*` before testing anything that involves blocks, language or the menu background.

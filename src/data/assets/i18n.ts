@@ -92,6 +92,16 @@ export function declaredLangs(): readonly Lang[] {
   return i18nState.declared;
 }
 
+/** Drop the built dictionaries, so the next `t()` rebuilds them from the chain in force (P1.49ab).
+ *
+ *  WHY IT IS NEEDED even though `dicts()` already rebuilds when the DECLARED SET changes: the set is the
+ *  cache key, so a pack that only EDITED `lang/zh.json` (same three languages) would keep the old words. The
+ *  reload driver calls this, which makes "the key set changed" and "the chain changed" the same event. */
+export function invalidateDictionaries(): void {
+  i18nState.strings = null;
+  i18nState.builtFrom = "";
+}
+
 function dicts(): Map<Lang, Dict> {
   if (!packsInstalled()) return NOTHING;
   const signature = i18nState.declared.join("\u0000");

@@ -46,6 +46,14 @@ export function menuBgState(): MenuBgState {
   return state;
 }
 
+/** Forget the memo so the next `menuBgKind()` re-derives the answer from the chain in force (P1.49ab). The
+ *  pack reload driver calls this AND clears the `MENU_BACKGROUND` scene, so a pack that swapped
+ *  `background.json`/`panorama.png` really changes the menu instead of keeping the panorama built from the
+ *  previous chain's texture. */
+export function invalidateMenuBackground(): void {
+  state.kind = null;
+}
+
 export function menuBgKind(): MenuBgKind {
   if (state.kind) return state.kind;
   // Do NOT cache the answer until the packs are installed — the memo would otherwise record "checker"

@@ -15,7 +15,8 @@
 // (`preventDefault` can only happen in the event that must be cancelled) and the arm paths of the key
 // bind gesture (click-synthesis timing, see ui/menu.ts).
 import { HOTBAR_SLOTS } from "../../player/components";
-import { SelectSlot } from "../../../core/effect/commands";
+import { SelectSlot } from "../../player/commands";
+import { ReloadPacks } from "../../../core/effect/commands";
 import { HotPlugPlugin } from "../../../core/effect/commands";
 import { hotPlugSurfaceForKey } from "../../../data/globals/hotplug";
 import { isModalUi, LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
@@ -170,6 +171,15 @@ export class UiNavigationSystem {
       const hotSurface = hotPlugSurfaceForKey(edge.code);
       if (hotSurface) {
         this.world.commands.send(HotPlugPlugin, hotSurface.id);
+        return;
+      }
+      // THE RESOURCE PACK RELOAD (P1.49ab) — this engine's "F3+T". It belongs here for the same reason the
+      // hot-plug key does: this system owns "which key means what" for the ui lane, and what it sends is a
+      // REQUEST (a flag), so no lane code reaches into the composition root. F7 is free: F3/F4 are the
+      // picker's chord, F5/F8–F11 are the hot-plug surfaces. Not gated on a world — a reload at the main menu
+      // is the ordinary case (and the screen it shows is the loading screen).
+      if (edge.code === "F7") {
+        this.world.commands.send(ReloadPacks, undefined);
         return;
       }
       if (edge.code === this.deps.inventoryCode()) {

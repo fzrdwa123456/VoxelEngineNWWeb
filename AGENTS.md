@@ -3,7 +3,8 @@
 > **THIS FILE DESCRIBES THE ORIGINAL NW.js ENGINE, NOT THIS TAURI PORT.** The port's layout, conventions,
 > history and open work are in `ROADMAP.md` (plus `docs/TESTING.md` for the manual checklist), and its code
 > lives under `src/core`, `src/data`, `src/plugins`, `src/boot` — not under `ecs/`, `ui/` or `logic/`.
-> Paths and numbers quoted below (the `SCHEDULE` lines, `ecs/ui/*`, `ui/menu.ts`, the assertion-group counts)
+> Paths and numbers quoted below (the `SCHEDULE` lines, `plugins/ui/systems/*`, `plugins/ui/views/menu.ts`,
+ the assertion-group counts)
 > are the ORIGINAL's and are stale here: treat them as historical context, never as a description of the code
 > in this checkout.
 Read this before changing anything. It maps the architecture, the invariants that keep it
@@ -122,14 +123,15 @@ ids, it does not write styles).
 ## Architecture — microkernel + plugins
 
 The name of this architecture is **microkernel (+ plugin) architecture**: a core that only knows
-MECHANISM, and features that are contributed into it. `plugins/` is a layout today; the registry that
-makes it a real plugin system is `ROADMAP.md` §P1.18.
+MECHANISM, and features that are contributed into it. `plugins/` is no longer a layout: the mechanism is `core/extension/*` + `core/plugin/*`, every folder
+under `plugins/` opts in with a `plugin.ts`, and the composition root names NO plugin by hand
+(P1.18 built the registry; P1.18b moved the systems' construction into the plugins).
 
 **The three layers, and who may see whom.**
 
 | Layer | Owns | May import | Must never |
 |---|---|---|---|
-| `core/` | the mechanism: entities/columns/queries, the stage schedule, the command queue, the resource tokens, the World façade, the platform-free services | `core/` + `shared/` | any game vocabulary (block/player/menu/i18n), `plugins/`, `host/`, `boot/` |
+| `core/` | the mechanism: entities/columns/queries, the stage schedule, the command queue, the resource tokens, the World façade, the platform-free services | `core/` + `shared/` + `data/` (values and tokens only) | any game vocabulary (block/player/menu/i18n), `plugins/`, `host/`, `boot/` |
 | `plugins/*` | a FEATURE **and the data it owns** (its components, its resource shapes, its tables) | `core/` + `shared/` + its own folder + `data/` | another plugin's internals; `host/` directly (a device/DOM/GPU need goes through an injected service) |
 | `host/` | the outside world: Tauri, files, logs, DOM, GPU, device events | `core/` + `shared/` | `plugins/` (the host does not know what a plugin is) |
 | `data/` | values only: resource shapes + every shared table + the pack-chain assets + the voxel data | `core/` + `shared/` | side effects, listeners, module-level mutable state |
@@ -141,7 +143,8 @@ makes it a real plugin system is `ROADMAP.md` §P1.18.
 in its own `components.ts` / `data.ts`. Only a value genuinely shared across plugins belongs in `data/`.
 
 **The extension points (the mechanism, since P1.18).** The core declares named slots in
-`core/extension/slots.ts` — `SLOT_SYSTEMS`, `SLOT_COMPONENTS`, `SLOT_RESOURCES`, `SLOT_COMMANDS` — and a
+`core/extension/slots.ts` — `SLOT_SYSTEMS`, `SLOT_COMPONENTS`, `SLOT_RESOURCES`, `SLOT_COMMANDS`,
+`SLOT_LANGUAGES`, `SLOT_BLOCKS`, `SLOT_UI_PAGES`, `SLOT_UI_HUD`, `SLOT_UI_ACTIONS`, `SLOT_UI_SOURCES` — and a
 plugin contributes into them from its own `plugins/<id>/index.ts` with `definePlugin({ id, deps, setup })`.
 `ExtensionRegistry` files each contribution under the plugin id and THROWS on a duplicate id;
 `installPlugins` (core/plugin/lifecycle.ts) orders the plugins by their declared `deps`, lets the manifest
@@ -150,18 +153,20 @@ The manifest is `plugins.json`, read out of the PACK CHAIN like any other conten
 turns off contributes nothing (its systems never reach the schedule). **The lifecycle is three phases:**
 `setup` (contribute — the schedule and the resource table are still being assembled), then
 `startPlugins(outcome, log)` AFTER `world.start()` for the plugins that declared a `start`, then
-`stopPlugins(outcome, started, log)` in REVERSE order when the app quits (or, once hot-plugging lands, when a
-plugin is uninstalled). A plugin that fails at any phase is DISABLED with a logged reason, and one that never
-started is never stopped. More slots are planned (views,
+`stopPlugins(outcome, started, log)` in REVERSE order when the app quits — and on an UNINSTALL
+(`core/plugin/hotplug.ts`, P1.24) the same `stop` runs plus every teardown the plugin registered through
+`api.onStop`. A plugin that fails at any phase is DISABLED with a logged reason, and one that never started
+is never stopped.
 
 **Which plugins are OPTIONAL today.** `plugins.json` (read from the pack chain) toggles the ids the code
 declares: a disabled plugin contributes nothing, so its systems never reach the schedule. `diagnostics`
-(simply no F3 panel and no probes), `content-default` (no declared language set) and `ui-debug` (no F3 debug
-panel and no F3+F4 mode chord; everything else about the UI is untouched) are genuinely optional.
-`player` and `render` are the game itself: they boot, but the body has no input/movement/collision and the
-screen is never drawn. `ui` is REMOVABLE in the mechanical sense — `boot/main.ts` logs and carries on
-instead of throwing — but the loading screen and the menus ARE ui surfaces, so the window then stays
-unpainted. A plugin whose declared `deps` are missing is REPORTED at boot, not silently half-installed.
+(no F3 panel data and no probes), `content-default` (no declared language set or block table) and the five
+ui surfaces — `ui-crosshair`, `ui-debug`, `ui-toast`, `ui-inventory`, `ui-keybind` — are genuinely optional,
+and those five are also the hot-pluggable ones (F5/F8/F9/F10/F11). `world`, `input`, `player`, `render` and
+`ui` are the game itself: `player`/`render` boot but nothing moves or is drawn, and `ui` is REMOVABLE in the
+mechanical sense — `boot/main.ts` logs and carries on instead of throwing — but the loading screen and the
+menus ARE ui surfaces, so the window then stays unpainted. A plugin whose declared `deps` are missing is
+REPORTED at boot, not silently half-installed.
 
 **Turning a SURFACE off must not need a rebuild, and that is a rewriting rule, not a plugin.** The ui lane
 was one plugin whose removal left a blank window because every surface lived in it; the fix is one plugin
@@ -172,7 +177,6 @@ are declared ON the picker (`before: ["ui.toast", "ui.widgets"]` in `plugins/ui-
 plugin's own chain stays complete without them (`ui.toast` follows `ui.inventory`, and the picker slips in
 between when it is installed). A system's STATE moves with its surface: `PICKER_STATE` is contributed by
 `ui-debug` now, not by `ui`.
-settings, blocks, languages, uiActions); the UI's existing action/source tables are the working prototype.
 
 **HOT-PLUG (P1.24).** The boot is not the only moment a plugin can arrive. `core/plugin/hotplug.ts` is
 `installPlugins` without the restart: `hotInstall` runs the same three phases (`setup` contributes, the
@@ -184,16 +188,19 @@ when its `setup` alone is enough to install it** (so it declares its own systems
 `plugins/ui-debug`'s factory is the worked example, and the root's `declare*Systems(api, instances)` shape —
 still how `ui` works — cannot be installed at runtime). Refused with a reason, never half-done: an id outside
 the catalogue, uninstalled `deps`, a double install, and an uninstall another INSTALLED plugin depends on.
-**F8 toggles the `ui-debug` surface live** (the key/label table is `data/globals/hotplug.ts`; the ui lane
-offers the chord without knowing any plugin id), and the outcome arrives as a raw toast.
+**F5/F8/F9/F10/F11 toggle the five optional surfaces live** — crosshair, debug, keybind, toast, inventory
+(the key/label table is `data/globals/hotplug.ts`; the ui lane offers the chord without knowing any plugin
+id) — and the outcome arrives as a raw toast.
 
 **What the gate enforces about plugins.** Every system is declared by the plugin that owns it (the root
 registers nothing by hand: `check:ecs` asserts `world.addSystem({` never appears in `boot/main.ts`), a
 cross-plugin import needs a declared `deps`, `plugins/**` may not import `host/**`, the declared graph must
 be acyclic, and the boot order is pinned (`last insertResource` < `installPlugins` < the first declaration).
-What is still true: a plugin owns its registrations and its data, but the systems' CONSTRUCTION happens in
-`boot/main.ts` (it closes over the wiring: the views, the injected hooks), which is why each plugin exports
-`create*System` pass-through factories and a `declare*Systems(api, instances)` function.
+CONSTRUCTION moved too (P1.18b): each plugin's own `plugin.ts` builds its systems from the instances the host
+publishes and calls its own `declare*Systems(api, s)`, so the root's plugin array is exactly
+`[...discoveredPlugins.map((p) => p.plugin)]`. What the root still owns is the VIEWS/panels it spawns
+(spawning is a structural change, so WHEN it happens is wiring) and the three `*_HANDLES` resources the
+plugins publish BACK for the code that drives them (`RENDER_HANDLES`, `PLAYER_HANDLES`, `UI_HANDLES`).
 
 ## Programming model — DOD (data-oriented design)
 
@@ -827,23 +834,23 @@ When work lands, move the entry here and delete it there.
 
 ## Known gaps (do not "fix" without asking)
 
-- The voxel world has NO content: `generateChunk()` (data/world/world.ts) fills every chunk with a
-  single block — no heightmap, biomes or ores. Breaking and placing DO work, but there is only
-  ONE block type: placement always writes SOLID. `interaction.ts` reads the selected slot's type
-  from INVENTORY (so the selection is real component data and the UI cannot disagree with it), but
-  there is no per-value material or voxel palette to write it into yet. The mesher draws the
-  built-in checker texture (CHECKER_TEXTURE_URL) instead of consulting data/assets/blockregistry.ts, so mod
-  blocks appear in the hotbar and not in the world.
+- The voxel world is FLAT and has no terrain: `generateChunk()` (data/world/world.ts) fills each chunk by
+  HEIGHT alone — a few layers of grass/dirt over stone below `TERRAIN_TOP_Y`, air above — so there is no
+  heightmap, no biomes and no ores. Everything else about block content WORKS: a voxel value is a palette
+  index derived from the block registry (P1.46/P1.47), placement writes the palette value of the block in
+  hand, and the mesher resolves each (value, face kind) through the block definition — texture, else flat
+  colour, else the engine's checker. A mod's block therefore places AND draws. What is missing is only the
+  GENERATOR (and face kinds beyond top/bottom/side).
 - Chunk data is never evicted: the map can hold up to WORLD_CHUNKS_X * WORLD_CHUNKS_Z *
   CHUNK_Y_COUNT = 32 * 32 * 8 = 8192 chunks. A uniform chunk allocates NO array at all (see
   data/world/chunk.ts), so real memory is only the chunks a player actually edited — but raising the
   period, or making generation non-uniform, needs eviction first.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
-  world. Raise RENDER_RADIUS_CHUNKS (logic/fixed/chunkstream.ts) to push it out, or reintroduce a
+  world. Raise RENDER_RADIUS_CHUNKS (plugins/render/systems/chunk-stream.ts) to push it out, or reintroduce a
   `scene.fog` — those two values were previously tuned as a pair.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
-  `VoxelWorld.topSolidY()`, used by logic/fixed/diagnostics.ts and the F3 panel.
+  `VoxelWorld.topSolidY()`, used by plugins/render/systems/diagnostics.ts and the F3 panel.
 - The torus is drawn by placing each chunk at its nearest representation, which is perfectly
   seamless while the world is uniform. Real terrain will need ghost meshes near the seam (or a
   much larger WORLD_CHUNKS period), otherwise the wrap will visibly snap.

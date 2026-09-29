@@ -45,11 +45,28 @@ const packLayers: Map<string, Bytes>[] = [];
  *  directory too) */
 const resourcepackInfos: PackInfo[] = [];
 let builtinInfo: PackInfo | null = null;
-/** The resource packs the user switched OFF (P1.49aa). The filter is applied when the chain is INSTALLED,
- *  i.e. at the next launch: the chain is built once and every asset (dictionaries, the block registry, the
- *  textures, the menu background) is derived from it, so a runtime swap would have to invalidate all of
- *  them - that is the documented "pack hot reload" item, not this. */
+/** The resource packs the user switched OFF (P1.49aa). The filter is applied when the chain is INSTALLED, so
+ *  it lands with the next chain build — either the startup or a RELOAD (P1.49ab: F7, or toggling a pack in the
+ *  settings panel). Both go through `installPacks`, which is idempotent on purpose: it RESETS the whole chain
+ *  before installing, which is what makes a second call a reload instead of a duplicate. */
 let disabledPacks: readonly string[] = [];
+
+/** HOW MANY TIMES THE CHAIN HAS BEEN INSTALLED (1 after the startup, +1 per reload).
+ *
+ *  THE POINT (P1.49ac): a reload produces a DIFFERENT chain, and every cache that holds a RESULT derived from
+ *  it has to be able to tell "this came from the previous chain" from "this is current". Keying those caches on
+ *  this number is what makes that automatic — `iconCacheKey` was `type@size`, so after a reload a bake that was
+ *  still IN FLIGHT from the old chain could land and overwrite the new one (same key, older pixels), and a
+ *  consumer that had already drawn a slot never came back to ask again.
+ *
+ *  It is a plain counter rather than a version of the bytes on purpose: comparing content would mean hashing
+ *  every file, and "a new install happened" is exactly the event every consumer cares about. */
+let chainGeneration = 0;
+
+/** The chain generation in force. Read by every cache key derived from the pack chain. */
+export function packChainGeneration(): number {
+  return chainGeneration;
+}
 
 /** Whatever settings.json holds, as a clean list of pack names. PURE (the gate drives it directly):
  *  anything that is not a non-empty string is dropped and duplicates are folded. */
@@ -176,6 +193,10 @@ export function installPacks(snap: PackSnapshotPayload, disabled: unknown = disa
   overrides.clear();
   resourcepackInfos.length = 0;
   scanCache.clear();
+  // The resolved-texture cache holds DATA URLS built from the bytes that were in force, so it has to fall
+  // with them: a re-install (P1.49ab, the pack reload) would otherwise answer with the previous chain's
+  // images for every texture that had already been asked for.
+  cache.clear();
   builtin = null;
   builtinInfo = null;
 
@@ -204,6 +225,9 @@ export function installPacks(snap: PackSnapshotPayload, disabled: unknown = disa
   }
   installed = true;
   scanned = true;
+  // THE CHAIN IS A NEW ONE NOW (P1.49ac): every cache derived from it is keyed on this number, so nothing the
+  // previous chain produced can be mistaken for current — see `packChainGeneration`.
+  chainGeneration += 1;
   return (
     `PACKS installed: builtin=${snap.builtin ? 1 : 0} mods=${snap.mods.length} ` +
     `resourcepacks=${snap.resourcepacks.length - disabledCount} disabled=${disabledCount} ` +

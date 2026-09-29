@@ -81,6 +81,14 @@ export function buildBlockRegistry(entries: readonly BlockEntry[]): string {
   return `BLOCKREG registry loaded: ${state.byId.size} blocks -> [${[...state.byId.keys()].join(", ")}]`;
 }
 
+/** Drop the assembled table so the next `buildBlockRegistry` rebuilds it from a NEW declaration (P1.49ab).
+ *  The "first call wins" rule above is right at boot and wrong after a reload: a pack that added a block
+ *  would otherwise never see it. */
+export function resetBlockRegistry(): void {
+  state.loaded = false;
+  state.byId.clear();
+}
+
 /** One block's definition, or undefined when the install has no such block (every caller treats that as
  *  "unknown block": the inventory shows the checker, the icon baker uses its fallback). */
 export function getBlockDef(id: string): BlockDef | undefined {

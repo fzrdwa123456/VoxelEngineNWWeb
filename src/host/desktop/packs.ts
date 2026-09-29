@@ -13,6 +13,17 @@ import { logDebug, readSettings } from "./shell";
 // The data module writes no log of its own: it calls the sink it was handed (this boundary owns the sink).
 adoptWarningSink(logDebug);
 
+/** Re-read the pack folders NOW and hand back a fresh snapshot, WITHOUT installing it (P1.49ab).
+ *
+ *  Two callers need the raw snapshot rather than "install whatever is on disk":
+ *   * the startup (which installs it and KEEPS it, so a reload can roll back to it);
+ *   * the pack reload driver (which installs it itself, and on a later failure re-installs the previous one).
+ *  The Rust side is stateless — `preload_packs` is `packs::snapshot(&root)` — so a second call really does
+ *  re-walk `mods/` and `resourcepacks/`; nothing about the chain is cached in Rust. */
+export async function rescanPacks(): Promise<PackSnapshotPayload> {
+  return await invoke<PackSnapshotPayload>("preload_packs");
+}
+
 /** Startup preload: awaited once at the top of main.ts (the Tauri IPC is asynchronous, while every
  *  resolution afterwards has to stay synchronous — see the note in the data module). */
 export async function preloadPacks(): Promise<void> {
