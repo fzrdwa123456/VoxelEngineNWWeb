@@ -12,7 +12,7 @@
 // resource table the root decides).
 //
 // Typed STRUCTURALLY, like every resource in `data/globals`, and deliberately narrow: one method.
-import { defineResource, type Resource } from "../../core/world";
+import { defineResource, type Entity, type Resource } from "../../core/world";
 import type { UiHit } from "../../shared/types/ui";
 
 export interface UiHandles {
@@ -21,3 +21,16 @@ export interface UiHandles {
 }
 
 export const UI_HANDLES: Resource<UiHandles> = defineResource<UiHandles>("uiHandles");
+
+// ===== What a surface publishes for a tree somebody ELSE paints (P1.18c) =====
+// `ui.navigation` paints the modal widget trees, and the BACKPACK's panel is one of them — but the panel belongs
+// to the ui-inventory plugin, which builds its view itself now. So the plugin publishes the entity and the
+// navigation tree reads it here. It is the same direction as `UI_HANDLES` (plugin -> root), narrowed to the one
+// thing the painter needs; a DISABLED ui-inventory publishes nothing, and the tree then points at NULL_ENTITY
+// (writing to it is a no-op, which is what "the bag is not installed" should look like).
+export interface InventoryHandles {
+  readonly panel: Entity;
+}
+
+export const INVENTORY_HANDLES: Resource<InventoryHandles> =
+  defineResource<InventoryHandles>("inventoryHandles");

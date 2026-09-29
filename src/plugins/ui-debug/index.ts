@@ -57,10 +57,10 @@ export function declareUiDebugSystems(api: PluginApi, s: UiDebugSystems): void {
 export function createUiDebugPlugin(s: UiDebugSystems): Plugin {
   return definePlugin({
     id: "ui-debug",
-    // The picker writes widget data (UI_STATE/UI_TEXT, through the ui plugin's components) and toggles the F3
-    // panel the hud view spawns, so the ui plugin is a hard dependency: a debug surface without the widget
-    // layer has nothing to draw into.
-    deps: ["ui"],
+    // The picker writes widget data (UI_STATE/UI_TEXT, through the ui plugin's components), toggles the F3 panel
+    // the hud view spawns, AND reads the local player's CONTROL / sends its SetMode command (P1.18c: it builds
+    // itself now, so the player plugin is a declared dep rather than something the root wired on its behalf).
+    deps: ["ui", "player"],
     setup(api) {
       api.insertResource(PICKER_STATE, createPickerState());
       api.contribute(SLOT_RESOURCES, [PICKER_STATE]);

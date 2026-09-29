@@ -198,9 +198,12 @@ cross-plugin import needs a declared `deps`, `plugins/**` may not import `host/*
 be acyclic, and the boot order is pinned (`last insertResource` < `installPlugins` < the first declaration).
 CONSTRUCTION moved too (P1.18b): each plugin's own `plugin.ts` builds its systems from the instances the host
 publishes and calls its own `declare*Systems(api, s)`, so the root's plugin array is exactly
-`[...discoveredPlugins.map((p) => p.plugin)]`. What the root still owns is the VIEWS/panels it spawns
-(spawning is a structural change, so WHEN it happens is wiring) and the three `*_HANDLES` resources the
-plugins publish BACK for the code that drives them (`RENDER_HANDLES`, `PLAYER_HANDLES`, `UI_HANDLES`).
+`[...discoveredPlugins.map((p) => p.plugin)]`. P1.18c closed the tail: the four optional
+surfaces build their own PANELS too, so **the root constructs no system at all** (the gate asserts it — none of
+the `create*System` factories, no `new`, and none of those panels). What the root still owns is the VIEWS it
+spawns (the HUD and the loading screen, the two menus, the frost layer, the F3 panel widget — spawning is a
+structural change, so WHEN it happens is wiring) and the handles the plugins publish BACK for the code that
+drives them (`RENDER_HANDLES`, `PLAYER_HANDLES`, `UI_HANDLES`, `INVENTORY_HANDLES`).
 
 ## Programming model — DOD (data-oriented design)
 

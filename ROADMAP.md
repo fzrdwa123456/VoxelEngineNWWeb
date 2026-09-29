@@ -1083,7 +1083,33 @@ Still outstanding:
   `PACKS installed: … resourcepacks=1 disabled=1 files=11` — the new pack was on disk and NOT in the chain.
   `tsc` 0, `check:ecs` 70/70 (the new assertions drive two packs and one selection through the real
   `installPacks`/`listPacks`/`updatePackListing`, plus the migration's source shape).
-- **P1.18c — the last construction: the optional surfaces' panels.** `TODO`. `ui-debug`, `ui-toast`,
+- **P1.18c — the tail is CLOSED: the root constructs no system at all.** `DONE`. The four optional surfaces
+  used to hand their instances in as host instances (`uiPicker`, `uiToast`, `uiKeybind`, `uiInventory`) around
+  panels the ROOT had spawned. Each builds its own now, panel included, in its own `plugin.ts` — which runs at
+  WIRING time (the catalogue build), the only place a spawn is legal before a barrier (a `setup` may not change
+  the entity structure — iron rule 1, an install is not a barrier). So **22 of 22 systems are constructed by the
+  plugin that declares them**, and the tail the plugin work was chasing is closed. What came out of it:
+  * the icon baker is a host INSTANCE (`iconSource`, the same three functions the root used to hand the
+    inventory system) — a plugin may not import `host/`, and the baker is three.js + a render target;
+  * the F3 PANEL stays a root-spawned VIEW widget (`diagnostics` reads its handles BEFORE the plugins are
+    built, so the root must spawn it early), so `ui-debug` receives that one entity as an instance;
+  * the key bind ENTRY array stays the root's: the menus (root-built views) spawn those buttons and push them
+    in; the plugin reads it by reference — the same shape as `uiTrees`;
+  * `ui-inventory` PUBLISHES its bag panel (`INVENTORY_HANDLES`), because `ui.navigation` — another plugin —
+    paints the modal trees. A disabled plugin publishes nothing and the tree points at `NULL_ENTITY`, which
+    paints as nothing at all (every setter no-ops on an entity without the components);
+  * `ui-debug` declares `player` as a dep now: it reads CONTROL and sends SetMode itself instead of the root
+    wiring those on its behalf.
+  VERIFIED with this tree: `tsc` 0, `check:ecs` 70/70 (four new assertions: the root calls none of the four
+  `create*System` factories, does not `new` a system, does not spawn those panels, and takes the bag panel from
+  the published handle), `npm run app:windows` packages 25 files / 13.8 MB. On a real debug run the boot log is
+  unchanged where it matters: `PLUGIN installed 12/12`, `REGISTRY systems: 26 from [8 owners]`, and the three
+  `SCHEDULE` lines BYTE-IDENTICAL to before the move, plus `PAGE mounted keybind` / `HUD element mounted` and
+  `BOOT ready in 410ms`.
+  STILL ROOT-OWNED, on purpose: the VIEWS it spawns (the HUD and loading screen, the two menus, the frost
+  layer, the F3 panel widget) — spawning is a structural change, so WHEN belongs to the wiring — and the
+  handles the plugins publish BACK (`RENDER_HANDLES`, `PLAYER_HANDLES`, `UI_HANDLES`, `INVENTORY_HANDLES`).
+- **P1.18c — the plan this executed (kept for the reasoning).** `DONE`. `ui-debug`, `ui-toast`,
   `ui-inventory` and `ui-keybind` still receive a system instance the ROOT built around a panel it spawned
   (`spawnPickerPanel`, `spawnToastPanel`, `createInventoryView`, `spawnKeybindLine`). Finishing means moving
   the PANEL spawn into each plugin too — legal (spawning is allowed during wiring, and the catalogue runs

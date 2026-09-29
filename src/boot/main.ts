@@ -1,9 +1,9 @@
 import * as THREE from "three/webgpu";
-import { World } from "../core/world";
-import { CONTROL, HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
+import { NULL_ENTITY, World } from "../core/world";
+import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "../data/globals/resources";
 import { SetLoadingStage, SetFpsCap, ShowToast } from "../core/effect/commands";
-import { SetMode, Teleport } from "../plugins/player/commands";
+import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/movement" was dead after P1.18b: the plugin owns it now)
@@ -30,12 +30,12 @@ import { createBlockOutline, createChunkMaterial, createChunkMeshCache, createIc
 import { createKeybindGesture, KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
 // The key bind PAGE is its own plugin too (P1.25), and hot-pluggable like the debug surface: the factory
 // below is called once, and the value goes into both the boot list and the runtime catalogue.
-import { createKeybindSystem } from "../plugins/ui-keybind";
-import { spawnPickerPanel } from "../plugins/ui-debug/systems/picker";
+// (the ui-keybind plugin builds its own rubber band, drag wiring and system: see plugins/ui-keybind/plugin.ts)
+// (the ui-debug plugin spawns its own picker panel: see plugins/ui-debug/plugin.ts)
 // The F3/F4 DEBUG surface is its own plugin, and it is HOT-PLUGGABLE: the factory is called further down with
 // the instance the root constructs, and that ONE value goes into both the boot's plugin list and the runtime
 // catalogue. A plugin is hot-pluggable exactly when its `setup` alone is enough to install it.
-import { createPickerSystem } from "../plugins/ui-debug";
+// (the ui-debug plugin constructs its own picker system: see plugins/ui-debug/plugin.ts)
 import { HOT_PLUG, type HotPlugHost } from "../core/plugin/hotplug";
 import { SLOT_BLOCKS, SLOT_LANGUAGES, SLOT_UI_HUD } from "../core/extension/slots";
 import { UI_HUD_PAINTED } from "../data/globals/ui-hud";
@@ -45,17 +45,17 @@ import type { Entity } from "../core/world";
 // The HUD message is its own plugin (P1.27 step 2) and needs NO mount: its panel is a TOP-LEVEL widget, so
 // it can be plugged in and out at runtime in BOTH directions (unlike the key bind tab, which lives inside a
 // view's layout). The root still spawns the widgets — it does the wiring — through the plugin's helper.
-import { createToastSystem, spawnToastPanel } from "../plugins/ui-toast";
+// (the ui-toast plugin owns its panel and its system now: see plugins/ui-toast/plugin.ts)
 // (every import of "../plugins/ui/systems/loading" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/ui/systems/hud" was dead after P1.18b: the plugin owns it now)
 import { type NavigationTrees } from "../plugins/ui/systems/navigation";
 // (every import of "../plugins/ui/views/loading" was dead after P1.18b: the plugin owns it now)
 // The INVENTORY layer is its own plugin (P1.31): the bag, the hotbar they share data with, and their system.
-import { createInventorySystem, createInventoryView } from "../plugins/ui-inventory";
+// (the ui-inventory plugin builds its own view, widget handles and system: see plugins/ui-inventory/plugin.ts)
 import { Menu, spawnMenuBackdrop } from "../plugins/ui/views/menu";
 // The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
 // them from THERE: the ui plugin exports none of it any more.
-import { bindKeybindDrag, boundCodes, cancelKeybindDrag, keycapAtPoint, spawnKeybindLine } from "../plugins/ui-keybind/views/keybind";
+import { cancelKeybindDrag } from "../plugins/ui-keybind/views/keybind";
 import { MainMenu } from "../plugins/ui/views/mainmenu";
 // (every import of "../plugins/ui/views/hud" was dead after P1.18b: the plugin owns it now)
 import { PointerLock } from "../host/browser/pointerlock";
@@ -73,11 +73,11 @@ import { iconCacheKey, peekBlockIcon, requestBlockIcon } from "../host/browser/b
 import { ChunkGeometry, getChunkMaterial } from "../host/browser/chunkmesh";
 import { RENDER_HANDLES } from "../data/globals/render-handles";
 import { PLAYER_HANDLES } from "../data/globals/player-handles";
-import { UI_HANDLES } from "../data/globals/ui-handles";
+import { UI_HANDLES, INVENTORY_HANDLES } from "../data/globals/ui-handles";
 import { adoptViewport, onViewportChange } from "../host/browser/viewport";
 import { DebugLogForwarder } from "../host/desktop/debuglog";
 import { PerfSampler } from "../core/services/perf";
-import { loadBinds, getBind, getBindsAll, getCapturing, setBind, endCapture, adoptKeybindGesture } from "../plugins/input/keybinds";
+import { loadBinds, getBindsAll, adoptKeybindGesture } from "../plugins/input/keybinds";
 // The configuration CHANGE BUS: a config value announces itself through here (the notification is
 // behaviour; the values live under data/). The root subscribes to persist each one.
 import { onConfigChange, notifyConfigChange } from "../core/services/bus";
@@ -484,7 +484,9 @@ const { hud, loadingScreen } = createUiViews(world);
 // The F3 panel's two widget handles, published for diagnostics (which writes the text) — the HUD view
 // spawns the tree, the system owns the data written into it.
 world.insertResource(F3_PANEL, hud.debugPanelEntities);
-const picker = spawnPickerPanel(world);
+// The F3+F4 DEBUG surface (the picker panel and its system) is the ui-debug PLUGIN's now (P1.18c): it spawns
+// its own panel and constructs its own system in `plugins/ui-debug/plugin.ts`, and takes only the F3 panel
+// entity from here (that widget belongs to the ui plugin's HUD view, which the root spawns).
 // The startup screen's tree: spawned hidden during wiring (spawning is a structural change, so it
 // belongs here or inside a command) and shown for as long as LOADING_STATE.active says the startup runs.
 
@@ -503,46 +505,20 @@ const chunkMeshFactory: ChunkMeshFactory = { createGeometry: () => new ChunkGeom
 // consumes the key edges and does nothing, and it takes its own panels down. The HUD toast below is
 // NOT gated: a main-menu toast is a documented case (the multiplayer placeholder is drawn by the menu
 // frame, which is the reason the ui lane can be pumped with no world running).
-const uiPicker = createPickerSystem(world, {
-  panel: picker.panel,
-  items: picker.items,
-  debugPanel: hud.debugPanelEntity,
-  // The player's mode and how to change it: a component read and the SetMode COMMAND, injected so the
-  // picker system itself only ever writes widget data.
-  readMode: () => world.get(player, CONTROL)?.mode ?? "walk",
-  applyMode: (mode) => world.commands.send(SetMode, { entity: player, mode }),
-  inWorld,
-  log: logDebug,
-});
-const toastPanel = spawnToastPanel(world);
-const uiToast = createToastSystem(world, toastPanel.panel, toastPanel.body);
+// (the ui-debug plugin owns its picker panel and its system now: see plugins/ui-debug/plugin.ts)
+// The TOAST panel and its system are the ui-toast PLUGIN's now (P1.18c): it spawns its own panel and
+// constructs its own system in `plugins/ui-toast/plugin.ts`, which is where the other optional surfaces are
+// heading too. The root no longer builds an instance for `host.instances` to hand over.
 // The page host and the startup screen's painter are the UI plugin's systems now (P1.18b): it constructs them
 // from the registry and the views the root spawns (see plugins/ui/plugin.ts).
-// The key bind drag's data: derived every frame from the bind table + the GESTURE + the POINTER resource,
-// with the platform reads injected so this layer stays free of platform imports (and so the gate can drive
-// it with fakes). `line` is the rubber-band WIDGET the view only spawns — the system writes its geometry.
-const keybindLine = spawnKeybindLine(world);
-// The key bind tab's entry buttons, one per settings panel: the VIEW spawns them hidden and `ui.keybind`
-// shows them, so this is filled once both menus exist (further down) and handed over by reference.
+// The key bind tab's entry buttons, one per settings panel: the VIEW (in the menus, which the root builds)
+// spawns them hidden and `ui.keybind` shows them, so this is filled once both menus exist (further down) and
+// handed to the plugin by reference — the ONE piece of the key bind surface the root still owns.
 const keybindEntries: Entity[] = [];
-const uiKeybind = createKeybindSystem(world, {
-  boundCodes,
-  capturing: getCapturing,
-  bindOf: getBind,
-  // The bind itself is applied by THIS system now (it drains the queued device decisions), so the writes
-  // are injected like the reads: the event listener only reports what happened.
-  setBind,
-  endCapture,
-  log: logDebug,
-  line: keybindLine,
-  entries: keybindEntries,
-  keycapAt: keycapAtPoint,
-});
-// The key bind drag asks the UI SYSTEM what is under the cursor: only it owns the elements. That system is the
-// UI plugin's now, so the question goes through the handle it publishes (UI_HANDLES) — resolved when the drag
-// asks, which is long after the plugins were installed.
-bindKeybindDrag({
-  log: logDebug, world, hitTest: (x, y) => world.resource(UI_HANDLES).uiRender.hitTest(x, y), gesture: keybindGesture });
+// THE RUBBER BAND, THE DRAG WIRING AND THE BIND SYSTEM are the ui-keybind PLUGIN's now (P1.18c): it spawns its
+// own widget, wires its own drag and constructs its own system in `plugins/ui-keybind/plugin.ts`. What it takes
+// from here is the entry array above (the menus fill it) and the host's log sink. The drag still asks the
+// reconciler what is under the cursor — through `UI_HANDLES`, which the ui plugin publishes.
 // No callback into the UI any more: the interaction system reads the entity's INVENTORY component
 // itself, so the hand you see and the hand that places a block cannot disagree. It writes the local
 // player's TARGET_HIT component; `block.outline` (render lane) draws the wireframe from it — the mesh
@@ -567,13 +543,12 @@ bindKeybindDrag({
 // its mouse bind) and its panel is painted from that state, so this view has no callback any more. The
 // pointer-lock effects that used to live in the callback (release on open, relock on close) are
 // edge-triggered from the same state inside ui.navigation.
-// The menu FROST (P1.30): a full-screen frosted layer that `ui.navigation` shows while any modal is up.
+// The MENU FROST (P1.30): a full-screen frosted layer that `ui.navigation` shows while any modal is up.
 const menuBackdrop = spawnMenuBackdrop(world);
-const inv = createInventoryView(world, player);
-// The handles the reconcile writes into (the view only spawns them): `ui.inventory` reads the component
-// and writes these widgets, which is why the view is no longer called once per frame.
-world.insertResource(INVENTORY_WIDGETS, inv.widgets);
-const uiInventory = createInventorySystem(world, { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon });
+// THE BACKPACK (the bag, the hotbar it shares data with, and their system) is entirely the ui-inventory
+// plugin's now (P1.18c): it builds its view, its widget handles and its system in
+// `plugins/ui-inventory/plugin.ts`, and publishes the one entity `ui.navigation` paints (INVENTORY_HANDLES).
+// The root keeps only what is HIS: the frost layer above, and the trees box below.
 // THE GAMEPLAY HUD — and the host that OWNS it (P1.34): the crosshair and the hotbar used to be spawned
 // during wiring and merely hidden outside a world. Now each one is BUILT by `ui.hud` when its element is
 // mounted and DESPAWNED with it, so the HUD is as dynamic as the plugin set: F11 removes the strip's element
@@ -643,14 +618,16 @@ const pluginHost: PluginHost = {
   log: logDebug,
   inWorld: () => inWorld(),
   instances: {
-    uiPicker,
-    uiToast,
-    uiInventory,
-    inv,
-    uiKeybind,
     keybindEntries,
     chunkMeshFactory,
     mouseCapture: { capture: (dom: HTMLElement) => captureMouse(dom), release: releaseMouse },
+    // The F3 DEBUG PANEL widget: it belongs to the ui plugin's HUD VIEW, whose construction is the root's
+    // (spawning is a structural change, and `diagnostics` reads the handles before the plugins are built), so
+    // ui-debug gets the entity as an instance — the same one the ui plugin has.
+    f3Panel: hud.debugPanelEntity,
+    // The block ICON BAKER (three.js + a render target = a `host/` object a plugin may not import): the same
+    // three functions the root used to hand the ui-inventory system directly.
+    iconSource: { key: iconCacheKey, peek: peekBlockIcon, request: requestBlockIcon },
     // ===== The UI plugin's instances (P1.18b) =====
     // The framework's registry (the page host and the HUD host read what other plugins contributed), the
     // loading-screen VIEW the root spawns, the modal-trees box the root fills further down, and the two
@@ -1092,7 +1069,10 @@ uiTrees.trees = {
   backdrop: menuBackdrop,
   mainPanels: mainMenu.panelEntities,
   mainLists: mainMenu.listEntities,
-  inventoryPanel: inv.panelEntity,
+  // The BACKPACK's panel belongs to the ui-inventory plugin (P1.18c), so it arrives as the handle that plugin
+  // publishes. A manifest that disables it publishes nothing, and NULL_ENTITY is what "no bag panel" paints like
+  // (every setter is a no-op on an entity that carries the component set it is asked about).
+  inventoryPanel: world.hasResource(INVENTORY_HANDLES) ? world.resource(INVENTORY_HANDLES).panel : NULL_ENTITY,
 };
 
 // The ui lane's eleven declarations belong to the ui PLUGIN (plugins/ui/index.ts, called from its own

@@ -26,6 +26,9 @@ import type { Entity, World } from "../../core/world";
 import { UI_MODAL, INVENTORY_WIDGETS } from "../../data/globals/resources";
 import type { UiHudElement } from "../../data/globals/ui-hud";
 import { INVENTORY_VIEW_ACCESS, UiInventorySystem } from "./systems/inventory";
+// The icon baker's SHAPE, re-exported so this plugin's own `plugin.ts` can name the host instance it narrows
+// without reaching into `./systems/...` (which is this plugin's own business).
+export type { IconSource } from "./systems/inventory";
 import { Inventory } from "./views/inventory";
 
 /** The backpack/bag widgets, built during wiring (spawning is a structural change). The HOTBAR's widgets are

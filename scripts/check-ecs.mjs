@@ -1836,9 +1836,16 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   // …and the composition root has to SUPPLY that answer (a dep that is never injected would read as
   // undefined and refuse everything, which is the same class of miss as the screen that was never
   // activated: the system is only as good as what the wiring hands it).
+  // P1.18b/P1.18c moved the systems that need it INTO the plugins, so the injection lives there now and the
+  // check follows it. (It used to grep the ROOT for `inWorld,` and passed on the picker's leftover line after
+  // ui.navigation had already moved into its plugin — a check that proves nothing about the system it names.)
   assert(
-    /inWorld,/.test(stripComments(readSource("src/boot/main.ts"))),
-    "main.ts injects \"is a world running\" into ui.navigation",
+    /inWorld: host\.inWorld/.test(stripComments(readSource("src/plugins/ui/plugin.ts"))),
+    "plugins/ui/plugin.ts injects \"is a world running\" into ui.navigation",
+  );
+  assert(
+    /inWorld: host\.inWorld/.test(stripComments(readSource("src/plugins/ui-debug/plugin.ts"))),
+    "…and plugins/ui-debug/plugin.ts injects it into the picker",
   );
 });
 
@@ -4527,6 +4534,20 @@ check("a plugin folder JOINS the catalogue by existing - and the two cannot drif
     "…and the HOT catalogue is the discovered set filtered by the flag, not a second hand-written array");
   assert(!/createUiDebugPlugin\(\{ uiPicker \}\)/.test(boot),
     "…so no optional surface is constructed by the root any more");
+  // P1.18c: THE ROOT CONSTRUCTS NO SYSTEM AT ALL. The four optional surfaces used to hand their instances in as
+  // host instances around panels the ROOT had spawned (`uiPicker`/`uiToast`/`uiKeybind`/`uiInventory`); each
+  // builds its own now, panel included, in its own `plugin.ts`. This is the check that keeps the tail closed:
+  // `boot/main.ts` may not call one of those factories, nor `new` a system, nor spawn the panels they own.
+  // (The VIEWS the root still spawns are a different thing and stay: spawning is a structural change, so WHEN it
+  // happens belongs to the wiring — `createUiViews`, the two menus, the frost layer.)
+  for (const dead of ["createPickerSystem(", "createToastSystem(", "createKeybindSystem(", "createInventorySystem("]) {
+    assert(!boot.includes(dead), `the root constructs no system any more (found ${dead})`);
+  }
+  assert(!/new \w+System\(/.test(boot), "…and it does not `new` one either");
+  assert(!/spawnPickerPanel\(|spawnToastPanel\(|spawnKeybindLine\(/.test(boot),
+    "…nor spawns the panels those systems own (each plugin spawns its own now)");
+  assert(/INVENTORY_HANDLES\) \? world\.resource\(INVENTORY_HANDLES\)\.panel : NULL_ENTITY/.test(boot),
+    "…and the one entity it still paints (the bag's panel) comes from the handle the plugin publishes");
   assert(opted.length >= 4, `at least the four optional surfaces opted in (found: ${opted.join(", ")})`);
   // A DISCOVERED plugin must be in DEFAULT_PLUGINS: "add a folder and forget the default list" is a plugin that
   // exists, compiles, passes every other check and is never installed - which is how the crosshair plugin first
