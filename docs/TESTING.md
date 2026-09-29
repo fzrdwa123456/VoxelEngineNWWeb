@@ -369,10 +369,13 @@ engine's first-run default (Chinese) — those two must not be confused, because
 first fix look right while the game still came up Chinese.
 
 WITHOUT a restart (P1.49ag — the picker's rows follow the chain): with the game RUNNING and `lang\fr.json` NOT
-yet in the pack, open the pause menu -> Settings -> Language/Font (three choices) and LEAVE THE PAGE OPEN, then
+yet in the pack, open the pause menu -> Settings -> Language/Font (three choices, each SHOWING ITS TEXT: an
+empty button is the `spawnButton`-without-a-text trap, see AGENTS.md) and LEAVE THE PAGE OPEN, then
 run `tools\lang-demo.bat` (or copy `lang/fr.json` into the sample resource pack) and press F7 to apply the
 chain. The FOURTH row must appear in that same panel as the reload finishes (`PACKS installed: …` in the log),
-labelled from the pack's OWN dictionary, and clicking it must switch the language at once. A row that only
+labelled from the pack's OWN dictionary — `Francais (FROM THE PACK)`, read IN French rather than through the
+language in force, which would print the raw key `lang.fr` — and clicking it must switch the language at once.
+A row that only
 appears after a relaunch, or one that appears but does nothing when clicked, means `renderLangs` is not being
 reached from the `packs` notification — or the action's row INDEX is not mapped back through the view's list.
 The other settings panel (the main menu's) must behave the same: both are built by `buildSettingsPanel`, so both

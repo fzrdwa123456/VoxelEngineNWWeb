@@ -805,6 +805,24 @@ check("widget prefabs build the tree the reconciler expects", () => {
   W.setUiText(uiWorld, label, "42", true);
   equal(uiWorld.get(label, W.UI_TEXT).raw, true, "a raw writer switches to a literal");
   equal(uiWorld.get(label, W.UI_TEXT).key, "42", "…and stores it verbatim");
+
+  // ── A POOL ROW MUST BE SPAWNED **WITH** A TEXT (P1.49ag, shipped broken and reported by hand: "the three
+  // language rows show no text"). This is the one mistake a POOL invites and nothing else catches: the rows
+  // exist, they are visible, they are clickable — and they are empty, because `spawnButton` attaches UI_TEXT
+  // only when it is GIVEN a text and `setUiText` on a widget without that component is a silent no-op. The
+  // writer that is supposed to fill the row later therefore does NOTHING, with no error anywhere.
+  const noText = W.spawnButton(uiWorld, null, "settings.choice", "check.pool", "0");
+  const emptyKey = W.spawnButton(uiWorld, null, "settings.choice", "check.pool", "1", "");
+  equal(uiWorld.has(noText, W.UI_TEXT), false, "a button spawned with no text argument has NO UI_TEXT");
+  W.setUiText(uiWorld, noText, "lang.zh");
+  equal(uiWorld.has(noText, W.UI_TEXT), false, "…so filling it later is a no-op: the silent trap");
+  equal(uiWorld.has(emptyKey, W.UI_TEXT), true, "…while an EMPTY key is enough to own the component");
+  W.setUiText(uiWorld, emptyKey, "lang.zh");
+  equal(uiWorld.get(emptyKey, W.UI_TEXT).key, "lang.zh", "…and the pool row is filled afterwards");
+  // …and the probes GO AWAY again: the next group mounts this same world's widgets and finds them by RECIPE
+  // (`elOf("settings.choice")`), so a leftover probe would be the first choice button it found, not its own.
+  uiWorld.despawn(noText);
+  uiWorld.despawn(emptyKey);
 });
 
 check("the reconciler writes the DOM from data: no wipe of a recipe, and a scroll list starts at the top", () => {
@@ -4868,6 +4886,15 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
   I18n.setLang("en");
   equal(I18n.getLang(), "en", "…while a declared one can");
 
+  // A ROW THAT OFFERS A LANGUAGE READS IN THAT LANGUAGE (P1.49ag). Read through `t()` — the language in
+  // force — a language a pack just added shows up as the raw key, because no dictionary but the new
+  // language's OWN holds a name for it (and that is the one the user cannot read yet). Reported as
+  // "the fourth row says lang.fr"; MC's rule is "Francais", never "French in English".
+  equal(I18n.t("lang.xx"), "lang.xx", "the language in force has no name for the pack's new language");
+  equal(I18n.tIn("xx", "lang.xx"), "Xx", "…so the PICKER reads the row in the language it offers");
+  equal(I18n.tIn("ja", "lang.xx"), "lang.xx", "a language with no name for it still falls back to the key");
+  equal(I18n.tIn("en", "main.single"), I18n.t("main.single"), "…and to the language in force for a shared key");
+
   // THE REAL SHAPE (P1.36b). The locale object comes from `createLocale()` — it already holds the first-run
   // default — and the FILE's value is only an argument. The first version of this check built the object WITH
   // the undeclared value, a state the boot never produces, so it passed while the game came up Chinese:
@@ -4912,6 +4939,10 @@ check("a PACK can add a language at RUNTIME: the picker's rows follow the chain 
   assert(!/langChoices/.test(menu), "the picker no longer spawns one row per language while the layout is built");
   assert(/const langCells = Array\.from\(\{ length: LANG_LIST_CAPACITY \}/.test(menu),
     "…it is a fixed-capacity POOL of rows, the shape the pack columns already use");
+  assert(/spawnButton\(world, langCol, "settings\.choice", `\$\{id\}\.lang`, String\(i\), ""\)/.test(menu),
+    "…each row is spawned WITH a text (an empty key): without one it has no UI_TEXT and cannot be filled");
+  assert(/setUiText\(world, cell, tIn\(lang, `lang\.\$\{lang\}`\), true\)/.test(menu),
+    "…and the fill reads the row's own language (`tIn`) as RAW text, not through the language in force");
   assert(/const renderLangs = \(\): void => \{[\s\S]*?declaredLanguages\(\)/.test(menu),
     "…filled from the DECLARED set, i.e. what the chain in force delivers");
   assert(/if \(section === "lang"\) renderLangs\(\);/.test(menu),

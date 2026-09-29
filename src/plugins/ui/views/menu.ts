@@ -43,7 +43,7 @@
 // through a second listener here. What is left of the gesture in this file is the EVENT-TIME half only:
 // the click shield, the drag's mousedown/mouseup, the wheel block and the key-capture handler, all of them
 // decisions that can only be taken inside the event that must be cancelled (see the contract above).
-import { t, getLang, setLang } from "../../../data/assets/i18n";
+import { t, tIn, getLang, setLang } from "../../../data/assets/i18n";
 import { declaredLanguages } from "../../../data/assets/languages";
 import { getUIScaleMode, setUIScaleMode, getCurrentScale } from "../../../data/globals/uiscale";
 import { getFontId, setFontId } from "../../../data/globals/fonts";
@@ -356,15 +356,29 @@ export function buildSettingsPanel(
   // the layout is built: the set follows the CHAIN, so a pack enabled at runtime has to gain a selectable
   // row now instead of at the next launch, and a system may not spawn widgets. Same shape as the pack list
   // below (fixed capacity, rows hidden when unused, an index-valued button mapped back through a list).
+  // THE TEXT ARGUMENT IS NOT OPTIONAL FOR A POOL ROW, and leaving it out is a SILENT failure (reported as
+  // "the three language rows show no text"): `spawnButton` attaches UI_TEXT only when it is GIVEN a text, and
+  // `setUiText` on a widget that has no UI_TEXT returns without doing anything — so a pool spawned with
+  // `undefined` renders rows that are permanently empty and `renderLangs` cannot fill a single one. An EMPTY
+  // key is enough to own the component; the rows are filled below, during this same wiring, before the first
+  // frame is painted. (The pack columns dodge the same trap differently: their row carries a CHILD label,
+  // because a pack NAME is not an i18n key and the reconciler refuses text on a widget with children.)
   const langCells = Array.from({ length: LANG_LIST_CAPACITY }, (_, i) =>
-    spawnButton(world, langCol, "settings.choice", `${id}.lang`, String(i), undefined),
+    spawnButton(world, langCol, "settings.choice", `${id}.lang`, String(i), ""),
   );
   /** Which language each ROW currently shows. A button's VALUE is component data written at spawn, so the
    *  action carries the row INDEX and the handler maps it back through this list - the pack rows' shape. */
   let langShown: string[] = [];
   /** Fill the rows from the DECLARED set - what `rebuildDerivedFromChain` re-derives on every pack APPLY -
    *  and paint their SELECTION with them: a language that moved to another row must not leave the highlight
-   *  behind, and a row that has just appeared must show the language in force if it is that one. */
+   *  behind, and a row that has just appeared must show the language in force if it is that one.
+   *
+   *  THE LABEL IS READ IN THE ROW'S OWN LANGUAGE (`tIn`), not the one in force: a row OFFERS a language, so it
+   *  has to be readable by somebody who cannot read that language yet — MC's rule ("Francais", not "French in
+   *  English"). Read through `t()` instead and a pack's new language shows up as the raw key `lang.fr`, because
+   *  the dictionaries in force have no reason to hold a name for a language they do not know. It is written as
+   *  RAW text for the same reason: this string does not depend on the language in force, so the reconciler has
+   *  nothing to re-derive on a switch. */
   const renderLangs = (): void => {
     const langs = declaredLanguages();
     if (langs.length > LANG_LIST_CAPACITY) {
@@ -375,7 +389,7 @@ export function buildSettingsPanel(
       const lang = langs[i];
       setUiVisible(world, cell, lang !== undefined);
       setUiSelected(world, cell, lang !== undefined && lang === getLang());
-      if (lang !== undefined) setUiText(world, cell, `lang.${lang}`);
+      if (lang !== undefined) setUiText(world, cell, tIn(lang, `lang.${lang}`), true);
     });
   };
   const fontCol = spawnPanel(world, choiceWrap, "settings.column");

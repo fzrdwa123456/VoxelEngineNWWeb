@@ -1105,6 +1105,23 @@ Still outstanding:
   voxel palette DO follow the chain already: `rebuildDerivedFromChain` re-runs both on every apply.
   VERIFIED: `tsc` 0, `check:ecs` 71/71 (a group of its own, plus the P1.36 picker assertion repointed from
   `declaredLanguages().map` to the pool).
+  FIXED IN THE SAME ROUND, both reported by hand after the first build of it:
+  * **the rows had NO TEXT.** `spawnButton` attaches `UI_TEXT` only when it is GIVEN a text, and `setUiText`
+    on a widget without that component is a SILENT no-op — so the pool, spawned with `undefined`, rendered
+    twelve empty buttons and `renderLangs` could not fill one of them. Nothing about it is loud: the rows
+    were visible, clickable, correctly placed and correctly hidden when unused. An EMPTY key is enough to
+    own the component; the gate now pins the trap on a real widget World (spawn without a text -> no
+    `UI_TEXT` -> `setUiText` does nothing) AND the pool line that must pass one.
+  * **the fourth row read `lang.fr`.** The row's label went through `t()`, i.e. the language IN FORCE, which
+    has no reason to hold a name for a language it does not know — and the one dictionary that does hold it
+    belongs to the language the user cannot read yet. A row that OFFERS a language is read in THAT language
+    now (`i18n.tIn`, written as raw text because the string does not depend on the language in force), which
+    is MC's rule and what `docs/TESTING.md` always claimed: the demo's row reads
+    `Francais (FROM THE PACK)`.
+  VERIFIED BY HAND, VISUALLY (packaged build, screenshots): three rows with their text, a pack's new
+  language appearing as a fourth row labelled in its own language, and — after the pack's `lang/fr.json` was
+  deleted while the game ran and the chain re-applied by toggling the pack — the rows back to three, with the
+  reload's own summary (`files=11`, `zh=104 en=104 ja=104`) proving the rescan re-read the folder.
 - **P1.18c — the tail is CLOSED: the root constructs no system at all.** `DONE`. The four optional surfaces
   used to hand their instances in as host instances (`uiPicker`, `uiToast`, `uiKeybind`, `uiInventory`) around
   panels the ROOT had spawned. Each builds its own now, panel included, in its own `plugin.ts` — which runs at

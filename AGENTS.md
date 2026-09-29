@@ -910,4 +910,15 @@ When work lands, move the entry here and delete it there.
 - Widget text is only written on LEAF widgets: a text write replaces an element's children, so the
   reconciler refuses to write text on a widget that has any. A container that needs text AND children
   needs a child label (which is what the keycaps do).
+- **A widget that will be filled LATER must be spawned WITH a text.** `spawnButton(..., text?)` attaches
+  `UI_TEXT` only when it is given one, and `setUiText` on a widget without that component returns without
+  doing anything — so a pool/list row spawned with `undefined` is permanently EMPTY, it is still visible and
+  clickable, and the writer that was supposed to fill it fails in silence (shipped once as "the three
+  language rows show no text", P1.49ag). An EMPTY key is enough to own the component. The other way out is
+  the pack columns': the row carries a CHILD label (`spawnLabel`, which has its own `UI_TEXT`) because a
+  pack NAME is not an i18n key. `check:ecs` pins both halves of the trap on a real widget World.
+- **A row that OFFERS a language is read IN that language** (`tIn`), not in the one in force: "Francais",
+  never "French in English". Through `t()` a language a pack just added shows up as the raw key `lang.fr`,
+  because no dictionary but the new language's own holds a name for it — and that is the one the user cannot
+  read yet. Written as RAW text, since the string does not depend on the language in force.
 - Multiplayer is a placeholder button.

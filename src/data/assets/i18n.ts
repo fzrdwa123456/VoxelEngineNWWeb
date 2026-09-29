@@ -153,6 +153,18 @@ export function getLang(): Lang {
   return langOf();
 }
 
+/** Copy for a NAMED language, falling back to the language in force and then to the key.
+ *
+ *  THE LANGUAGE PICKER is the reason this exists: every other surface wants the language IN FORCE, but a row
+ *  that OFFERS a language has to read in THAT language — MC's convention is "Francais", never "French in
+ *  English". Reading the current dictionary instead is what made a pack's new language show up as the raw key
+ *  `lang.fr` in the picker: the dictionaries in force have no reason to hold a name for a language they do
+ *  not know, and the ONE dictionary that does hold it is the language's own — i.e. the one the user cannot
+ *  read yet, which is a chicken and egg the picker must not depend on. */
+export function tIn(lang: Lang, key: string): string {
+  return dicts().get(lang)?.[key] ?? t(key);
+}
+
 /** Switch language: writes the RESOURCE and announces it (it does not persist — the composition root
   *  subscribes through the host's config bus to save). A language the install does not declare is refused:
   *  the set is content, and the picker is built from it. */
