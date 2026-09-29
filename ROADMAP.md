@@ -1083,6 +1083,28 @@ Still outstanding:
   `PACKS installed: … resourcepacks=1 disabled=1 files=11` — the new pack was on disk and NOT in the chain.
   `tsc` 0, `check:ecs` 70/70 (the new assertions drive two packs and one selection through the real
   `installPacks`/`listPacks`/`updatePackListing`, plus the migration's source shape).
+- **P1.49ag — the language PICKER's rows follow the chain too, at runtime.** `DONE`. P1.36 made the language set
+  CONTENT (the loader reads `declaredLanguages()`) and P1.49ac gave the pack page a way to follow the folder,
+  but the picker was left behind by both: `buildSettingsPanel` spawned ONE ROW PER DECLARED LANGUAGE while the
+  layout was built, so a pack enabled while the game ran delivered a `lang/<id>.json` the loader built a
+  dictionary from and the picker could not show. The language was loadable and savable but not SELECTABLE
+  until the next launch — the same "publishable but unselectable" drift P1.36 removed from the loader,
+  standing in the one surface that offers the choice. It is a fixed-capacity POOL now (`LANG_LIST_CAPACITY`,
+  in `data/globals/paint.ts` next to `PACK_LIST_CAPACITY`), i.e. the shape the pack columns already use, and
+  the two events that can change the declared set re-fill it: the pack-APPLY notification on the config bus
+  (the same `onConfigChange("packs")` the pack rows hear, guarded per section) and the moment the section
+  OPENS (`show("lang")`), which is what covers a chain change that landed while another settings page was up.
+  No barrier is involved, and that is what the pool buys: a row that already exists can be re-filled by a view
+  at any time, while SPAWNING one is a structural change and may not happen outside a barrier — the same
+  reason the pack list chose this shape. The rows' SELECTION is painted by `renderLangs` together with their
+  text and visibility (a language that moved to another row must not leave the highlight behind), so the
+  action carries the row INDEX and maps it back through the view's list, exactly as the pack rows' action does.
+  STILL OPEN, and a DESIGN decision rather than a bug: a BLOCK added to a pack still has no hotbar slot until
+  the next launch, because the hotbar holds the stack set `spawnPlayer` seeded (MC behaves the same way and
+  solves it with a creative inventory built from the registry — see the P1.49ac note). The block TABLE and the
+  voxel palette DO follow the chain already: `rebuildDerivedFromChain` re-runs both on every apply.
+  VERIFIED: `tsc` 0, `check:ecs` 71/71 (a group of its own, plus the P1.36 picker assertion repointed from
+  `declaredLanguages().map` to the pool).
 - **P1.18c — the tail is CLOSED: the root constructs no system at all.** `DONE`. The four optional surfaces
   used to hand their instances in as host instances (`uiPicker`, `uiToast`, `uiKeybind`, `uiInventory`) around
   panels the ROOT had spawned. Each builds its own now, panel included, in its own `plugin.ts` — which runs at

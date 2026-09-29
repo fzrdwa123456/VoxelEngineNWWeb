@@ -55,7 +55,7 @@ import { CAP_MAX, CAP_MIN, CAP_STEP, sanitizeFrameCap, UI_MODAL, type UiModalSta
 import { stepBackSettings, type SettingsListTree } from "../systems/navigation";
 import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
 import { onUiSource, SOURCE_FPS_CAP, UI_SOURCES, type UiSource } from "../../../data/globals/sources";
-import { PACK_LIST_CAPACITY } from "../../../data/globals/paint";
+import { LANG_LIST_CAPACITY, PACK_LIST_CAPACITY } from "../../../data/globals/paint";
 import { UI_THEME } from "../../../data/assets/theme";
 import { UI_PAGE_HOSTS } from "../../../data/globals/ui-pages";
 import {
@@ -223,6 +223,10 @@ export function buildSettingsPanel(
     }
     // The pack list is a PUSH too (it comes from disk): refresh it whenever its section is selected.
     if (which === "pack") renderPacks();
+    // The language rows come from the CHAIN the way the pack rows come from the folder, so they are
+    // refreshed when their section opens too: a pack that added a language while another page was up is
+    // picked up here, without the reload event having to know which section is on screen.
+    if (which === "lang") renderLangs();
   };
   const hideAll = (): void => show(null);
 
@@ -348,18 +352,42 @@ export function buildSettingsPanel(
   // plugin contributes and `loadLang` builds dictionaries from, so a pack shipping `lang/fr.json` gets a
   // picker entry instead of a file nobody can select. The label is the `lang.<id>` key, which the pack's own
   // dictionary is expected to hold (a missing one shows the raw key: a missing TRANSLATION, not a missing
-  // language). Spawning happens during wiring, i.e. after `preloadPacks()`.
-  const langChoices = declaredLanguages().map((lang) => ({
-    key: lang,
-    entity: spawnButton(world, langCol, "settings.choice", `${id}.lang`, lang, `lang.${lang}`),
-  }));
+  // language). The rows are a POOL filled from that set (P1.49ag), not one row per language spawned while
+  // the layout is built: the set follows the CHAIN, so a pack enabled at runtime has to gain a selectable
+  // row now instead of at the next launch, and a system may not spawn widgets. Same shape as the pack list
+  // below (fixed capacity, rows hidden when unused, an index-valued button mapped back through a list).
+  const langCells = Array.from({ length: LANG_LIST_CAPACITY }, (_, i) =>
+    spawnButton(world, langCol, "settings.choice", `${id}.lang`, String(i), undefined),
+  );
+  /** Which language each ROW currently shows. A button's VALUE is component data written at spawn, so the
+   *  action carries the row INDEX and the handler maps it back through this list - the pack rows' shape. */
+  let langShown: string[] = [];
+  /** Fill the rows from the DECLARED set - what `rebuildDerivedFromChain` re-derives on every pack APPLY -
+   *  and paint their SELECTION with them: a language that moved to another row must not leave the highlight
+   *  behind, and a row that has just appeared must show the language in force if it is that one. */
+  const renderLangs = (): void => {
+    const langs = declaredLanguages();
+    if (langs.length > LANG_LIST_CAPACITY) {
+      opts.log(`LANGS ${langs.length} declared, only ${LANG_LIST_CAPACITY} rows exist (fixed capacity)`);
+    }
+    langShown = langs;
+    langCells.forEach((cell, i) => {
+      const lang = langs[i];
+      setUiVisible(world, cell, lang !== undefined);
+      setUiSelected(world, cell, lang !== undefined && lang === getLang());
+      if (lang !== undefined) setUiText(world, cell, `lang.${lang}`);
+    });
+  };
   const fontCol = spawnPanel(world, choiceWrap, "settings.column");
   spawnLabel(world, fontCol, "settings.columnLabel", "settings.font");
   const fontChoices = (["pixel", "system"] as const).map((font) => ({
     key: font,
     entity: spawnButton(world, fontCol, "settings.choice", `${id}.font`, font, `fonts.${font}`),
   }));
-  onUiAction(actions, `${id}.lang`, (value) => setLang(value as string));
+  onUiAction(actions, `${id}.lang`, (value) => {
+    const lang = langShown[Number(value)];
+    if (lang !== undefined) setLang(lang);
+  });
   onUiAction(actions, `${id}.font`, (value) => setFontId(value as "pixel" | "system"));
 
   // --- Resource packs: TWO COLUMNS (P1.49ae) - LEFT = available, RIGHT = in the chain -------------------
@@ -455,7 +483,13 @@ export function buildSettingsPanel(
   // that is the existing way a VALUE tells its surfaces it changed (the value-composed labels subscribe the same
   // way); the guard keeps a reload that happens while another settings page is up from touching this one.
   onConfigChange("packs", () => {
-    if (world.resource(UI_MODAL).settings === "pack") renderPacks();
+    const section = world.resource(UI_MODAL).settings;
+    if (section === "pack") renderPacks();
+    // …and the LANGUAGE rows follow the same event (P1.49ag): the chain this apply installed is what
+    // `declaredLanguages()` reads, so a language that arrived with it is selectable at once - the same
+    // "must restart to see it" defect as the pack listing, one table over. Guarded per section for the same
+    // reason: the other list is re-filled when it opens.
+    if (section === "lang") renderLangs();
   });
 
   // --- THE PAGE HOST (P1.29): this panel does not know which pages exist. It registers WHERE a page may be
@@ -509,7 +543,8 @@ export function buildSettingsPanel(
   const renderChoices = (): void => {
     for (const choice of scaleChoices) setUiSelected(world, choice.entity, getUIScaleMode() === choice.key);
     for (const choice of wmChoices) setUiSelected(world, choice.entity, opts.getWindowMode() === choice.key);
-    for (const choice of langChoices) setUiSelected(world, choice.entity, getLang() === choice.key);
+    // (The LANGUAGE rows are not here: they are a pool whose contents follow the pack chain, so
+    // `renderLangs` paints their text, visibility and selection together - see it above.)
     for (const choice of fontChoices) setUiSelected(world, choice.entity, getFontId() === choice.key);
     // The two DROPDOWN faces show the value IN FORCE, as keys, so the language switch reaches them too.
     setUiText(world, scaleDrop.value, `uiScale.${getUIScaleMode()}`);
@@ -557,6 +592,7 @@ export function buildSettingsPanel(
     renderCap();
     renderScaleLabel();
     renderChoices();
+    renderLangs();
     if (world.resource(UI_MODAL).settings === "pack") renderPacks();
   });
 
@@ -564,6 +600,7 @@ export function buildSettingsPanel(
   renderCap();
   renderScaleLabel();
   renderChoices();
+  renderLangs();
   // (The key bind panel needs no initial render: `ui.keybind` derives it from the bind table every
   // frame, including the frame this panel is first shown.)
 

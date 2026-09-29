@@ -4891,10 +4891,45 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
   // unselectable.
   assert(/listPackPaths/.test(stripComments(readSource("src/data/assets/languages.ts"))),
     "the set is discovered from the pack chain, not listed");
-  assert(/declaredLanguages\(\)\.map/.test(stripComments(readSource("src/plugins/ui/views/menu.ts"))),
+  assert(/const renderLangs = \(\): void => \{[\s\S]*?declaredLanguages\(\)/.test(
+    stripComments(readSource("src/plugins/ui/views/menu.ts")),
+  ),
     "…and the settings PICKER is built from that same set (a pack's language is selectable, not just loadable)");
   assert(!/"zh", "en", "ja"\]/.test(stripComments(readSource("src/data/assets/i18n.ts"))),
     "…and i18n no longer knows any language by name");
+});
+
+// ===== a language that arrives at RUNTIME (P1.49ag) =====
+check("a PACK can add a language at RUNTIME: the picker's rows follow the chain (P1.49ag)", () => {
+  // P1.36 made the language set CONTENT (the loader reads it) and P1.49ac gave the pack page a way to follow
+  // the folder. The picker was left behind by both: its rows were spawned ONE PER DECLARED LANGUAGE while the
+  // layout was built, so a pack enabled while the game ran delivered a `lang/<id>.json` the LOADER built a
+  // dictionary from and the PICKER could not show. The language was selectable only after a restart — the same
+  // "publishable but unselectable" drift P1.36 was about, in the one surface that offers the choice. The rows
+  // are a fixed-capacity POOL filled from the declared set now, exactly like the pack columns, and the two
+  // events that can change that set re-fill it: the pack-APPLY notification, and the moment the section opens.
+  const menu = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  assert(!/langChoices/.test(menu), "the picker no longer spawns one row per language while the layout is built");
+  assert(/const langCells = Array\.from\(\{ length: LANG_LIST_CAPACITY \}/.test(menu),
+    "…it is a fixed-capacity POOL of rows, the shape the pack columns already use");
+  assert(/const renderLangs = \(\): void => \{[\s\S]*?declaredLanguages\(\)/.test(menu),
+    "…filled from the DECLARED set, i.e. what the chain in force delivers");
+  assert(/if \(section === "lang"\) renderLangs\(\);/.test(menu),
+    "…and re-filled on the pack-APPLY event, the bus notification `rebuildDerivedFromChain` raises");
+  assert(/if \(which === "lang"\) renderLangs\(\);/.test(menu),
+    "…so a chain change that landed while another page was up is picked up when this one opens");
+  assert(/langShown\[Number\(value\)\]/.test(menu),
+    "the action carries the row INDEX and maps it back through the list (a button's value is written at spawn)");
+  assert(/export const LANG_LIST_CAPACITY = \d+/.test(readSource("src/data/globals/paint.ts")),
+    "the capacity is DATA, next to the pack list's");
+  // …and the event it listens for is really raised by the APPLY half of the reload driver, so the chain of
+  // evidence is closed: apply -> declare -> notify -> fill (the gate drives the first link above).
+  assert(/function dropPackDerivedCaches[\s\S]*?notifyConfigChange\("packs"\)/.test(stripComments(readSource("src/boot/main.ts"))),
+    "…and the driver announces the chain it just installed from its cache-drop step");
+  // …and the value it hands `setLang` is one the install declares, because `renderLangs` filled the list from
+  // that same call: a row that is not shown is not clickable, so an index can never point at a stale language.
+  assert(/const lang = langShown\[Number\(value\)\];[\s\S]*?if \(lang !== undefined\) setLang\(lang\);/.test(menu),
+    "…and an index with no language behind it is a no-op rather than a refusal to switch");
 });
 
 // ===== report =====

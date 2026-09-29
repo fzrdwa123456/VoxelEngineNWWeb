@@ -404,7 +404,8 @@ The per-stage yield is a `setTimeout` macrotask, NOT a second `requestAnimationF
 still owns exactly one, and the gate asserts it.
 
 **The settings FILE is checked at boot, repaired, and written back.** Every config module validates its
-own field and silently falls back when it cannot (`loadLang` ignores a language outside zh/en/ja,
+own field and silently falls back when it cannot (`loadLang` ignores a language the install does not
+DECLARE — the set is content, discovered from the pack chain, see `data/assets/languages.ts`;
 `sanitizeFrameCap` turns a hand-edited `fpsCap: 1` into 30, `loadBinds` drops a code it does not know).
 That is right at LOAD time, but it left the file saying one thing while the game used another — the bad
 value survived on disk, unreported, and every launch guessed again. `host/desktop/shell.ts`'s
@@ -744,7 +745,7 @@ settings check, the world, the movement modes, every menu, the key binds, the in
 `docs/TESTING.md`**, together with what a failure at each step means. Read it before saying a change
 works, and extend it when a behaviour lands.
 
-**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 69
+**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 71
 assertion groups, ends with `RESULT: OK` / `RESULT: FAILED`). It compiles the ECS plus the fixed lane
 with the same `tsc` the build uses into `node_modules/.cache/voxelengine-ecs-check` (git-ignored, so
 it writes nothing tracked; Node still resolves the real `three`), then asserts what no type-checker

@@ -163,3 +163,10 @@ export function createUiPaint(inventorySlots: number): UiPaintState {
  *  rows exist up front and are filled in). 24 packs is far beyond any real install; beyond it the extra
  *  packs are REPORTED rather than silently dropped. */
 export const PACK_LIST_CAPACITY = 24;
+
+/** The settings panel's LANGUAGE rows are a fixed-capacity list for the same reason, and they follow the
+ *  pack CHAIN the way the pack rows follow the folder: a pack enabled while the game runs delivers new
+ *  `lang/<id>.json` files, so the picker has to gain rows without a restart and the count is not knowable
+ *  when the layout is built (P1.49ag). The built-in three plus whatever the packs declare; beyond this the
+ *  extra languages are REPORTED rather than silently dropped. */
+export const LANG_LIST_CAPACITY = 12;

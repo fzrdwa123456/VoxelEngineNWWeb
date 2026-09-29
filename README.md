@@ -248,7 +248,7 @@ game\saves\
 | 项目 | 结果 |
 |---|---|
 | `tsc --noEmit`（strict） | **0 errors** |
-| `npm run check:ecs` | **69 assertion groups passed / RESULT: OK** |
+| `npm run check:ecs` | **71 assertion groups passed / RESULT: OK** |
 | `rustc --test src-tauri/src/cursor_model.rs` | **29 passed**（纯规则层，不需要窗口/GPU） |
 | `vite build` | **✓ 132 modules transformed，478ms** |
 | `cargo check` / `cargo build`（`x86_64-pc-windows-gnu`） | **exit 0**，只有两个既有警告 |
