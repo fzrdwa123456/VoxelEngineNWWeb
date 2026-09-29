@@ -45,7 +45,7 @@
   "settings.packsOff": "無効",
   "settings.packsOn": "有効",
   "settings.packsNone": "（なし）",
-  "settings.packsRestart": "変更はすぐに再読み込みされます",
+  "settings.packsRestart": "リストはフォルダを反映します。入れたパックは無効のままなので、クリックで有効化（即時反映）",
   "settings.uiScale": "UIスケール",
   "uiScale.small": "小",
   "uiScale.normal": "普通",

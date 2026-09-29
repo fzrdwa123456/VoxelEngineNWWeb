@@ -92,9 +92,10 @@ export interface SettingsCallbacks {
   onToggleDiagLog: (on: boolean) => boolean;
   getWindowMode: () => WindowMode;
   onSetWindowMode: (mode: WindowMode) => void;
-  /** The resource packs the user switched OFF (P1.49aa) and the way to change them. The change is written
-   *  to settings.json at once and applied when the pack chain is installed, i.e. on the NEXT LAUNCH - the
-   *  section says so on screen, and the columns re-split immediately so the click has visible feedback. */
+  /** THE SELECTION: the resource packs that are enabled (P1.49ae) — the chain is built from this list, so one
+   *  that is on disk and not named here is off (a pack just dropped into the folder lands in the left column).
+   *  The change is written to settings.json at once and applied by a reload; the columns re-split immediately so
+   *  the click has visible feedback. */
   onSetPacks: (names: readonly string[]) => void;
   /** The platform's log sink and the two config subscriptions, INJECTED: a plugin may not import
    *  `host/` (the layer rule in check:ecs). */
@@ -361,11 +362,13 @@ export function buildSettingsPanel(
   onUiAction(actions, `${id}.lang`, (value) => setLang(value as string));
   onUiAction(actions, `${id}.font`, (value) => setFontId(value as "pixel" | "system"));
 
-  // --- Resource packs: TWO COLUMNS (P1.49aa) - LEFT = switched off, RIGHT = in the chain --------------
-  // The engine had no notion of an enabled pack at all: the chain was built once at boot from whatever the
-  // folder held. Switching one off is written to settings.json and takes effect at the NEXT LAUNCH (the
-  // chain is what the dictionaries, the block registry, the textures and the menu background are derived
-  // from), which is what the hint under the columns says. The split itself updates at once.
+  // --- Resource packs: TWO COLUMNS (P1.49ae) - LEFT = available, RIGHT = in the chain -------------------
+  // THE SELECTION IS AN ENABLED LIST (MC's semantics): the chain is built from the names the user picked, so
+  // everything else on disk sits in the left column — including a pack that was just copied into
+  // `resourcepacks/`, which is the point of the change. Enabling one is written to settings.json at once and
+  // APPLIED by a reload (the chain is what the dictionaries, the block registry, the textures and the menu
+  // background are derived from), which is what the hint under the columns says. The split updates immediately.
+  // The list itself follows the FOLDER while this page is open (P1.49ad), so a pack appears/goes by itself.
   spawnLabel(world, panels.pack, "settings.title", "settings.resourcepacks");
   const packWrap = spawnPanel(world, panels.pack, "settings.columns");
   const offCol = spawnPanel(world, packWrap, "settings.column");
@@ -428,16 +431,19 @@ export function buildSettingsPanel(
     setUiVisible(world, onNone, on.length === 0);
   };
 
-  /** Move one pack across the split. The built-in is the chain is floor (the engine fallback sits below
-   *  IT), so it is not switchable: clicking it does nothing, and its row says built-in instead of a count. */
+  /** Move one pack across the split. The built-in is the chain's floor (the engine fallback sits below IT), so
+   *  it is not switchable: clicking it does nothing, and its row says built-in instead of a count.
+   *
+   *  THE CALLBACK CARRIES THE ENABLED LIST (P1.49ae), not the switched-off one, because the chain is built from
+   *  the selection: a pack that is on disk and not in the list is off. */
   const togglePack = (name: string | undefined): void => {
     if (!name) return;
     const pack = listPacks().find((p) => p.name === name);
     if (!pack || pack.builtin) return;
-    const off = new Set(listPacks().filter((p) => !p.builtin && !p.enabled).map((p) => p.name));
-    if (off.has(name)) off.delete(name);
-    else off.add(name);
-    opts.onSetPacks([...off]);
+    const enabled = new Set(listPacks().filter((p) => !p.builtin && p.enabled).map((p) => p.name));
+    if (enabled.has(name)) enabled.delete(name);
+    else enabled.add(name);
+    opts.onSetPacks([...enabled]);
     renderPacks();
   };
   onUiAction(actions, `${id}.packOff`, (value) => togglePack(offShown[Number(value)]));

@@ -493,7 +493,14 @@ export function recipeStyle(recipe: UiRecipe, state: UiWidgetState, theme: UiThe
     case "settings.value":
       // Compact and right-aligned since P1.49m: it is the LAST thing in its row, and `min-width` is what
       // keeps the slider (which sits to its left) from moving as the text goes 60 FPS -> Unlimited.
-      return "text-align:right;font-size:0.9375rem;font-weight:600;margin:0;min-width:4.5rem;";
+      //
+      // P1.49af: `padding-right` MIRRORS THE INNER PADDING A BUTTON HAS (settings.rowBtn's 0.75rem), because this
+      // is the one control in the screen that is a bare label rather than a button. Without it the number's right
+      // edge sat flush with the row band while the text inside every button on the same column stopped 12px short
+      // of that edge, so the FPS value read as "shifted right" next to the rows above and below it. The eye
+      // compares TEXT, so the TEXT is what has to line up. It is the only user of this recipe (the FPS cap), so
+      // nothing else moves; the amount scales with the root font size like every other rem, i.e. with UI scale.
+      return "text-align:right;font-size:0.9375rem;font-weight:600;margin:0;min-width:4.5rem;padding-right:0.75rem;";
     case "settings.range":
       // NARROW and inline now: the slider lives INSIDE its row, and the stylesheet below hides it until
       // that row is hovered (P1.49m).

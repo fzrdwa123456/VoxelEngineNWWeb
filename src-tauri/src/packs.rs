@@ -133,3 +133,96 @@ pub fn snapshot(game_root: &Path) -> PackSnapshot {
         resourcepacks: scan_dir(&packs_dir, true),
     }
 }
+
+// ===== The LISTING: which packs exist on disk right now (P1.49ad) =====
+// The pack SCREEN has to follow the folder while it is open — a pack dropped in appears, a deleted one goes —
+// and doing that with `preload_packs` would mean reading (and base64-ing) every file of every pack once a
+// second. This is the cheap half of MC's split: `PackRepository.reload()` lists what is AVAILABLE without
+// loading it, and only `createReload` actually reads the resources.
+//
+// So this walk reads NAMES and counts files; it never opens one. `file_count` is therefore EXACT for a folder
+// pack and -1 for a .zip (counting a zip's entries would mean unpacking it) — the frontend shows a negative
+// count as blank, which is the same thing it already does for a switched-off pack.
+#[derive(Serialize)]
+pub struct PackListingEntry {
+    pub name: String,
+    pub builtin: bool,
+    /// Folder pack: how many files it holds. Zip pack: -1 (never opened).
+    #[serde(rename = "fileCount")]
+    pub file_count: i64,
+    /// Is it a .zip? (the frontend only uses this for the log line)
+    pub zip: bool,
+}
+
+#[derive(Serialize)]
+pub struct PackListing {
+    /// The built-in pack, when it is on disk (name + the same fields as the others).
+    pub builtin: Option<PackListingEntry>,
+    pub mods: Vec<PackListingEntry>,
+    pub resourcepacks: Vec<PackListingEntry>,
+}
+
+/// Count the files under `dir` WITHOUT reading any of them.
+fn count_files(dir: &Path) -> i64 {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut n = 0i64;
+    for e in entries.flatten() {
+        match e.file_type() {
+            Ok(t) if t.is_dir() => n += count_files(&e.path()),
+            Ok(_) => n += 1,
+            Err(_) => {}
+        }
+    }
+    n
+}
+
+fn listing_entry(full: &Path, name: &str, builtin: bool) -> PackListingEntry {
+    let is_dir = full.is_dir();
+    PackListingEntry {
+        name: name.to_string(),
+        builtin,
+        file_count: if is_dir { count_files(full) } else { -1 },
+        zip: !is_dir,
+    }
+}
+
+/// The packs that exist on disk right now, in the same order and with the same filters as `snapshot`.
+pub fn listing(game_root: &Path) -> PackListing {
+    let packs_dir = game_root.join("resourcepacks");
+    let mods_dir = game_root.join("mods");
+
+    let list_dir = |dir: &Path, skip_builtin: bool| -> Vec<PackListingEntry> {
+        let mut out = Vec::new();
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return out,
+        };
+        let mut items: Vec<_> = entries.flatten().collect();
+        items.sort_by_key(|e| e.file_name());
+        for e in items {
+            let name = e.file_name().to_string_lossy().to_string();
+            if skip_builtin && name == BUILTIN_NAME {
+                continue;
+            }
+            let full = e.path();
+            let is_zip = name.to_ascii_lowercase().ends_with(".zip");
+            if full.is_dir() || is_zip {
+                out.push(listing_entry(&full, &name, false));
+            }
+        }
+        out
+    };
+
+    PackListing {
+        builtin: if packs_dir.join(BUILTIN_NAME).is_file() {
+            Some(listing_entry(&packs_dir.join(BUILTIN_NAME), BUILTIN_NAME, true))
+        } else {
+            None
+        },
+        mods: list_dir(&mods_dir, false),
+        resourcepacks: list_dir(&packs_dir, true),
+    }
+}

@@ -69,9 +69,9 @@ export function diffSettings(
       if (changed) merged[key] = out;
       continue;
     }
-    // A LIST-valued setting (P1.49aa, `disabledPacks`) is compared ELEMENT-WISE: two arrays are never
+    // A LIST-valued setting (P1.49aa/P1.49ae, `enabledPacks`) is compared ELEMENT-WISE: two arrays are never
     // identical by reference, so the plain `!==` below would have called every array unusable and rewritten
-    // the user is list from the value in force on every single boot.
+    // the user's selection from the value in force on every single boot.
     if (Array.isArray(value) && Array.isArray(known)) {
       if (value.length !== known.length || value.some((v, i) => v !== known[i])) {
         merged[key] = known;

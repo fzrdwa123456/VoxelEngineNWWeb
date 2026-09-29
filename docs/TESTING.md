@@ -761,6 +761,30 @@ once at wiring time — so a reload left the old picture up and never showed the
   creative inventory for the same reason).
 - Open Settings -> Resource Packs, keep that page OPEN, press **F7** (or toggle a pack): the rows and their
   file counts must refresh instead of showing the previous chain's numbers.
+
+**E. The pack page follows the folder (P1.49ad)**
+
+- Open Settings -> Resource Packs and LEAVE IT OPEN.
+- Copy a pack folder (or a .zip) into `game\resourcepacks\` while the game runs: within a second it appears in
+  the list, with its file count (a .zip shows no count until it is applied — counting one means unpacking it).
+- Delete it again: the row disappears within a second.
+- Add a file INSIDE a pack that is already in the chain: the row's count does NOT change (it shows what is
+  loaded), because applying is still a decision.
+- Nothing is applied by watching: the game keeps running the chain it has (the log shows `PACKS listing from
+  disk: …` lines and NO `PACKS reloaded` line). Press **F7** (or toggle a pack) to apply.
+- Close the page: polling stops (no more listing lines); reopen it and the list is refreshed at once.
+
+**F. A newly dropped pack starts NOT enabled (P1.49ae)**
+
+- With the Resource Packs page open, copy a pack folder into `game\resourcepacks\`: it appears in the LEFT
+  column (no file count) and does NOT change the game — the log's next reload says `disabled=1`.
+- Click it: it moves to the right column and the game applies it at once (`PACKS enabled: [...]` in the log,
+  then a reload).
+- Click it again: it goes back to the left, and the next reload leaves it out.
+- The SELECTION lives in `game\config\settings.json` as `enabledPacks: ["<pack name>", …]`. Delete that key by
+  hand, restart: the boot logs `SETTINGS enabledPacks seeded from the folder …` and the packs on disk are
+  selected again (that is the first-run/migration rule). An EMPTY array is respected (nothing enabled).
+- `mods/` is NOT part of the selection: a mod is the content baseline and is always in the chain.
 **F3+T equivalent / gotcha**: F7 is handled by `ui.navigation` like the hot-plug keys, so it works at the
 main menu too. Synthetic keys sent from another process (SendKeys) do NOT reach the WebView — press it on
 the real keyboard.

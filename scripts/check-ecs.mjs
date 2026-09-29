@@ -1235,6 +1235,26 @@ check("a delayed intent is DATA with a deadline, applied by a system �?never a
   }
 });
 
+check("the pack page's live listing lists the folder WITHOUT applying it (P1.49ad)", () => {
+  // The pack screen follows the folder while it is open (a pack dropped in appears, a deleted one goes), and the
+  // whole point is that looking at the list is not a decision: the listing path walks NAMES and COUNTS only —
+  // Rust's list_packs opens no file — and it must NEVER install a chain, or opening the page (or adding a file
+  // to a pack) would reload the world behind the player's back. Applying stays the reload driver's job.
+  const tex = stripComments(readSource("src/data/assets/textures.ts"));
+  const fn = tex.slice(tex.indexOf("export function updatePackListing"));
+  assert(fn.length > 0, "the listing-only entry exists");
+  assert(!/installPacks\(/.test(fn.slice(0, 1400)), "…and it does NOT install a chain (that would APPLY the pack)");
+  assert(/resourcepackInfos\.length = 0/.test(fn.slice(0, 1400)), "…it replaces the listing");
+  const rust = readSource("src-tauri/src/packs.rs");
+  assert(/pub fn listing\(/.test(rust), "the Rust side lists the folders");
+  assert(!/fs::read\(/.test(rust.slice(rust.indexOf("pub fn listing("))), "…without opening a single file");
+  assert(/fn list_packs\(/.test(readSource("src-tauri/src/lib.rs")), "…and it is exposed as its own command");
+  const boot = stripComments(readSource("src/boot/main.ts"));
+  assert(/maybePollPackListing\(\)/.test(boot), "the loop checks for a listing each frame");
+  assert(/settings !== "pack"/.test(boot), "…and only polls while that settings page is up");
+  assert(/notifyConfigChange\("packs"\)/.test(boot), "…announcing a change so the open page re-renders");
+});
+
 check("the icon cache has a synchronous reader, and both readers agree on the key", () => {
   // The inventory draws the icon IMMEDIATELY when it is already baked; that is what keeps a stack move
   // from painting one frame of the placeholder. It can only do that if the cache is readable without a
@@ -2455,23 +2475,23 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   const empty = diffSettings({}, inForce);
   equal(empty.fixed.length + empty.unknown.length, 0, "an ABSENT key is not a fault (a first run)");
 
-  // A LIST-valued setting (P1.49aa, `disabledPacks`): two arrays are never identical by REFERENCE, so the
+  // A LIST-valued setting (P1.49aa/P1.49ae, `enabledPacks`): two arrays are never identical by REFERENCE, so the
   // plain `!==` would have called the user is own list unusable and rewritten it from the value in force on
   // every boot. The repair compares element-wise, and a wrong TYPE is still repaired.
-  const listSame = diffSettings({ disabledPacks: ["a"] }, { ...inForce, disabledPacks: ["a"] });
+  const listSame = diffSettings({ enabledPacks: ["a"] }, { ...inForce, enabledPacks: ["a"] });
   equal(listSame.fixed.join(","), "", "an unchanged pack list is NOT reported as repaired");
-  const listDiff = diffSettings({ disabledPacks: ["a", "b"] }, { ...inForce, disabledPacks: ["a"] });
-  equal(listDiff.fixed.join(","), "disabledPacks", "a DIFFERENT pack list is repaired");
-  equal(listDiff.merged.disabledPacks.join(","), "a", "?to the list in force");
-  const listBad = diffSettings({ disabledPacks: "a" }, { ...inForce, disabledPacks: ["a"] });
-  equal(listBad.fixed.join(","), "disabledPacks", "a pack list of the wrong TYPE is repaired too");
+  const listDiff = diffSettings({ enabledPacks: ["a", "b"] }, { ...inForce, enabledPacks: ["a"] });
+  equal(listDiff.fixed.join(","), "enabledPacks", "a DIFFERENT pack selection is repaired");
+  equal(listDiff.merged.enabledPacks.join(","), "a", "?to the selection in force");
+  const listBad = diffSettings({ enabledPacks: "a" }, { ...inForce, enabledPacks: ["a"] });
+  equal(listBad.fixed.join(","), "enabledPacks", "a pack selection of the wrong TYPE is repaired too");
 
   // ?and the pack store NORMALISES whatever the file held: only non-empty strings, no duplicates, so a
   // hand-edited `[1, "", " a ", "a"]` cannot take a pack out of the chain twice or crash the filter.
   const Tex = load("data/assets/textures.js");
-  equal(Tex.normalizeDisabledPacks([1, "", "  ", "a", "a", "b "]).join(","), "a,b", "the disabled list is normalised");
-  equal(Tex.normalizeDisabledPacks("a").length, 0, "a non-array disabled list is ignored");
-  equal(Tex.normalizeDisabledPacks(undefined).length, 0, "?including an absent one");
+  equal(Tex.normalizeEnabledPacks([1, "", "  ", "a", "a", "b "]).join(","), "a,b", "the enabled selection is normalised");
+  equal(Tex.normalizeEnabledPacks("a").length, 0, "a non-array selection is ignored");
+  equal(Tex.normalizeEnabledPacks(undefined).length, 0, "?including an absent one");
 
   // …and the composition root actually runs it, before anything it could disagree with is used.
   const main = stripComments(readSource("src/boot/main.ts"));
@@ -2480,7 +2500,7 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   assert(/writeSettings\(report\.merged\)/.test(main), "…and writes the repaired file back");
   assert(/backupSettingsFile\(\)/.test(main), "an UNREADABLE file is backed up before being rebuilt");
   assert(/writeSettings\(\{ \.\.\.inForce \}\)/.test(main), "…and rebuilt from the values in force");
-  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds", "diagLog", "disabledPacks"]) {
+  for (const key of ["language", "font", "uiScale", "windowMode", "fpsCap", "keybinds", "diagLog", "enabledPacks"]) {
     assert(new RegExp(`\\n    ${key}:`).test(main), `the schema lists "${key}"`);
   }
   // The "Diagnostic log" switch (the settings panel's `diagLog` toggle) is a plain boolean in the same
@@ -4667,6 +4687,49 @@ check("a PACK can add a block: the discovered table drives the registry (P1.37)"
   const Reg = load("data/assets/blockregistry.js");
   const Slots = load("core/extension/slots.js");
   const { ExtensionRegistry } = load("core/extension/registry.js");
+
+  // THE SELECTION IS AN ENABLED LIST (P1.49ae). The chain honours the LIST, not the folder, which is what makes a
+  // pack someone just dropped into `resourcepacks/` start switched off — MC's rule. Two packs on disk, ONE
+  // selected: only the selected one contributes bytes, and the other is still LISTED so the screen can offer it.
+  const twoPacks = {
+    builtin: null,
+    mods: [],
+    resourcepacks: [
+      { name: "packA", builtin: false, files: { "data/blocks.json": Buffer.from(JSON.stringify({ a: {} }), "utf8").toString("base64") } },
+      { name: "packB", builtin: false, files: { "data/blocks.json": Buffer.from(JSON.stringify({ b: {} }), "utf8").toString("base64") } },
+    ],
+  };
+  const selected = Tex.installPacks(twoPacks, ["packA"]);
+  assert(/resourcepacks=1 disabled=1/.test(selected), `only the SELECTED pack enters the chain (got: ${selected})`);
+  equal(Tex.listPacks().filter((p) => !p.builtin && p.enabled).map((p) => p.name).join(","), "packA", "…and it is the enabled row");
+  equal(Tex.listPacks().filter((p) => !p.builtin && !p.enabled).map((p) => p.name).join(","), "packB", "…while the other is listed as NOT enabled");
+  equal(Tex.resolveBytes("data/blocks.json") !== null, true, "the selected pack resolves");
+  // An EMPTY selection is a real answer ("nothing enabled"), not a fallback to "everything".
+  Tex.installPacks(twoPacks, []);
+  equal(Tex.listPacks().filter((p) => !p.builtin && p.enabled).length, 0, "an empty selection enables nothing");
+  equal(Tex.resolveBytes("data/blocks.json"), null, "…and delivers no bytes at all");
+  // The live listing judges by the same list (that is the page's left/right split).
+  const listingSig = Tex.updatePackListing(
+    {
+      builtin: null,
+      mods: [],
+      resourcepacks: [
+        { name: "packA", builtin: false, fileCount: 1, zip: false },
+        { name: "packB", builtin: false, fileCount: 1, zip: false },
+      ],
+    },
+    ["packB"],
+  );
+  equal(listingSig, "packA:-1, packB:1", "…and an available-but-off pack shows no file count (-1)");
+  // The BOOT migration is what keeps an existing install working: an absent key means "the folder is the
+  // selection", and it is written back at once (a migration kept in memory would re-run and re-enable a pack that
+  // was dropped in between). Source-level, because that helper lives in the composition root.
+  const bootSrc = stripComments(readSource("src/boot/main.ts"));
+  assert(/function resolveEnabledPacks\(/.test(bootSrc), "the boot resolves the selection");
+  assert(/Array\.isArray\(file\.enabledPacks\)/.test(bootSrc), "…honouring an explicit list, even an empty one");
+  assert(/writeSettings\(next\)/.test(bootSrc), "…and writing the migrated list back at once");
+  assert(/delete next\.disabledPacks/.test(bootSrc), "…dropping the old negative key");
+
   Tex.installPacks({
     builtin: {
       name: "test-pack",

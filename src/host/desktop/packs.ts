@@ -7,11 +7,22 @@
 // A failure is not fatal: the summary says so and every resolution then takes the engine fallback (the
 // magenta/black checkerboard), which is why this only logs.
 import { invoke } from "@tauri-apps/api/core";
-import { adoptWarningSink, installPacks, type PackSnapshotPayload } from "../../data/assets/textures";
+import { adoptWarningSink, installPacks, type PackListingPayload, type PackSnapshotPayload } from "../../data/assets/textures";
 import { logDebug, readSettings } from "./shell";
 
 // The data module writes no log of its own: it calls the sink it was handed (this boundary owns the sink).
 adoptWarningSink(logDebug);
+
+/** WHICH PACKS EXIST ON DISK right now (P1.49ad) — names and file counts only; no file is opened and nothing is
+ *  installed. Called once a second while the pack page is open, so the list follows the folder: a pack dropped
+ *  into `resourcepacks/` appears, a deleted one goes.
+ *
+ *  It is deliberately NOT `rescanPacks()`: that one reads every file of every pack (the chain needs the bytes),
+ *  which is far too much work to repeat while somebody is copying a folder into place — and APPLYING a chain is
+ *  a decision, not a side effect of looking at the list. */
+export async function listPacksOnDisk(): Promise<PackListingPayload> {
+  return await invoke<PackListingPayload>("list_packs");
+}
 
 /** Re-read the pack folders NOW and hand back a fresh snapshot, WITHOUT installing it (P1.49ab).
  *
@@ -24,14 +35,13 @@ export async function rescanPacks(): Promise<PackSnapshotPayload> {
   return await invoke<PackSnapshotPayload>("preload_packs");
 }
 
-/** Startup preload: awaited once at the top of main.ts (the Tauri IPC is asynchronous, while every
- *  resolution afterwards has to stay synchronous — see the note in the data module). */
+/** Startup preload — UNUSED as of P1.49ab and kept only as the one-liner it always was: the boot now goes through
+ *  `rescanPacks()` + `installPacks()` itself, because it has to KEEP the snapshot (a failed reload rolls back to
+ *  it) and has to resolve the ENABLED list (P1.49ae) before installing. Use those two, not this. */
 export async function preloadPacks(): Promise<void> {
   try {
-    const snap = await invoke<PackSnapshotPayload>("preload_packs");
-    // The DISABLED list comes from settings.json (P1.49aa). That is why the boot loads the SHELL before the
-    // packs: the chain has to know what the user switched off before anything derives an asset from it.
-    logDebug(installPacks(snap, readSettings().disabledPacks));
+    const snap = await rescanPacks();
+    logDebug(installPacks(snap, readSettings().enabledPacks));
   } catch (e) {
     logDebug(`PACKS preload failed (engine fallbacks only): ${String(e)}`);
   }

@@ -45,11 +45,33 @@ const packLayers: Map<string, Bytes>[] = [];
  *  directory too) */
 const resourcepackInfos: PackInfo[] = [];
 let builtinInfo: PackInfo | null = null;
-/** The resource packs the user switched OFF (P1.49aa). The filter is applied when the chain is INSTALLED, so
- *  it lands with the next chain build — either the startup or a RELOAD (P1.49ab: F7, or toggling a pack in the
- *  settings panel). Both go through `installPacks`, which is idempotent on purpose: it RESETS the whole chain
- *  before installing, which is what makes a second call a reload instead of a duplicate. */
-let disabledPacks: readonly string[] = [];
+/** THE SELECTION: the resource packs the user has ENABLED — the chain is built from this list and nothing else
+ *  (P1.49ae). A pack on disk that is not named here is available and switched off, so one dropped into
+ *  `resourcepacks/` starts disabled: MC's rule, where a new zip lands in the "available" column and takes effect
+ *  only once it is moved into the selection. (It replaced a NEGATIVE list — "the packs switched off" — which made
+ *  the folder the truth and a new pack enabled by definition.)
+ *
+ *  The filter is applied when the chain is INSTALLED, so it lands with the next chain build — either the startup
+ *  or a RELOAD (P1.49ab: F7, or toggling a pack in the settings panel). Both go through `installPacks`, which is
+ *  idempotent on purpose: it RESETS the whole chain before installing, which is what makes a second call a reload
+ *  instead of a duplicate. */
+let enabledPacks: readonly string[] = [];
+
+/** What Rust's `list_packs` returns: the packs that exist on disk right now, with NO file opened (P1.49ad).
+ *  `fileCount` is exact for a folder pack and -1 for a .zip (counting a zip means unpacking it), which the
+ *  pack list shows as blank — the same thing it already does for a switched-off pack. */
+export interface PackListingEntryPayload {
+  name: string;
+  builtin: boolean;
+  fileCount: number;
+  zip: boolean;
+}
+
+export interface PackListingPayload {
+  builtin: PackListingEntryPayload | null;
+  mods: PackListingEntryPayload[];
+  resourcepacks: PackListingEntryPayload[];
+}
 
 /** HOW MANY TIMES THE CHAIN HAS BEEN INSTALLED (1 after the startup, +1 per reload).
  *
@@ -70,7 +92,7 @@ export function packChainGeneration(): number {
 
 /** Whatever settings.json holds, as a clean list of pack names. PURE (the gate drives it directly):
  *  anything that is not a non-empty string is dropped and duplicates are folded. */
-export function normalizeDisabledPacks(raw: unknown): string[] {
+export function normalizeEnabledPacks(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
   for (const item of raw) {
@@ -81,18 +103,24 @@ export function normalizeDisabledPacks(raw: unknown): string[] {
   return out;
 }
 
-/** The list the chain was installed with. */
-export function getDisabledPacks(): readonly string[] {
-  return disabledPacks;
+/** THE SELECTION: the packs that are IN the chain (P1.49ae). A pack on disk that is not named here is AVAILABLE
+ *  and switched off, which is why one dropped into `resourcepacks/` now starts disabled — MC's semantics (its
+ *  `options.txt` resourcePacks list IS the selection, and a new zip lands in the "available" column).
+ *
+ *  It used to be the NEGATIVE list (`disabledPacks`): "the folder is the truth, minus these". That made a newly
+ *  dropped pack enabled by definition — it took effect at the next apply without being asked, which is the
+ *  behaviour this list replaces. */
+export function getEnabledPacks(): readonly string[] {
+  return enabledPacks;
 }
 
-/** Re-flag the listed packs WITHOUT touching the chain: the settings screen has to show the new split at
- *  once, while the bytes only change at the next install (see `disabledPacks`). */
-export function setDisabledPacks(raw: unknown): void {
-  disabledPacks = normalizeDisabledPacks(raw);
+/** Re-flag the listed packs WITHOUT touching the chain: the settings screen has to show the new split at once,
+ *  while the bytes only change at the next install (see `enabledPacks`). */
+export function setEnabledPacks(raw: unknown): void {
+  enabledPacks = normalizeEnabledPacks(raw);
   for (let i = 0; i < resourcepackInfos.length; i++) {
     const info = resourcepackInfos[i];
-    resourcepackInfos[i] = { ...info, enabled: !disabledPacks.includes(info.name) };
+    resourcepackInfos[i] = { ...info, enabled: enabledPacks.includes(info.name) };
   }
 }
 let warnedNotInstalled = false;
@@ -186,8 +214,8 @@ function installDir(entries: PackEntryPayload[]): void {
  *  It does not read anything and does not log: the I/O lives in `logic/host/window/packs.ts` (which calls
  *  Rust and then calls this) and the returned summary is printed by whoever owns the log sink. This
  *  module stays a pure data store: bytes in, resolvers out. */
-export function installPacks(snap: PackSnapshotPayload, disabled: unknown = disabledPacks): string {
-  disabledPacks = normalizeDisabledPacks(disabled);
+export function installPacks(snap: PackSnapshotPayload, enabled: unknown = enabledPacks): string {
+  enabledPacks = normalizeEnabledPacks(enabled);
   for (const layer of packLayers) layer.clear();
   packLayers.length = 0;
   overrides.clear();
@@ -207,20 +235,22 @@ export function installPacks(snap: PackSnapshotPayload, disabled: unknown = disa
     builtinInfo = { name: snap.builtin.name, builtin: true, fileCount: builtin.size, enabled: true };
   }
   installDir(snap.mods);  // mods directory (middle priority: content baseline, provides blocks.json/own textures)
-  // The resourcepack chain, HIGH priority first: a switched-off pack is left out entirely (that is what
-  // switching it off means) and listed afterwards as enabled:false, with no file count.
-  let disabledCount = 0;
+  // The resourcepack chain, HIGH priority first: a pack that is NOT SELECTED is left out entirely (that is what
+  // not selecting it means) and listed afterwards as enabled:false, with no file count. THE SELECTION IS THE
+  // LIST, not the folder (P1.49ae): a pack dropped in while the game runs is AVAILABLE and off until it is
+  // enabled, which is Minecraft's rule.
+  let offCount = 0;
   for (let i = snap.resourcepacks.length - 1; i >= 0; i--) {
     const e = snap.resourcepacks[i];
-    if (disabledPacks.includes(e.name)) {
-      disabledCount++;
+    if (!enabledPacks.includes(e.name)) {
+      offCount++;
       continue;
     }
     installEntry(e, true);
   }
   for (let i = snap.resourcepacks.length - 1; i >= 0; i--) {
     const e = snap.resourcepacks[i];
-    if (!disabledPacks.includes(e.name)) continue;
+    if (enabledPacks.includes(e.name)) continue;
     resourcepackInfos.push({ name: e.name, builtin: false, fileCount: -1, enabled: false });
   }
   installed = true;
@@ -230,9 +260,73 @@ export function installPacks(snap: PackSnapshotPayload, disabled: unknown = disa
   chainGeneration += 1;
   return (
     `PACKS installed: builtin=${snap.builtin ? 1 : 0} mods=${snap.mods.length} ` +
-    `resourcepacks=${snap.resourcepacks.length - disabledCount} disabled=${disabledCount} ` +
+    `resourcepacks=${snap.resourcepacks.length - offCount} disabled=${offCount} ` +
     `files=${overrides.size}`
   );
+}
+
+/** REPLACE THE LISTING (names + counts) with what is on disk right now, WITHOUT touching the chain (P1.49ad).
+ *
+ *  This is the cheap half of MC's split — `PackRepository.reload()` lists what is AVAILABLE, `createReload`
+ *  loads it — and it exists for the pack SCREEN, which follows the folder while it is open. Two properties are
+ *  load-bearing:
+ *   * it NEVER calls `installPacks`: merely opening the page (or dropping a file into a pack) must not reload the
+ *     world behind the player's back. Applying a chain stays a decision (F7, entering a world, toggling a pack);
+ *   * it keeps the ENABLED flags from the settings list, so the off/on split still follows the user's choices
+ *     rather than the disk.
+ *
+ *  It returns a SIGNATURE (every name with its file count, sorted), which the caller compares to decide whether
+ *  the screen has to be re-rendered — a file added INSIDE a pack changes its count and therefore the signature. */
+export function updatePackListing(listing: PackListingPayload, enabled: unknown = enabledPacks): string {
+  const on = normalizeEnabledPacks(enabled);
+  enabledPacks = on;
+  // The FILE COUNT of a pack that is already IN the chain keeps the value the install gave it (the decoded
+  // layer). Overwriting it with the raw on-disk count would make the same row's number flip every time the page
+  // polled: 7 files on disk, 6 entries loaded, 7, 6 … A pack the listing knows and the chain does not — one that
+  // was just dropped in — gets the disk count, which is the honest thing to show for it.
+  const shown = new Map(resourcepackInfos.map((p) => [p.name, p.fileCount] as const));
+  // The built-in pack's decoded count is only known after it has been READ, so an installed built-in keeps it;
+  // only its PRESENCE follows the disk.
+  if (listing.builtin) {
+    if (!builtinInfo) {
+      builtinInfo = { name: listing.builtin.name, builtin: true, fileCount: -1, enabled: true };
+    }
+  } else {
+    builtinInfo = null;
+  }
+  const rows: PackInfo[] = [];
+  // Same order as `installPacks`: the SELECTED packs first (reverse name order = priority high to low), then the
+  // available-but-off ones (still listed, so the screen can offer them; that is where a pack just dropped in
+  // appears), with no file count.
+  for (let i = listing.resourcepacks.length - 1; i >= 0; i--) {
+    const e = listing.resourcepacks[i];
+    if (!on.includes(e.name)) continue;
+    const known = shown.get(e.name);
+    rows.push({
+      name: e.name,
+      builtin: false,
+      fileCount: known !== undefined && known >= 0 ? known : e.fileCount,
+      enabled: true,
+    });
+  }
+  for (let i = listing.resourcepacks.length - 1; i >= 0; i--) {
+    const e = listing.resourcepacks[i];
+    if (on.includes(e.name)) continue;
+    rows.push({ name: e.name, builtin: false, fileCount: -1, enabled: false });
+  }
+  resourcepackInfos.length = 0;
+  resourcepackInfos.push(...rows);
+  // The change detector is what the SCREEN shows: a pack appearing or disappearing, a new language… no — a pack
+  // appearing/disappearing, and a NEW pack's count growing while it is being copied. A file added inside an
+  // INSTALLED pack is deliberately NOT a change here: its row shows the installed count either way, and a big
+  // folder being unpacked would otherwise write a log line a second.
+  return [
+    ...rows.map((p) => `${p.name}:${p.fileCount}`),
+    ...listing.mods.map((m) => m.name),
+    ...(listing.builtin ? [listing.builtin.name] : []),
+  ]
+    .sort()
+    .join(", ");
 }
 
 /** Whether the pack chain has been installed.
@@ -325,9 +419,9 @@ export interface PackInfo {
   name: string;
   builtin: boolean;
   fileCount: number;
-  /** Is this pack IN the chain? A switched-off pack is still LISTED (P1.49aa, so the settings screen can
-   *  offer it back) but contributes no bytes, and its `fileCount` is -1: counting it would mean decoding
-   *  it, which is the work switching it off is meant to save. The built-in is always enabled. */
+  /** Is this pack IN the chain? A pack that is available but NOT SELECTED is still LISTED (P1.49ae, so the settings
+ *  screen can offer it) but contributes no bytes, and its `fileCount` is -1: counting it would mean decoding it,
+ *  which is the work not selecting it is meant to save. The built-in is always enabled. */
   enabled: boolean;
 }
 

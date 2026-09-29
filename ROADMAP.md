@@ -1028,6 +1028,61 @@ Still outstanding:
   VERIFIED BY HAND (debug build): a reload now logs `chain gen 2` and `inventory memory cleared (36 slot
   signature(s))`; `tsc` 0, `check:ecs` 69/69 (with new assertions pinning the generation in the key and the
   two invalidations in the driver).
+- **P1.49ad — the pack page follows the FOLDER (and only the LISTING follows it).** `DONE`. The screen listed
+  the chain the last INSTALL produced, so a pack dropped into `resourcepacks/` never appeared and a deleted one
+  never went — and nothing in the project watched the folders (no watcher, front end or Rust; the rescan ran at
+  the startup and on a reload only). It is the other half of MC's split now: `PackRepository.reload()` — LIST
+  what is available, load nothing — next to `createReload`, which this project already had.
+  * RUST: a new `list_packs` command walks the folders and counts files, **opening none** (`packs::listing`; a
+    zip's count is -1 because counting it means unpacking it, and the screen shows that as blank, exactly what
+    it already did for a switched-off pack). `preload_packs` would have meant reading and base64-ing every file
+    of every pack once a second.
+  * FRONT END: `textures.ts::updatePackListing(listing, disabled)` replaces the LISTING and nothing else — it
+    never calls `installPacks`, which is the property the gate now pins: merely looking at the list (or adding a
+    file to a pack) must not reload the world. Applying stays a decision: F7, entering a world, or toggling a
+    pack (a selection change) — MC's shape too.
+  * WHEN: the per-frame check (`maybePollPackListing`, the same `pendingReload`-style shape as the reload) does
+    nothing unless THAT settings section is selected, and polls once a second while it is; closing the page
+    resets the deadline so reopening lists at once. MC puts the identical poll in its pack screen's `tick()`,
+    with the same one-second debounce.
+  * THE COUNT OF AN INSTALLED PACK IS KEPT (the decoded layer size): overwriting it with the raw on-disk count
+    would make the same row flip 7/6/7 every time the page polled. A pack the listing knows and the chain does
+    not — one just dropped in — shows its disk count instead, which is the honest number for it. The change
+    detector is what the SCREEN shows, so a big folder being unpacked cannot write a log line a second.
+  * NO PROTECTION, on purpose: an enabled pack is a piece of ACCOUNTING, not a lock. Deleting a pack's folder
+    while the game runs changes nothing (the chain is an in-memory snapshot of bytes), and the next APPLY simply
+    rebuilds without it: missing textures fall back to the checker, a missing language falls back and the
+    settings file is repaired, a missing block draws as the missing block. MC behaves the same way, and the OS
+    would not let the game stop a delete anyway. The list says what the folder holds; the log says when a pack
+    leaves the chain.
+  VERIFIED BY HAND (debug build, page open via a harness hook): the listing appeared the moment the page
+  opened (`VoxelEngineNWWebmod, VoxelEngineNWWebrp:7`), a `TestPack42` folder created WHILE RUNNING showed up
+  one second later (`TestPack42:1, …`) and disappeared one second after it was deleted — with NO reload line at
+  all in that run, which is the proof that the listing never applies. `tsc` 0, `check:ecs` 70/70.
+- **P1.49ae — the pack selection is an ENABLED list, so a dropped pack starts OFF.** `DONE`. P1.49aa stored
+  the NEGATIVE list — `disabledPacks`, "the folder is the truth minus these" — which made a pack copied into
+  `resourcepacks/` enabled BY DEFINITION: it took effect at the next apply without being asked, and the folder
+  was silently the only thing that decided membership. The selection is a POSITIVE list now (`enabledPacks`),
+  which is what MC persists (`options.txt`'s `resourcePacks` is the selection; a new zip lands in its
+  "available" column and does nothing until it is moved across). Consequences, all of them intended:
+  * a pack on disk that is not in the list contributes NO bytes, and the pack page shows it in the left column
+    with no file count (-1, the same thing a switched-off pack always showed);
+  * enabling one is a selection change, so it applies at once (the existing reload driver);
+  * priority is still the folder's name order — the list decides MEMBERSHIP, not order, and the screen has no
+    reordering to express anything else;
+  * MIGRATION, and it has to WRITE THE FILE: an absent key means "the folder is the selection", so the boot
+    seeds the list from what is on disk (minus the old negative list, which is then dropped) and writes it back
+    immediately — a migration kept in memory would run again next launch and re-enable whatever was dropped in
+    between. An EMPTY array is a real answer ("nothing enabled") and is respected.
+  * the settings REPAIR needed no code: `diffSettings` compares any list-valued setting element-wise, so the key
+    rename only changed its comment and the examples the gate drives.
+  VERIFIED BY HAND (debug build): `game/config/settings.json` had neither key, the boot logged `SETTINGS
+  enabledPacks seeded from the folder (no list in the file: first run or upgrade): [VoxelEngineNWWebrp]` and the
+  file came back with `enabledPacks` and NO `disabledPacks`. A `TestPack42` folder created WHILE RUNNING showed
+  up in the live listing as `TestPack42:-1` (available, off), and the next reload logged
+  `PACKS installed: … resourcepacks=1 disabled=1 files=11` — the new pack was on disk and NOT in the chain.
+  `tsc` 0, `check:ecs` 70/70 (the new assertions drive two packs and one selection through the real
+  `installPacks`/`listPacks`/`updatePackListing`, plus the migration's source shape).
 - **P1.18c — the last construction: the optional surfaces' panels.** `TODO`. `ui-debug`, `ui-toast`,
   `ui-inventory` and `ui-keybind` still receive a system instance the ROOT built around a panel it spawned
   (`spawnPickerPanel`, `spawnToastPanel`, `createInventoryView`, `spawnKeybindLine`). Finishing means moving

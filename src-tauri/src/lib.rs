@@ -140,6 +140,14 @@ fn preload_packs(state: State<'_, AppState>) -> packs::PackSnapshot {
     packs::snapshot(&state.root)
 }
 
+/// WHICH PACKS EXIST ON DISK (P1.49ad) — the cheap half of the pack screen's live list: names and file counts,
+/// no file is ever opened. The screen polls this while it is open, so a pack dropped into `resourcepacks/`
+/// appears and a deleted one disappears; APPLYING one is still the separate reload (F7 / entering a world).
+#[tauri::command]
+fn list_packs(state: State<'_, AppState>) -> packs::PackListing {
+    packs::listing(&state.root)
+}
+
 #[tauri::command]
 fn show_window(window: tauri::WebviewWindow) -> bool {
     let ok = window.show().is_ok();
@@ -248,6 +256,7 @@ pub fn run() {
             append_log,
             boot_report,
             preload_packs,
+            list_packs,
             show_window,
             focus_window,
             quit_app,

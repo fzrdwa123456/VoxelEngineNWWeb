@@ -83,18 +83,19 @@ import { loadBinds, getBind, getBindsAll, getCapturing, setBind, endCapture, ado
 import { onConfigChange, notifyConfigChange } from "../core/services/bus";
 import { menuBgState, MENU_BG_KIND } from "../data/assets/background";
 import {
-  getDisabledPacks,
+  getEnabledPacks,
+  normalizeEnabledPacks,
   resolveAllBytes,
   resolveTexture,
-  setDisabledPacks,
+  setEnabledPacks,
 } from "../data/assets/textures";
-import { preloadPacks, rescanPacks } from "../host/desktop/packs";
+import { preloadPacks, rescanPacks, listPacksOnDisk } from "../host/desktop/packs";
 // ===== The pack RELOAD's imports (P1.49ab) =====
 // The reload re-runs the CONTENT PHASE: rescan (Rust) -> install the chain -> re-derive what the chain
 // declares (languages, the block table, the palette) -> drop the caches those derived -> mark the chunks
 // stale. Every piece below is one of those steps, and every one of them already existed for the BOOT: the
 // reload is the same path with a different trigger, which is what makes it small.
-import { installPacks, packChainGeneration, type PackSnapshotPayload } from "../data/assets/textures";
+import { installPacks, packChainGeneration, updatePackListing, type PackListingPayload, type PackSnapshotPayload } from "../data/assets/textures";
 import { discoverBlockEntries } from "../data/assets/blocks";
 import { declaredLanguages } from "../data/assets/languages";
 import { invalidateDictionaries } from "../data/assets/i18n";
@@ -141,13 +142,41 @@ import "@fontsource/fusion-pixel-12px-monospaced-sc";
 // The chain the engine is on RIGHT NOW. Kept so a reload that fails half-way can put it back (MC's
 // `rollbackResourcePacks`); null only before the startup install.
 let lastGoodSnapshot: PackSnapshotPayload | null = null;
+
+/** THE SELECTION, MIGRATED (P1.49ae). The chain is built from an ENABLED list now, so a pack on disk that is not
+ *  named there is available-but-off — that is what makes a newly dropped pack start disabled (MC's rule).
+ *
+ *  An ABSENT key is the migration case (and a first run): the packs the folder holds become the selection and the
+ *  list is written back AT ONCE. Writing it back matters — a migration kept only in memory would run again on the
+ *  next launch, and a pack dropped in between would silently become enabled, which is exactly the behaviour this
+ *  key exists to end. An empty ARRAY is a real answer ("nothing selected") and is respected.
+ *
+ *  The old negative key is honoured once and then dropped: `disabledPacks` named what the user had switched off,
+ *  so the migration is "everything on disk MINUS that list". */
+function resolveEnabledPacks(snap: PackSnapshotPayload): string[] {
+  const file = readSettings() as { enabledPacks?: unknown; disabledPacks?: unknown };
+  if (Array.isArray(file.enabledPacks)) return normalizeEnabledPacks(file.enabledPacks);
+  const switchedOff = normalizeEnabledPacks(file.disabledPacks);
+  const onDisk = snap.resourcepacks.map((e) => e.name);
+  const picked = onDisk.filter((name) => !switchedOff.includes(name));
+  const next: Record<string, unknown> = { ...file, enabledPacks: picked };
+  delete next.disabledPacks;
+  writeSettings(next);
+  logDebug(
+    `SETTINGS enabledPacks seeded from the folder ` +
+      `(${file.disabledPacks === undefined ? "no list in the file: first run or upgrade" : "migrated from disabledPacks"}): ` +
+      `[${picked.join(", ")}]`,
+  );
+  return picked;
+}
+
 try {
   await preloadShell();
   // THE STARTUP INSTALL IS THE SAME PATH A RELOAD TAKES (P1.49ab): rescan -> install, and the snapshot is
-  // KEPT. It used to be `preloadPacks()`, which did this and threw the snapshot away.
+  // KEPT.
   try {
     lastGoodSnapshot = await rescanPacks();
-    logDebug(installPacks(lastGoodSnapshot, readSettings().disabledPacks));
+    logDebug(installPacks(lastGoodSnapshot, resolveEnabledPacks(lastGoodSnapshot)));
   } catch (packErr) {
     logDebug(`PACKS preload failed (engine fallbacks only): ${String(packErr)}`);
   }
@@ -212,7 +241,7 @@ const saveSettings = (fpsCapOverride?: number): void => {
   s.fpsCap = fpsCapOverride ?? world.resource(FPS_CAP).cap;
   // The switched-off resource packs travel with every save (P1.49aa): the value in force is the one the
   // chain was installed with, so a save can never lose it.
-  s.disabledPacks = getDisabledPacks();
+  s.enabledPacks = getEnabledPacks();
   writeSettings(s);
 };
 onConfigChange("lang", saveSettings);
@@ -851,17 +880,19 @@ const onSetWindowMode = (mode: WindowMode): void => {
     logDebug(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
 };
 
-/** The resource packs the user switched OFF (P1.49aa). Written to settings.json AT ONCE and applied when
- *  the pack chain is installed: every asset (dictionaries, block registry, textures, menu background) is
- *  derived from the chain, so this only RECORDS the choice. Applying it is the pack reload driver below
- *  (P1.49ab, raised with F7), which re-runs the whole content phase; the note on screen says so. */
+/** The resource packs the user has ENABLED (P1.49ae). Written to settings.json AT ONCE and applied when the pack
+ *  chain is installed: every asset (dictionaries, block registry, textures, menu background) is derived from the
+ *  chain, so this only RECORDS the choice. Applying it is the pack reload driver below (P1.49ab, raised with F7),
+ *  which re-runs the whole content phase; MC applies a selection change at once and so does this (`onSetPacks`
+ *  raises the reload), and the note on screen says so. */
 const onSetPacks = (names: readonly string[]): void => {
-  setDisabledPacks(names);
+  setEnabledPacks(names);
   saveSettings();
-  // MC applies the new selection at once (its pack screen triggers the reload when the list changes), so the
-  // toggle only RECORDS the choice and the reload driver below does the work — no restart, no relaunch.
   world.resource(PACK_RELOAD).requested = true;
-  logDebug(`PACKS disabled: ${getDisabledPacks().join(", ") || "none"} (press F7 to reload now, or restart)`);
+  logDebug(
+    `PACKS enabled: ${getEnabledPacks().join(", ") || "none"} ` +
+      `(the reload applies it; a pack that is on disk but not listed here stays off)`,
+  );
 };
 
 const menu = createPauseMenu(world, {
@@ -1439,6 +1470,8 @@ function frame(): void {
     // THE PACK RELOAD CHECK (P1.49ab): Minecraft's shape — a plain flag set by the key handler and checked
     // once per frame (`pendingReload` + `runTick`), never a tick state machine. It only STARTS the driver.
     maybeReloadPacks();
+    // THE PACK PAGE'S LIVE LISTING (P1.49ad): the same "poll once per frame, do nothing unless asked" shape.
+    maybePollPackListing();
     // THE LOOK IS APPLIED ONCE PER FRAME, here, before any fixed step: the raw deltas that arrived since
     // the last frame become ONE `look` intent, so a frame's rotation is exactly that frame's mouse
     // movement. It used to be an 8 ms `setInterval` poll feeding several intents per frame, which the
@@ -1616,7 +1649,7 @@ async function reloadPacksNow(): Promise<string> {
     // ---- 2. REBUILD: install the chain and re-run the content phase ----
     announceStage({ progress: 0.35, key: "loading.packs.build" });
     await paint();
-    const chainLine = installPacks(snap, getDisabledPacks());
+    const chainLine = installPacks(snap, getEnabledPacks());
     const derivedLine = rebuildDerivedFromChain();
     // ---- 3. DROP the caches that hold the previous chain's results ----
     announceStage({ progress: 0.7, key: "loading.packs.apply" });
@@ -1632,7 +1665,7 @@ async function reloadPacksNow(): Promise<string> {
     // ROLLBACK: put the last good chain back and re-derive from it, so a bad pack leaves the engine exactly
     // as it was (MC's rollbackResourcePacks) instead of half-swapped.
     if (previous) {
-      installPacks(previous, getDisabledPacks());
+      installPacks(previous, getEnabledPacks());
       rebuildDerivedFromChain();
       dropPackDerivedCaches();
       voxel.markAllStale();
@@ -1671,6 +1704,60 @@ function maybeReloadPacks(): void {
     });
 }
 
+// ===== The PACK PAGE'S LIVE LISTING (P1.49ad) =====
+// The pack screen follows the FOLDER while it is open, the way MC's does: a pack dropped into `resourcepacks/`
+// appears, a deleted one goes, and a file added inside a pack updates its count. This is the CHEAP half of MC's
+// split — `PackRepository.reload()` lists what is AVAILABLE without loading it — so it walks the directories
+// only (Rust's `list_packs` opens no file) and it NEVER installs a chain: applying stays a decision, taken by
+// the reload driver above (F7, entering a world, or toggling a pack, which is a selection change).
+//
+// MC puts the same poll in its pack SCREEN's tick, with a one-second debounce; the equivalent here is the
+// per-frame check below, which does nothing at all unless that page is the selected settings section.
+const PACK_LISTING_POLL_MS = 1000;
+/** When the next poll is due. Reset to 0 when the page is closed, so RE-opening it lists at once. */
+let listingNextAt = 0;
+let listingInFlight = false;
+/** A listing that arrived from Rust and has not been applied yet (an IPC result may not write module state from
+ *  a promise continuation — it lands here and the next frame applies it, the `ICON_BAKE` shape). */
+let listingResult: PackListingPayload | null = null;
+/** The signature of the last listing the screen was told about, so an unchanged folder is silent. */
+let listingLast = "";
+
+function maybePollPackListing(): void {
+  // 1. APPLY a listing that landed since the last frame, at a frame boundary.
+  if (listingResult) {
+    const listing = listingResult;
+    listingResult = null;
+    const signature = updatePackListing(listing, getEnabledPacks());
+    if (signature !== listingLast) {
+      listingLast = signature;
+      logDebug(`PACKS listing from disk: ${signature === "" ? "(empty)" : signature}`);
+      // The pack page re-renders on this (its `packs` subscription) — the list is PUSHED data, so a change has to
+      // be announced rather than polled for by the view.
+      notifyConfigChange("packs");
+    }
+  }
+  // 2. POLL only while the pack page is up.
+  if (world.resource(UI_MODAL).settings !== "pack") {
+    listingNextAt = 0;
+    return;
+  }
+  const now = performance.now();
+  if (listingInFlight || now < listingNextAt) return;
+  listingInFlight = true;
+  listingNextAt = now + PACK_LISTING_POLL_MS;
+  listPacksOnDisk()
+    .then((listing) => {
+      listingResult = listing;
+    })
+    .catch(() => {
+      // A failed listing keeps the previous one: it is a directory read, and there is nothing to tell the player.
+    })
+    .finally(() => {
+      listingInFlight = false;
+    });
+}
+
 /** The walker's dependencies: the loading screen is driven through the COMMAND barrier (which only this
  *  root may do) and the yield is a macrotask (see ecs/boot.ts::BootFlowDeps). */
 const flowDeps: BootFlowDeps = {
@@ -1704,7 +1791,7 @@ function checkSettingsAtBoot(): { noteKey: string; noteValue: string } {
     fpsCap: frameCap.cap,
     keybinds: getBindsAll(),
     diagLog: isDiagLogEnabled(),
-    disabledPacks: getDisabledPacks(),
+    enabledPacks: getEnabledPacks(),
   };
   const checked = readSettingsChecked();
   if (checked.problem) {

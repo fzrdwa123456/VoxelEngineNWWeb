@@ -45,7 +45,7 @@
   "settings.packsOff": "未启用",
   "settings.packsOn": "已启用",
   "settings.packsNone": "（无）",
-  "settings.packsRestart": "改动会立即重新加载",
+  "settings.packsRestart": "列表实时反映文件夹；新放入的包默认未启用，点一下才启用（立即生效）",
   "settings.uiScale": "界面缩放",
   "uiScale.small": "小",
   "uiScale.normal": "普通",
