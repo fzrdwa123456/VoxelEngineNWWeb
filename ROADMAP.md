@@ -1191,6 +1191,36 @@ Still outstanding:
   "READING THE TREE" and "THE LAYER RULES" paragraphs rendered as code (and the schedule report it quotes was
   a version old); both are fixed, and the AGENTS paragraph claiming FIVE pinned `host/` reads now says what is
   true — zero, enforced.
+- **P1.18e — the root's DRIVERS are files, and the root is wiring + the ONE loop.** `DONE`. `boot/main.ts`
+  had grown to 1885 lines because three SEQUENCES lived inside it as sections: the startup, entering a world
+  and the pack reload (with the pack page's listing poll). They are `boot/drivers/*.ts` now — and the split is
+  what makes the root's remaining job nameable: create the world, insert the resources, wire the views, plug
+  the plugins, own the ONE rAF chain, and hand each driver the pieces it drives.
+  * `boot/drivers/stage.ts` — the SHARED half all three need: `announce` (through the `SetLoadingStage`
+    command, then `world.renderUi()`), `paint` (one macrotask, deliberately not a second rAF chain) and
+    `run(flow, stages)` = the walker (`core/flow/boot.ts`), so a driver owns only its own stage LIST.
+  * `boot/drivers/startup.ts` — the settings check (`checkSettingsAtBoot`, which needs the FPS cap from the
+    world), the window reveal, the GPU handshake and the menu hand-over, plus `BOOT_STAGES` as DATA. It ends
+    by calling `deps.frame()` — still the single place a frame is kicked off.
+  * `boot/drivers/world-entry.ts` — the Teleport, `prime` + `warmUp` behind the screen, the hand-over to
+    `game` and the capture decision (foreground + no hand on the window + no fiddling during the load).
+  * `boot/drivers/pack-reload.ts` — the F7 reload (rescan → install → re-derive → drop caches → mark stale,
+    with the rollback) AND the listing poll; its own state (the poll deadline, the in-flight flag, the last
+    signature) is a CLOSURE now instead of five `let`s beside the loop.
+  WHAT THE ROOT KEEPS, deliberately: the rollback SEED (`lastGoodSnapshot`) — the startup installs the first
+  chain before any driver exists, so the driver reaches it through a getter/setter — and the mode writers the
+  menus own. Each driver takes ONE deps object of root-built values (the loop state, the two menus, the
+  pointer lock, the renderer, the window queries, the spawn point), with arrows for the two menus so the
+  factories may run before them.
+  RESULT: `boot/main.ts` 1885 → 1460 lines, and no driver text is matched against the root any more — the
+  gate reads `boot/drivers/*` for driver facts (16 assertions repointed), while the loop, the resource table
+  and the wiring checks stay on the root. VERIFIED: `tsc` 0, `check:ecs` 71/71, the package 25 files /
+  13.8 MB, and on a real run the boot log is unchanged where it matters (`PACKS installed … files=11`,
+  `PLUGIN installed 12/12`, the same `REGISTRY` counts, the three `SCHEDULE` lines byte-identical,
+  `PAGE mounted keybind` ×2, `SETTINGS ok`, `BOOT graphics ready at 363ms`, `BOOT ready in 402ms`); two pack
+  toggles reloaded the chain (`files=5` then `files=11`), and entering a world logged
+  `MAINMENU entering singleplayer (world type: superflat)` → `WORLD ready at 2301ms` → `LOCK request
+  [world entered]` with `mode=game locked=1` and ZERO error lines.
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`

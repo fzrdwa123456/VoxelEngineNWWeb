@@ -44,7 +44,9 @@ src/
 ├── data/       纯值：globals(资源形状 + 所有共享表 + 三个"发布句柄"资源) / assets(资源包链产物) / world(体素数据)
 ├── shared/     类型与纯工具：math/raycast（体素 DDA）、math/view、types/ui
 └── boot/       装配根 main.ts：读清单 → 装插件 → 插资源 → start，并持有唯一 rAF 链
-                另有 manifest(插件清单) / plugin-catalog(文件夹发现) / plugin-catalog 的 glob
+                另有 manifest(插件清单) / plugin-catalog(文件夹发现) / ui-tables(两张 UI 表的实现) /
+                drivers/：三个"加载屏序列"——stage(公告/让出/走流程) / startup(启动) /
+                world-entry(进世界) / pack-reload(资源包重载 + 包页实时列表)
 ```
 
 **放置规则**（新文件该去哪）：
@@ -165,6 +167,8 @@ boot/main.ts
  6. 读清单 → start（world.start() 之后，可以看装配好的世界）
  7. world.start()：排班 resolve + 未声明依赖报错 + 批次推导
  8. 唯一 rAF 链（boot/main.ts 持有）→ 按模式驱动三条 lane
+ 9. 三个**驱动**在 boot/drivers/：startup（启动序列，末尾调 frame()）/ world-entry（进世界）/
+    pack-reload（F7 重载 + 包页实时列表，挂在每帧检查上）；它们共用的 stage 负责"公告→让出→跑"。
 ```
 
 > 顺序是**加载性**的：4 必须在资源表之后（系统的构造函数里解析资源），5 必须在 4 之后（setup 依赖构造）。
@@ -214,8 +218,9 @@ load 帧：只跑 ui lane（loading 是 widget 数据）
 2. **四个可选面：已收尾（P1.18c）**。它们现在连**面板**都自己 spawn、系统自己构造（在 `plugin.ts`，即装配期；
    `setup` 不许 spawn —— 铁律 1），根**不构造任何系统**。仍然留在根的是**视图**（HUD/加载屏、两个菜单、
    霜层、F3 面板控件——spawn 是结构变更，"什么时候"属于装配）与插件发布回来的**句柄**。
-3. **资源包热重载**：**已实现**（P1.49ab）。触发是 **F7**（`ui.navigation` 从按键边沿发 `ReloadPacks` 命令）
-   或**在设置里开关资源包**；驱动在装配根，形状照抄 Minecraft：**重扫（Rust 重新读目录）→ 安装新链 →
+3. **资源包热重载**：**已实现**（P1.49ab；驱动已独立成文件 `boot/drivers/pack-reload.ts`，P1.18e）。
+   触发是 **F7**（`ui.navigation` 从按键边沿发 `ReloadPacks` 命令）
+   或**在设置里开关资源包**；驱动形状照抄 Minecraft：**重扫（Rust 重新读目录）→ 安装新链 →
    重跑内容阶段（语言/方块表/调色板）→ 丢派生缓存（区块材质、方块图标、菜单背景）→ 把已加载区块标脏**
    （由 chunk stream 按每帧预算重画，不在一次里做完）。失败时**回到上一份快照**，绝不半套生效。
    调色板是**只增不改**的合并（`VoxelWorld.mergePalette`）——体素存的是编号，编号由引擎拥有，所以换包不会

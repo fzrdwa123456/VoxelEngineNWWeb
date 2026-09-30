@@ -91,10 +91,12 @@ src/
 ├── shared/                types and pure helpers with no state: math/raycast.ts (the voxel DDA)
 ├── boot/                  the composition root: main.ts creates the World, reads the plugin MANIFEST,
 │                            installs the plugins into the registry and registers the systems from what
-│                            they contributed, inserts every resource, owns the ONE rAF chain and the
-│                            boot/world-entry stage lists, and wires the views; manifest.ts is the
-│                            manifest's parser/reader (its shape is in manifest-types.ts, which the gate
-│                            imports)
+│                            they contributed, inserts every resource, owns the ONE rAF chain, and wires
+│                            the views; manifest.ts is the manifest's parser/reader (its shape is in
+│                            manifest-types.ts, which the gate imports); ui-tables.ts implements the UI
+│                            tables' hook the kernel declares; drivers/ holds the three loading-screen
+│                            SEQUENCES (stage.ts = the shared announce/paint/run, startup.ts,
+│                            world-entry.ts, pack-reload.ts)
 └── vite-env.d.ts          the bundler's type shim
 ```
 
@@ -315,8 +317,9 @@ rAF game loop — ONE chain; `frame()` picks its body from `loopMode` (see setLo
 cancel. Every call site says which state it wants (boot, entering a world, back to the main menu)
 instead of which one to leave. "Are we playing" is DERIVED (`inWorld()`), and `check:ecs` asserts there
 is exactly ONE `requestAnimationFrame`, no `cancelAnimationFrame`, and a frame body that dispatches on
-the mode. The mode starts as `"load"` so the first transition always applies; the boot block ends by
-calling `frame()` directly, which is the single place a frame is kicked off. (Why this shape replaced
+the mode. The mode starts as `"load"` so the first transition always applies; the STARTUP DRIVER
+(`boot/drivers/startup.ts`) ends by calling `deps.frame()` directly, which is the single place a frame is
+kicked off. (Why this shape replaced
 three chains with a `stopLoop()`/`startLoop()` pair is in ROADMAP §3.8.)
 
 MENU mode halts the simulation AND the draw, which keeps the last world frame on screen and the CPU
@@ -396,17 +399,31 @@ window AFTER `renderer.init()` was the original complaint: the GPU handshake, th
 the first ~100 frames of meshing all happened behind a hidden window, so the startup was a black
 rectangle for as long as it took.
 
-**The world itself is built on ENTRY, not at startup** (`enterWorld`): the Teleport goes through the
-barrier first (the warm-up reads POSITION), then `world.spawn` → `world.terrain` (`chunkStream.prime`)
-→ `world.chunks` (`chunkStream.warmUp`, which meshes the WHOLE spawn window instead of spreading it
-over ~100 frames) → `world.ready`, and the mode hands over to `game` in the same ui lane that takes the
-screen down (a game frame draws the scene BEFORE its ui lane, so no empty frame shows). `boot()` must
-not touch `chunkStream` at all — the gate asserts that separation, and it is why the main menu is up
-after ~0.45 s instead of ~2 s. A RE-entry into a window that is still built skips the screen entirely
-(`chunkStream.needsWarmUp`), because a screen that appears for one frame is worse than none.
+**The world itself is built on ENTRY, not at startup** (`boot/drivers/world-entry.ts`): the Teleport goes
+through the barrier first (the warm-up reads POSITION), then `world.spawn` → `world.terrain`
+(`chunkStream.prime`) → `world.chunks` (`chunkStream.warmUp`, which meshes the WHOLE spawn window instead of
+spreading it over ~100 frames) → `world.ready`, and the mode hands over to `game` in the same ui lane that
+takes the screen down (a game frame draws the scene BEFORE its ui lane, so no empty frame shows). The STARTUP
+DRIVER (`boot/drivers/startup.ts`) must not touch `chunkStream` at all — the gate asserts that separation, and
+it is why the main menu is up after ~0.45 s instead of ~2 s. A RE-entry into a window that is still built skips
+the screen entirely (`chunkStream.needsWarmUp`), because a screen that appears for one frame is worse than none.
 **EACH driver ACTIVATES the screen itself** (`SetLoadingStage { active: true }`): the startup's last stage
 sets `active = false`, so the entry has to set it back — this shipped broken twice, and the gate now
 asserts the flag per driver. It also has to enter `load` mode (it is driven from the MENU).
+
+**THE DRIVERS ARE FILES, NOT SECTIONS OF THE ROOT (P1.18e).** `boot/main.ts` is the composition root and the
+ONE rAF chain; the three sequences that drive the loading screen live in `boot/drivers/`, and each takes ONE
+deps object of the wiring the root owns:
+
+| file | what it drives | how it is reached |
+|---|---|---|
+| `boot/drivers/stage.ts` | the shared half: announce (through the command barrier), paint (one macrotask), and `run(flow, stages)` = the walker | built first, handed to the other three |
+| `boot/drivers/startup.ts` | the settings check, the window reveal, the GPU handshake, the menu hand-over — and the `BOOT_STAGES` DATA | called once at the bottom of the root |
+| `boot/drivers/world-entry.ts` | the Teleport, the spawn window's prime + warm-up, the mode hand-over and the capture decision | `createMainMenu`'s "singleplayer" callback |
+| `boot/drivers/pack-reload.ts` | the F7 reload (rescan → install → re-derive → drop caches → mark stale, with rollback) AND the pack page's live listing | `frame()`, once per frame |
+
+The rollback SEED (`lastGoodSnapshot`) stays the ROOT's: the startup installs the first chain before any driver
+exists, so the driver reaches it through a getter and a setter instead of owning it.
 
 The per-stage yield is a `setTimeout` macrotask, NOT a second `requestAnimationFrame` chain: the process
 still owns exactly one, and the gate asserts it.

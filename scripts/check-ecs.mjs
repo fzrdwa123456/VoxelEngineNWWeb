@@ -624,9 +624,11 @@ check("the chunk stream can say whether a window still needs warming", () => {
   equal(stream.needsWarmUp(1, 3), false, "…so a re-entry into THIS window shows no screen");
   assert(stream.needsWarmUp(900, 900), "a window somewhere else still needs one");
   // (read directly: the section's `readSource`/`stripComments` helpers are defined further down)
-  const mainSrc = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
+  // The entry driver lives in boot/drivers/ (P1.18e), so this reads THAT file: it asks the question
+  // about the position it is entering.
+  const mainSrc = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "drivers", "world-entry.ts"), "utf8");
   assert(
-    /needsWarmUp\(SPAWN\.x, SPAWN\.z\)/.test(mainSrc),
+    /needsWarmUp\(deps\.spawn\.x, deps\.spawn\.z\)/.test(mainSrc),
     "…and the entry driver asks exactly that question, about the position it is entering",
   );
 });
@@ -1273,9 +1275,10 @@ check("the pack page's live listing lists the folder WITHOUT applying it (P1.49a
   assert(!/fs::read\(/.test(rust.slice(rust.indexOf("pub fn listing("))), "…without opening a single file");
   assert(/fn list_packs\(/.test(readSource("src-tauri/src/lib.rs")), "…and it is exposed as its own command");
   const boot = stripComments(readSource("src/boot/main.ts"));
-  assert(/maybePollPackListing\(\)/.test(boot), "the loop checks for a listing each frame");
-  assert(/settings !== "pack"/.test(boot), "…and only polls while that settings page is up");
-  assert(/notifyConfigChange\("packs"\)/.test(boot), "…announcing a change so the open page re-renders");
+  const reload = stripComments(readSource("src/boot/drivers/pack-reload.ts"));
+  assert(/packReload\.maybePollListing\(\)/.test(boot), "the loop asks the driver for a listing each frame");
+  assert(/settings !== "pack"/.test(reload), "…and the driver polls only while that settings page is up");
+  assert(/notifyConfigChange\("packs"\)/.test(reload), "…announcing a change so the open page re-renders");
 });
 
 check("the icon cache has a synchronous reader, and both readers agree on the key", () => {
@@ -1301,7 +1304,7 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
     "installing a chain bumps the generation");
   assert(/`\$\{packChainGeneration\(\)\}/.test(stripComments(readSource("src/host/browser/blockicons.ts"))),
     "…and the icon key is built from it");
-  const reloadDriver = stripComments(readSource("src/boot/main.ts"));
+  const reloadDriver = stripComments(readSource("src/boot/drivers/pack-reload.ts"));
   assert(/inventoryPaint\.drawn\.fill\("\\u0000"\)/.test(reloadDriver),
     "the reload clears the inventory's reconcile memory (or the slot is never drawn again)");
   assert(/notifyConfigChange\("packs"\)/.test(reloadDriver),
@@ -2285,7 +2288,14 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
     "the separate ui pump / panorama loops are gone");
   assert(/function setLoopMode\(/.test(main), "one transition function");
   assert(/function inWorld\(\)/.test(main), "the playing-or-not question is a function of the mode");
-  assert(countOf(main, /setLoopMode\("/g) >= 4, "the startup, the world entry, its hand-over and the menu all say it");
+  // The MODE is written by the three drivers as well as by the root's own menu paths (P1.18e), so the
+  // count spans all of them: what the assertion is about is that EVERY transition names its target.
+  const modeCallers =
+    main +
+    stripComments(readSource("src/boot/drivers/startup.ts")) +
+    stripComments(readSource("src/boot/drivers/world-entry.ts")) +
+    stripComments(readSource("src/boot/drivers/pack-reload.ts"));
+  assert(countOf(modeCallers, /setLoopMode\("/g) >= 4, "the startup, the world entry, its hand-over and the menu all say it");
   // ONE chain: a single requestAnimationFrame (re-arming itself) and no cancelAnimationFrame anywhere.
   equal(countOf(main, /requestAnimationFrame\(/g), 1, "exactly one rAF chain");
   equal(countOf(main, /cancelAnimationFrame\(/g), 0, "the chain is never cancelled or restarted");
@@ -2302,13 +2312,14 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   // …and BOTH flows have to be in that mode while their screen is up: the startup starts in it, and a
   // world entry (driven from the MENU) has to switch into it, or every frame in between is a menu frame
   // that draws the panorama behind an opaque screen for nothing.
-  const entryForMode = main.slice(main.indexOf("async function enterWorld("), main.indexOf("const mainMenu = createMainMenu("));
-  assert(/setLoopMode\("load"\)/.test(entryForMode), "the world entry puts the loop in load mode");
+  const entryForMode = stripComments(readSource("src/boot/drivers/world-entry.ts"));
+  assert(/deps\.setLoopMode\("load"\)/.test(entryForMode), "the world entry puts the loop in load mode");
   equal(countOf(main, /loop\.mode = mode;/g), 1, "the mode has exactly one writer (LOOP_STATE.mode)");
   // …and the chain is kicked off once, by calling frame() directly rather than scheduling it. The call
   // lives inside the boot driver now (it is the first thing that happens after the loading screen's
   // first stage), so the assertion has to allow its indentation while still demanding exactly one.
-  equal(countOf(main, /^\s*frame\(\);$/gm), 1, "the boot block starts the chain exactly once");
+  equal(countOf(stripComments(readSource("src/boot/drivers/startup.ts")), /^\s*deps\.frame\(\);$/gm), 1,
+    "the startup driver starts the chain exactly once (the ONE chain itself stays in the root)");
 });
 
 check("the startup screen is DATA: a command moves LOADING_STATE, `ui.loading` paints the widgets", () => {
@@ -2373,25 +2384,25 @@ check("the startup reveals the window behind the screen, and entering a world re
   // window's generation and the first ~100 frames of chunk meshing all happened behind a hidden
   // window �?the startup was a black rectangle for as long as it took. The order below is the feature.
   const main = stripComments(readSource("src/boot/main.ts"));
-  // The two drivers, extracted by name: EVERY assertion about "the screen is activated" / "the world is
-  // built here" has to be scoped to ONE of them, because an unscoped `indexOf` finds whichever comes
-  // first in the FILE, which is not the one being talked about.
-  const bootBody = main.slice(main.indexOf("async function boot("), main.indexOf("void boot()"));
+  // The two drivers live in boot/drivers/ (P1.18e), and the shared stage half in drivers/stage.ts. EVERY
+  // assertion about "the screen is activated" / "the world is built here" is scoped to ONE of them, because
+  // an unscoped `indexOf` finds whichever comes first in the FILE, which is not the one being talked about.
+  const startupSrc = stripComments(readSource("src/boot/drivers/startup.ts"));
+  const entrySrc = stripComments(readSource("src/boot/drivers/world-entry.ts"));
+  const stageSrc = stripComments(readSource("src/boot/drivers/stage.ts"));
+  const bootBody = startupSrc.slice(startupSrc.indexOf("const boot = async"), startupSrc.indexOf("return boot;"));
   // The end marker has to be CODE: comments are stripped above, so a `//` marker matches nothing and the
   // slice would silently run to the end of the file (which is how the entry assertions passed while the
   // entry was broken �?the boot driver's own `active: true` was inside the slice).
-  const entryBody = main.slice(
-    main.indexOf("async function enterWorld("),
-    main.indexOf("const mainMenu = createMainMenu("),
-  );
+  const entryBody = entrySrc.slice(entrySrc.indexOf("const enterWorld = async"), entrySrc.indexOf("return enterWorld;"));
   assert(bootBody.length > 0, "the startup driver is in the source");
   assert(entryBody.length > 0, "the world-entry driver is in the source");
   assert(!entryBody.includes("renderer.init"), "…and the slice ends before the startup driver");
   // The flow's stages are DATA now (ecs/boot.ts walks them), so the first stage is found by its own key.
-  const firstStage = main.indexOf('key: "loading.settings"');
-  const started = main.indexOf("frame();");
-  const revealed = main.indexOf("showWindow()");
-  const gpu = main.indexOf("await renderer.init()");
+  const firstStage = startupSrc.indexOf('key: "loading.settings"');
+  const started = startupSrc.indexOf("deps.frame()");
+  const revealed = startupSrc.indexOf("showWindow()");
+  const gpu = startupSrc.indexOf("await deps.renderer.init()");
   assert(firstStage > 0, "the startup screen's first stage is announced");
   assert(started > firstStage, "…before the ONE chain is kicked off");
   assert(revealed > started, "…and before the window is revealed");
@@ -2410,7 +2421,7 @@ check("the startup reveals the window behind the screen, and entering a world re
   // through the command barrier) before it runs that stage's work, so "screen up" precedes "window shown"
   // by construction �?the source order inside the driver plus the walker's own contract.
   assert(
-    bootBody.indexOf("active: true") < bootBody.indexOf("runBootFlow(bootFlow"),
+    bootBody.indexOf("active: true") < bootBody.indexOf("deps.stage.run(\"boot\""),
     "…before the flow is started, so the first visible frame is the screen",
   );
   const walker = stripComments(readSource("src/core/flow/boot.ts"));
@@ -2433,20 +2444,20 @@ check("the startup reveals the window behind the screen, and entering a world re
     "…and after the Teleport is queued, because the warm-up reads POSITION",
   );
   // Every stage is announced BEFORE its work runs, and each announcement names an i18n key.
-  for (const [key, work] of [
-    ["loading.gpu", "await renderer.init()"],
-    ["loading.ready", "mainMenu.show()"],
-    ["world.terrain", "chunkStream.prime("],
-    ["world.chunks", "chunkStream.warmUp("],
+  for (const [key, work, where] of [
+    ["loading.gpu", "await deps.renderer.init()", startupSrc],
+    ["loading.ready", "deps.showMainMenu()", startupSrc],
+    ["world.terrain", "chunkStream.prime(", entrySrc],
+    ["world.chunks", "chunkStream.warmUp(", entrySrc],
   ]) {
-    const at = main.indexOf(`"${key}"`);
+    const at = where.indexOf(`"${key}"`);
     assert(at > 0, `the loading screen announces ${key}`);
-    assert(at < main.indexOf(work, at), `${key} is announced before its work runs`);
+    assert(at < where.indexOf(work, at), `${key} is announced before its work runs`);
   }
-  assert(/world\.renderUi\(\)/.test(main), "each stage is reconciled before its paint");
+  assert(/world\.renderUi\(\)/.test(stageSrc), "each stage is reconciled before its paint");
   // The per-stage yield is a MACROTASK, not a second chain: there is still exactly ONE rAF chain, and
   // the yield has to let the compositor present the screen before the blocking work starts.
-  assert(/setTimeout\(resolve, 0\)/.test(main), "the per-stage yield is a timer task");
+  assert(/setTimeout\(resolve, 0\)/.test(stageSrc), "the per-stage yield is a timer task");
   equal(countOf(main, /requestAnimationFrame\(/g), 1, "…so the process still owns exactly one rAF chain");
 
   // ===== the world is built at ENTRY, not at startup =====
@@ -2456,13 +2467,13 @@ check("the startup reveals the window behind the screen, and entering a world re
   // `boot()` must NOT build a world, and the entry driver MUST. (Both bodies were extracted above.)
   equal(countOf(bootBody, /chunkStream\./g), 0, "the startup does not build or mesh the world any more");
   assert(/chunkStream\.prime\(/.test(entryBody), "entering a world generates the spawn window");
-  assert(/chunkStream\.warmUp\(paint/.test(entryBody), "…and meshes it behind the screen");
+  assert(/chunkStream\.warmUp\(deps\.stage\.paint/.test(entryBody), "…and meshes it behind the screen");
   // A re-entry into a window that is still built skips the screen instead of flashing it for one frame.
   assert(
-    /if \(world\.resource\(RENDER_HANDLES\)\.chunkStream\.needsWarmUp\(/.test(entryBody),
+    /if \(deps\.world\.resource\(RENDER_HANDLES\)\.chunkStream\.needsWarmUp\(/.test(entryBody),
     "the entry asks whether there is anything to build before it shows a screen",
   );
-  assert(/setLoopMode\("game"\)/.test(entryBody), "the entry ends by handing the mode over to the game");
+  assert(/deps\.setLoopMode\("game"\)/.test(entryBody), "the entry ends by handing the mode over to the game");
   equal(countOf(main, /document\.createElement\(/g), 0, "the composition root builds no element any more");
   equal(countOf(main, /style\.cssText/g), 0, "…and writes no style string");
 });
@@ -2523,8 +2534,9 @@ check("the settings FILE is checked at boot, repaired and written back", () => {
   equal(Tex.normalizeEnabledPacks("a").length, 0, "a non-array selection is ignored");
   equal(Tex.normalizeEnabledPacks(undefined).length, 0, "?including an absent one");
 
-  // …and the composition root actually runs it, before anything it could disagree with is used.
-  const main = stripComments(readSource("src/boot/main.ts"));
+  // …and the startup driver actually runs it, before anything it could disagree with is used. The check
+  // moved into boot/drivers/startup.ts (P1.18e), where the stage list that REPORTS its outcome lives.
+  const main = stripComments(readSource("src/boot/drivers/startup.ts"));
   assert(/readSettingsChecked\(\)/.test(main), "the boot check uses the read that can report a fault");
   assert(/diffSettings\(checked\.settings, inForce\)/.test(main), "…compares the file with the values in force");
   assert(/writeSettings\(report\.merged\)/.test(main), "…and writes the repaired file back");
@@ -2847,7 +2859,8 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   assert(/focused: \(\) => boolean/.test(pointerlockSrc), "the lock manager takes a foreground predicate");
   assert(/if \(!this\.deps\.focused\(\)\)/.test(pointerlockSrc), "…and refuses to capture without it");
   assert(/focused: winFocused/.test(main), "…which the composition root ships from the shell");
-  assert(/if \(winFocused\(\) && !moving && !fiddled\) \{[\s\S]{0,140}relock\("world entered"\)/.test(main),
+  const entrySrc = stripComments(readSource("src/boot/drivers/world-entry.ts"));
+  assert(/if \(deps\.winFocused\(\) && !moving && !fiddled\) \{[\s\S]{0,140}deps\.relock\("world entered"\)/.test(entrySrc),
     "the world entry captures only when foregrounded, with no hand on the window and no fiddling during loading");
   assert(/onCaptureLost\(/.test(main), "…and a rust-side teardown is handled as a lost window");
   // **A FOCUS EVENT NEVER RE-REQUESTS CAPTURE (P1.58).** The root cure of the Win-key flap the boot.log
@@ -3916,8 +3929,10 @@ check("the view paint state, the host state and the loop's own state are RESOURC
     "the keybinds module keeps no capture state (it holds a pointer to the resource)");
   // The boot/entry walks are DATA: the stage lists are declared by the composition root and the only
   // logic is the walker, which announces a stage before running its work.
-  assert(/const BOOT_STAGES: readonly BootStage\[\]/.test(main), "the startup flow is a stage list");
-  assert(/const stages: readonly BootStage\[\]/.test(main), "…and so is the world entry's");
+  assert(/const BOOT_STAGES: readonly BootStage\[\]/.test(stripComments(readSource("src/boot/drivers/startup.ts"))),
+    "the startup flow is a stage list");
+  assert(/const stages: readonly BootStage\[\]/.test(stripComments(readSource("src/boot/drivers/world-entry.ts"))),
+    "…and so is the world entry's");
   const walker = stripComments(readSource("src/core/flow/boot.ts"));
   assert(/export async function runBootFlow\(/.test(walker), "the walk itself lives in ecs/boot.ts");
 });
@@ -5047,7 +5062,7 @@ check("a PACK can add a language at RUNTIME: the picker's rows follow the chain 
     "the capacity is DATA, next to the pack list's");
   // …and the event it listens for is really raised by the APPLY half of the reload driver, so the chain of
   // evidence is closed: apply -> declare -> notify -> fill (the gate drives the first link above).
-  assert(/function dropPackDerivedCaches[\s\S]*?notifyConfigChange\("packs"\)/.test(stripComments(readSource("src/boot/main.ts"))),
+  assert(/const dropPackDerivedCaches = \(\): void => \{[\s\S]*?notifyConfigChange\("packs"\)/.test(stripComments(readSource("src/boot/drivers/pack-reload.ts"))),
     "…and the driver announces the chain it just installed from its cache-drop step");
   // …and the value it hands `setLang` is one the install declares, because `renderLangs` filled the list from
   // that same call: a row that is not shown is not clickable, so an index can never point at a stale language.

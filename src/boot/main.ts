@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "../data/globals/resources";
-import { SetLoadingStage, SetFpsCap, ShowToast } from "../data/globals/commands";
+import { SetFpsCap, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
@@ -10,8 +10,7 @@ import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/collision" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/interaction" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/render/systems/outline" was dead after P1.18b: the plugin owns it now)
-import { BOOT_FLOW, createBootFlow, type BootStage } from "../data/globals/boot";
-import { runBootFlow, type BootFlowDeps } from "../core/flow/boot";
+import { BOOT_FLOW, createBootFlow } from "../data/globals/boot";
 // (every import of "../plugins/render/systems/chunk-stream" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/snapshot" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/render/systems/diagnostics" was dead after P1.18b: the plugin owns it now)
@@ -62,7 +61,7 @@ import { PointerLock } from "../host/browser/pointerlock";
 import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS } from "../data/assets/i18n";
 import { loadUIScaleMode, getUIScaleMode } from "../data/globals/uiscale";
 import { loadFont, getFontId } from "../data/globals/fonts";
-import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, readSettingsChecked, backupSettingsFile, diffSettings, writeSettings, getWindowMode, setWindowMode, applyWindowModeAtStart, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
+import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, writeSettings, getWindowMode, setWindowMode, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
@@ -89,18 +88,13 @@ import {
   resolveTexture,
   setEnabledPacks,
 } from "../data/assets/textures";
-import { preloadPacks, rescanPacks, listPacksOnDisk } from "../host/desktop/packs";
+import { preloadPacks, rescanPacks } from "../host/desktop/packs";
 // ===== The pack RELOAD's imports (P1.49ab) =====
 // The reload re-runs the CONTENT PHASE: rescan (Rust) -> install the chain -> re-derive what the chain
 // declares (languages, the block table, the palette) -> drop the caches those derived -> mark the chunks
 // stale. Every piece below is one of those steps, and every one of them already existed for the BOOT: the
 // reload is the same path with a different trigger, which is what makes it small.
-import { installPacks, packChainGeneration, updatePackListing, type PackListingPayload, type PackSnapshotPayload } from "../data/assets/textures";
-import { discoverBlockEntries } from "../data/assets/blocks";
-import { declaredLanguages } from "../data/assets/languages";
-import { invalidateDictionaries } from "../data/assets/i18n";
-import { resetBlockRegistry } from "../data/assets/blockregistry";
-import { invalidateMenuBackground, menuBgKind } from "../data/assets/background";
+import { installPacks, type PackSnapshotPayload } from "../data/assets/textures";
 import { PACK_RELOAD, createPackReloadState } from "../data/globals/resources";
 
 import { allBlockIds, buildBlockRegistry, blockRegistryState, BLOCK_REGISTRY } from "../data/assets/blockregistry";
@@ -120,6 +114,10 @@ import { discoverPlugins } from "./plugin-catalog";
 // work, because the two tables are data — see core/plugin/ui-tables.ts. It is injected into the installer and
 // into the hot-plug host below, the same way the log sink is.
 import { uiTables } from "./ui-tables";
+import { createStageDriver } from "./drivers/stage";
+import { createWorldEntry } from "./drivers/world-entry";
+import { createPackReloadDriver } from "./drivers/pack-reload";
+import { createStartupDriver } from "./drivers/startup";
 import type { PluginHost } from "../core/plugin/host";
 // The render plugin's MESHER type (a `host/` object the root builds and hands in as a host instance).
 import type { ChunkMeshFactory } from "../plugins/render";
@@ -917,112 +915,29 @@ const menu = createPauseMenu(world, {
   },
 });
 
-// ===== Entering a world: the ONE place a world is built =====
-// There is no world-entry loading screen in the old sense and no boot-time preload any more: the
-// SPAWN WINDOW IS GENERATED AND MESHED HERE, behind the same screen the startup uses (`LOADING_STATE` +
-// `ui.loading`, whose text is a stage key and whose bar is data). Why here and not at boot:
-//   * the startup no longer spends ~1.6 s building a world the user may never enter (it reaches the
-//     main menu right after the GPU is ready), and chunk data is only allocated if a world is entered;
-//   * the work is where the user expects to wait for it, and a screen that covers real work is honest —
-//     the boot screen used to cover it, which made "entering a world" instant but the STARTUP long;
-//   * a future world type, save game or respawn simply has more to do in the same place.
-// The loop is put in `load` mode (the ui lane only: nothing simulated, nothing drawn) until the
-// world is ready, which is what keeps the screen up with no panorama drawn behind it.
-/** Enter the world: build the window around the spawn point behind the loading screen, then play.
- *  A RE-entry into a window that is still built skips the screen entirely (see `needsWarmUp`). */
-async function enterWorld(mode: string): Promise<void> {
-  const entryStart = performance.now();
-  // The entry watches the window for fiddling of its own (P1.62e): a drag during the loading is remembered
-  // and makes this entry start on the pause menu instead of capturing behind the user's back.
-  loop.geometryDuringLoad = false;
-  // The menu stops owning the display first: `hide()` publishes into UI_MODAL, so ui.navigation takes
-  // it down in the same ui lane that paints the screen.
-  mainMenu.hide();
-  // Back to spawn. Through the barrier — and it has to be applied BEFORE the warm-up, because
-  // `chunkStream.step()` reads POSITION to decide which window to build.
-  world.commands.send(Teleport, { entity: player, x: SPAWN.x, y: SPAWN.y, z: SPAWN.z });
-  logDebug(`MAINMENU entering singleplayer (world type: ${mode === "noise" ? "noise" : "superflat"})`);
-
-  if (world.resource(RENDER_HANDLES).chunkStream.needsWarmUp(SPAWN.x, SPAWN.z)) {
-    // ACTIVATE the screen: the same trap as the startup's first stage — the root is spawned hidden and
-    // `ui.loading` paints nothing while LOADING_STATE.active is false (which the END of boot() left it as).
-    // Forgetting this line is invisible to a type-checker and to every "is the screen painted" test
-    // that drives the system rather than the driver, which is why the gate now asserts it per driver.
-    // The NOTE is cleared in the same breath: it belongs to the startup's settings check, and a stale
-    // "repaired settings" line has no business on a world entry.
-    world.commands.send(SetLoadingStage, { active: true, noteKey: "", noteValue: "" });
-    // …and the loop has to BE in `load` mode for the whole entry: the entry is driven from the main
-    // menu, so without this line every frame in between is a MENU frame, which draws the panorama
-    // behind an opaque screen for nothing (and `loadFrame` — the mode's own body — would never run).
-    setLoopMode("load");
-    // The entry's stages, as DATA (ecs/boot.ts): the work of a stage runs after its own announcement has
-    // been painted, so the bar never claims to be doing something it has not started.
-    const stages: readonly BootStage[] = [
-      { progress: 0, key: "world.spawn" },
-      {
-        progress: 0.15,
-        key: "world.terrain",
-        // Generate (no meshing) the spawn window: collision needs real blocks on the very first tick.
-        run: () => world.resource(RENDER_HANDLES).chunkStream.prime(SPAWN.x, SPAWN.z),
-      },
-      {
-        progress: 0.2,
-        key: "world.chunks",
-        run: () =>
-          world.resource(RENDER_HANDLES).chunkStream.warmUp(paint, (done, total) => {
-            // The bar owns almost the whole entry: the GPU was paid for at boot.
-            world.commands.send(SetLoadingStage, { progress: total > 0 ? 0.2 + 0.75 * (done / total) : 0.2 });
-          }),
-      },
-      { progress: 1, key: "world.ready" },
-    ];
-    await runBootFlow(bootFlow, "world", stages, flowDeps);
-    logDebug(`WORLD ready at ${(performance.now() - entryStart).toFixed(0)}ms`);
-  } else {
-    // Nothing to build: the world is already on screen behind the menu, so it comes back at once.
-    world.renderUi(); // the barrier applies the Teleport before the first game frame reads it
-    logDebug("WORLD already warm, entering without a screen");
-  }
-
-  // Hand the display over in ONE ui lane: the screen comes down and the world is drawn by the very
-  // next frame (a game frame draws the scene BEFORE its ui lane runs, so there is no empty frame).
-  world.commands.send(SetLoadingStage, { active: false });
-  setLoopMode("game");
-  pointerLock.applyCursor();
-  // **Entering a world must be a DELIBERATE "give me the mouse" moment.** Two things can make it wrong,
-  // and both end in the same place: no capture, and the pause menu.
-  //   * the window is not FOREGROUND: the relock would open native capture on a background window (the
-  //     cursor clamped into a screen region another app is over; raw input is collected in the background
-  //     too, so the view keeps turning; and the cursor is globally hidden) — and no blur event will come to
-  //     the rescue, because focus was lost long ago;
-  //   * the user has a HAND ON THE WINDOW (P1.62e): holding a title bar or a border produces NO geometry
-  //     event until it MOVES, so the game used to come up "playing" with a hand on the frame and pause only
-  //     on the first movement. `winWindowMoving()` is the platform's own view of that (pushed as
-  //     `win-session`), and `geometryDuringLoad` covers "they fiddled with it at some point while it was
-  //     loading" — where there was nothing to pause yet.
-  // **ASK THE PLATFORM, DO NOT TRUST THE PUSHED FLAG (P1.62f).** `win-session` is an EVENT, and a push is
-  // only current if the JS event loop has been idle since it happened - while THIS decision is taken at the
-  // end of the entry, whose stages generate and mesh the spawn window in long synchronous stretches. That is
-  // exactly how a world entered with a hand on the title bar still captured the mouse while the platform's
-  // own log (boot.log, `[cursor] window session moving=true`) said otherwise 158ms earlier. The query gives
-  // the value at THIS instant, and awaiting it also lets any queued push drain on the way.
-  const moving = await windowSessionActiveNow();
-  const pushed = winWindowMoving();
-  const fiddled = loop.geometryDuringLoad;
-  if (winFocused() && !moving && !fiddled) {
-    pointerLock.relock("world entered");
-  } else {
-    menu.show();
-    const why = !winFocused()
-      ? "not foreground"
-      : moving
-        ? "the window is being moved/resized"
-        : "the window was moved during loading";
-    // The values go in the line: if this ever fires wrongly again it says whether the QUERY was wrong or the
-    // PUSH was late (they are both in the log, and the platform's own `window session` line is in boot.log).
-    logDebug(`WORLD entered while ${why} -> pause menu (no capture) [moving=${moving} pushed=${pushed} fiddled=${fiddled}]`);
-  }
-}
+// ===== The loading-screen STAGE driver, then the WORLD ENTRY driver (P1.18e) =====
+// The three drivers that drive the loading screen - the startup, entering a world and the pack reload -
+// live in `boot/drivers/` now. What stays HERE is the wiring they are handed: the loop the entry puts in
+// "load" mode, the two menus, the pointer lock, the window queries and the spawn point. The stage helper
+// is built first because all three take it; the two menus are arrows because the pause menu is created
+// further down, and only when the entry is actually taken.
+const stage = createStageDriver(world);
+const enterWorld = createWorldEntry({
+  world,
+  log: logDebug,
+  stage,
+  loop,
+  player,
+  spawn: SPAWN,
+  setLoopMode,
+  hideMainMenu: () => mainMenu.hide(),
+  showPauseMenu: () => menu.show(),
+  relock: (why: string) => pointerLock.relock(why),
+  applyCursor: () => pointerLock.applyCursor(),
+  winFocused,
+  winWindowMoving,
+  windowSessionActiveNow,
+});
 
 // Main menu: singleplayer picks a world type then enters; multiplayer placeholder; settings/exit
 const mainMenu = createMainMenu(world, {
@@ -1457,9 +1372,9 @@ function frame(): void {
     applyViewportSize(); // before the mode body: the canvas follows the window whoever is drawing
     // THE PACK RELOAD CHECK (P1.49ab): Minecraft's shape — a plain flag set by the key handler and checked
     // once per frame (`pendingReload` + `runTick`), never a tick state machine. It only STARTS the driver.
-    maybeReloadPacks();
+    packReload.maybeReload();
     // THE PACK PAGE'S LIVE LISTING (P1.49ad): the same "poll once per frame, do nothing unless asked" shape.
-    maybePollPackListing();
+    packReload.maybePollListing();
     // THE LOOK IS APPLIED ONCE PER FRAME, here, before any fixed step: the raw deltas that arrived since
     // the last frame become ONE `look` intent, so a frame's rotation is exactly that frame's mouse
     // movement. It used to be an 8 ms `setInterval` poll feeding several intents per frame, which the
@@ -1502,383 +1417,43 @@ function inWorld(): boolean {
 
 logDebug(`BOOT render=rAF(60Hz) winFocused=${winFocused()}`);
 
-// ===== Boot: put the startup screen up, do the slow work behind it, then show the main menu =====
-// THE ORDER IS THE FEATURE. Everything below used to happen while the window was still hidden, so the
-// startup was a black (or stale) rectangle for as long as it took: `await renderer.init()`, the spawn
-// window's generation, and the first ~100 frames of chunk meshing. Now the window is revealed as soon
-// as the startup screen has been painted, and each stage below is announced BEFORE its work runs — the
-// screen is state (`LOADING_STATE`) and a stage goes through the command barrier + a paint, so what the
-// user reads is what the process is doing at that moment.
+// ===== Boot: the startup and the two per-frame checks (P1.18e) =====
+// The startup itself is `boot/drivers/startup.ts` (its stage list and the settings check live there) and
+// the pack reload with its listing poll is `boot/drivers/pack-reload.ts`. What is left here is the ONE
+// rAF chain above, which calls them: the reload request and the listing poll ride `frame()`.
 
-/** Yield one MACROTASK so the browser can paint what the last frame wrote. Deliberately not a second
- *  requestAnimationFrame chain — the process owns exactly ONE (see the loop above) — and not a
- *  microtask either: a timer task boundary is what lets the compositor present the loading screen
- *  before the GPU handshake and the chunk meshing block the thread. */
-function paint(): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, 0);
-  });
-}
-/** Announce a stage, reconcile it NOW and let it paint. `key` is omitted for a stage that only moves
- *  the bar, `note` for the one stage that has something to report. Shared by BOTH flows the screen
- *  serves — the startup and entering a world — which is why it is not named after either. */
-function announceStage(stage: BootStage): void {
-  world.commands.send(SetLoadingStage, {
-    progress: stage.progress,
-    ...(stage.key === undefined ? {} : { key: stage.key }),
-    ...(stage.withNote ? { noteKey: bootFlow.noteKey, noteValue: bootFlow.noteValue } : {}),
-  });
-  world.renderUi(); // the barrier + the ui lane: the same pump a menu frame uses
-}
-
-// ===== The RESOURCE PACK RELOAD driver (P1.49ab) — Minecraft's resource reload, adapted =====
-// WHAT IT COPIES FROM MC, in the order MC does it:
-//   1. THE TRIGGER IS EXPLICIT AND THE REQUEST IS A FLAG. F7 (ui.navigation) only raises
-//      `PACK_RELOAD.requested`; a per-frame check starts the driver — `Minecraft.pendingReload` + `runTick`,
-//      not a tick state machine.
-//   2. RESCAN AND REBUILD ARE TWO STEPS. `PackRepository.reload()` only re-walks the folders; loading the
-//      resources is a separate act. Here: `rescanPacks()` re-reads `mods/` + `resourcepacks/` and returns a
-//      fresh snapshot, then `installPacks` puts it in force.
-//   3. THE CONTENT PHASE IS RE-RUN, then the caches are dropped — in that order, so nothing answers with the
-//      previous chain's bytes afterwards.
-//   4. THE WORLD IS NOT REBUILT. Success only marks every loaded chunk STALE, and the chunk stream re-meshes
-//      them at `MESH_BUDGET_PER_FRAME` — MC's `allChanged()` -> "invalidate compiled geometry" -> rebuild
-//      over the following frames, for the same reason (doing it in one frame is the hitch).
-//   5. A FAILURE KEEPS THE OLD CHAIN: the previous snapshot is re-installed and re-derived before the error is
-//      reported — MC's `rollbackResourcePacks`. Nothing is ever left half-applied.
-//   6. THE PLAYER SEES AN OVERLAY, not a frozen frame: the LOADING SCREEN is raised through the same
-//      `SetLoadingStage` command the startup and the world entry use, one announce-paint-yield per stage.
-// WHAT IT DELIBERATELY DOES NOT COPY YET: MC's prepare/apply split across a worker pool (this engine is
-// single-threaded by design, AGENTS.md iron rule 4) and MC's shared-state dependency graph between reload
-// listeners (there is ONE producer here — the chain — so the order is written out below).
-
-/** Re-derive everything the pack chain declares, in dependency order, and return a one-line summary.
- *  Reads whatever chain is in force; each step is the same call the startup makes. */
-function rebuildDerivedFromChain(): string {
-  // 1. the LANGUAGES the chain delivers, and the dictionaries built for them (the set is the cache key, and
-  //    the invalidation is what makes a pack that only EDITED lang/zh.json take effect).
-  invalidateDictionaries();
-  const langLine = loadLang(locale, readSettings().language, declaredLanguages());
-  // 2. the BLOCK TABLE, from the entries the chain delivers (the content plugin's discovery, re-run).
-  resetBlockRegistry();
-  const blockLine = buildBlockRegistry(discoverBlockEntries());
-  // 3. the PALETTE — merged, never replaced: a voxel stores a number (see VoxelWorld.mergePalette).
-  const merged = voxel.mergePalette(allBlockIds());
-  return (
-    `${langLine}; ${blockLine}; palette ${merged.total} block(s)` +
-    (merged.added.length > 0 ? `, ${merged.added.length} new: [${merged.added.join(", ")}]` : "")
-  );
-}
-
-/** Drop every cache that holds a RESULT derived from the chain. Called after the new chain is in force. */
-function dropPackDerivedCaches(): void {
-  // Chunk materials are cached per block LOOK and the key is the resolved texture path, so the map has to go:
-  // the re-mesh asks again and resolves the new chain's images.
-  const material = world.resource(CHUNK_MATERIAL);
-  for (const made of material.materials.values()) made.dispose();
-  material.materials.clear();
-  material.material?.dispose();
-  material.material = null;
-  // Baked block ICONS are pictures of block looks (the inventory and the hotbar read them). Clearing the cache
-  // is only HALF of it — see the consumers' memory below, which is what decides whether a slot is drawn again.
-  const icons = world.resource(ICON_BAKE);
-  icons.cache.clear();
-  icons.pending.clear();
-  // ===== THE CONSUMERS' MEMORY, not just the data (P1.49ac) =====
-  // `ui.inventory` draws a slot only when its SIGNATURE changes, and that signature is "block type + count" — it
-  // says nothing about the ICON. So after a reload it kept the previous chain's baked icon forever: no redraw,
-  // and therefore no new bake either (the request lives at the END of the draw path). The sentinel below is the
-  // same one `collectFinishedBakes` uses to force exactly one redraw, because no real signature equals "\u0000".
-  const inventoryPaint = world.resource(UI_PAINT).inventory;
-  inventoryPaint.drawn.fill("\u0000");
-  inventoryPaint.waiting.fill(0);
-  // …and the surfaces that LIST the chain (the settings panel's pack rows: names + file counts) hear about the
-  // new install through the config bus, the same way a value-composed label hears about its value changing.
-  notifyConfigChange("packs");
-  // The MENU BACKGROUND — TWO halves, because it is drawn two different ways (P1.49ab):
-  //   * the PANORAMA is a three.js scene the menu frame renders. Drop it (so the next menu frame rebuilds it
-  //     from the new chain) AND dispose its GPU objects first: dropping the reference alone leaks a texture,
-  //     a geometry and a material per reload.
-  //   * the IMAGE / checker backdrop is a WIDGET whose recipe and UI_IMAGE were decided when the menu was
-  //     BUILT, so the view that owns them re-derives them — that is the bug this fixes: a reload used to leave
-  //     the old picture up (the recipe still said `menu.backdropImage`, the URL was the previous chain's) and
-  //     could not show the new one.
-  invalidateMenuBackground();
-  const bg = world.resource(MENU_BACKGROUND);
-  if (bg.scene) {
-    bg.scene.traverse((object) => {
-      const drawable = object as THREE.Mesh;
-      drawable.geometry?.dispose?.();
-      const material = drawable.material as THREE.Material | THREE.Material[] | undefined;
-      for (const one of Array.isArray(material) ? material : material ? [material] : []) {
-        (one as THREE.MeshBasicMaterial).map?.dispose();
-        one.dispose();
-      }
-    });
-    bg.scene = null;
-  }
-  bg.camera = null;
-  bg.appliedAspect = Number.NaN;
-  mainMenu.refreshBackdrop();
-  logDebug(
-    `PACKS menu backdrop re-derived: kind=${menuBgKind()}; inventory memory cleared ` +
-      `(${inventoryPaint.drawn.length} slot signature(s)), chain gen ${packChainGeneration()}`,
-  );
-}
-
-/** ONE reload, start to finish. Returns the summary line; throws when the reload AND its rollback failed. */
-async function reloadPacksNow(): Promise<string> {
-  const previous = lastGoodSnapshot;
-  try {
-    // ---- 1. RESCAN: the folders, from Rust (stateless, so this really re-walks them) ----
-    announceStage({ progress: 0.05, key: "loading.packs.scan" });
-    await paint();
-    const snap = await rescanPacks();
-    // ---- 2. REBUILD: install the chain and re-run the content phase ----
-    announceStage({ progress: 0.35, key: "loading.packs.build" });
-    await paint();
-    const chainLine = installPacks(snap, getEnabledPacks());
-    const derivedLine = rebuildDerivedFromChain();
-    // ---- 3. DROP the caches that hold the previous chain's results ----
-    announceStage({ progress: 0.7, key: "loading.packs.apply" });
-    await paint();
-    dropPackDerivedCaches();
-    // ---- 4. MARK THE WORLD STALE (do NOT rebuild it here) ----
-    announceStage({ progress: 0.85, key: "loading.packs.mesh" });
-    await paint();
-    const stale = voxel.markAllStale();
+const packReload = createPackReloadDriver({
+  world,
+  log: logDebug,
+  stage,
+  loop,
+  locale,
+  voxel,
+  setLoopMode,
+  refreshMenuBackdrop: () => mainMenu.refreshBackdrop(),
+  // The rollback target is the ROOT's: the startup installs the first chain, before any driver exists.
+  lastGoodSnapshot: () => lastGoodSnapshot,
+  noteSnapshot: (snap) => {
     lastGoodSnapshot = snap;
-    return `${chainLine}; ${derivedLine}; ${stale} chunk(s) marked stale`;
-  } catch (err) {
-    // ROLLBACK: put the last good chain back and re-derive from it, so a bad pack leaves the engine exactly
-    // as it was (MC's rollbackResourcePacks) instead of half-swapped.
-    if (previous) {
-      installPacks(previous, getEnabledPacks());
-      rebuildDerivedFromChain();
-      dropPackDerivedCaches();
-      voxel.markAllStale();
-      lastGoodSnapshot = previous;
-    }
-    throw err;
-  }
-}
-
-/** The per-frame check: at most ONE reload at a time, and never started from inside a lane. */
-function maybeReloadPacks(): void {
-  const req = world.resource(PACK_RELOAD);
-  if (!req.requested || req.running) return;
-  req.requested = false;
-  req.running = true;
-  const previousMode = loop.mode;
-  setLoopMode("load"); // the loading screen is the overlay: nothing simulates or draws under it
-  world.commands.send(SetLoadingStage, { active: true, progress: 0, key: "loading.packs.scan" });
-  void reloadPacksNow()
-    .then((summary) => {
-      req.count += 1;
-      logDebug(`PACKS reloaded #${req.count}: ${summary}`);
-      world.commands.send(ShowToast, { key: `pack reload OK — ${summary}`, raw: true });
-    })
-    .catch((err) => {
-      const why = String((err as Error)?.message || err);
-      logDebug(`PACKS reload FAILED (the previous chain is still in force): ${why}`);
-      world.commands.send(ShowToast, { key: `pack reload FAILED — ${why}`, raw: true });
-    })
-    .finally(() => {
-      // Take the screen down in the SAME ui lane the last stage painted in, then hand the mode back.
-      world.commands.send(SetLoadingStage, { active: false, progress: 1, key: "loading.ready" });
-      world.renderUi();
-      req.running = false;
-      setLoopMode(previousMode);
-    });
-}
-
-// ===== The PACK PAGE'S LIVE LISTING (P1.49ad) =====
-// The pack screen follows the FOLDER while it is open, the way MC's does: a pack dropped into `resourcepacks/`
-// appears, a deleted one goes, and a file added inside a pack updates its count. This is the CHEAP half of MC's
-// split — `PackRepository.reload()` lists what is AVAILABLE without loading it — so it walks the directories
-// only (Rust's `list_packs` opens no file) and it NEVER installs a chain: applying stays a decision, taken by
-// the reload driver above (F7, entering a world, or toggling a pack, which is a selection change).
-//
-// MC puts the same poll in its pack SCREEN's tick, with a one-second debounce; the equivalent here is the
-// per-frame check below, which does nothing at all unless that page is the selected settings section.
-const PACK_LISTING_POLL_MS = 1000;
-/** When the next poll is due. Reset to 0 when the page is closed, so RE-opening it lists at once. */
-let listingNextAt = 0;
-let listingInFlight = false;
-/** A listing that arrived from Rust and has not been applied yet (an IPC result may not write module state from
- *  a promise continuation — it lands here and the next frame applies it, the `ICON_BAKE` shape). */
-let listingResult: PackListingPayload | null = null;
-/** The signature of the last listing the screen was told about, so an unchanged folder is silent. */
-let listingLast = "";
-
-function maybePollPackListing(): void {
-  // 1. APPLY a listing that landed since the last frame, at a frame boundary.
-  if (listingResult) {
-    const listing = listingResult;
-    listingResult = null;
-    const signature = updatePackListing(listing, getEnabledPacks());
-    if (signature !== listingLast) {
-      listingLast = signature;
-      logDebug(`PACKS listing from disk: ${signature === "" ? "(empty)" : signature}`);
-      // The pack page re-renders on this (its `packs` subscription) — the list is PUSHED data, so a change has to
-      // be announced rather than polled for by the view.
-      notifyConfigChange("packs");
-    }
-  }
-  // 2. POLL only while the pack page is up.
-  if (world.resource(UI_MODAL).settings !== "pack") {
-    listingNextAt = 0;
-    return;
-  }
-  const now = performance.now();
-  if (listingInFlight || now < listingNextAt) return;
-  listingInFlight = true;
-  listingNextAt = now + PACK_LISTING_POLL_MS;
-  listPacksOnDisk()
-    .then((listing) => {
-      listingResult = listing;
-    })
-    .catch(() => {
-      // A failed listing keeps the previous one: it is a directory read, and there is nothing to tell the player.
-    })
-    .finally(() => {
-      listingInFlight = false;
-    });
-}
-
-/** The walker's dependencies: the loading screen is driven through the COMMAND barrier (which only this
- *  root may do) and the yield is a macrotask (see ecs/boot.ts::BootFlowDeps). */
-const flowDeps: BootFlowDeps = {
-  announce: announceStage,
-  paint: () =>
-    new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    }),
-  now: () => performance.now(),
-};
-
-/** Validate the settings FILE against the values that actually took force, repair what cannot be
- *  used, write the corrected file back and report it.
- *
- *  Every config module already validates its own field and silently falls back to a default when it
- *  cannot (`loadLang` ignores a language that is not zh/en/ja, `sanitizeFrameCap` turns a hand-edited
- *  `fpsCap: 1` into 30, `loadBinds` drops a code it does not know). That is the right thing to do at
- *  LOAD time, but it left the file saying one thing while the game used another — so the bad value
- *  survived on disk, unreported, and every launch had to guess again. Comparing the two is what turns
- *  "the game quietly uses 30" into "fpsCap was repaired to 30, on disk, and here is the list".
- *
- *  `inForce` doubles as the SCHEMA: its keys are the settings the engine knows. Anything else in the
- *  file is reported and KEPT — a newer build (or a mod) may have written it, and an older build must
- *  not trim it. */
-function checkSettingsAtBoot(): { noteKey: string; noteValue: string } {
-  const inForce: Record<string, unknown> = {
-    language: getLang(),
-    font: getFontId(),
-    uiScale: getUIScaleMode(),
-    windowMode: getWindowMode(),
-    fpsCap: frameCap.cap,
-    keybinds: getBindsAll(),
-    diagLog: isDiagLogEnabled(),
-    enabledPacks: getEnabledPacks(),
-  };
-  const checked = readSettingsChecked();
-  if (checked.problem) {
-    // Unreadable file. Keep the bytes — a hand-edit typo is worth recovering — and rebuild a complete,
-    // valid file from the values in force, so the next launch cannot fail the same way.
-    const backup = backupSettingsFile();
-    writeSettings({ ...inForce });
-    logDebug(`SETTINGS ${checked.problem}; copied to ${backup} and rebuilt from the values in force`);
-    return { noteKey: "loading.rebuilt", noteValue: backup };
-  }
-  const report = diffSettings(checked.settings, inForce);
-  if (report.fixed.length === 0 && report.unknown.length === 0) {
-    logDebug("SETTINGS ok");
-    return { noteKey: "", noteValue: "" };
-  }
-  if (report.fixed.length > 0) writeSettings(report.merged);
-  logDebug(
-    `SETTINGS repaired: ${report.fixed.join(", ") || "none"}` +
-      (report.unknown.length > 0 ? `; unknown settings kept: ${report.unknown.join(", ")}` : ""),
-  );
-  // A repair is what the user needs to see; unknown keys are only worth a line when they are all there
-  // is to say (nothing was broken, but the file has something this build does not know).
-  return report.fixed.length > 0
-    ? { noteKey: "loading.fixed", noteValue: report.fixed.join(", ") }
-    : { noteKey: "loading.unknown", noteValue: report.unknown.join(", ") };
-}
-
-/** The STARTUP flow, as DATA. The order IS the feature and it is now readable in one place; each stage's
- *  work runs after its own announcement has been painted (ecs/boot.ts::runBootFlow). The root font size
- *  is NOT applied here any more: the reconciler applies it (with the font pair) at the top of every frame,
- *  diffed against what it last wrote, so the very first stage already renders at the right size. */
-const BOOT_STAGES: readonly BootStage[] = [
-  {
-    progress: 0,
-    key: "loading.settings",
-    run: () => {
-      // The screen is spawned (hidden) during wiring; this frame is what shows it, and it is also the ONLY
-      // place the chain is kicked off. Calling `frame()` directly — instead of scheduling it — keeps this
-      // the single place a frame starts from; the call at the END of frame() re-arms it.
-      frame();
-      // The window is revealed only now, with the loading screen already in the DOM: the manifest hides it
-      // at creation ("show": false) precisely so nothing white can flash, and revealing it before the first
-      // paint would trade that for a black rectangle.
-      showWindow();
-      suppressGeometryPause(); // the reveal itself resizes/moves the window
-      applyWindowModeAtStart();
-      // The settings check's OUTCOME is data (bootFlow.note*), because the stage after this one reports it.
-      const settings = checkSettingsAtBoot();
-      bootFlow.noteKey = settings.noteKey;
-      bootFlow.noteValue = settings.noteValue;
-    },
   },
-  { progress: 0.2, key: "loading.settings", withNote: true },
-  {
-    progress: 0.3,
-    key: "loading.gpu",
-    run: async () => {
-      await renderer.init();
-      // From here the canvas may be sized (a load frame runs before this point) — and the size comes from
-      // the VIEWPORT resource like every later resize, so there is ONE rule for "how big is the canvas".
-      loop.rendererReady = true;
-      applyViewportSize();
-      // The canvas host is read back from the world: "where the game's canvas goes" is world state too.
-      world.resource(CANVAS_HOST).appendChild(renderer.domElement);
-      logDebug(`BOOT graphics ready at ${(performance.now() - bootFlow.startedAt).toFixed(0)}ms`);
-    },
-  },
-  {
-    progress: 1,
-    key: "loading.ready",
-    // The startup ENDS here: the world is not built at boot any more (`enterWorld()` does that behind this
-    // same screen), so the main menu comes up as soon as the GPU can draw. The mode becomes MENU, and the
-    // first game frame draws the 3D world over the black clear.
-    run: () => {
-      renderer.setClearColor(0x000000);
-      renderer.clear();
-      mainMenu.show();
-      pointerLock.applyCursor();
-      setLoopMode("menu");
-      // Last, the startup screen comes down. Through the barrier like everything else, so the screen and
-      // the menu swap inside ONE ui lane — a direct flag write here would leave a frame showing neither.
-      world.commands.send(SetLoadingStage, { active: false });
-    },
-  },
-];
+});
 
-async function boot(): Promise<void> {
-  const bootStart = performance.now();
-  // ACTIVATE the screen before the first stage — and note this line is load-bearing, not decoration:
-  // `ui.loading` only paints while LOADING_STATE.active is true (its root is spawned hidden), so a driver
-  // that forgets it leaves the window showing the HUD ALONE — a black page with a crosshair and a
-  // hotbar on it, which is exactly how that bug was reported. The command lands on the barrier inside
-  // the first stage's renderUi, i.e. before anything is revealed.
-  world.commands.send(SetLoadingStage, { active: true });
-  await runBootFlow(bootFlow, "boot", BOOT_STAGES, flowDeps);
-  logDebug(`BOOT ready in ${(performance.now() - bootStart).toFixed(0)}ms`);
-}
 
-void boot().catch((err: unknown) => {
+const startGame = createStartupDriver({
+  world,
+  log: logDebug,
+  stage,
+  renderer,
+  loop,
+  frame,
+  suppressGeometryPause,
+  applyViewportSize,
+  showMainMenu: () => mainMenu.show(),
+  applyCursor: () => pointerLock.applyCursor(),
+  setLoopMode,
+});
+
+void startGame().catch((err: unknown) => {
   // Loud, and the startup screen deliberately STAYS up: if the GPU or the world generation failed,
   // showing the main menu would offer buttons that cannot work.
   logDebug(`BOOT failed: ${String((err as Error)?.message ?? err)}`);
