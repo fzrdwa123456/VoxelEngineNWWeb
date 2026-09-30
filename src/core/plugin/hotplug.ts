@@ -12,10 +12,10 @@
 // it in is one call.
 //
 // WHERE THIS MAY RUN: at a BARRIER, and nowhere else. Installing a plugin means adding systems to the
-// schedule, and adding systems re-resolves it. The door is the `HotPlugPlugin` COMMAND (core/effect/commands),
-// which the command queue applies at the top of every entry point — before any lane runs — so no system ever
-// sees the schedule change underneath it. Calling `hotInstall` from a system would be the same bug as
-// spawning an entity there.
+// schedule, and adding systems re-resolves it. The door is the `HotPlugPlugin` COMMAND
+// (data/globals/commands.ts), which the command queue applies at the top of every entry point — before any lane
+// runs — so no system ever sees the schedule change underneath it. Calling `hotInstall` from a system would be
+// the same bug as spawning an entity there.
 //
 // WHAT IT REFUSES TO DO, loudly and with a reason instead of half-way:
 //   * install something twice, or something this build does not catalogue for runtime install;
@@ -30,7 +30,7 @@ import type { SystemDef } from "../flow/schedule";
 import type { World } from "../world";
 import { createPluginApi } from "./api";
 import { runTeardowns } from "./teardown";
-import { installPluginUiTables, removePluginUiTables } from "./ui-tables";
+import type { UiTablesHook } from "./ui-tables";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -52,6 +52,10 @@ export interface HotPlugHost {
   depsOf(id: string): readonly string[];
   markInstalled(id: string): void;
   markUninstalled(id: string): void;
+  /** The UI tables' installer/withdrawer (P1.41), INJECTED by the composition root: the tables are data and a
+   *  `core/` file may not name a data value at runtime, so the kernel asks for the capability instead of
+   *  importing it — see core/plugin/ui-tables.ts. `boot/ui-tables.ts` is the implementation. */
+  readonly uiTables: UiTablesHook;
 }
 
 /** The door itself. `HotPlugPlugin.run` reads it; nothing else does. */
@@ -91,8 +95,9 @@ export function hotInstall(host: HotPlugHost, id: string): HotPlugOutcome {
   // 1. setup — contributions only, which is all the boot lets it do either.
   try {
     plugin.setup(api);
-    // What it filed into the UI tables lands in them now, and an uninstall takes it back out (P1.41).
-    installPluginUiTables(registry, world, id);
+    // What it filed into the UI tables lands in them now, and an uninstall takes it back out (P1.41). The
+    // installer is INJECTED (`host.uiTables`): the tables are data, so the kernel asks for the capability.
+    host.uiTables.install(registry, world, id);
   } catch (error) {
     registry.withdraw(id);
     const reason = `setup threw: ${describeError(error)}`;
@@ -178,7 +183,7 @@ export function hotUninstall(host: HotPlugHost, id: string): HotPlugOutcome {
   if (torn > 0) host.log(`PLUGIN ${id} ran ${torn} registered teardown(s)`);
   const withdrawn = registry.withdraw(id);
   // …and the UI TABLES forget what it filed, so a re-install does not hit a stale claim (P1.41).
-  removePluginUiTables(world, withdrawn);
+  host.uiTables.remove(world, withdrawn);
   const systems: string[] = [];
   for (const entry of withdrawn) {
     if (entry.point === SLOT_SYSTEMS.name && world.hotRemoveSystem(entry.id)) systems.push(entry.id);

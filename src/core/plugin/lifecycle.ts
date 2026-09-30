@@ -13,7 +13,7 @@ import type { World } from "../world";
 import type { ExtensionRegistry } from "../extension/registry";
 import { createPluginApi, type PluginApi } from "./api";
 import { runTeardowns } from "./teardown";
-import { installPluginUiTables } from "./ui-tables";
+import type { UiTablesHook } from "./ui-tables";
 import type { Plugin } from "./descriptor";
 import { describeError } from "./errors";
 
@@ -23,6 +23,10 @@ export interface InstallOptions {
   readonly log: (line: string) => void;
   /** The manifest's veto: a plugin it disabled is skipped (absent = every plugin is wanted). */
   readonly enabled?: (id: string) => boolean;
+  /** What a plugin filed into the UI tables, written into them as it installs (P1.41) — INJECTED, because the
+   *  tables are data and a `core/` file may not name a data value at runtime (see core/plugin/ui-tables.ts).
+   *  Absent = a world with no UI lane, which is exactly what the old in-place installer treated as a no-op. */
+  readonly uiTables?: UiTablesHook;
 }
 
 export interface InstallOutcome {
@@ -84,7 +88,7 @@ function order(
 }
 
 export function installPlugins(plugins: readonly Plugin[], options: InstallOptions): InstallOutcome {
-  const { world, registry, log, enabled } = options;
+  const { world, registry, log, enabled, uiTables } = options;
   const { ordered, skipped } = order(plugins, log);
   const installed: string[] = [];
   const disabled: { id: string; error: string }[] = [];
@@ -100,7 +104,9 @@ export function installPlugins(plugins: readonly Plugin[], options: InstallOptio
     try {
       plugin.setup(api);
       // What it filed into the UI tables lands in them now, and an uninstall takes it back out (P1.41).
-      installPluginUiTables(registry, world, plugin.id);
+      // The installer is INJECTED (`options.uiTables`): the tables are data, so the kernel asks for the
+      // capability rather than importing it.
+      uiTables?.install(registry, world, plugin.id);
       installed.push(plugin.id);
       installedPlugins.push(plugin);
       apis.set(plugin.id, api);

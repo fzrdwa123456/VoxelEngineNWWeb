@@ -16,8 +16,8 @@
 // bind gesture (click-synthesis timing, see ui/menu.ts).
 import { HOTBAR_SLOTS } from "../../player/components";
 import { SelectSlot } from "../../player/commands";
-import { ReloadPacks } from "../../../core/effect/commands";
-import { HotPlugPlugin } from "../../../core/effect/commands";
+import { ReloadPacks } from "../../../data/globals/commands";
+import { HotPlugPlugin } from "../../../data/globals/commands";
 import { hotPlugSurfaceForKey } from "../../../data/globals/hotplug";
 import { isModalUi, LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../../data/globals/resources";
 import { KEY_EVENTS } from "../../../data/globals/resources";

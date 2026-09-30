@@ -28,9 +28,11 @@ const SOURCES = [
   "src/core/world.ts",
   "src/plugins/player/components.ts",
   // The PLAYER's commands (P1.18b): they read/write this plugin's own components, so they live next to
-  // them and `core/effect/commands.ts` no longer imports `plugins/` at all.
+  // them and no `core/` file imports `plugins/` at all.
   "src/plugins/player/commands.ts",
-  "src/core/effect/commands.ts",
+  // The entity-free commands (P1.18d): they write data VALUES, so they live in `data/` next to the resources
+  // they read — the kernel keeps only the mechanism (`core/effect/command-queue.ts`).
+  "src/data/globals/commands.ts",
   // The boot / world-entry FLOW: the stage list is data and `runBootFlow` is the only logic (its deps are
   // injected, so it needs no DOM and no World).
   "src/core/flow/boot.ts",
@@ -46,6 +48,9 @@ const SOURCES = [
   "src/core/plugin/errors.ts",
   "src/boot/manifest.ts",
   "src/boot/manifest-types.ts",
+  // The UI tables' IMPLEMENTATION (P1.18d): the kernel declares `UiTablesHook` and the root supplies it, so
+  // this is the module that really writes `UI_ACTIONS`/`UI_SOURCES` — the gate drives it directly.
+  "src/boot/ui-tables.ts",
   "src/plugins/world/index.ts",
   "src/plugins/player/index.ts",
   "src/plugins/render/index.ts",
@@ -232,7 +237,7 @@ const {
   UI_MODAL,
   VOXEL,
 } = load("data/globals/resources.js");
-const { SetLoadingStage, ShowToast } = load("core/effect/commands.js");
+const { SetLoadingStage, ShowToast } = load("data/globals/commands.js");
 // The four PLAYER commands moved to the plugin that owns the components they write (P1.18b): `core/` no
 // longer imports `plugins/`, and the gate loads each from the module that declares it.
 const { SelectSlot, SetMode, SwapSlots, Teleport } = load("plugins/player/commands.js");
@@ -2230,7 +2235,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // world state and cannot be assigned by a UI callback), and it sanitises exactly like the loader.
   const capWorld = new World();
   capWorld.insertResource(R.FPS_CAP, R.createFrameCap(0));
-  const { SetFpsCap } = load("core/effect/commands.js");
+  const { SetFpsCap } = load("data/globals/commands.js");
   capWorld.commands.send(SetFpsCap, { cap: 90 });
   equal(capWorld.resource(R.FPS_CAP).cap, 0, "the command is deferred: nothing changes before a barrier");
   capWorld.commands.flush();
@@ -4343,6 +4348,81 @@ check("the plugin system: extension points, the registry, the install and the ma
     }
   }
   equal([...unresolved].join(","), "", "the real plugin dependency graph is acyclic (an install order exists)");
+
+  // 6b. THE OTHER DIRECTIONS, COUNTED (P1.18d). The kernel used to name two `data/` modules at RUNTIME
+  //     (`core/effect/commands.ts` wrote the toast/the cap/the loading screen, `core/plugin/ui-tables.ts`
+  //     wrote the two UI tables), i.e. the mechanism depended on the program. Both are gone: the commands live
+  //     next to the resources they write, and the tables arrive as an INJECTED hook. What must hold now:
+  //       * `core/` may import `data/` for TYPES only (a type is erased, so the kernel ships no game word);
+  //       * `data/` may import neither a plugin nor the host at runtime (one type-only import exists:
+  //         `gfx.ts` names `ChunkGeometry`);
+  //       * `core/` still never imports `plugins/`.
+  //     Specifiers are RESOLVED before they are classified: `../data/resource` from inside `core/` is the
+  //     kernel's OWN substrate (`src/core/data/`), which has nothing to do with the layer.
+  const layerFiles = (dir) => {
+    const out = [];
+    const walk = (d) => {
+      for (const e of require("node:fs").readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith(".ts")) out.push(path.relative(ROOT, p).replace(/\\/g, "/"));
+      }
+    };
+    walk(path.join(ROOT, dir));
+    return out;
+  };
+  const counts = { coreData: 0, coreDataType: 0, corePlugins: 0, dataOut: 0, dataOutType: 0 };
+  const offenders = [];
+  for (const rel of [...layerFiles("src/core"), ...layerFiles("src/data")]) {
+    for (const line of readSource(rel).split("\n")) {
+      if (!/^\s*import\b/.test(line)) continue;
+      const spec = /from "(\.[^"]*)"/.exec(line);
+      if (!spec) continue;
+      const isType = /^\s*import\s+type\b/.test(line);
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(rel), spec[1]));
+      const inData = target.startsWith("src/data/");
+      const inPlugins = target.startsWith("src/plugins/");
+      const inHost = target.startsWith("src/host/");
+      const inCore = target.startsWith("src/core/");
+      if (rel.startsWith("src/core/")) {
+        if (inPlugins) counts.corePlugins++;
+        if (inData) {
+          if (isType) counts.coreDataType++;
+          else {
+            counts.coreData++;
+            offenders.push(`${rel} -> ${target}`);
+          }
+        }
+      } else if (inPlugins || inHost) {
+        if (isType) counts.dataOutType++;
+        else {
+          counts.dataOut++;
+          offenders.push(`${rel} -> ${target}`);
+        }
+      } else if (!inCore && !target.startsWith("src/shared/")) {
+        // data/ importing data/ (or nothing at all) is fine; anything else is a new layer edge to declare.
+        if (!target.startsWith("src/data/")) offenders.push(`${rel} -> ${target} (unclassified)`);
+      }
+    }
+  }
+  equal(counts.corePlugins, 0, "no core/ file imports plugins/ (the kernel owns no feature)");
+  // The TYPE-only counts are pinned rather than merely allowed: a type is erased, so the kernel can name the
+  // SHAPE of a data value without depending on it — and a new one has to be a deliberate act (the six are
+  // `core/extension/slots.ts`'s five slot payloads + `core/flow/boot.ts`'s stage keys; the one outbound edge
+  // is `data/globals/gfx.ts` naming `ChunkGeometry`).
+  equal(counts.coreDataType, 6, "…and its data/ imports are the six TYPE-only ones (erased at build time)");
+  equal(counts.dataOutType, 1, "…while data/'s single outbound edge is the type-only `ChunkGeometry`");
+  equal(
+    counts.coreData,
+    0,
+    `no core/ file imports a data/ VALUE at runtime (now ${counts.coreData}${counts.coreDataType ? `, plus ${counts.coreDataType} type-only` : ""})`,
+  );
+  equal(
+    counts.dataOut,
+    0,
+    `no data/ file imports plugins/ or host/ at runtime (now ${counts.dataOut}${counts.dataOutType ? `, plus ${counts.dataOutType} type-only` : ""})`,
+  );
+  equal(offenders.join(" | "), "", "…and every cross-layer import is one of the two allowed kinds");
 });
 
 // ===== hot-plug (P1.24) =====
@@ -4385,6 +4465,9 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
     depsOf: (id) => (id === "surface" ? ["base"] : []),
     markInstalled: (id) => { installed = [...installed, id]; },
     markUninstalled: (id) => { installed = installed.filter((x) => x !== id); },
+    // The UI tables' hook is INJECTED (P1.18d) and this world has no UI lane: the real one is a no-op here
+    // too, so the stub says the same thing the composition root would.
+    uiTables: { install: () => 0, remove: () => 0 },
   };
   world.start();
 
@@ -4498,7 +4581,7 @@ check("a plugin's UI actions and sources are installed, and WITHDRAWN with it", 
   const S = load("core/extension/slots.js");
   const { ExtensionRegistry } = load("core/extension/registry.js");
   const { World } = load("core/world.js");
-  const T = load("core/plugin/ui-tables.js");
+  const T = load("boot/ui-tables.js").uiTables;
   const A = load("data/globals/actions.js");
   const SO = load("data/globals/sources.js");
   const world = new World();
@@ -4508,24 +4591,33 @@ check("a plugin's UI actions and sources are installed, and WITHDRAWN with it", 
   const calls = [];
   registry.contribute(S.SLOT_UI_ACTIONS, "probe", [{ id: "probe.act", run: (v) => calls.push(`act:${v}`) }]);
   registry.contribute(S.SLOT_UI_SOURCES, "probe", [{ id: "probe.src", read: () => 42 }]);
-  equal(T.installPluginUiTables(registry, world, "probe"), 2, "both filed entries are installed");
+  equal(T.install(registry, world, "probe"), 2, "both filed entries are installed");
   world.resource(A.UI_ACTIONS).get("probe.act")("x");
   equal(calls.join(","), "act:x", "…the action is in the table and dispatches");
   equal(world.resource(SO.UI_SOURCES).get("probe.src")(), 42, "…and the source answers");
-  equal(T.installPluginUiTables(registry, new World(), "probe"), 0, "a world with no UI lane is a no-op");
+  equal(T.install(registry, new World(), "probe"), 0, "a world with no UI lane is a no-op");
   const withdrawn = registry.withdraw("probe");
-  equal(T.removePluginUiTables(world, withdrawn), 2, "the uninstall takes both back out");
+  equal(T.remove(world, withdrawn), 2, "the uninstall takes both back out");
   equal(world.resource(A.UI_ACTIONS).has("probe.act"), false, "…the action id is free again");
   equal(world.resource(SO.UI_SOURCES).has("probe.src"), false, "…and so is the source id");
   // …which is what makes a RE-INSTALL work: the same id can be filed again (this used to throw).
   registry.contribute(S.SLOT_UI_ACTIONS, "probe", [{ id: "probe.act", run: () => {} }]);
-  equal(T.installPluginUiTables(registry, world, "probe"), 1, "a re-install installs again (no stale claim)");
-  // The framework runs both halves.
+  equal(T.install(registry, world, "probe"), 1, "a re-install installs again (no stale claim)");
+  // The framework runs both halves — through the INJECTED hook (P1.18d): the kernel declares the shape, the
+  // composition root implements it, so `core/` never names the two tables.
   const lc = stripComments(readSource("src/core/plugin/lifecycle.ts"));
   const hp = stripComments(readSource("src/core/plugin/hotplug.ts"));
-  assert(/installPluginUiTables\(registry, world, plugin\.id\)/.test(lc), "installPlugins installs them");
-  assert(/installPluginUiTables\(registry, world, id\)/.test(hp), "a hot install does too");
-  assert(/removePluginUiTables\(world, withdrawn\)/.test(hp), "…and the uninstall removes them with the plugin");
+  assert(/uiTables\?\.install\(registry, world, plugin\.id\)/.test(lc), "installPlugins installs them");
+  assert(/host\.uiTables\.install\(registry, world, id\)/.test(hp), "a hot install does too");
+  assert(/host\.uiTables\.remove\(world, withdrawn\)/.test(hp), "…and the uninstall removes them with the plugin");
+  // …and it is INJECTED, not imported: the installer offers it as an option and the hot-plug host carries it.
+  assert(/readonly uiTables\?: UiTablesHook/.test(stripComments(readSource("src/core/plugin/lifecycle.ts"))),
+    "the installer takes the hook as an OPTION (absent = no UI lane)");
+  assert(/readonly uiTables: UiTablesHook/.test(hp), "the hot-plug host carries it, like its log sink");
+  // …while the kernel's own file is a SHAPE: no data module appears in it at all.
+  const hook = stripComments(readSource("src/core/plugin/ui-tables.ts"));
+  assert(/export interface UiTablesHook/.test(hook) && !/data\//.test(hook),
+    "core/plugin/ui-tables.ts declares the shape and names no data module");
   const slots = readSource("src/core/extension/slots.ts");
   assert(/SLOT_UI_ACTIONS = defineExtensionPoint/.test(slots) && /SLOT_UI_SOURCES = defineExtensionPoint/.test(slots),
     "…through two extension points of their own, so a plugin never touches the tables by hand");

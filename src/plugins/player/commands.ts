@@ -9,8 +9,10 @@
 // next to the components they touch. `plugins/player/index.ts` contributes them into `SLOT_COMMANDS`, so
 // "which commands exist because this plugin exists" is now a statement the plugin makes about itself.
 //
-// The kernel keeps the commands that are about the world as a whole and name no entity: `ShowToast`,
-// `SetFpsCap`, `SetLoadingStage` and `HotPlugPlugin`.
+// The kernel keeps the MECHANISM only: the entity-free commands (the toast, the frame cap, the loading
+// screen, the pack reload, the hot-plug toggle) live next to the data values they write
+// (`data/globals/commands.ts`, P1.18d), so `core/` names no game word at all — neither a plugin's component
+// nor a data value.
 import { defineCommand, entityIndex, type Entity } from "../../core/world";
 import {
   CONTROL,

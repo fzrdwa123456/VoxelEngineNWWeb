@@ -26,7 +26,7 @@ import { UI_HUD_ACCESS } from "./systems/hud";
 import { UI_LOADING_ACCESS } from "./systems/loading";
 import { UI_NAVIGATION_ACCESS } from "./systems/navigation";
 import { UI_RENDER_ACCESS } from "./systems/reconcile";
-import { SetFpsCap, SetLoadingStage, ShowToast } from "../../core/effect/commands";
+import { SetFpsCap, SetLoadingStage, ShowToast } from "../../data/globals/commands";
 import { UI_THEME } from "../../data/assets/theme";
 import { UI_ACTIONS } from "../../data/globals/actions";
 import { UI_MOUNT } from "../../data/globals/gfx";

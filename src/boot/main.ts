@@ -2,7 +2,7 @@ import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "../data/globals/resources";
-import { SetLoadingStage, SetFpsCap, ShowToast } from "../core/effect/commands";
+import { SetLoadingStage, SetFpsCap, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
@@ -116,6 +116,10 @@ import { installPlugins, startPlugins, stopPlugins } from "../core/plugin/lifecy
 import type { SystemDef } from "../core/flow/schedule";
 import { MANIFEST_FILE, isEnabled, readManifest, unknownPlugins } from "./manifest";
 import { discoverPlugins } from "./plugin-catalog";
+// THE UI TABLES' IMPLEMENTATION (P1.18d): the kernel declares the shape (`UiTablesHook`), this layer does the
+// work, because the two tables are data — see core/plugin/ui-tables.ts. It is injected into the installer and
+// into the hot-plug host below, the same way the log sink is.
+import { uiTables } from "./ui-tables";
 import type { PluginHost } from "../core/plugin/host";
 // The render plugin's MESHER type (a `host/` object the root builds and hands in as a host instance).
 import type { ChunkMeshFactory } from "../plugins/render";
@@ -670,6 +674,9 @@ const hotHost: HotPlugHost = {
   markUninstalled: (id) => {
     livePlugins.delete(id);
   },
+  // What a plugin files into the UI tables is installed/withdrawn by the ROOT's implementation (P1.18d): the
+  // tables are data, so the kernel asks for the capability instead of importing it.
+  uiTables,
 };
 world.insertResource(HOT_PLUG, hotHost);
 
@@ -691,6 +698,7 @@ const installOutcome = installPlugins(PLUGINS, {
   registry,
   log: logDebug,
   enabled: (id) => isEnabled(manifest, id),
+  uiTables,
 });
 // The hot-plug host's "installed right now" set starts as the boot's list: everything plugged in later is
 // added by `hotInstall`, everything unplugged is removed by `hotUninstall`, and the reverse-dependency guard

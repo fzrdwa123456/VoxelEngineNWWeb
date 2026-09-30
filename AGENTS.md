@@ -96,22 +96,30 @@ src/
 │                            manifest's parser/reader (its shape is in manifest-types.ts, which the gate
 │                            imports)
 └── vite-env.d.ts          the bundler's type shim
+```
 
 READING THE TREE: `core/` = mechanism, `plugins/` = features (a plugin owns its own components and
 resources, and every plugin has an `index.ts` that DECLARES them through `definePlugin`), `host/` = the
 outside world, `data/` = values, `shared/` = pure helpers, `boot/` = assembly.
 
-THE LAYER RULES (enforced by `check:ecs` since P1.18b): a plugin may import a SIBLING only if it declared
-it in its own `deps`, and the declared graph must be ACYCLIC — otherwise the install order it implies does
-not exist. Two pieces that genuinely crossed a plugin boundary were moved rather than declared: the view
-direction (`shared/math/view.ts` — the camera and the player's raycast are its two callers) and the UI
-hit-test shape (`shared/types/ui.ts` — the key bind drag in `plugins/input` asks the question the UI plugin
-answers). FIVE reads into `host/` remain and are PINNED, so the debt can shrink but never grow:
-`ui/views/menu.ts` -> shell + viewport, `ui/systems/inventory.ts` -> blockicons,
-`render/systems/chunk-stream.ts` -> chunkmesh, `player/systems/input.ts` -> mousecapture. Turning those into
-injected services — and moving each system's CONSTRUCTION out of `boot/main.ts` and into its plugin — is the
-rest of P1.18b.
-```
+THE LAYER RULES (enforced by `check:ecs` since P1.18b, and COUNTED since P1.18d): a plugin may import a
+SIBLING only if it declared it in its own `deps`, and the declared graph must be ACYCLIC — otherwise the
+install order it implies does not exist. Three pieces that genuinely crossed a boundary were moved rather than
+declared: the view direction (`shared/math/view.ts` — the camera and the player's raycast are its two callers),
+the UI hit-test shape (`shared/types/ui.ts` — the key bind drag in `plugins/input` asks the question the UI
+plugin answers) and the entity-free commands (`data/globals/commands.ts`, P1.18d — see below). The two
+remaining directions are counted over RESOLVED specifiers, so the numbers are facts rather than intentions:
+`plugins/ -> host/` = **0** at runtime; `core/ -> data/` = **0 at runtime** (6 type-only imports, the shapes of
+the slot payloads and the boot stage keys); `data/ -> plugins|host` = **0 at runtime** (1 type-only,
+`ChunkGeometry`). A new runtime import in any of those directions fails the gate by name.
+
+**The lesson P1.18d wrote down**: a `core/` file that names a `data/` VALUE is the mechanism depending on the
+program, and it is how the kernel ends up knowing game words. Two shapes replaced it, and they are the ones to
+copy: (1) a command whose body writes a resource lives NEXT TO that resource (`data/globals/commands.ts` holds
+`ShowToast`/`SetFpsCap`/`SetLoadingStage`/`ReloadPacks`/`HotPlugPlugin`; `data/globals/ui-pages.ts` already had
+the same shape with `UiLayoutOp`), and (2) a capability the kernel DRIVES but may not name arrives as an
+INJECTED hook — `UiTablesHook` (`core/plugin/ui-tables.ts`) is a type, and `boot/ui-tables.ts` is the
+implementation the root hands to `installPlugins` and to the hot-plug host, exactly like the log sink.
 
 Placement rule of thumb: touches the OS/browser/Tauri → `host/` (Tauri/files/logs → `host/desktop/`,
 DOM/GPU/device events → `host/browser/`); mutates entity data per tick → the owning plugin's `systems/`;
@@ -131,12 +139,12 @@ under `plugins/` opts in with a `plugin.ts`, and the composition root names NO p
 
 | Layer | Owns | May import | Must never |
 |---|---|---|---|
-| `core/` | the mechanism: entities/columns/queries, the stage schedule, the command queue, the resource tokens, the World façade, the platform-free services | `core/` + `shared/` + `data/` (values and tokens only) | any game vocabulary (block/player/menu/i18n), `plugins/`, `host/`, `boot/` |
+| `core/` | the mechanism: entities/columns/queries, the stage schedule, the command queue, the resource tokens, the World façade, the platform-free services | `core/` + `shared/` + `data/` **types only** (a runtime import of a data VALUE is a gate failure — P1.18d) | any game vocabulary (block/player/menu/i18n), `plugins/`, `host/`, `boot/` |
 | `plugins/*` | a FEATURE **and the data it owns** (its components, its resource shapes, its tables) | `core/` + `shared/` + its own folder + `data/` | another plugin's internals; `host/` directly (a device/DOM/GPU need goes through an injected service) |
 | `host/` | the outside world: Tauri, files, logs, DOM, GPU, device events | `core/` + `shared/` | `plugins/` (the host does not know what a plugin is) |
-| `data/` | values only: resource shapes + every shared table + the pack-chain assets + the voxel data | `core/` + `shared/` | side effects, listeners, module-level mutable state |
+| `data/` | values only: resource shapes + every shared table + the pack-chain assets + the voxel data + the commands that write those values | `core/` (its declaration mechanisms: `defineResource`, `defineCommand`) + `shared/` | `plugins/`/`host/` at runtime (one type-only import exists); side effects, listeners, module-level mutable state |
 | `shared/` | types and pure helpers | nothing | everything else |
-| `boot/` | the composition root: read the manifest, install, start, own the ONE rAF chain | everything | — |
+| `boot/` | the composition root: read the manifest, install, start, own the ONE rAF chain, and implement the capabilities the kernel may not name (`boot/ui-tables.ts`) | everything | — |
 
 **Why a plugin owns its data.** The point of a plugin is that it can be installed AND removed, so
 `components/` is deliberately NOT a top-level folder any more: a plugin's components and constants live
@@ -339,7 +347,7 @@ resolved order — determinism over a fake thread. `world.scheduleReport()` prin
 ```
 SCHEDULE fixed: 6 systems, 5 batches, 1 parallel pair(s) [player.input | (motion.snapshot ~ player.controller) | player.movement | player.collision | player.interaction]
 SCHEDULE render: 5 systems, 2 batches, 6 parallel pair(s) [(cameraView.render ~ chunk.stream ~ block.outline ~ diagnostics) | renderer.draw]
-SCHEDULE ui: 10 systems, 9 batches, 1 parallel pair(s) [(ui.hud ~ ui.bindings) | ui.loading | ui.inventory | ui.picker | ui.toast | ui.keybind | ui.navigation | ui.delays | ui.widgets]
+SCHEDULE ui: 11 systems + 4 gap(s), 13 batches, 3 parallel pair(s) [(ui.pages ~ ui.hud ~ ui.bindings) | ui.loading | ui.slot.bag* | ui.inventory | ui.slot.debug* | ui.picker | ui.slot.toast* | ui.toast | ui.slot.keybind* | ui.keybind | ui.navigation | ui.delays | ui.widgets]
 ```
 
 Reading those reports: the fixed lane's batch 0 is a REAL read-after-write (`player.input` writes
@@ -792,6 +800,10 @@ can:
   order, every `dom.*` writer in the ui lane,
   `renderUi()` running the barrier + the ui lane and NOTHING else, the undeclared-dependency error,
   and diagnostics declaring every external target it really touches;
+- **the layer directions, COUNTED** (P1.18b/P1.18d) — every `import` in `src/core/` and `src/data/` is
+  RESOLVED to its file and classified: `plugins/ -> host/` 0, `core/ -> plugins/` 0, `core/ -> data/` 0 at
+  runtime (6 type-only, pinned), `data/ -> plugins|host` 0 at runtime (1 type-only, pinned). A probe that
+  adds a runtime data import to a core file turns the gate red, which is how the rule was shown to bite;
 - **the presentation state** — that the objects the world owns are RESOURCES, that the composition root
   inserts every one of them, that no system takes one as an argument any more, and that the LAST
   module-level state went the same way: the icon baker's renderer and caches (ICON_BAKE — and the
@@ -814,7 +826,7 @@ CommonJS needs a `{"type":"commonjs"}` package.json in its output directory beca
 
 ```
 node ./node_modules/typescript/bin/tsc src/core/data/entity.ts src/core/data/component.ts \
-  src/core/data/query.ts src/core/data/store.ts src/core/flow/schedule.ts src/core/effect/commands.ts \
+  src/core/data/query.ts src/core/data/store.ts src/core/flow/schedule.ts \
   src/core/data/resource.ts src/core/world.ts --ignoreConfig --outDir .tmp/ecstest --rootDir src \
   --module commonjs --target es2022 --strict --skipLibCheck --types node \
   --lib es2022,dom,dom.iterable

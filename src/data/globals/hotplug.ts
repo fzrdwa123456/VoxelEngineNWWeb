@@ -3,7 +3,7 @@
 // the CATALOGUE of plugins that may be plugged in belongs to the build; this table is the user-facing part
 // of it — the key that toggles a surface and the name a toast shows. Keeping it here is what lets
 // `ui.navigation` (a system in the ui lane) offer the key without knowing which plugins exist, and lets the
-// command in `core/effect/commands.ts` name the outcome without importing a plugin.
+// command in `data/globals/commands.ts` name the outcome without importing a plugin.
 //
 // Adding a surface later means ONE line here plus one entry in the root's catalogue — which is the shape the
 // next optional ui surfaces (`ui-keybind`, the toast, the backpack) are going to use.

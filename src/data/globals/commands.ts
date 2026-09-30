@@ -1,19 +1,24 @@
-// ===== Concrete commands: every ECS write that comes from OUTSIDE a system =====
-// The UI layer, the DOM event handlers and the composition root do not touch component columns.
-// They send one of these, and the next barrier applies it. See core/effect/command-queue.ts for why.
+// ===== The concrete commands: every ECS write that comes from OUTSIDE a system =====
+// The UI layer, the DOM event handlers and the composition root do not touch component columns. They send
+// one of these, and the next barrier applies it. See core/effect/command-queue.ts for why.
 //
-// WHAT LIVES HERE: only the commands that are about the WORLD as a whole and name no entity — the toast,
-// the frame cap, the loading screen and the hot-plug toggle. Everything ENTITY-shaped belongs to the plugin
-// that owns those components: the four player commands (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots`)
-// are in `plugins/player/commands.ts` (P1.18b), because a file under `core/` may not import `plugins/`.
-import { defineCommand } from "../world";
-import { LOADING_STATE, FPS_CAP, PACK_RELOAD, sanitizeFrameCap, TOAST, TOAST_MS } from "../../data/globals/resources";
-import { hotPlugLabel } from "../../data/globals/hotplug";
-import { HOT_PLUG, hotInstall, hotUninstall } from "../plugin/hotplug";
-
+// WHY THEY LIVE IN `data/` AND NOT IN `core/` (P1.18d): a command NAME is game vocabulary and its body
+// writes a data VALUE (the toast, the frame cap, the loading screen, the pack-reload request, the hot-plug
+// toggle), so a kernel file defining them is the mechanism depending on the program. `core/effect` keeps the
+// MECHANISM (`defineCommand` + the deferred queue) and the kernel now names no `data/` value at runtime at
+// all - `check:ecs` counts that direction and fails on a single runtime import. The shape is the one
+// `data/globals/ui-pages.ts` already had: a data module owns a resource AND the command that writes it.
+//
+// WHAT IS NOT HERE: everything ENTITY-shaped. The four player commands (`SetMode`, `Teleport`, `SelectSlot`,
+// `SwapSlots`) are in `plugins/player/commands.ts` (P1.18b), because they write a plugin's own components.
+import { defineCommand } from "../../core/world";
+import { LOADING_STATE, FPS_CAP, PACK_RELOAD, sanitizeFrameCap, TOAST, TOAST_MS } from "./resources";
+import { hotPlugLabel } from "./hotplug";
+import { HOT_PLUG, hotInstall, hotUninstall } from "../../core/plugin/hotplug";
 /** Show a toast: `key` is an i18n key unless `raw` is set ("cap set to 60" cannot be a key — see
- *  ecs/ui/toast.ts). The message is world state with a wall-clock deadline, so this command only arms
- *  it; the ui lane's `ui.toast` system puts it on screen and takes it down again. */
+ *  plugins/ui-toast/systems/toast.ts). The message is world state with a wall-clock deadline, so this command
+ *  only arms it; the `ui-toast` plugin's system puts it on screen and takes it down again. It is reachable
+ *  whatever plugins are installed, which is why it cannot live in that (optional) plugin — see P1.28. */
 export const ShowToast = defineCommand<{ key: string; raw?: boolean }>(
   "showToast",
   (world, { key, raw }) => {
@@ -96,3 +101,4 @@ export const SetLoadingStage = defineCommand<{
   if (patch.noteValue !== undefined) loading.noteValue = patch.noteValue;
   if (patch.active !== undefined) loading.active = patch.active;
 });
+

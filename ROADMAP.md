@@ -65,7 +65,7 @@ orientation assumptions the next one depends on.
 |---|---|---|---|
 | **P0 ground** | `DONE` | flat world, chunks, collision, edit | `generateChunk()` in `src/data/world/world.ts` |
 | **P1 terrain** | `TODO` | replace the uniform fill with a real (noise) generator | **`generateChunk()` is the ONLY place that knows what a block is.** Everything else asks `isSolid()`. Start here. |
-| **P2 floating origin** | `TODO` | split coordinates into `int cell + float local`, render camera-relative, update by **delta only** | Must land **before** anything writes absolute world coordinates. The absolute-position writes are now funneled into ONE place — the `Teleport` command (`src/core/effect/commands.ts`) — which is exactly where the cell/local split goes. Reference technique: [big_space](https://docs.rs/big_space/0.6.0/i686-unknown-linux-gnu/big_space/) |
+| **P2 floating origin** | `TODO` | split coordinates into `int cell + float local`, render camera-relative, update by **delta only** | Must land **before** anything writes absolute world coordinates. The absolute-position writes are now funneled into ONE place — the `Teleport` command (`src/plugins/player/commands.ts`) — which is exactly where the cell/local split goes. Reference technique: [big_space](https://docs.rs/big_space/0.6.0/i686-unknown-linux-gnu/big_space/) |
 | **P3 radial gravity** | `TODO` | `ORIENTATION.up` = local surface normal instead of the constant `(0,1,0)` | ⚠️ **Known blocker**: `src/plugins/player/systems/controller.ts` sums view deltas and applies them once per tick **because** `up` is constant. With a changing `up`, "sum then apply" ≠ "apply each". That optimisation must change in the same commit. |
 | **P4 sphere + LOD** | `TODO` | cube-sphere quadtree; near = real voxels, far = heightmap | Do the sphere **after** P3; do LOD after the sphere looks right without it. |
 | **P5 space layer** | `TODO` | several bodies, orbits, nested reference frames | Only possible once P2 exists. |
@@ -943,9 +943,10 @@ Still outstanding:
   (P1.45), `PLAYER_HANDLES` (the input system the raw-input thread, the frame loop and the pointer lock
   drive) and `UI_HANDLES` (the reconciler, which owns the widget elements the bind drag hit-tests).
   (2) **the kernel stopped knowing a game word.** `SetMode` / `Teleport` / `SelectSlot` / `SwapSlots` moved
-  to `plugins/player/commands.ts`, so `core/effect/commands.ts` holds only the entity-free commands
-  (toast, frame cap, loading screen, hot-plug) — and `core/ -> plugins/` is 0 imports again (a direct
-  grep, not a ratchet).
+  to `plugins/player/commands.ts` (`core/` no longer imports `plugins/`), and the ENTITY-FREE commands — the
+  toast, the frame cap, the loading screen, the hot-plug toggle — followed in P1.18d to
+  `data/globals/commands.ts`, next to the resources they write. `core/effect/` now holds the mechanism only
+  (`defineCommand` + the deferred queue), and `core/ -> data/` is 0 at RUNTIME (6 type-only imports, pinned).
   (3) **what the root still owns, and why.** The VIEWS and panels it spawns (spawning is a structural
   change, so WHEN belongs to wiring) and the four hot-pluggable surfaces' system instances, which wrap
   those panels — that is exactly what makes them installable at runtime. Moving those too is P1.18c.
@@ -1155,6 +1156,41 @@ Still outstanding:
   after the resource table) but it changes WHEN those widget entities exist, so the resource-table order has
   to be re-checked: the F3 panel's entities must be in the world before the `diagnostics` plugin is
   constructed, which is the boot-order trap `check:ecs` already guards for the install block.
+- **P1.18d — the kernel names no `data/` VALUE any more, and the directions are COUNTED.** `DONE`. Two core
+  files still imported the data layer at RUNTIME, which is the one thing the layer table forbids: a `core/`
+  file naming a `data/` module is the mechanism depending on the program, and it is how the kernel ends up
+  knowing game words. Both are gone, each by the shape that fits it:
+  * **the entity-free COMMANDS moved to their data** (`data/globals/commands.ts`): `ShowToast`, `SetFpsCap`,
+    `SetLoadingStage`, `ReloadPacks` and `HotPlugPlugin` write the toast, the frame cap, the loading screen,
+    the reload request and the hot-plug toggle, so they now sit next to those resources — the shape
+    `data/globals/ui-pages.ts` already had with `UiLayoutOp` (a data module owning a resource AND the command
+    that writes it). `core/effect/` keeps the MECHANISM only (`defineCommand` + the deferred queue), and the
+    four importers (`boot/main.ts`, `plugins/ui/index.ts`, `plugins/ui/systems/navigation.ts`) follow the new
+    path. The commands could NOT move into a plugin: `ShowToast` reads `TOAST` whatever plugin is installed
+    (P1.28), and a dep on the hot-pluggable `ui-toast` would dangle the moment it is unplugged.
+  * **the UI-tables installer became an INJECTED hook.** `core/plugin/ui-tables.ts` used to import
+    `UI_ACTIONS`/`UI_SOURCES` and write them; it now declares a TYPE (`UiTablesHook`: install/remove,
+    nothing else) and the implementation lives in `boot/ui-tables.ts` — the one layer that may import both —
+    handed to `installPlugins` (an optional `InstallOptions` field, absent = no UI lane, exactly what the old
+    in-place installer treated as its no-op) and to the hot-plug host (beside its log sink). The kernel stays
+    deaf to whether a UI has tables at all.
+  WHAT THE GATE DOES NOW: it stops DESCRIBING the layer rules and COUNTS them — every `import` in `src/core/`
+  and `src/data/` is resolved to its file and classified. `core/ -> plugins/` 0, `plugins/ -> host/` 0,
+  `core/ -> data/` **0 at runtime** (6 type-only: the slot payload shapes and the boot stage keys),
+  `data/ -> plugins|host` **0 at runtime** (1 type-only: `ChunkGeometry`). The two type-only counts are PINNED,
+  so a new one is a deliberate act, and the rule was shown to BITE rather than assumed: a probe that adds one
+  runtime data import to a core file turned the gate red with `now 1, plus 6 type-only`.
+  VERIFIED: `tsc` 0, `check:ecs` 71/71 (the UI-tables group drives the injected hook — install 2, no-op
+  without a UI lane, remove 2, re-install 1 — and asserts the kernel file carries no data module at all),
+  `npm run app:windows` 25 files / 13.8 MB. On a real boot the log is unchanged where it matters:
+  `PLUGIN installed 12/12`, the same `REGISTRY` counts, the three `SCHEDULE` lines BYTE-IDENTICAL,
+  `PAGE mounted keybind` ×2, `HUD element mounted` ×2, `BOOT ready in 416ms`; a pack toggle reloaded the chain
+  twice (`files=5` then `files=11`, the loading screen and the toast going through the moved
+  `SetLoadingStage`/`ShowToast`) and entering a world reached `mode=game locked=1` with ZERO error lines.
+  DOC FIX IN THE SAME ROUND: `AGENTS.md`'s fence for the directory map closed ~15 lines too late, so the
+  "READING THE TREE" and "THE LAYER RULES" paragraphs rendered as code (and the schedule report it quotes was
+  a version old); both are fixed, and the AGENTS paragraph claiming FIVE pinned `host/` reads now says what is
+  true — zero, enforced.
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`

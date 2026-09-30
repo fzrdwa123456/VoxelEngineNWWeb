@@ -58,18 +58,22 @@ src/
 
 | 层 | 拥有 | 可以 import | 绝对不 |
 |---|---|---|---|
-| `core/` | 机制 | `core/` `shared/` `data/`(值) | 游戏词汇、`plugins/`、`host/`、`boot/` |
+| `core/` | 机制 | `core/` `shared/` `data/`(**仅类型**) | 游戏词汇、`plugins/`、`host/`、`boot/` |
 | `plugins/*` | 一个功能**以及它拥有的数据** | `core/` `shared/` `data/` 自己目录 + **已声明 deps 的兄弟插件** | 别的插件的内部、直接 `host/` |
 | `host/` | 外部世界 | `core/` `shared/` | `plugins/`（宿主不认识插件） |
-| `data/` | 只有值 | `core/`(仅令牌类型) `shared/` | 副作用、监听器、模块级可变状态 |
+| `data/` | 只有值（以及写这些值的命令） | `core/`(声明机制 `defineResource`/`defineCommand` + 令牌类型) `shared/` | 运行期 import `plugins/`/`host/`、副作用、监听器、模块级可变状态 |
 | `shared/` | 类型与纯函数 | 无 | 其它一切 |
-| `boot/` | 装配 | 全部 | — |
+| `boot/` | 装配（含内核不能点名的能力的实现，如 `boot/ui-tables.ts`） | 全部 | — |
 
 **判定条款**：核心只做机制 / 有扩展点 / 有注册表 / 有生命周期（可选）/ 依赖必须声明。
 只有前两条 → 普通插件架构；全都有 → 微内核级。权限模型**不是**判定项（那是安全，另一个维度）。
 
-**当前实测：`core/ → plugins/` = 0 处**（P1.18b 把最后四个玩家命令搬去了 `plugins/player/commands.ts`），
-`plugins/ → host/` = 0 处（平台能力一律由宿主注入），`data/ → core|plugins|host` = 0 处。
+**当前实测（门禁逐条 import 解析后计数，P1.18d 起为硬断言）**：`core/ → plugins/` = **0 处**；
+`plugins/ → host/` = **0 处**（平台能力一律由宿主注入）；`core/ → data/` **运行期 = 0 处**（仅 6 条
+`import type`：插槽载荷形状 + 启动阶段键）；`data/ → plugins|host` **运行期 = 0 处**（仅 1 条
+`import type`：`ChunkGeometry`）。两条 type-only 数量都被**钉死**，所以任何一处新增都必须是有意为之。
+**走法**：命令写在它写的那个资源旁边（`data/globals/commands.ts`），内核要驱动但不可点名的能力以
+**注入 hook** 到场（`UiTablesHook` 是类型，`boot/ui-tables.ts` 是实现，经 `installPlugins` 与热插拔宿主递进来）。
 
 ---
 
@@ -182,8 +186,11 @@ load 帧：只跑 ui lane（loading 是 widget 数据）
 **已经成立的**
 
 - 层次：`core/` / `plugins/` / `host/` / `data/` / `shared/` / `boot/`，副作用 100% 关在 `host/`；
-  `core/ → plugins/`、`plugins/ → host/`、`data/ → 其它层` **都是 0 处**（门禁断言）。
+  `core/ → plugins/`、`plugins/ → host/` 都是 **0 处**，`core/ → data/` 与 `data/ → plugins|host`
+  **运行期也是 0 处**（各只剩 6 条 / 1 条 `import type`，门禁逐条解析计数并钉死数量）。
 - DOD：列存、查询缓存、原地覆写、屏障、批次推导、访问声明（门禁 **71 组断言**）。
+- **内核不含游戏词汇**：具体命令跟着它们写的资源走（`data/globals/commands.ts`），内核只留机制
+  （`defineCommand` + 队列）；要驱动却不可点名的能力走**注入 hook**（`UiTablesHook` ← `boot/ui-tables.ts`）。
 - **插件系统**：11 个插槽 + 注册表（重复 id 会抛并点名双方）+ `definePlugin` + 依赖拓扑安装 +
   清单否决 + 失败隔离 + 三阶段生命周期 + 运行中装卸（F5/F8/F9/F10/F11）+ 卸载回滚与反向依赖守卫。
 - **全部 12 个插件走文件夹发现**：`boot/main.ts` 的插件数组只有 `[...discoveredPlugins...]`，
