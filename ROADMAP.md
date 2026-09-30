@@ -1221,6 +1221,44 @@ Still outstanding:
   toggles reloaded the chain (`files=5` then `files=11`), and entering a world logged
   `MAINMENU entering singleplayer (world type: superflat)` → `WORLD ready at 2301ms` → `LOCK request
   [world entered]` with `mode=game locked=1` and ZERO error lines.
+- **P1.18f — the pack chain travels as BYTES, and its read is off the main thread.** `DONE`. The first step of
+  the multithreading route, and it needed no threads of ours:
+  * `preload_packs` and `list_packs` are `#[tauri::command(async)]` now. Tauri runs a command WITHOUT that
+    attribute on the **main thread**, so reading the whole chain (2.8 MB of textures in the sample pack) was
+    blocking the event loop.
+  * **No base64.** `packs::snapshot` used to base64 EVERY file into a JSON string: +33% on the wire, and the
+    front end paid `atob` + a per-byte loop **on its main thread** for a chain a reload re-reads in full. One
+    binary body now (`[u32 LE header length][header JSON][blob]`), parsed by `decodePackSnapshot`, whose file
+    values are **views into that buffer** — no copy, no decode. The `base64` crate is gone from `Cargo.toml`.
+  * **A folder pack's own `assets.zip` is SKIPPED**: that key is dead (it normalises to itself and nothing ever
+    resolves it), and the sample resource pack's zip is 2.8 MB — a byte-for-byte copy of the loose tree beside
+    it — so it was read, encoded, shipped and parsed for nothing.
+  VERIFIED: `tsc` 0, `check:ecs` 72/72 (a group drives the decoder on a synthetic body and asserts the views
+  share the buffer), boot `PACKS installed` **248 ms → 171 ms** with the chain intact
+  (`files=11 → 10`, `zh=104 en=104 ja=104`, `BLOCKREG 7 blocks`, the same `REGISTRY`/`SCHEDULE` lines).
+- **P1.18g — the menu backdrop is rebuilt only when the BACKDROP changed.** `DONE`. Step 1 removed the pack
+  transport from the main thread and the reload hitch did not move (90.5/98.4 ms before, 93.1 ms after) —
+  which is what isolating it proved: it only happens when the resource pack is in the chain, and it is
+  transport-independent. The cost was the **menu background**: `backgrounds/panorama.png` is 2.2 MB,
+  `resolveTexture()` turned it into a base64 `data:` URL (a 2.2M-character `String.fromCharCode` spread plus
+  `btoa`, tens of milliseconds of main-thread work) and the reload dropped the scene unconditionally, so the
+  PNG was re-decoded and re-uploaded on EVERY reload — including F7 and including toggling a pack that ships
+  no background at all.
+  * `MenuBgState` carries a **`signature`** (the kind + an FNV-1a hash of the image that kind resolves), and
+    `refreshMenuBackground()` re-derives from the chain in force and answers **whether the backdrop itself
+    changed**. The reload driver disposes and re-derives only when that answer is true, and logs
+    `PACKS menu backdrop kept (unchanged)` or `re-derived` so the decision is visible. A hash rather than a
+    length, because a same-size edit would fool a length; ~2-4 ms against ~90 ms is the trade.
+  * The PANORAMA is loaded from its bytes through a **Blob object URL** (revoked when the texture is in), not
+    from a `data:` URL: the browser reads the file itself instead of the main thread base64-ing it first.
+  VERIFIED BY HAND (packaged build, real clicks): `tsc` 0, `check:ecs` 73/73 (a group drives the real module
+  against synthetic chains: the same bytes twice → `false`, a swapped image → `true`, panorama → checker →
+  `true`, then settled), the reload that does NOT touch the backdrop costs no frame over 25 ms, and the reload
+  that really rebuilds it went **93 ms → 47 ms** (`stalls=0`, where it used to count one) — with the menu
+  still showing the pack's panorama and ZERO error lines in the log.
+  STILL ON THE ROUTE (deliberately not done): the panorama's PNG DECODE + GPU UPLOAD (~35 ms of what is left)
+  cannot be skipped when the picture really changes; Worker-pool chunk generation/meshing is step 2, and it
+  waits for real terrain to be worth measuring.
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`

@@ -770,7 +770,7 @@ settings check, the world, the movement modes, every menu, the key binds, the in
 `docs/TESTING.md`**, together with what a failure at each step means. Read it before saying a change
 works, and extend it when a behaviour lands.
 
-**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 71
+**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 73
 assertion groups, ends with `RESULT: OK` / `RESULT: FAILED`). It compiles the ECS plus the fixed lane
 with the same `tsc` the build uses into `node_modules/.cache/voxelengine-ecs-check` (git-ignored, so
 it writes nothing tracked; Node still resolves the real `three`), then asserts what no type-checker

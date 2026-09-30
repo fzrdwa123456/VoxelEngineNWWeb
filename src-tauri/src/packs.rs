@@ -13,44 +13,52 @@
 //
 // The ordering is copied from TS too: entries in each directory are returned in **ascending name
 // order**, and the TS side walks them back to front (later loads win).
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use base64::Engine;
 use serde::Serialize;
 
-/// A pack: either a folder pack (files has content) or a zip pack (zipB64 has content)
-#[derive(Serialize, Default)]
-pub struct PackEntry {
-    pub name: String,
-    pub builtin: bool,
-    /// Folder pack: relative path (as-is, with either forward or back slashes — the frontend
-    /// normalises it) -> base64 bytes
-    pub files: BTreeMap<String, String>,
-    /// Zip pack: base64 of the whole zip (the frontend unpacks it with fflate)
-    #[serde(rename = "zipB64", skip_serializing_if = "Option::is_none")]
-    pub zip_b64: Option<String>,
+/// Where one file's bytes live in the snapshot blob.
+#[derive(Serialize)]
+struct BlobRef {
+    name: String,
+    off: usize,
+    len: usize,
 }
 
+/// One pack, as places in the blob (`zip` for a zip pack, `files` for a folder pack).
+#[derive(Serialize, Default)]
+struct BlobEntry {
+    name: String,
+    builtin: bool,
+    files: Vec<BlobRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zip: Option<BlobRef>,
+}
+
+/// What the front end parses out of the header, before it makes views into the blob.
 #[derive(Serialize)]
-pub struct PackSnapshot {
-    pub builtin: Option<PackEntry>,
-    /// mods directory (medium priority)
-    pub mods: Vec<PackEntry>,
-    /// resourcepacks directory (highest priority)
-    pub resourcepacks: Vec<PackEntry>,
+struct BlobHeader {
+    builtin: Option<BlobEntry>,
+    mods: Vec<BlobEntry>,
+    resourcepacks: Vec<BlobEntry>,
 }
 
 const BUILTIN_NAME: &str = "default.zip";
 
-fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
+/// A folder pack's own `assets.zip` is SKIPPED, because that key is DEAD.
+///
+/// WHY: a folder pack is walked file by file and the front end normalises every name; `assets.zip`
+/// normalises to itself, and nothing in the engine ever asks for that path (resolutions go through
+/// `block/dirt.png`, `lang/zh.json`, ...). So its bytes were carried to the front end, encoded, parsed and
+/// decoded on the main thread for nothing — and the sample resource pack's zip is **2.8 MB**, a copy of the
+/// loose tree sitting next to it. A pack that shipped ONLY this zip resolved nothing before and resolves
+/// nothing now; a zip at the pack ROOT is the zip-pack layout and goes through `read_entry` as before.
+const DEAD_FOLDER_ZIP: &str = "assets.zip";
 
-/// Recursively collects every file in a folder pack (keys are joined with `/`, and the frontend
-/// normalises by the same rule)
-fn walk(dir: &Path, base: &str, out: &mut BTreeMap<String, String>) {
+/// Recursively collects every file in a folder pack: the bytes go into `blob`, and the place they landed
+/// goes into `out` (keys are joined with `/`, and the frontend normalises by the same rule).
+fn walk(dir: &Path, base: &str, blob: &mut Vec<u8>, out: &mut Vec<BlobRef>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -66,10 +74,16 @@ fn walk(dir: &Path, base: &str, out: &mut BTreeMap<String, String>) {
             format!("{base}/{name}")
         };
         match e.file_type() {
-            Ok(t) if t.is_dir() => walk(&full, &rel, out),
+            Ok(t) if t.is_dir() => walk(&full, &rel, blob, out),
             Ok(_) => {
+                if base.is_empty() && name == DEAD_FOLDER_ZIP {
+                    continue;
+                }
                 if let Ok(bytes) = fs::read(&full) {
-                    out.insert(rel, b64(&bytes));
+                    let off = blob.len();
+                    let len = bytes.len();
+                    blob.extend_from_slice(&bytes);
+                    out.push(BlobRef { name: rel, off, len });
                 }
             }
             Err(_) => {}
@@ -77,23 +91,30 @@ fn walk(dir: &Path, base: &str, out: &mut BTreeMap<String, String>) {
     }
 }
 
-fn read_entry(full: &Path, name: &str, builtin: bool) -> PackEntry {
-    let mut entry = PackEntry {
+fn read_entry(full: &Path, name: &str, builtin: bool, blob: &mut Vec<u8>) -> BlobEntry {
+    let mut entry = BlobEntry {
         name: name.to_string(),
         builtin,
         ..Default::default()
     };
     if full.is_dir() {
-        walk(full, "", &mut entry.files);
+        walk(full, "", blob, &mut entry.files);
     } else if let Ok(bytes) = fs::read(full) {
-        entry.zip_b64 = Some(b64(&bytes));
+        let off = blob.len();
+        let len = bytes.len();
+        blob.extend_from_slice(&bytes);
+        entry.zip = Some(BlobRef {
+            name: name.to_string(),
+            off,
+            len,
+        });
     }
     entry
 }
 
 /// Scans one directory: skips the builtin pack name and returns ascending name order (both folder
 /// packs and .zip files count)
-fn scan_dir(dir: &Path, skip_builtin: bool) -> Vec<PackEntry> {
+fn scan_dir(dir: &Path, skip_builtin: bool, blob: &mut Vec<u8>) -> Vec<BlobEntry> {
     let mut out = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -109,29 +130,45 @@ fn scan_dir(dir: &Path, skip_builtin: bool) -> Vec<PackEntry> {
         let full = e.path();
         let is_zip = name.to_ascii_lowercase().ends_with(".zip");
         if full.is_dir() || is_zip {
-            out.push(read_entry(&full, &name, false));
+            out.push(read_entry(&full, &name, false, blob));
         }
     }
     out
 }
 
-/// The complete resource pack snapshot (the original scanPacks()'s three sources, in the same order)
-pub fn snapshot(game_root: &Path) -> PackSnapshot {
+/// The complete pack snapshot (the original scanPacks()'s three sources, in the same order) as ONE binary
+/// body: `[u32 LE header length][header JSON][blob]`.
+///
+/// WHY BYTES AND NOT JSON+base64: the walk used to encode every file into a JSON string, which cost +33% on
+/// the wire and made the front end `atob` + loop over every byte ON ITS MAIN THREAD — and the reload re-reads
+/// the whole chain, so the sample pack's 2.8 MB panorama was paid again on every F7. The front end now makes
+/// zero-copy views into this buffer (`decodePackSnapshot`).
+pub fn snapshot_blob(game_root: &Path) -> Vec<u8> {
     let packs_dir = game_root.join("resourcepacks");
     let mods_dir = game_root.join("mods");
+    let mut blob: Vec<u8> = Vec::new();
 
     let builtin_file = packs_dir.join(BUILTIN_NAME);
     let builtin = if builtin_file.is_file() {
-        Some(read_entry(&builtin_file, BUILTIN_NAME, true))
+        Some(read_entry(&builtin_file, BUILTIN_NAME, true, &mut blob))
     } else {
         None
     };
+    let mods = scan_dir(&mods_dir, false, &mut blob);
+    let resourcepacks = scan_dir(&packs_dir, true, &mut blob);
 
-    PackSnapshot {
+    let header = serde_json::to_vec(&BlobHeader {
         builtin,
-        mods: scan_dir(&mods_dir, false),
-        resourcepacks: scan_dir(&packs_dir, true),
-    }
+        mods,
+        resourcepacks,
+    })
+    .unwrap_or_else(|_| b"{}".to_vec());
+
+    let mut out = Vec::with_capacity(4 + header.len() + blob.len());
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&blob);
+    out
 }
 
 // ===== The LISTING: which packs exist on disk right now (P1.49ad) =====

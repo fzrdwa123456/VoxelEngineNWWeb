@@ -15,8 +15,8 @@ import * as THREE from "three/webgpu";
 import { VIEWPORT, type ViewportState } from "../../../data/globals/resources";
 import { MENU_BACKGROUND, RENDERER3D, type MenuBackgroundState } from "../../../data/globals/gfx";
 import type { SystemAccess, World } from "../../../core/world";
-import { menuBgKind } from "../../../data/assets/background";
-import { resolveTexture } from "../../../data/assets/textures";
+import { menuBgKind, PANORAMA_REL } from "../../../data/assets/background";
+import { resolveBytes } from "../../../data/assets/textures";
 
 /** What this step touches. `framebuffer` is shared with renderer.draw — which is exactly why it must NOT
  *  be registered in the render lane: two systems writing the framebuffer in one stage would need an
@@ -43,8 +43,18 @@ export class MenuBackgroundSystem {
     if (!bg.scene) {
       // Lazy init: SphereGeometry's default UV is equirectangular; scale(-1,1,1) flips to the inner wall
       // without mirroring.
+      //
+      // THE PANORAMA IS LOADED FROM ITS BYTES, NOT FROM A `data:` URL (P1.18g). `resolveTexture()` turns the
+      // pack's bytes into a base64 data URL, and the sample panorama is 2.2 MB — so every rebuild paid a
+      // 2.2M-character `String.fromCharCode` spread plus `btoa` (tens of milliseconds of main-thread work)
+      // before the browser had even seen a PNG. A Blob URL hands the bytes over in one native copy (`.slice()`
+      // — also the TL;DR way to satisfy TS's `BlobPart`, which refuses a `Uint8Array` over an ArrayBufferLike)
+      // and lets the image loader read the file itself; the URL is revoked as soon as the texture is in.
+      const bytes = resolveBytes(PANORAMA_REL);
+      if (!bytes) return; // `menuBgKind()` said panorama, so this is a race, not a case: draw nothing
       bg.scene = new THREE.Scene();
-      const tex = new THREE.TextureLoader().load(resolveTexture("backgrounds/panorama.png"));
+      const url = URL.createObjectURL(new Blob([bytes.slice()], { type: "image/png" }));
+      const tex = new THREE.TextureLoader().load(url, () => URL.revokeObjectURL(url));
       tex.colorSpace = THREE.SRGBColorSpace;
       const geo = new THREE.SphereGeometry(50, 64, 32);
       geo.scale(-1, 1, 1);

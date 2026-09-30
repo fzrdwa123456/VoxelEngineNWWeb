@@ -135,15 +135,23 @@ fn window_session_active() -> bool {
     platform::clip_is_postponed()
 }
 
-#[tauri::command]
-fn preload_packs(state: State<'_, AppState>) -> packs::PackSnapshot {
-    packs::snapshot(&state.root)
+/// Read every pack's bytes and hand them over as ONE binary body — see `packs::snapshot_blob` for the
+/// framing, and for why it is not JSON + base64 any more.
+///
+/// `(async)` IS THE POINT (P1.18f): Tauri runs a command WITHOUT it on the **main thread**, so reading the
+/// whole chain (2.8 MB of textures in the sample pack alone) blocked the event loop — that is the `FRAME …
+/// max=77~95ms` hitch logged right after every pack reload. `(async)` runs the body on the async runtime, so
+/// the front end's own main thread is free while the disk is read.
+#[tauri::command(async)]
+fn preload_packs(state: State<'_, AppState>) -> tauri::ipc::Response {
+    tauri::ipc::Response::new(packs::snapshot_blob(&state.root))
 }
 
 /// WHICH PACKS EXIST ON DISK (P1.49ad) — the cheap half of the pack screen's live list: names and file counts,
 /// no file is ever opened. The screen polls this while it is open, so a pack dropped into `resourcepacks/`
 /// appears and a deleted one disappears; APPLYING one is still the separate reload (F7 / entering a world).
-#[tauri::command]
+/// `(async)` like the read above: a walk of every pack folder is IO, and the poll runs once a second.
+#[tauri::command(async)]
 fn list_packs(state: State<'_, AppState>) -> packs::PackListing {
     packs::listing(&state.root)
 }

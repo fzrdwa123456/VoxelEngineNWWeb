@@ -7,7 +7,7 @@
 // A failure is not fatal: the summary says so and every resolution then takes the engine fallback (the
 // magenta/black checkerboard), which is why this only logs.
 import { invoke } from "@tauri-apps/api/core";
-import { adoptWarningSink, installPacks, type PackListingPayload, type PackSnapshotPayload } from "../../data/assets/textures";
+import { adoptWarningSink, decodePackSnapshot, installPacks, type PackListingPayload, type PackSnapshotPayload } from "../../data/assets/textures";
 import { logDebug, readSettings } from "./shell";
 
 // The data module writes no log of its own: it calls the sink it was handed (this boundary owns the sink).
@@ -29,10 +29,17 @@ export async function listPacksOnDisk(): Promise<PackListingPayload> {
  *  Two callers need the raw snapshot rather than "install whatever is on disk":
  *   * the startup (which installs it and KEEPS it, so a reload can roll back to it);
  *   * the pack reload driver (which installs it itself, and on a later failure re-installs the previous one).
- *  The Rust side is stateless — `preload_packs` is `packs::snapshot(&root)` — so a second call really does
- *  re-walk `mods/` and `resourcepacks/`; nothing about the chain is cached in Rust. */
+ *  The Rust side is stateless — `preload_packs` is `packs::snapshot_blob(&root)` — so a second call really
+ *  does re-walk `mods/` and `resourcepacks/`; nothing about the chain is cached in Rust.
+ *
+ *  IT ANSWERS WITH **BYTES** (P1.18f): one binary body (`[u32 LE header length][header JSON][blob]`) that
+ *  `decodePackSnapshot` turns into the engine's shape with zero-copy views. It used to be JSON whose every
+ *  value was a base64 string, which this side decoded per byte on the MAIN thread — for a chain the reload
+ *  reads in full, so the sample pack's 2.8 MB panorama was paid again on every F7. The command is `(async)`
+ *  on the Rust side for the same reason: a sync command runs on the main thread. */
 export async function rescanPacks(): Promise<PackSnapshotPayload> {
-  return await invoke<PackSnapshotPayload>("preload_packs");
+  const body = await invoke<ArrayBuffer>("preload_packs");
+  return decodePackSnapshot(body);
 }
 
 /** Startup preload — UNUSED as of P1.49ab and kept only as the one-liner it always was: the boot now goes through

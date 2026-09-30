@@ -10,25 +10,81 @@
 // The split is deliberate: Rust only lists directories and reads bytes (what Node's fs did), while the MC
 // namespace normalization / priority / layering all stay below — that is pure logic, and `check:ecs` covers
 // it. The zip is still unpacked by fflate on the front end (Rust does not unzip, saving a dependency).
+//
+// ===== THE PACK BYTES ARRIVE AS BYTES (P1.18f) =====
+// `preload_packs` used to return JSON with every file base64-ed, and the front end decoded each one with
+// `atob` + a per-byte loop — **on the main thread**, for a chain the reload re-reads in full (the sample
+// resource pack's panorama alone is 2.8 MB). The command now returns ONE binary body
+// (`packs::snapshot_blob`: `[u32 LE header length][header JSON][blob]`) and `decodePackSnapshot` below turns
+// it into the SAME shape this module always consumed, except that a file's value is a **view into that
+// buffer** instead of a decoded string: no base64, no copy, nothing to decode per file.
 import { unzipSync } from "fflate";
 
 
 type Bytes = Uint8Array;
 
-/** The shape Rust's `preload_packs` returns (serde's camelCase) */
+/** One file's place in the snapshot blob (what the Rust header carries). */
+interface PackBlobRef {
+  name: string;
+  off: number;
+  len: number;
+}
+
+/** One pack in the blob: a place per file (folder pack) or one for the archive (zip pack). */
+interface PackBlobEntry {
+  name: string;
+  builtin: boolean;
+  files: PackBlobRef[];
+  zip?: PackBlobRef;
+}
+
+interface PackBlobHeader {
+  builtin: PackBlobEntry | null;
+  mods: PackBlobEntry[];
+  resourcepacks: PackBlobEntry[];
+}
+
+/** A pack as the engine consumes it: relative path -> BYTES (a view into the snapshot buffer). */
 interface PackEntryPayload {
   name: string;
   builtin: boolean;
-  /** Folder pack: relative path -> base64 */
-  files: Record<string, string>;
-  /** Zip pack: base64 of the whole archive (unpacked by fflate on the front end) */
-  zipB64?: string;
+  files: Record<string, Bytes>;
+  /** Zip pack: the whole archive's bytes (unpacked by fflate on the front end) */
+  zip?: Bytes;
 }
 
 export interface PackSnapshotPayload {
   builtin: PackEntryPayload | null;
   mods: PackEntryPayload[];
   resourcepacks: PackEntryPayload[];
+}
+
+/** Decode what `preload_packs` returns: `[u32 LE header length][header JSON][blob]`.
+ *
+ *  Pure, and deliberately so: the gate drives it with a synthetic buffer, so the framing on this side is
+ *  pinned against the same shape the Rust encoder writes. Every file becomes a `subarray` VIEW — nothing is
+ *  copied, and an out-of-range ref is clamped by `subarray` rather than throwing. */
+export function decodePackSnapshot(body: ArrayBuffer): PackSnapshotPayload {
+  const headerLen = new DataView(body).getUint32(0, true);
+  const header = JSON.parse(
+    new TextDecoder().decode(new Uint8Array(body, 4, headerLen)),
+  ) as PackBlobHeader;
+  const blob = new Uint8Array(body, 4 + headerLen);
+  const slice = (ref: PackBlobRef): Bytes => blob.subarray(ref.off, ref.off + ref.len);
+  const entry = (e: PackBlobEntry | null): PackEntryPayload | null =>
+    e === null
+      ? null
+      : {
+          name: e.name,
+          builtin: e.builtin,
+          files: Object.fromEntries(e.files.map((ref) => [ref.name, slice(ref)])),
+          ...(e.zip === undefined ? {} : { zip: slice(e.zip) }),
+        };
+  return {
+    builtin: entry(header.builtin),
+    mods: header.mods.map((e) => entry(e)!),
+    resourcepacks: header.resourcepacks.map((e) => entry(e)!),
+  };
 }
 
 const overrides = new Map<string, Bytes>();
@@ -132,6 +188,8 @@ export function adoptWarningSink(sink: (line: string) => void): void {
   warnSink = sink;
 }
 
+/** Bytes -> a `data:` URL. The ONE remaining base64 use in the engine, and it is the platform's own
+ *  encoding for an inline image (a texture handed to the DOM / three.js), not a transport of ours. */
 function bytesToB64(bytes: Bytes): string {
   let bin = "";
   const CHUNK = 0x8000;
@@ -139,13 +197,6 @@ function bytesToB64(bytes: Bytes): string {
     bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(bin);
-}
-
-function b64ToBytes(b64: string): Bytes {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 // ===== MC-style namespace normalization =====
@@ -170,12 +221,13 @@ function normalizeKey(name: string): string | null {
 }
 
 /** One pack -> a normalized path:bytes table (the original's `readZip()`/`walkDir()` merged into one,
- *  except the bytes come from Rust rather than fs) */
+ *  except the bytes come from Rust rather than fs — and, since P1.18f, as VIEWS into the snapshot buffer
+ *  rather than base64 strings this side had to decode) */
 function decodePack(entry: PackEntryPayload): Map<string, Bytes> {
   const map = new Map<string, Bytes>();
-  if (entry.zipB64) {
+  if (entry.zip) {
     try {
-      const out = unzipSync(b64ToBytes(entry.zipB64));
+      const out = unzipSync(entry.zip);
       for (const [name, data] of Object.entries(out)) {
         if (!data) continue;
         const rel = normalizeKey(name);
@@ -186,9 +238,9 @@ function decodePack(entry: PackEntryPayload): Map<string, Bytes> {
     }
     return map;
   }
-  for (const [name, b64] of Object.entries(entry.files)) {
+  for (const [name, bytes] of Object.entries(entry.files)) {
     const rel = normalizeKey(name);  // Folder packs support the same assets/<ns>/ three-layer structure
-    if (rel) map.set(rel, b64ToBytes(b64));
+    if (rel) map.set(rel, bytes);
   }
   return map;
 }

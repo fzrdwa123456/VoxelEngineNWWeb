@@ -22,6 +22,9 @@ import { ROOT, TSC_BIN } from "./paths.mjs";
 
 const NODE = process.execPath;
 const OUT = path.join(ROOT, "node_modules", ".cache", "voxelengine-ecs-check");
+/** A pack file's bytes in the snapshot's own shape. Since P1.18f that shape is BYTES, not base64: the
+ *  transport is one binary body and a file's value is a VIEW into it (see `decodePackSnapshot`). */
+const packBytes = (text) => new Uint8Array(Buffer.from(text, "utf8"));
 
 /** Sources to compile. tsc follows their imports, so this list is "the ECS plus the fixed lane". */
 const SOURCES = [
@@ -89,6 +92,9 @@ const SOURCES = [
   // The widget layer: pure data + one pure style function + the action table + the reconciler. None of
   // them touches the DOM at import time, which is what lets this gate load them.
   "src/data/assets/theme.ts",
+  // The menu background's KIND + SIGNATURE (P1.18g): driven below against synthetic chains, so the file the
+  // pack reload asks "did the backdrop change?" is the real one.
+  "src/data/assets/background.ts",
   "src/plugins/ui/components.ts",
   "src/data/globals/actions.ts",
   // The presentation TOKENS + state shapes are pure data (gfx.ts); the factories that build those objects
@@ -4841,8 +4847,8 @@ check("a PACK can add a block: the discovered table drives the registry (P1.37)"
     builtin: null,
     mods: [],
     resourcepacks: [
-      { name: "packA", builtin: false, files: { "data/blocks.json": Buffer.from(JSON.stringify({ a: {} }), "utf8").toString("base64") } },
-      { name: "packB", builtin: false, files: { "data/blocks.json": Buffer.from(JSON.stringify({ b: {} }), "utf8").toString("base64") } },
+      { name: "packA", builtin: false, files: { "data/blocks.json": packBytes(JSON.stringify({ a: {} })) } },
+      { name: "packB", builtin: false, files: { "data/blocks.json": packBytes(JSON.stringify({ b: {} })) } },
     ],
   };
   const selected = Tex.installPacks(twoPacks, ["packA"]);
@@ -4881,13 +4887,12 @@ check("a PACK can add a block: the discovered table drives the registry (P1.37)"
       name: "test-pack",
       builtin: true,
       files: {
-        "data/blocks.json": Buffer.from(
+        "data/blocks.json": packBytes(
           JSON.stringify({
             demo: { label: "Demo Block", side: "block/demo.png" }, // a texture NO pack ships
             plain: { label: "Plain", color: "#123456" },
           }),
-          "utf8",
-        ).toString("base64"),
+        ),
       },
     },
     mods: [],
@@ -4955,7 +4960,7 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
     builtin: {
       name: "test-pack",
       builtin: true,
-      files: { "lang/xx.json": Buffer.from(JSON.stringify(dict), "utf8").toString("base64") },
+      files: { "lang/xx.json": packBytes(JSON.stringify(dict)) },
     },
     mods: [],
     resourcepacks: [],
@@ -5031,6 +5036,140 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
     "…and the settings PICKER is built from that same set (a pack's language is selectable, not just loadable)");
   assert(!/"zh", "en", "ja"\]/.test(stripComments(readSource("src/data/assets/i18n.ts"))),
     "…and i18n no longer knows any language by name");
+});
+
+// ===== THE MENU BACKDROP IS REBUILT ONLY WHEN IT CHANGED (P1.18g) =====
+check("a pack reload rebuilds the menu backdrop ONLY when its bytes changed", () => {
+  // The reload used to forget the background memo unconditionally and rebuild: correct, and it cost a full
+  // texture rebuild every time — the sample panorama is 2.2 MB, so F7, or toggling a pack that ships no
+  // background at all, paid base64 + PNG decode + a GPU upload on the main thread for a picture that had not
+  // changed. The driver now asks this question instead, and only disposes/re-derives when the answer is true.
+  const Tex = load("data/assets/textures.js");
+  const Bg = load("data/assets/background.js");
+  const png = (text) => new Uint8Array(Buffer.from(text, "utf8"));
+  const chain = (panoramaBytes) => ({
+    builtin: null,
+    mods: [],
+    resourcepacks: [
+      {
+        name: "packA",
+        builtin: false,
+        files: {
+          "backgrounds/background.json": png(JSON.stringify({ mode: "panorama" })),
+          "backgrounds/panorama.png": panoramaBytes,
+        },
+      },
+    ],
+  });
+
+  const first = png("PANORAMA-ONE");
+  Tex.installPacks(chain(first), ["packA"]);
+  equal(Bg.menuBgKind(), "panorama", "the pack's config picks the panorama");
+  equal(
+    Bg.refreshMenuBackground(),
+    false,
+    "re-applying the SAME chain does not ask for a rebuild (this is the F7 case)",
+  );
+  equal(Bg.refreshMenuBackground(), false, "…and it stays settled however often it is asked");
+
+  // A pack that really swapped the image is a rebuild.
+  Tex.installPacks(chain(png("PANORAMA-TWO")), ["packA"]);
+  equal(Bg.refreshMenuBackground(), true, "a pack that changed the image DOES ask for a rebuild");
+  equal(Bg.refreshMenuBackground(), false, "…and then settles again");
+
+  // A chain with no background config at all is the checkerboard — a different kind, so a rebuild.
+  Tex.installPacks({ builtin: null, mods: [], resourcepacks: [] }, []);
+  equal(Bg.refreshMenuBackground(), true, "losing the pack changes the kind (panorama -> checker)");
+  equal(Bg.menuBgKind(), "checker", "…and no config means the checkerboard");
+  equal(Bg.refreshMenuBackground(), false, "…which then settles too");
+
+  // The STATIC kind is signed from its own image, the same way.
+  Tex.installPacks(
+    {
+      builtin: null,
+      mods: [],
+      resourcepacks: [
+        {
+          name: "packA",
+          builtin: false,
+          files: {
+            "backgrounds/background.json": png(JSON.stringify({ mode: "static" })),
+            "backgrounds/mainmenu.png": png("MENU-ONE"),
+          },
+        },
+      ],
+    },
+    ["packA"],
+  );
+  // The memo is re-derived BY THE REFRESH (the driver always calls it right after an install; asking
+  // `menuBgKind()` on its own answers with what the last refresh concluded — the contract it always had).
+  equal(Bg.refreshMenuBackground(), true, "switching to the other mode is a change");
+  equal(Bg.menuBgKind(), "static", "the other mode picks the static image");
+  equal(Bg.refreshMenuBackground(), false, "…and it is signed from that image");
+
+  // The driver's own shape: the dispose + the view refresh are INSIDE the answer.
+  const driver = stripComments(readSource("src/boot/drivers/pack-reload.ts"));
+  assert(/const backdropChanged = refreshMenuBackground\(\);/.test(driver), "the driver asks the question once");
+  assert(
+    /if \(backdropChanged\) \{[\s\S]*?refreshMenuBackdrop\(\);\s*\}/.test(driver),
+    "…and disposes + re-derives the backdrop only when it is true",
+  );
+  // The panorama reaches the GPU from its BYTES (a Blob URL), not from a base64 data URL.
+  const scene = stripComments(readSource("src/plugins/render/systems/menu-background.ts"));
+  assert(
+    /URL\.createObjectURL\(new Blob\(\[bytes\.slice\(\)\]/.test(scene) && !/resolveTexture\(/.test(scene),
+    "the panorama texture is loaded from a Blob URL, not a data: URL",
+  );
+});
+
+// ===== THE PACK TRANSPORT IS BYTES (P1.18f) =====
+check("the pack snapshot arrives as ONE binary body, and decoding it COPIES NOTHING", () => {
+  // Rust hands over `[u32 LE header length][header JSON][blob]` (`packs::snapshot_blob`) and the front
+  // end parses the header and makes views into the blob. Both halves of that framing are pinned here: the
+  // Rust half by the real boot (the chain has to resolve its textures), this half by driving the decoder.
+  // WHY IT MATTERS: the old shape base64-ed every file and the front end decoded each one with `atob` + a
+  // per-byte loop ON THE MAIN THREAD — for a chain the reload re-reads in full, so the sample pack's 2.8 MB
+  // panorama was paid again on every F7.
+  const Tex = load("data/assets/textures.js");
+  const words = packBytes("hello pack");
+  const zip = packBytes("PK-not-really-a-zip");
+  const blob = new Uint8Array(words.length + zip.length);
+  blob.set(words, 0);
+  blob.set(zip, words.length);
+  const header = new TextEncoder().encode(
+    JSON.stringify({
+      builtin: {
+        name: "default.zip",
+        builtin: true,
+        files: [],
+        zip: { name: "default.zip", off: 0, len: words.length },
+      },
+      mods: [
+        { name: "modA", builtin: false, files: [{ name: "data/blocks.json", off: words.length, len: zip.length }] },
+      ],
+      resourcepacks: [],
+    }),
+  );
+  const body = new Uint8Array(4 + header.length + blob.length);
+  new DataView(body.buffer).setUint32(0, header.length, true);
+  body.set(header, 4);
+  body.set(blob, 4 + header.length);
+
+  const snap = Tex.decodePackSnapshot(body.buffer);
+  equal(snap.builtin.name, "default.zip", "the builtin pack survives the round trip");
+  equal(
+    Array.from(snap.builtin.zip).join(","),
+    Array.from(words).join(","),
+    "…and its archive bytes are exactly the blob slice",
+  );
+  equal(snap.mods.length, 1, "one mod pack");
+  equal(snap.mods[0].name, "modA", "…named as the header says");
+  const file = snap.mods[0].files["data/blocks.json"];
+  equal(new TextDecoder().decode(file), new TextDecoder().decode(zip), "…with the file's own bytes");
+  // NOTHING IS COPIED: both values are views into the SAME buffer the IPC handed over.
+  equal(file.buffer, body.buffer, "the file's bytes are a VIEW into the snapshot buffer");
+  equal(snap.builtin.zip.buffer, body.buffer, "…and so is a zip pack's");
+  equal(snap.resourcepacks.length, 0, "an empty list stays empty");
 });
 
 // ===== a language that arrives at RUNTIME (P1.49ag) =====

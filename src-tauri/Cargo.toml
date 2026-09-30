@@ -36,7 +36,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+# `base64` was only ever used by the pack walk, which now hands over raw bytes (P1.18f) — dependency gone.
 # ===== THE WINDOWS-ONLY DEPENDENCIES (P1.79) =====
 # Both are used by exactly ONE file, `src/platform/windows.rs`: `webview2-com` for the native
 # WebView2 settings (plan A: disable the browser accelerator keys, so F3 no longer opens "Find") and

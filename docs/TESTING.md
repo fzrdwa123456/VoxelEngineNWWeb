@@ -724,6 +724,14 @@ world's chunks stale (they are re-meshed at the per-frame budget, not in one hit
 5. The log gets one `PACKS reloaded #1: ...` line with the SAME summary. `files` and the language list are
    the proof that the folders were re-read (this was verified by hand: `files=12 ... zh/en/ja/fr` at boot
    became `files=13 ... zh/en/ja/de=1/fr=2` after a reload that ran while a new `de.json` was created).
+   **THE MENU BACKDROP SAYS WHAT IT DID (P1.18g)**: that line is followed by
+   `PACKS menu backdrop kept (unchanged): kind=panorama; …` when the background the chain resolves is the
+   SAME picture (an F7 with nothing new, or a pack toggled that ships no `backgrounds/`) — and by
+   `re-derived` when it really changed (toggling the sample resource pack on/off is that case, because
+   `backgrounds/background.json` comes and goes with it). The **cost** is the thing to watch: a `kept` reload
+   must produce NO frame over ~25 ms in the `FRAME n=… max=` lines, while a `re-derived` one pays the
+   panorama's PNG decode + GPU upload (measured ~47 ms for the sample pack's 2.2 MB image, against ~93 ms
+   before the texture stopped going through a base64 `data:` URL).
 6. **Failure path**: put a deliberately broken `data/blocks.json` (`{ this is not json`) in a pack, press F7.
    Expected: the toast says `pack reload FAILED — ...`, the log says the previous chain is still in force,
    and the game keeps running on the OLD chain (nothing is half-applied).

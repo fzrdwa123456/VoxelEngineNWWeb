@@ -10,7 +10,7 @@ import { invalidateDictionaries, loadLang } from "../../data/assets/i18n";
 import { declaredLanguages } from "../../data/assets/languages";
 import { resetBlockRegistry, buildBlockRegistry, allBlockIds } from "../../data/assets/blockregistry";
 import { discoverBlockEntries } from "../../data/assets/blocks";
-import { invalidateMenuBackground, menuBgKind } from "../../data/assets/background";
+import { refreshMenuBackground, menuBgKind } from "../../data/assets/background";
 import { notifyConfigChange } from "../../core/services/bus";
 import { CHUNK_MATERIAL, ICON_BAKE, MENU_BACKGROUND } from "../../data/globals/gfx";
 import { UI_PAINT } from "../../data/globals/paint";
@@ -117,26 +117,34 @@ const dropPackDerivedCaches = (): void => {
   //     BUILT, so the view that owns them re-derives them — that is the bug this fixes: a reload used to leave
   //     the old picture up (the recipe still said `menu.backdropImage`, the URL was the previous chain's) and
   //     could not show the new one.
-  invalidateMenuBackground();
-  const bg = deps.world.resource(MENU_BACKGROUND);
-  if (bg.scene) {
-    bg.scene.traverse((object) => {
-      const drawable = object as THREE.Mesh;
-      drawable.geometry?.dispose?.();
-      const material = drawable.material as THREE.Material | THREE.Material[] | undefined;
-      for (const one of Array.isArray(material) ? material : material ? [material] : []) {
-        (one as THREE.MeshBasicMaterial).map?.dispose();
-        one.dispose();
-      }
-    });
-    bg.scene = null;
+  // ONLY WHEN THE BACKDROP ITSELF CHANGED (P1.18g). Forgetting the memo and rebuilding unconditionally was
+  // correct and cost a full texture rebuild every time: the sample panorama is 2.2 MB, so F7 — or toggling a
+  // pack that ships no background at all — paid ~60-90 ms of base64 + PNG decode + GPU upload on the main
+  // thread for a picture that had not changed. `refreshMenuBackground()` re-derives from the chain in force
+  // and answers whether the kind OR the bytes behind it differ.
+  const backdropChanged = refreshMenuBackground();
+  if (backdropChanged) {
+    const bg = deps.world.resource(MENU_BACKGROUND);
+    if (bg.scene) {
+      bg.scene.traverse((object) => {
+        const drawable = object as THREE.Mesh;
+        drawable.geometry?.dispose?.();
+        const material = drawable.material as THREE.Material | THREE.Material[] | undefined;
+        for (const one of Array.isArray(material) ? material : material ? [material] : []) {
+          (one as THREE.MeshBasicMaterial).map?.dispose();
+          one.dispose();
+        }
+      });
+      bg.scene = null;
+    }
+    bg.camera = null;
+    bg.appliedAspect = Number.NaN;
+    deps.refreshMenuBackdrop();
   }
-  bg.camera = null;
-  bg.appliedAspect = Number.NaN;
-  deps.refreshMenuBackdrop();
   deps.log(
-    `PACKS menu backdrop re-derived: kind=${menuBgKind()}; inventory memory cleared ` +
-      `(${inventoryPaint.drawn.length} slot signature(s)), chain gen ${packChainGeneration()}`,
+    `PACKS menu backdrop ${backdropChanged ? "re-derived" : "kept (unchanged)"}: kind=${menuBgKind()}; ` +
+      `inventory memory cleared (${inventoryPaint.drawn.length} slot signature(s)), ` +
+      `chain gen ${packChainGeneration()}`,
   );
 }
 
