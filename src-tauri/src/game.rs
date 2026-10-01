@@ -155,23 +155,28 @@ pub fn append_boot(root: &Path, message: &str) {
     }
 }
 
-// ===== The webview's launch arguments (P1.86) =====
+// ===== The webview's launch arguments (P1.86, extended in P1.89) =====
 // These are FIXED now, and that is the point: a WebView2 argument can only be supplied before the webview
-// exists, so anything the user may switch at runtime must NOT be one. The flag below is what makes that
-// possible: **`--disable-frame-rate-limit`** lifts Chromium's OWN display-rate limit, so rAF stops being
-// pinned to the panel's refresh and the frame rate becomes something the page decides. The vertical-sync
-// switch then lives in the front end (`FPS_CAP.vsync` + `pacingTargetHz`): "synced" paces the loop at the
-// display's measured refresh rate, "unsynced" draws on every vblank.
+// exists, so anything the user may switch at runtime must NOT be one. Two flags are published, and they do
+// different things:
 //
-// **`--disable-gpu-vsync` IS DELIBERATELY NOT HERE (measured, not assumed).** It makes the compositor submit
-// WITHOUT waiting for vertical blank, and with it the synced case measured 55-60fps with 21ms frames — the
-// submits land between the panel's vblanks and the panel repeats frames (judder), because the unthrottled
-// BeginFrame source delivers ~2 callbacks per refresh and a time-based pacer can only submit on a callback.
-// Left OUT, the compositor keeps its vblank-locked presents: the panel shows the newest frame once per
-// refresh, which is the smoothness the switch's "synced" state is FOR. The cost is that "unsynced" cannot
-// tear (a browser presents through its compositor either way) — what it buys instead is a much higher render
-// rate and therefore lower input-to-photon latency.
-const EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit";
+//   * **`--disable-frame-rate-limit`** lifts Chromium's OWN display-rate limit, so rAF stops being pinned to
+//     the panel's refresh and the frame rate becomes something the page decides. The vertical-sync switch then
+//     lives in the front end (`FPS_CAP.vsync` + `pacingTargetHz`): "synced" paces the loop at the display's
+//     measured refresh rate, "unsynced" draws on every vblank.
+//   * **`--disable-gpu-vsync` (P1.89, requested: «把浏览器自带的垂直同步关了试试»)** drops the compositor's
+//     own vertical-blank wait, so a submitted frame is presented IMMEDIATELY instead of at the next refresh —
+//     the closest a WebView gets to a real `vsync off` (it can tear, and the input-to-photon latency stops
+//     depending on the swapchain's vblank alignment).
+//
+// WHAT IT COSTS, MEASURED (P1.86, when this flag was first tried and then left out): with presents unsynced,
+// a draw that lands BETWEEN two panel refreshes is shown mid-scan, so the "synced" in-game mode reads
+// 55-60fps with 21ms worst frames instead of a clean 16.7ms — the panel repeats a frame instead of waiting
+// for the next one. With the in-game switch OFF and the cap unlimited it is the opposite trade: the highest
+// frame rate and the lowest latency, at the price of tearing. So: **sync ON + this flag = worse smoothness
+// than before; sync OFF + this flag = what a game means by vsync off.** The flag is launch-time only, which is
+// why BOTH behaviours have to be reachable from the in-game switch rather than from the flag.
+const EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit --disable-gpu-vsync";
 //
 // THE OLD SHAPE, for the record: this read `config/vsync.json` and appended `--disable-gpu-vsync` only when
 // it said so, which meant the switch could only ever apply at the next launch - and the setting could not be

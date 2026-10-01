@@ -2586,13 +2586,15 @@ check("the frame cap is world state AND a persisted setting", () => {
   assert(/isVsyncOn: cb\.isVsyncOn/.test(stripComments(readSource("src/plugins/ui/views/mainmenu.ts"))) &&
     /isVsyncOn: cb\.isVsyncOn/.test(menuNow), "both settings panels drive the runtime switch");
   const gameRs = readSource("src-tauri/src/game.rs");
-  assert(/EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit"/.test(gameRs),
-    "the launch arguments lift the display-rate limit unconditionally (that is what makes the switch runtime)");
-  // …and `--disable-gpu-vsync` is deliberately ABSENT: it makes the compositor submit between the panel's
-  // vblanks, which the synced case pays for in repeated frames (measured: 21ms frames). The launches are
-  // fixed; this is the one flag they may not carry.
-  assert(!/EXTRA_BROWSER_ARGS: &str = "[^"]*disable-gpu-vsync/.test(gameRs),
-    "…without un-syncing the compositor, so a synced frame still lands on a vblank");
+  assert(/EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit --disable-gpu-vsync"/.test(gameRs),
+    "the launch arguments lift the display-rate limit AND the compositor's vblank wait (P1.89)");
+  // Both flags are LAUNCH-time, so the in-game switch is what decides the behaviour: synced paces the loop at
+  // the display rate, unsynced draws on every vblank and the unsynced present is what makes it visible.
+  assert(/pacingTargetHz\(frameCap\.cap, frameCap\.vsync, frameCap\.refreshHz\)/.test(
+    stripComments(readSource("src/boot/main.ts"))),
+    "…while the rate in force is still the in-game switch's decision");
+  assert(!/vsync_path|read_vsync_disabled|write_vsync_disabled/.test(gameRs),
+    "…and the vsync switch FILE stays gone: nothing about the frame rate needs a relaunch");
   assert(!/vsync_path|read_vsync_disabled|write_vsync_disabled/.test(gameRs),
     "…and the vsync switch FILE is gone: nothing about the frame rate needs a relaunch");
   assert(/pub fn apply_browser_args\(\)/.test(gameRs), "…so the arguments no longer depend on the game root");

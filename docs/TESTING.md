@@ -117,13 +117,19 @@ that used to lie. In a world, open the pause menu → Settings → Graphics:
    rate must be ~55-60/s on a 60Hz panel (`raf=` reads ~108/s — Chromium delivers about two callbacks per
    refresh, which is why a target EQUAL to the panel rate lands a little under it: **KNOWN, measured, and the
    price of the switch being runtime**). With sync OFF and the cap unlimited the rate follows the machine
-   (measured ~490fps on this box, `target=uncapped`) — that jump, within a frame of the click, is the proof the
-   switch works. **`raf=60/s` while the cap is unlimited means the display-rate limit did NOT come off** — the
+   (measured ~490-650fps on this box, `target=uncapped`).
+   **THE BROWSER'S OWN VSYNC IS OFF TOO SINCE P1.89** (`--disable-gpu-vsync`, launch-time): with sync OFF the
+   frame is presented IMMEDIATELY — that is where tearing comes from, and it is what makes this mode behave
+   like a real `vsync off`; with sync ON the same flag means a draw can land between two refreshes, so the
+   `max` column reads 21-36ms instead of a clean 16.7ms (the panel repeats a frame). If sync ON looks WORSE
+   than it used to, that is this flag, and it is one line in `game.rs::EXTRA_BROWSER_ARGS` to take back out.
+   **`raf=60/s` while the cap is unlimited means the display-rate limit did NOT come off** — the
    launch arguments are printed one line above as `BOOT webview args: …` and must contain
-   `--disable-frame-rate-limit` (and must NOT contain `--disable-gpu-vsync`: that one makes the synced case
-   submit between vblanks).
+   `--disable-frame-rate-limit`.
    A rate well below the callback rate is EXACT: set the FPS cap to 30 and the log must read `target=30.00fps`
-   with `avg≈33.3ms` and `n≈30` — that is the pacing arithmetic doing its job.
+   with `avg≈33.3ms` and `n≈30` — that is the pacing arithmetic doing its job. The 60..200 band is NOT
+   honoured (measured: `target=96fps` drew ~60fps with 21-36ms worst frames), which is the judder a
+   non-divisor of the refresh always produces.
 4. The boot line is real now: `BOOT render=rAF(pacing 59.94fps; vsync=on; cap=unlimited; display=59.94Hz)`.
    `display=` is the PLATFORM's answer in milli-Hz (a 59.94Hz panel must read 59.94, not 60 — rounding it is
    what makes a "locked 60" stutter once every ~16 s), and `unknown` must still pace at 60, never uncapped.

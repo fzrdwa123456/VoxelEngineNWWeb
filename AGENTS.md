@@ -341,7 +341,10 @@ asserted. Three consequences worth knowing:
   browser really let go (60 next to 60 = it did not);
 * **what this still cannot do** is switch the GPU's present mode (FIFO / immediate) at runtime: that is a
   swapchain concept and no browser exposes one. Pacing is what the switch's label promises, and the old
-  shape — a `config/vsync.json` file plus a "restart to apply" hint — is gone along with the file.
+  shape — a `config/vsync.json` file plus a "restart to apply" hint — is gone along with the file. The
+  compositor's own vblank wait IS switched off, but only at LAUNCH (`--disable-gpu-vsync`, P1.89), so it is a
+  property of the process, not of the in-game switch: with it on, "synced" can repeat a frame (a draw that
+  lands mid-refresh is shown as it is) and "unsynced" is a real immediate present — tearing included.
   **AND THE SYNCS ARE NOT ALL EQUAL (measured)**: a target equal to the panel rate lands at ~57fps rather than
   60, because the unthrottled callback rate (~1.8 per panel refresh) does not divide into the panel's rate —
   see `paceFrame`'s note. `--disable-gpu-vsync` is deliberately NOT in the launch arguments either (it made the
@@ -809,9 +812,12 @@ untouched.
   (the config had `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`, the host's list did not,
   so switching vsync off silently re-enabled those three components).
   **Since P1.86 the list is FIXED** (`game.rs::EXTRA_BROWSER_ARGS` = `--disable-gpu-vsync
-  --disable-frame-rate-limit`) — nothing the user can switch may be a launch argument, because a launch
-  argument can only apply at the next launch. What those two flags buy is a *page-decided* frame rate; see
-  the pacing note in the frame-loop section.
+  --disable-frame-rate-limit`, the second flag added in P1.89) — nothing the user can switch may be a launch
+  argument, because a launch argument can only apply at the next launch. What those two flags buy is a
+  *page-decided* frame rate AND an immediately-presented frame; what they cost is that a SYNCED draw can land
+  between two refreshes and the panel then repeats a frame (measured: 21ms worst frames with sync on). Both
+  behaviours come from the same flag, so the in-game vertical-sync switch is what picks between them; see the
+  pacing note in the frame-loop section.
 - **NEVER move a window flag into `tauri.windows.conf.json`** (learned the hard way, P1.80): the platform
   overlay is merged with `json_patch::merge` (RFC 7386) - objects merge recursively, **arrays are REPLACED
   wholesale** - so a partial `app.windows: [{ label, ... }]` entry silently drops `center`, the size,

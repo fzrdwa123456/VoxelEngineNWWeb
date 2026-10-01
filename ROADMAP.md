@@ -2371,6 +2371,18 @@ Still outstanding:
     4 Hz AND only while the F3 panel is visible.
   VERIFIED: `tsc` 0; `check:ecs` 75/75 with both facts asserted (the coalescing, the sampling interval and the
   panel gate); and a real run with sync OFF for a minute holds a flat frame time instead of drifting.
+- **P1.89 — the browser's OWN vsync is turned off too (an experiment, by request).** `DONE`, by request
+  («把浏览器自带的垂直同步关了试试»). P1.86 pinned the launch arguments to `--disable-frame-rate-limit` only,
+  on the measured grounds that un-syncing the compositor's present made the *synced* case worse (21ms worst
+  frames). This round adds `--disable-gpu-vsync` back, so the WebView presents immediately instead of at the
+  next refresh: the unsynced in-game mode now behaves like a real `vsync off` (higher rate, lower
+  input-to-photon latency, and it can TEAR), at the cost that the SYNCED mode submits between refreshes and
+  the panel repeats frames. Both are the same launch flag, so the in-game switch is still what picks between
+  them — see `game.rs::EXTRA_BROWSER_ARGS` for the measurement that goes with each combination.
+  What this does NOT change: the panel is still a 60Hz metronome, so a frame rate that is not a divisor of it
+  (96/100/228…) still cannot be phase-locked, and the achieved rate in the 60..200 band still does not follow
+  the cap (measured: `target=96fps` → ~60fps drawn with 21-36ms worst frames). The cure for THAT is still a
+  DWM vblank clock (P1.86's open item).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
