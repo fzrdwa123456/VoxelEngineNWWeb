@@ -1,4 +1,5 @@
 import * as THREE from "three/webgpu";
+import { invoke } from "@tauri-apps/api/core";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, paceFrame, pacingTargetHz, refreshHzFromMilliHz, type InputDiagnostics } from "../data/globals/resources";
@@ -856,6 +857,9 @@ const onSetVsync = (on: boolean): void => {
   // HANDED the value, like the cap: the command applies at the next barrier, so reading the resource here
   // would persist the state the user just left (measured: the file kept flipping back to the previous value).
   saveSettings({ vsync: on });
+  // …and the NATIVE layer switches its present mode on the next frame (P1.87). That is the switch this
+  // round was for: a real present mode, changed while the game runs, with no relaunch.
+  if (nativeActive) void invoke("native_vsync", { vsync: on }).catch(() => {});
   const target = pacingTargetHz(frameCap.cap, on, frameCap.refreshHz);
   logDebug(
     `VSYNC ${on ? "on" : "off"} (applies immediately): target ` +
@@ -1475,6 +1479,11 @@ function frame(): void {
   // Diagnostics go last — and only for a DRAWN frame: what the FRAME line measures is the interval between
   // frames, so a skipped vblank must not enter it (see `paceWantsFrame`).
   if (drew) frameProbe();
+  // The native layer (P1.87) gets the camera the game just rendered with, once per drawn frame.
+  if (nativeActive) {
+    pushNativePose();
+    syncNativeUi();
+  }
   requestAnimationFrame(frame);
 }
 
@@ -1553,3 +1562,98 @@ void startGame().catch((err: unknown) => {
   // showing the main menu would offer buttons that cannot work.
   logDebug(`BOOT failed: ${String((err as Error)?.message ?? err)}`);
 });
+
+// ===== THE NATIVE RENDER LAYER (P1.87) =====
+// When `settings.json` asks for it (`"renderer": "native"`), the world is drawn by RUST + wgpu on a child
+// window behind the transparent WebView, and this side only pushes the camera. **It is opt-in and it FAILS
+// SAFE**: a native layer that cannot start keeps the web renderer and says so in the log, because a blank
+// screen is not an acceptable outcome for a renderer switch.
+//
+// What it buys, measured in `logs\debug.log` as a `NATIVE …` line once a second: the present mode is the
+// game's own vertical-sync setting (switched at runtime, no relaunch) instead of the WebView compositor's, and
+// the frame rate is ours.
+interface NativePose {
+  x: number;
+  y: number;
+  z: number;
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
+  fovY: number;
+  width: number;
+  height: number;
+}
+
+let nativeActive = false;
+let nativeUiShown = true;
+const nativePose: NativePose = { x: 0, y: 0, z: 0, qx: 0, qy: 0, qz: 0, qw: 1, fovY: 75, width: 1, height: 1 };
+
+/** The UI hand-off (P1.87, measured): WebView2's *windowed* hosting paints opaque over a native child window,
+ *  so the two layers cannot be on screen at once. With a WORLD running the webview is shrunk to 1x1 (it stays
+ *  visible — Chromium throttles a hidden page's rAF, and the game loop lives there), and everywhere else —
+ *  startup, loading screen, menus — it is restored to the full client area, so the HTML UI keeps its layout and
+ *  its live resize exactly as before. */
+const syncNativeUi = (): void => {
+  if (!nativeActive) return;
+  // …and a MODAL UI counts as "the HTML side needs the screen": the pause menu and the backpack are opened
+  // while a world runs (the mode stays "game"), so hiding the page there would hide the menu itself.
+  const wantUi = loop.mode !== "game" || uiOpen();
+  if (wantUi === nativeUiShown) return;
+  nativeUiShown = wantUi;
+  void invoke("native_ui", { show: wantUi }).catch(() => {});
+};
+
+/** Push the camera the game is actually rendering with (the three.js camera: it IS the view the player sees,
+ *  whatever draws the pixels). Called once per frame while the native layer runs. */
+const pushNativePose = (): void => {
+  const vp = world.resource(VIEWPORT);
+  camera.updateMatrixWorld();
+  const q = camera.quaternion;
+  nativePose.x = camera.position.x;
+  nativePose.y = camera.position.y;
+  nativePose.z = camera.position.z;
+  nativePose.qx = q.x;
+  nativePose.qy = q.y;
+  nativePose.qz = q.z;
+  nativePose.qw = q.w;
+  nativePose.fovY = camera.fov;
+  nativePose.width = vp.width;
+  nativePose.height = vp.height;
+  void invoke("native_pose", { pose: nativePose }).catch(() => {});
+};
+
+/** Make the page let the native layer show through: the stylesheet paints `html, body` black and the canvas
+ *  would cover the window, so both are turned off here. The UI's own panels keep their backgrounds (they are
+ *  the interface), which is exactly the split this renderer is for. */
+const goTransparent = (): void => {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+  renderer.domElement.style.display = "none";
+  const mount = world.resource(UI_MOUNT) as unknown as HTMLElement | null;
+  if (mount) mount.style.background = "transparent";
+};
+
+const startNativeLayer = async (): Promise<void> => {
+  // ON unless the settings file says `"renderer": "web"`: this round exists to be tested, and the fallback
+  // below is what makes that safe. The line is logged either way, so the choice in force is never a guess.
+  if (readSettings().renderer === "web") {
+    logDebug("NATIVE renderer off (settings.json renderer=web): the web renderer draws the world");
+    return;
+  }
+  try {
+    const summary = await invoke<string>("native_start", { vsync: frameCap.vsync });
+    nativeActive = true;
+    goTransparent();
+    logDebug(`NATIVE renderer live: ${summary} · vsync=${frameCap.vsync ? "on" : "off"}`);
+    // The web world is now invisible, so its frame rate is no longer the interesting number; the native
+    // loop logs its own once a second (see the Rust side). One line here says which renderer is live.
+    logDebug("NATIVE the web canvas is hidden (the HTML UI floats over the native world)");
+  } catch (err) {
+    // FAIL SAFE: keep drawing with three.js and say why.
+    nativeActive = false;
+    logDebug(`NATIVE renderer unavailable, keeping the web renderer: ${String(err)}`);
+  }
+};
+
+void startNativeLayer();

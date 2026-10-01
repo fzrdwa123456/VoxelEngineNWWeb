@@ -198,6 +198,16 @@ pub fn display_refresh_milli_hz() -> u32 {
     0
 }
 
+/// Make the WebView's own default background TRANSPARENT, so a native render layer behind it is visible
+/// wherever the page does not paint (P1.87). A no-op off Windows (no native layer there yet).
+#[cfg(target_os = "windows")]
+pub fn make_webview_transparent(window: &WebviewWindow, log_root: PathBuf) {
+    windows::make_webview_transparent(window, log_root)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn make_webview_transparent(_window: &WebviewWindow, _log_root: PathBuf) {}
+
 pub fn native_window(window: &WebviewWindow) -> Option<NativeWindow> {
     CURSOR.native_window(window)
 }

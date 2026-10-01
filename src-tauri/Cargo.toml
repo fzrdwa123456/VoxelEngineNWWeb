@@ -50,7 +50,29 @@ serde_json = "1"
 # Both are opt-in in the `windows` crate, hence spelled out here.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }
+
+# ===== THE NATIVE RENDER LAYER (P1.87) =====
+# `wgpu` draws the world on a native child window behind the transparent WebView, which is the only way to get
+# a REAL vertical-sync switch (a present mode) and full control of the frame rate - the browser's compositor
+# owns both of those on its own terms. `bytemuck` moves the vertex/uniform bytes, `pollster` blocks on the
+# adapter/device futures (the render thread is synchronous on purpose: it owns the frame).
+# TARGET-GATED with the Windows backend, because the child window and the surface are Win32 objects.
+[target.'cfg(windows)'.dependencies.wgpu]
+version = "30"
+default-features = false
+features = ["std", "dx12", "wgsl", "parking_lot"]
+
+[target.'cfg(windows)'.dependencies.bytemuck]
+version = "1"
+features = ["derive"]
+
+[target.'cfg(windows)'.dependencies.pollster]
+version = "0.4"
+
+[target.'cfg(windows)'.dependencies.raw-window-handle]
+version = "0.6"
+
 
 # Raw mouse input and SetCursorPos declare `extern "system"` directly (copied from the original
 # rawinput/src/lib.rs), and deliberately do **not** pull in the windows crate: one less dependency
