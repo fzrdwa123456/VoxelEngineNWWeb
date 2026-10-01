@@ -1,4 +1,6 @@
 // ===== Chunk meshing: face-culled geometry, one MATERIAL GROUP per block look (P1.46) =====
+// (The SCAN lives in `data/world/mesh.ts` since P1.18h — pure, so a Worker can run it; this file is the
+//  GPU side: reusable buffers, the group/material mapping and the pack-chain look resolution.)
 // A face is emitted only when the neighbour on that side is not solid, so:
 //   - a uniformly AIR chunk draws nothing at all (the whole build space is free);
 //   - a uniformly solid chunk with solid neighbours yields NO faces — the streaming system
@@ -40,8 +42,10 @@ import {
   type ChunkFaceSpec,
   type ChunkMaterialState,
 } from "../../data/globals/gfx";
-import { CORNER_UVS, FACES, type Face } from "../../data/globals/faces";
-import { AIR, CHUNK_SIZE, type Chunk } from "../../data/world/chunk";
+import { CHUNK_SIZE } from "../../data/world/chunk";
+// The PURE mesher (P1.18h): the walk itself, plus the input gatherer that turns a chunk and its neighbour
+// planes into bytes a Worker can take.
+import { gatherChunkMeshInput, meshChunk, type MeshResult } from "../../data/world/mesh";
 import type { VoxelWorld } from "../../data/world/world";
 import { getBlockDef } from "../../data/assets/blockregistry";
 import { CHECKER_TEXTURE_URL, resolveTexture } from "../../data/assets/textures";
@@ -93,9 +97,16 @@ function specFor(id: string, kind: number): ChunkFaceSpec {
   return { key: "checker", texture: CHECKER_TEXTURE_URL, color: null };
 }
 
-/** One chunk's reusable geometry. A rebuild is a single `rebuild()` call: it overwrites the existing
+/** One chunk's reusable geometry. A rebuild is a single `apply()` call: it overwrites the existing
  *  typed arrays, so nothing is allocated and no GPU buffer is touched as long as the face count
- *  stays within the capacity already reserved for this chunk. */
+ *  stays within the capacity already reserved for this chunk.
+ *
+ *  ===== THE SCAN IS NOT HERE ANY MORE (P1.18h) =====
+ *  The face-culling walk lives in `data/world/mesh.ts` as a PURE function (`meshChunk`: voxel bytes in,
+ *  typed arrays out), because that is what a Worker can run — and the same function is this class's own
+ *  fallback, so the off-thread path and the on-thread path cannot drift. This class is now only the GPU
+ *  side of it: reuse the buffers, copy the result in, resolve the LOOKS to materials (`specFor`) and move
+ *  the draw range. */
 export class ChunkGeometry {
   readonly geometry = new THREE.BufferGeometry();
   /** One look per material group, in `geometry.groups` order (the caller resolves them to materials). */
@@ -110,12 +121,6 @@ export class ChunkGeometry {
   private indexAttr: THREE.Uint32BufferAttribute;
   private capacityFaces: number;
   private faceCount = 0;
-  /** Per-scan look bookkeeping: (value, kind) -> slot, how many faces each slot got, where its slice starts
-   *  and how far it has been written. Cleared at the start of every rebuild. */
-  private readonly slotOf = new Map<number, number>();
-  private readonly slotFaces: number[] = [];
-  private readonly slotStart: number[] = [];
-  private readonly slotCursor: number[] = [];
 
   constructor() {
     this.capacityFaces = CHUNK_FACES_INITIAL;
@@ -146,50 +151,63 @@ export class ChunkGeometry {
     return this.faceCount;
   }
 
-  /** Rebuild this chunk's mesh in place. Returns the number of faces emitted (0 = nothing visible,
-   *  in which case the caller should drop the mesh). `cx/cy/cz` may be unwrapped: VoxelWorld wraps
-   *  X/Z for both the chunk lookup and the neighbour tests. */
-  rebuild(voxel: VoxelWorld, cx: number, cy: number, cz: number): number {
+  /** Build this chunk's mesh IN PLACE from a pure mesher's result. Returns the number of faces drawn
+   *  (0 = nothing visible, in which case the caller drops the mesh). `cx/cy/cz` are the chunk identity
+   *  only for the LOOK lookup — the geometry itself is chunk-local.
+   *
+   *  The look bookkeeping is the reason a slot KEY carries its voxel value: the palette and the block table
+   *  (and, behind them, the pack chain) live on this side, so the mesher hands over `(value, kind)` and this
+   *  method resolves it with the SAME `specFor` the old in-place scan used, in the same first-seen order. */
+  apply(voxel: VoxelWorld, mesh: MeshResult): number {
     this.faceCount = 0;
     this.specs.length = 0;
-    this.slotOf.clear();
-    this.slotFaces.length = 0;
     this.geometry.clearGroups();
 
-    const chunk = voxel.getChunk(cx, cy, cz);
-    if (chunk === null || (chunk.isUniform && chunk.uniformValue === AIR)) {
+    if (mesh.faces === 0) {
       this.geometry.setDrawRange(0, 0);
       return 0;
     }
-    // Interior voxels of a uniform chunk are surrounded by solid on all six sides -> no faces
-    const uniformSolid = chunk.isUniform && chunk.uniformValue !== AIR;
 
-    // Pass A: count the faces of every look, so each one can be given a contiguous slice.
-    this.scan(voxel, chunk, cx, cy, cz, uniformSolid, true);
-    let total = 0;
-    this.slotStart.length = this.specs.length;
-    this.slotCursor.length = this.specs.length;
-    for (let slot = 0; slot < this.specs.length; slot++) {
-      this.slotStart[slot] = total;
-      this.slotCursor[slot] = total;
-      const faces = this.slotFaces[slot];
-      if (faces > 0) this.geometry.addGroup(total * 6, faces * 6, slot);
-      total += faces;
+    // Capacity first (this may replace the attributes), then ONE copy per channel.
+    this.reserve(mesh.faces);
+    this.positions.set(mesh.positions);
+    this.normals.set(mesh.normals);
+    this.uvs.set(mesh.uvs);
+    this.indices.set(mesh.indices);
+    this.faceCount = mesh.faces;
+
+    for (let slot = 0; slot < mesh.slots.length; slot++) {
+      const { key, start, count } = mesh.slots[slot];
+      const value = key >>> 2;
+      const kind = key & 3;
+      // The palette lives on the world (P1.47), and an id it does not name falls back to the engine
+      // untextured block, which resolves to the checker — a value outside the palette still draws SOMETHING.
+      this.specs.push(specFor(voxel.idOf(value) ?? "missing", kind));
+      if (count > 0) this.geometry.addGroup(start * 6, count * 6, slot);
     }
-    if (total > 0) {
-      this.reserve(total);
-      // Pass B: the SAME walk, in the same order, writing into the slices pass A reserved.
-      this.scan(voxel, chunk, cx, cy, cz, uniformSolid, false);
-      this.faceCount = total;
-      // Same arrays, same length -> three.js re-uploads into the EXISTING GPU buffers
-      this.positionAttr.needsUpdate = true;
-      this.normalAttr.needsUpdate = true;
-      this.uvAttr.needsUpdate = true;
-      this.indexAttr.needsUpdate = true;
-    }
+
+    // Same arrays, same length -> three.js re-uploads into the EXISTING GPU buffers
+    this.positionAttr.needsUpdate = true;
+    this.normalAttr.needsUpdate = true;
+    this.uvAttr.needsUpdate = true;
+    this.indexAttr.needsUpdate = true;
     // Indexed geometry: drawRange counts INDICES, and a face is 6 of them
     this.geometry.setDrawRange(0, this.faceCount * 6);
     return this.faceCount;
+  }
+
+  /** The SYNCHRONOUS path: gather on this thread, mesh, apply. Used when no worker pool is injected (the
+   *  Node gate, a stub world) and for the block edits the player is waiting on. */
+  rebuild(voxel: VoxelWorld, cx: number, cy: number, cz: number): number {
+    const chunk = voxel.getChunk(cx, cy, cz);
+    if (chunk === null) {
+      this.faceCount = 0;
+      this.specs.length = 0;
+      this.geometry.clearGroups();
+      this.geometry.setDrawRange(0, 0);
+      return 0;
+    }
+    return this.apply(voxel, meshChunk(gatherChunkMeshInput(voxel, chunk, cx, cy, cz)));
   }
 
   dispose(): void {
@@ -201,95 +219,6 @@ export class ChunkGeometry {
     this.geometry.setAttribute("normal", this.normalAttr);
     this.geometry.setAttribute("uv", this.uvAttr);
     this.geometry.setIndex(this.indexAttr);
-  }
-
-  /** The look slot for one face, created on first use (so `specs`/`slotFaces` grow in first-seen order). */
-  private slotFor(voxel: VoxelWorld, value: number, face: Face): number {
-    const kind = face.dir[1] === 1 ? 0 : face.dir[1] === -1 ? 1 : 2;
-    const key = (value << 2) | kind;
-    const hit = this.slotOf.get(key);
-    if (hit !== undefined) return hit;
-    const slot = this.specs.length;
-    this.slotOf.set(key, slot);
-    // The palette lives on the world (P1.47), and an id it does not name falls back to the engine untextured
-    // block, which resolves to the checker below ? a value outside the palette still draws SOMETHING.
-    this.specs.push(specFor(voxel.idOf(value) ?? "missing", kind));
-    this.slotFaces[slot] = 0;
-    return slot;
-  }
-
-  /** One walk over the chunk's emissive voxels. `counting` picks the pass; both passes MUST visit faces in
-   *  the same order, which they do because nothing here depends on the counts. */
-  private scan(
-    voxel: VoxelWorld,
-    chunk: Chunk,
-    cx: number,
-    cy: number,
-    cz: number,
-    uniformSolid: boolean,
-    counting: boolean,
-  ): void {
-    const S = CHUNK_SIZE;
-    const gx0 = cx * S;
-    const gy0 = cy * S;
-    const gz0 = cz * S;
-
-    // Neighbour solidity, local-first: inside this chunk it is a plain array read, and only the
-    // boundary shell pays for a VoxelWorld lookup (which is what handles wrapping and Y limits).
-    // This matters a lot once the world is editable: writing one block clears the chunk's uniform
-    // flag, and without the fast path every one of the 32^3 voxels' neighbour tests would become
-    // a Map lookup — far too slow to re-mesh on each block edit.
-    const solidAt = (lx: number, ly: number, lz: number): boolean =>
-      lx >= 0 && lx < S && ly >= 0 && ly < S && lz >= 0 && lz < S
-        ? chunk.get(lx, ly, lz) !== AIR
-        : voxel.isSolid(gx0 + lx, gy0 + ly, gz0 + lz);
-
-    for (let ly = 0; ly < S; ly++) {
-      for (let lz = 0; lz < S; lz++) {
-        for (let lx = 0; lx < S; lx++) {
-          if (uniformSolid && lx > 0 && lx < S - 1 && ly > 0 && ly < S - 1 && lz > 0 && lz < S - 1) continue;
-          const value = chunk.get(lx, ly, lz);
-          if (value === AIR) continue;
-
-          for (const face of FACES) {
-            if (solidAt(lx + face.dir[0], ly + face.dir[1], lz + face.dir[2])) continue;
-            const slot = this.slotFor(voxel, value, face);
-            if (counting) this.slotFaces[slot]++;
-            else this.writeFace(this.slotCursor[slot]++, lx, ly, lz, face);
-          }
-        }
-      }
-    }
-  }
-
-  /** Write one face straight into the typed arrays (no intermediate JS array, so no garbage). The face index
-   *  is GIVEN: pass B hands out each look's slice in order, which is what makes the groups contiguous. */
-  private writeFace(faceIndex: number, lx: number, ly: number, lz: number, face: Face): void {
-    const firstVertex = faceIndex * 4;
-    const positionOffset = firstVertex * 3;
-    const uvOffset = firstVertex * 2;
-
-    for (let i = 0; i < 4; i++) {
-      const corner = face.corners[i];
-      const p = positionOffset + i * 3;
-      this.positions[p] = lx + corner[0];
-      this.positions[p + 1] = ly + corner[1];
-      this.positions[p + 2] = lz + corner[2];
-      this.normals[p] = face.normal[0];
-      this.normals[p + 1] = face.normal[1];
-      this.normals[p + 2] = face.normal[2];
-      const u = uvOffset + i * 2;
-      this.uvs[u] = CORNER_UVS[i][0];
-      this.uvs[u + 1] = CORNER_UVS[i][1];
-    }
-
-    const io = faceIndex * 6;
-    this.indices[io] = firstVertex;
-    this.indices[io + 1] = firstVertex + 1;
-    this.indices[io + 2] = firstVertex + 2;
-    this.indices[io + 3] = firstVertex;
-    this.indices[io + 4] = firstVertex + 2;
-    this.indices[io + 5] = firstVertex + 3;
   }
 
   /** Make room for `needed` faces (pass B knows the total before it starts, unlike the old per-face

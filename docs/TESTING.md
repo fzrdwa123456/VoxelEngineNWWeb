@@ -22,6 +22,16 @@ is ALREADY there — no streaming-in. Press ESC or E while that screen is up: no
 pause menu and the backpack are refused until a world runs). Then go back to the main menu and enter
 again: the second entry must be INSTANT, with no screen at all (the window around the spawn point is
 still built — `WORLD already warm, entering without a screen` in `debug.log`).
+**THE MESHING WORKERS (P1.18h)**: the boot log must carry `RENDER meshing: N worker(s)` where N is
+`hardwareConcurrency - 1` (11 on a 12-thread machine) — `main thread only` means the Worker never started, and
+then everything below still works but the entry is slow again. The FIRST entry is the thing to watch:
+`WORLD ready at NNNms` should be well under a second (it was ~2300 ms while the main thread meshed the window
+by itself; measured 97 ms with 11 workers) because the spawn window's chunks are meshed in parallel. The world
+must look EXACTLY as before (the same checker ground — a worker that produced different geometry would show as
+holes or wrong faces), the first frames after the entry may run 40–50 ms (the GPU uploads the new meshes) and
+`stalls` must stay 0. Then check the one path that stays on the main thread: **dig and place a block** — the
+block must change on the SAME click, not a frame or two later (block edits are deliberately not sent to a
+worker), and digging the block you stand on must still drop you correctly.
 At the MAIN MENU (and on the loading screen) the GAMEPLAY UI must be absent: no crosshair, no hotbar,
 and the hotbar's slots must not respond to a click. F3 must do nothing there, and F3+F4 must not open
 the mode picker — check the same at the pause menu, where F3 MUST still work (a world is running). Then

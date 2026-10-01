@@ -1259,6 +1259,39 @@ Still outstanding:
   STILL ON THE ROUTE (deliberately not done): the panorama's PNG DECODE + GPU UPLOAD (~35 ms of what is left)
   cannot be skipped when the picture really changes; Worker-pool chunk generation/meshing is step 2, and it
   waits for real terrain to be worth measuring.
+- **P1.18h — the FIRST real multi-core path: chunk meshing runs on WORKERS.** `DONE`. Step 2 of the route, and
+  the reason it does not touch the schedule at all: meshing is one INDEPENDENT JOB per chunk, so it needs no
+  batch model, no archetypes and no shared world — it needs a pure function and a transport.
+  * `data/world/mesh.ts` is that function (`meshChunk`): voxel BYTES in, positions/normals/uvs/indices plus the
+    look slots out. No three.js, no GPU, no block table, no `VoxelWorld` — and it is ALSO the main thread's own
+    path (`ChunkGeometry.rebuild` = gather → `meshChunk` → `apply`), so a worker path that computed something
+    slightly different is impossible: there is one mesher, used twice.
+  * the INPUT is deliberately small: the chunk's own voxels are left out entirely while the chunk is UNIFORM
+    (the value says everything and the scan only visits the boundary shell — which is the case the whole flat
+    world is in), and the only outside information is six 32×32 neighbour SOLIDITY planes. Both are built fresh
+    per job and TRANSFERRED, never copied.
+  * the looks come back as KEYS (`(voxel value << 2) | kind`): the palette, the block table and the pack chain
+    behind them are main-thread state, so `ChunkGeometry.apply` resolves each key with the SAME `specFor` the
+    old in-place scan used. A chunk's material list is identical whichever thread meshed it.
+  * `host/browser/mesh-pool.ts` owns `hardwareConcurrency - 1` workers and only produces a QUEUE; the render
+    lane's `chunk.stream` step drains it and applies the results INSIDE the lane, so nothing touches the scene
+    from a worker callback and the order stays deterministic. `CHUNK_MESHES.inFlight` is the validity token — a
+    key that left it was rebuilt on this thread (a block edit) or left the window, so a late result is dropped
+    instead of overwriting fresher geometry.
+  * BLOCK EDITS STAY ON THE MAIN THREAD on purpose (the player is watching one block; a round trip would put
+    the mesh a frame or two behind the click) and so does a world with no workers: the pool is an INJECTED
+    capability (a `host/` object the plugin may not import), and absent = exactly the behaviour before this
+    round. A worker that dies answers `null` for its job and that chunk is meshed on the main thread, so a
+    failure costs a frame and never a hole.
+  VERIFIED: `tsc` 0; `check:ecs` **74/74** with a group of its own — the pure mesher's faces/slots/fast paths
+  driven directly, the queue→drain→apply orchestration with the REAL mesher behind a fake transport, one job
+  per chunk in flight, the failure fallback, and the two thread rules (an edit stays local, a pack reload's
+  stale chunks go to the workers); the package builds a `dist/assets/mesh-worker-*.js` chunk of its own; and on
+  a real run the boot logs `RENDER meshing: 11 worker(s)` while entering a world went from
+  **`WORLD ready at 2301ms` to 97ms** (same click path, same spawn window), with `mode=game locked=1`, 60 fps
+  and `stalls=0` afterwards. STILL OPEN: chunk GENERATION is still on the main thread (it is cheap now — a
+  uniform fill per chunk — and it owns the world's `Map`, so it is the next thing to move once terrain is real),
+  and nothing else has been parallelized: the schedule's batches remain computed-not-executed.
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`

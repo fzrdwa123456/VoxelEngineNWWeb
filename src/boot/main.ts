@@ -120,7 +120,8 @@ import { createPackReloadDriver } from "./drivers/pack-reload";
 import { createStartupDriver } from "./drivers/startup";
 import type { PluginHost } from "../core/plugin/host";
 // The render plugin's MESHER type (a `host/` object the root builds and hands in as a host instance).
-import type { ChunkMeshFactory } from "../plugins/render";
+import type { ChunkMeshFactory, MeshWorkerPool } from "../plugins/render";
+import { createMeshWorkerPool } from "../host/browser/mesh-pool";
 // (the diagnostics, world, player, input and content-default plugins are DISCOVERED now: each folder owns a
 //  `plugin.ts` that builds it from the host's instances — see `boot/plugin-catalog.ts` and P1.18b.)
 import { createMainMenu, createPauseMenu, createUiViews } from "../plugins/ui";
@@ -496,6 +497,12 @@ world.insertResource(F3_PANEL, hud.debugPanelEntities);
 // CAMERA3D, the chunk stream takes the CHUNK_MESHES cache — the presentation objects are resources now,
 // so no system is handed one. See ecs/presentation.ts.
 const chunkMeshFactory: ChunkMeshFactory = { createGeometry: () => new ChunkGeometry(), getMaterial: getChunkMaterial };
+// …AND THE MESHING WORKER POOL (P1.18h): chunk meshing is the engine's densest per-frame CPU work, and it is
+// independent per chunk, so it runs on `hardwareConcurrency - 1` workers. The pool is a `host/` object (it
+// creates Workers), handed in as a host instance like the mesher itself; if the environment has no Worker the
+// pool reports 0 and the chunk stream keeps meshing on this thread. The results are applied inside the render
+// lane (`chunk.stream` drains them), so nothing touches the scene from a worker callback.
+const meshPool: MeshWorkerPool = createMeshWorkerPool();
 // THE RENDER HANDLES COME FROM THE PLUGIN THAT PUBLISHES THEM (P1.45): the render plugin is DISCOVERED
 // now, so the root no longer CONSTRUCTS it - but the boot driver still primes and warms the chunk stream,
 // and the published resource is how it reaches the very instance the plugin registered.
@@ -622,6 +629,7 @@ const pluginHost: PluginHost = {
   instances: {
     keybindEntries,
     chunkMeshFactory,
+    meshPool,
     mouseCapture: { capture: (dom: HTMLElement) => captureMouse(dom), release: releaseMouse },
     // The F3 DEBUG PANEL widget: it belongs to the ui plugin's HUD VIEW, whose construction is the root's
     // (spawning is a structural change, and `diagnostics` reads the handles before the plugins are built), so

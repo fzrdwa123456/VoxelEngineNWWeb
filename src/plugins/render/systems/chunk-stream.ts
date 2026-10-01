@@ -29,6 +29,7 @@ import {
 import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
+import { gatherChunkMeshInput, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
 /** Declared access. Reads the player's position and writes the block world plus the GPU meshes —
@@ -63,6 +64,25 @@ export interface ChunkMeshFactory {
   createGeometry(): ChunkMeshEntry["geom"];
   getMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material;
 }
+
+/** ONE finished meshing job, as this lane sees it (P1.18h). Declared here for the same reason the factory is:
+ *  the pool is a `host/` object, and a plugin may not import it — so the shape lives on this side and the
+ *  host's pool satisfies it structurally. */
+export interface MeshJobDone {
+  readonly key: string;
+  /** The mesh, or null when the worker failed or died: that chunk is then meshed on THIS thread, so a
+   *  broken worker degrades into the old behaviour instead of leaving a hole in the world. */
+  readonly result: MeshResult | null;
+}
+
+/** The main-thread half of the worker pool. `request` returning false means "saturated, ask again later". */
+export interface MeshWorkerPool {
+  request(key: string, input: ChunkMeshInput): boolean;
+  take(): MeshJobDone[];
+  readonly inFlight: number;
+  readonly workers: number;
+}
+
 /** Default so a drive-by test — and the Node gate, which drives `prime`/`needsWarmUp` on a stub voxel —
  *  can construct this system without a GPU: a geometry that is never drawn and a material that never
  *  renders. The composition root always injects the real factory. */
@@ -75,6 +95,7 @@ const NO_MESH: ChunkMeshFactory = {
       geometry: new THREE.BufferGeometry(),
       faces: 0,
       rebuild: () => 0,
+      apply: () => 0,
       dispose: () => {},
     }) as unknown as ChunkMeshEntry["geom"],
   getMaterial: () => new THREE.MeshBasicMaterial(),
@@ -121,6 +142,9 @@ export class ChunkStreamSystem {
     private readonly world: World,
     /** The platform's mesher (see ChunkMeshFactory). */
     private readonly mesh: ChunkMeshFactory = NO_MESH,
+    /** The worker pool, when the platform has one (P1.18h). Absent = every mesh is built on this thread,
+     *  which is exactly what the engine did before, and what the Node gate still does. */
+    private readonly pool: MeshWorkerPool | null = null,
   ) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
@@ -194,7 +218,11 @@ export class ChunkStreamSystem {
     for (let guard = 0; guard < 4096; guard++) {
       const pending = this.pendingCount();
       onProgress?.(total - pending, total);
-      if (pending === 0 || pending === last) return;
+      if (pending === 0) return;
+      // The guard has to tell "no progress" apart from "progress is IN FLIGHT" (P1.18h): with a pool, the
+      // count stands still for as many frames as the workers take, and the yield below is exactly what lets
+      // their replies arrive. Only nothing-pending AND nothing-in-flight means the generator is stuck.
+      if (pending === last && (this.pool === null || this.pool.inFlight === 0)) return;
       last = pending;
       this.step();
       await yieldTo();
@@ -202,6 +230,10 @@ export class ChunkStreamSystem {
   }
 
   step(): void {
+    // FINISHED WORK FIRST (P1.18h): a job that came back last frame is applied here, INSIDE the lane, so
+    // the scene is never touched from a worker callback and the order stays deterministic.
+    this.drain();
+
     const pcx = Math.floor(POSITION.x[this.index] / CHUNK_SIZE);
     const pcz = Math.floor(POSITION.z[this.index] / CHUNK_SIZE);
     const moved = pcx !== this.lastPcx || pcz !== this.lastPcz;
@@ -216,17 +248,19 @@ export class ChunkStreamSystem {
     // Block edits are rebuilt FIRST and unbudgeted: the player must see the block they just
     // changed. One edit touches at most a handful of chunks (the owner plus any border
     // neighbour), and input is rate-limited in ecs/systems/interaction.ts, so this cannot flood
-    // a frame.
+    // a frame. THEY STAY ON THIS THREAD even with a pool: a worker round trip would put the mesh a frame or
+    // two behind the click, and this is the one path where the player is watching one block.
     for (const key of this.voxel.takeDirty()) this.rebuild(key);
 
     // A PACK RELOAD marks every loaded chunk stale (P1.49ab): the LOOKS a chunk resolves come from the block
     // table and the textures, so a new chain changes every mesh's material list. Budgeted, unlike a block
     // edit: the player is not waiting on any one chunk here, and rebuilding ~2000 of them in a single frame is
     // the hitch Minecraft avoids by invalidating the geometry and rebuilding over the following frames.
+    // This is BULK work, so it goes to the pool when there is one.
     let reloadBudget = MESH_BUDGET_PER_FRAME;
     for (const key of this.voxel.takeStale(reloadBudget)) {
       reloadBudget--;
-      this.rebuild(key);
+      if (!this.queueRebuild(key)) break;
     }
 
     let budget = MESH_BUDGET_PER_FRAME;
@@ -234,12 +268,110 @@ export class ChunkStreamSystem {
       if (budget <= 0) break;
       if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
       budget--;
-      this.build(key);
+      if (!this.queueBuild(key)) break;
     }
 
     if (moved) {
       for (const entry of this.cache.meshes.values()) this.place(entry);
     }
+  }
+
+  /** Apply what the workers finished. The IN-FLIGHT SET IS THE VALIDITY TOKEN: a key that is no longer in it
+   *  was rebuilt on this thread in the meantime (a block edit) or left the window, so its result is stale and
+   *  is dropped rather than overwriting fresher geometry. */
+  private drain(): void {
+    if (!this.pool) return;
+    for (const done of this.pool.take()) {
+      if (!this.cache.inFlight.delete(done.key)) continue;
+      if (done.result === null) {
+        // A dead or failing worker: build this one here, so the failure costs a frame and not a hole.
+        this.rebuild(done.key);
+        continue;
+      }
+      this.applyResult(done.key, done.result);
+    }
+  }
+
+  /** Put a finished mesh on screen: refill an existing chunk's geometry IN PLACE (no dispose, no new Mesh,
+   *  no new GPU buffers) or build one for a chunk that had none. A result with no faces means the chunk is
+   *  invisible — it goes into the `empty` set so it is never asked for again. */
+  private applyResult(key: string, result: MeshResult): void {
+    const entry = this.cache.meshes.get(key);
+    if (entry) {
+      if (entry.geom.apply(this.voxel, result) > 0) {
+        // A dig or a place can change WHICH LOOKS this chunk shows, so the material list follows the rebuild.
+        entry.mesh.material = this.materialsFor(entry.geom);
+        return;
+      }
+      this.cache.group.remove(entry.mesh);
+      entry.geom.dispose();
+      this.cache.meshes.delete(key);
+      this.cache.empty.add(key);
+      return;
+    }
+    if (result.faces === 0) {
+      this.cache.empty.add(key);
+      return;
+    }
+    const geom = this.mesh.createGeometry();
+    if (geom.apply(this.voxel, result) === 0) {
+      geom.dispose();
+      this.cache.empty.add(key);
+      return;
+    }
+    const parts = key.split(",");
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
+    mesh.matrixAutoUpdate = false;
+    const fresh: ChunkMeshEntry = {
+      mesh,
+      geom,
+      cx: Number(parts[0]),
+      cy: Number(parts[1]),
+      cz: Number(parts[2]),
+    };
+    this.cache.group.add(mesh);
+    this.cache.meshes.set(key, fresh);
+    this.place(fresh);
+  }
+
+  /** Hand one chunk to a worker. False = the pool is saturated (or there is none): the caller stops asking
+   *  this frame and comes back to that chunk later. */
+  private requestMesh(key: string): boolean {
+    if (!this.pool || this.cache.inFlight.has(key)) return false;
+    const parts = key.split(",");
+    const cx = Number(parts[0]);
+    const cy = Number(parts[1]);
+    const cz = Number(parts[2]);
+    // Boundary faces are culled against neighbouring chunks, so those must exist first (the input's planes
+    // are read from them).
+    for (const [dx, dy, dz] of NEIGHBOURS) this.voxel.ensureChunk(cx + dx, cy + dy, cz + dz);
+    const chunk = this.voxel.getChunk(cx, cy, cz);
+    if (chunk === null) return false;
+    if (!this.pool.request(key, gatherChunkMeshInput(this.voxel, chunk, cx, cy, cz))) return false;
+    this.cache.inFlight.add(key);
+    return true;
+  }
+
+  /** The reload path (bulk re-mesh after a chain change): off-thread when possible, otherwise exactly what it
+   *  always did. */
+  private queueRebuild(key: string): boolean {
+    if (!this.pool) {
+      this.rebuild(key);
+      return true;
+    }
+    if (this.cache.meshes.has(key) || this.cache.empty.has(key)) return this.requestMesh(key);
+    // No mesh and not known empty: it needs one only if the window still wants it.
+    return this.wanted?.has(key) ? this.requestMesh(key) : true;
+  }
+
+  /** The streaming path (a chunk the window wants that has not been decided yet). */
+  private queueBuild(key: string): boolean {
+    if (!this.pool) {
+      this.build(key);
+      return true;
+    }
+    if (this.cache.meshes.has(key) || this.cache.empty.has(key)) return true;
+    return this.requestMesh(key);
   }
 
   /** Wrapped chunk identities of the window, ordered near-first, top Y chunk first */
@@ -262,6 +394,8 @@ export class ChunkStreamSystem {
       entry.geom.dispose();
       this.cache.meshes.delete(key);
       this.cache.empty.delete(key);
+      // A job for a chunk that left the window is dropped when it comes back (`drain` checks this set).
+      this.cache.inFlight.delete(key);
     }
   }
 

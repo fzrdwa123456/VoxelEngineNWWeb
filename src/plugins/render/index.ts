@@ -5,10 +5,10 @@
 import type { World } from "../../core/world";
 import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { CameraViewSystem, CAMERA_VIEW_ACCESS } from "./systems/camera";
-import { ChunkStreamSystem, type ChunkMeshFactory, CHUNK_STREAM_ACCESS } from "./systems/chunk-stream";
+import { ChunkStreamSystem, type ChunkMeshFactory, type MeshWorkerPool, CHUNK_STREAM_ACCESS } from "./systems/chunk-stream";
 // The host builds the mesher (it is a `host/` object), so it needs the factory type: re-exported here rather
 // than reached for through `./systems/...`, which is this plugin own business.
-export type { ChunkMeshFactory };
+export type { ChunkMeshFactory, MeshWorkerPool };
 import { MenuBackgroundSystem } from "./systems/menu-background";
 import { BlockOutlineSystem, OUTLINE_ACCESS } from "./systems/outline";
 import { definePlugin } from "../../core/plugin/descriptor";
@@ -28,12 +28,15 @@ import {
 export interface RenderWiring {
   readonly world: World;
   readonly mesh: ChunkMeshFactory;
+  /** The platform's meshing WORKER POOL (P1.18h), when it has one: absent = mesh on this thread, which is
+   *  what the gate and a worker-less environment do. */
+  readonly pool?: MeshWorkerPool | null;
 }
 
 /** The render lane's systems, constructed here. */
 export function createRenderSystems(w: RenderWiring) {
   return {
-    chunkStream: new ChunkStreamSystem(w.world, w.mesh),
+    chunkStream: new ChunkStreamSystem(w.world, w.mesh, w.pool ?? null),
     cameraView: new CameraViewSystem(w.world),
     outline: new BlockOutlineSystem(w.world),
     menuBg: new MenuBackgroundSystem(w.world),

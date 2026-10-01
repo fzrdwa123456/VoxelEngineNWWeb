@@ -71,6 +71,11 @@ export interface ChunkMeshCache {
   /** Keys that produced NO geometry (a uniform chunk has no visible face) kept so they are not retried
    *  every frame. Invalidated on a block write, exactly like the meshes themselves. */
   readonly empty: Set<string>;
+  /** Keys a WORKER is meshing right now (P1.18h). It is the validity token of a finished job: a key that is
+   *  no longer here was rebuilt on this thread (a block edit) or left the window, so a late result for it is
+   *  stale and is dropped instead of overwriting fresher geometry. It also stops the same chunk being asked
+   *  for twice while its mesh is in flight. */
+  readonly inFlight: Set<string>;
   /** The window's WANTED key set, rebuilt only when the player crosses a chunk boundary (null until the
    *  first build): "which chunks does this window want" is state of the cache, so it is readable here. */
   wantedKeys: Set<string> | null;

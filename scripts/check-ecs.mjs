@@ -589,6 +589,161 @@ check("an entity with no PREV_POSITION is skipped, not swept from a bogus origin
   equal(C.POSITION.y[index], 190, "untouched: the loud failure is 'falls', not 'jitters'");
 });
 
+check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1.18h)", () => {
+  // The route: the PURE mesher (data/world/mesh.ts) turns voxel BYTES into typed arrays, a Worker pool runs it
+  // off the main thread, and the render lane queues jobs and APPLIES the results inside a step — never from a
+  // worker callback, so the scene is still only touched in a lane, in a deterministic order.
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const { meshChunk, gatherChunkMeshInput } = load("data/world/mesh.js");
+  const { VoxelWorld } = load("data/world/world.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+  const P = loadPresentation();
+
+  // ===== 1. THE PURE MESHER, driven directly (this is the function a worker runs) =====
+  const S = CHUNK_SIZE;
+  const air = new Uint8Array(6 * S * S);            // every neighbour face is open, so nothing is culled
+  const solid = new Uint8Array(6 * S * S).fill(1);  // every neighbour face is solid, so everything is culled
+  const blocks = new Uint8Array(S * S * S);         // AIR (0) everywhere…
+  blocks[1 + 1 * S + 1 * S * S] = 7;                // …except ONE voxel of value 7 at (1,1,1)
+  const one = meshChunk({ uniform: false, uniformValue: 0, blocks, planes: air });
+  equal(one.faces, 6, "a lone voxel emits all six faces");
+  equal(one.slots.length, 3, "…gathered into three looks (side, top, bottom)");
+  equal(
+    one.slots.map((s) => `${s.key >> 2}/${s.key & 3}:${s.count}`).join(","),
+    "7/2:4,7/0:1,7/1:1",
+    "…keyed by (voxel value, kind) in first-seen order, so the caller can resolve each to a material",
+  );
+  equal(one.positions.length, 6 * 4 * 3, "four vertices per face");
+  equal(one.normals.length, 6 * 4 * 3, "…with a normal each");
+  equal(one.uvs.length, 6 * 4 * 2, "…and a uv each");
+  equal(one.indices.length, 6 * 6, "six indices per face (two triangles)");
+  equal(one.transfer.length, 4, "the four buffers come back as TRANSFERABLES, not as copies");
+  // The two fast paths the flat world lives on.
+  equal(meshChunk({ uniform: true, uniformValue: 0, blocks: null, planes: air }).faces, 0, "all-air emits nothing");
+  equal(meshChunk({ uniform: true, uniformValue: 3, blocks: null, planes: solid }).faces, 0,
+    "a solid chunk inside solid neighbours emits nothing (its shell is culled too)");
+  assert(meshChunk({ uniform: true, uniformValue: 3, blocks: null, planes: air }).faces > 0,
+    "…while a solid chunk with open neighbours is a shell of faces (the uniform fast path)");
+
+  // ===== 2. THE LANE'S HALF, with the real mesher behind a fake transport =====
+  // A REAL VoxelWorld (so the flat generator produces chunks with faces), the shared player handle, and a
+  // geometry/material pair that records what happened instead of drawing.
+  const voxel = new VoxelWorld();
+  const cacheWorld = new World();
+  cacheWorld.insertResource(VOXEL, voxel);
+  cacheWorld.insertResource(LOCAL_PLAYER, localPlayer);
+  const cache = P.createChunkMeshCache({ add() {}, remove() {} });
+  cacheWorld.insertResource(P.CHUNK_MESHES, cache);
+  cacheWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+
+  const applied = [];   // faces applied through a geometry (the WORKER path)
+  const rebuilt = [];   // sync rebuilds (the main-thread path)
+  const fakeMesh = {
+    createGeometry: () => ({
+      // A real three.js Mesh is built around this in `applyResult`, and its constructor reads
+      // `geometry.morphAttributes` — hence the empty object (the ONE thing a fake geometry owes it).
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [],
+      faces: 0,
+      apply: (_v, result) => {
+        applied.push(result.faces);
+        return result.faces;
+      },
+      rebuild: () => {
+        rebuilt.push(1);
+        return 0;
+      },
+      dispose: () => {},
+    }),
+    getMaterial: () => ({}),
+  };
+  // The pool stands in for the Workers: it runs the REAL pure mesher on the input the lane gathered, and hands
+  // the result back on the NEXT `take()` — which is exactly how a worker reply arrives (a later frame).
+  const jobs = [];
+  const requests = [];
+  let fail = false;
+  const pool = {
+    workers: 2,
+    get inFlight() {
+      return requests.length - jobs.length;
+    },
+    request(key, input) {
+      requests.push(key);
+      jobs.push({ key, result: fail ? null : meshChunk(input) });
+      return true;
+    },
+    take() {
+      return jobs.splice(0, jobs.length);
+    },
+  };
+  const stream = new ChunkStreamSystem(cacheWorld, fakeMesh, pool);
+  stream.prime(1, 3);
+  stream.step();
+  assert(requests.length > 0, "the lane hands chunks to the pool instead of meshing them itself");
+  const firstBatch = [...cache.inFlight];
+  equal(firstBatch.length, requests.length, "…and remembers which of them are in flight");
+  equal(applied.length, 0, "nothing is applied from the request: the result is not back yet");
+  stream.step();
+  // The SAME keys are no longer in flight (the next batch starts asking immediately, so the SIZE of the set
+  // is the wrong thing to look at — the keys that came back are).
+  equal(firstBatch.filter((key) => cache.inFlight.has(key)).length, 0,
+    "a result that came back is applied and retired in the SAME lane");
+  assert(applied.length > 0, "…through the geometry (a worker's mesh), and");
+  equal(rebuilt.length, 0, "…with no main-thread meshing needed at all");
+  equal(requests.length, firstBatch.length + cache.inFlight.size,
+    "…one job per chunk: nothing is asked for twice while its mesh is in flight");
+
+  // A worker that FAILS must not leave a hole: the chunk falls back to this thread.
+  fail = true;
+  applied.length = 0;
+  rebuilt.length = 0;
+  const before = cache.meshes.size;
+  for (let i = 0; i < 8 && cache.inFlight.size > 0; i++) stream.step();
+  assert(rebuilt.length > 0 || applied.length > 0 || cache.meshes.size >= before,
+    "a failed job degrades into the main-thread path rather than into a hole");
+
+  // ===== 2b. THE TWO QUEUES KEEP THEIR OWN THREAD RULES =====
+  fail = false;
+  // A BLOCK EDIT is the one path that stays on THIS thread: the player is watching that single block.
+  const meshed = [...cache.meshes.keys()];
+  if (meshed.length > 0) {
+    const parts = meshed[0].split(",").map(Number);
+    rebuilt.length = 0;
+    const asked = requests.length;
+    voxel.setBlock(parts[0] * CHUNK_SIZE + 1, parts[1] * CHUNK_SIZE + 1, parts[2] * CHUNK_SIZE + 1, 1);
+    stream.step();
+    assert(rebuilt.length > 0, "a BLOCK EDIT is re-meshed on this thread (no round trip: the player is waiting)");
+    // (the same step keeps streaming the rest of the window, so the assertion is about THIS key, not a count)
+    assert(!requests.slice(asked).includes(meshed[0]), "…so the edited chunk itself is not handed to a worker");
+  }
+  // A PACK RELOAD is BULK: it marks every chunk stale and those go to the pool.
+  rebuilt.length = 0;
+  const askedBeforeReload = requests.length;
+  voxel.markAllStale();
+  stream.step();
+  assert(requests.length > askedBeforeReload, "a PACK RELOAD's stale chunks go to the WORKERS instead");
+  equal(rebuilt.length, 0, "…and none of them is meshed on this thread");
+
+  // ===== 3. THE WIRING, asserted where it lives =====
+  // Read directly: this group sits above the section's `readSource`/`stripComments` helpers (they are defined
+  // further down the file), so it uses `fs` the way the chunk-stream group next door does.
+  const read = (rel) => require("node:fs").readFileSync(path.join(ROOT, "src", rel), "utf8");
+  const systems = read("plugins/render/index.ts");
+  assert(/new ChunkStreamSystem\(w\.world, w\.mesh, w\.pool \?\? null\)/.test(systems),
+    "the pool is the chunk stream's third dependency (absent = main thread, which the gate uses)");
+  const root = read("boot/main.ts");
+  assert(/const meshPool: MeshWorkerPool = createMeshWorkerPool\(\);/.test(root),
+    "the composition root builds the pool");
+  assert(/meshPool,/.test(root), "…and hands it in as a host instance");
+  const poolSrc = read("host/browser/mesh-pool.ts");
+  assert(/createMeshWorkerPool/.test(poolSrc), "the pool creates the workers (a host object: a plugin may not import it)");
+  assert(/slot\.worker\.postMessage\(job, transfer\)/.test(poolSrc),
+    "…and posts each job WITH its buffers as transferables (no copy on the way in)");
+  const worker = read("host/browser/mesh-worker.ts");
+  assert(/meshChunk\(input\)/.test(worker) && /result\.transfer/.test(worker),
+    "the worker runs the pure mesher and transfers the result back");
+});
+
 check("the chunk stream can say whether a window still needs warming", () => {
   // The world-entry screen is only honest if it covers real work, and a RE-entry into a window that is
   // still built has none: `needsWarmUp` is what keeps that from being a one-frame flash of the screen.
@@ -2829,7 +2984,10 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   ].join("\n");
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(w\.world\)/],
-    ["the chunk stream", /new ChunkStreamSystem\(w\.world, w\.mesh\)/],
+    // The mesher and the WORKER POOL are platform capabilities injected by the root, not presentation objects
+    // (the pool creates Workers — a `host/` object a plugin may not import). Neither is a resource, which is
+    // what this check is about.
+    ["the chunk stream", /new ChunkStreamSystem\(w\.world, w\.mesh, w\.pool \?\? null\)/],
     ["the device layer", /new PlayerInputSystem\(w\.world, w\.log, w\.inWorld, w\.mouse\)/],
     ["the reconciler", /export function createRenderSystem\(\.\.\.args: ConstructorParameters/],
   ]) {

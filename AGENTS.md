@@ -78,8 +78,9 @@ src/
 │   ├── desktop/             shell.ts (Tauri: settings/logs/window/vsync), packs.ts (the pack-chain
 │   │                        preload), debuglog.ts (the diagnostic-queue forwarder)
 │   └── browser/             viewport.ts, rawinput.ts, pointerlock.ts, mousecapture.ts, window-guards.ts,
-│                            presentation.ts (the GPU/DOM factories), chunkmesh.ts (the mesher),
-│                            blockicons.ts (the icon baker)
+│                            presentation.ts (the GPU/DOM factories), chunkmesh.ts (the GPU half of the
+│                            mesher), mesh-worker.ts + mesh-pool.ts (the meshing WORKERS), blockicons.ts
+│                            (the icon baker)
 ├── data/                  values only: no listeners, no DOM, no GPU, no timers, no module-level behaviour
 │   ├── globals/             the resource SHAPES + every shared table: resources.ts, gfx.ts, paint.ts,
 │   │                        actions.ts, sources.ts, keybind-gesture.ts, shell.ts, fonts.ts, uiscale.ts,
@@ -87,7 +88,8 @@ src/
 │   ├── assets/              read once from the pack chain, then never written: theme.ts (UI_THEME +
 │   │                        recipeStyle), i18n.ts (I18N_STRINGS + t()), blockregistry.ts
 │   │                        (BLOCK_REGISTRY), textures.ts (the pack chain), background.ts (MENU_BG_KIND)
-│   └── world/               the voxel data: chunk.ts, world.ts
+│   └── world/               the voxel data: chunk.ts, world.ts, mesh.ts (the PURE mesher: bytes in,
+│                            typed arrays out — the function the workers run AND the main thread's fallback)
 ├── shared/                types and pure helpers with no state: math/raycast.ts (the voxel DDA)
 ├── boot/                  the composition root: main.ts creates the World, reads the plugin MANIFEST,
 │                            installs the plugins into the registry and registers the systems from what
@@ -445,6 +447,34 @@ which is also how it is tested by hand.
 concurrently and `check:ecs` proves the grouping; the blockers are the DATA MODEL (record components are
 JS objects a Worker can only clone; the voxel Map is not shareable), written out in ROADMAP §3.9.
 
+**…but the engine HAS one real multi-core path: chunk meshing (P1.18h).** It is not the schedule: the work is
+one independent JOB per chunk, so it does not need the batch model at all. The route, and why each piece is
+where it is:
+
+* `data/world/mesh.ts` is the **PURE mesher** (`meshChunk`): voxel BYTES in, four typed arrays plus the look
+  slots out — no three.js, no GPU, no block table, no `VoxelWorld`. That is what a Worker may run, and it is
+  ALSO the main thread's own path (`ChunkGeometry.rebuild` = gather → `meshChunk` → `apply`), so the two
+  cannot drift into two meshers.
+* a job's INPUT is small on purpose: the chunk's own voxels are omitted entirely while the chunk is UNIFORM
+  (the value says it all and the scan only visits the boundary shell), and the only outside information is six
+  32×32 neighbour SOLIDITY planes. All of it is built fresh per job and **transferred**, never copied.
+* the output's looks come back as KEYS (`(voxel value << 2) | kind`), because the palette, the block table and
+  the pack chain behind them are main-thread state; `ChunkGeometry.apply` resolves each key with the SAME
+  `specFor` the in-place scan used, so a chunk's material list is identical whichever thread meshed it.
+* `host/browser/mesh-pool.ts` owns `hardwareConcurrency - 1` workers (`mesh-worker.ts` is the entry Vite
+  bundles) and **only answers with a queue**: the render lane's `chunk.stream` step DRAINS it and applies the
+  results inside the lane. Nothing touches the scene from a worker callback, so the scene stays a lane's
+  business and the order stays deterministic.
+* `CHUNK_MESHES.inFlight` is the validity token: a key that is no longer in it was rebuilt on this thread (a
+  block edit) or left the window, so a late result for it is dropped instead of overwriting fresher geometry.
+  It also keeps one chunk from being asked for twice.
+* **BLOCK EDITS STAY ON THE MAIN THREAD** (the player is watching one block — a round trip would put the mesh
+  a frame or two behind the click) and so does the no-pool environment (the Node gate, a browser without
+  workers): the pool is an INJECTED capability, absent = the behaviour the engine had before.
+* a worker that dies does not leave a hole: its job comes back as `null` and that chunk is meshed here.
+  MEASURED: entering a world went from `WORLD ready at 2301ms` to **97ms** with 11 workers on a 12-thread
+  machine, and the app logs `RENDER meshing: N worker(s)` at boot.
+
 ## Iron rules (breaking any of these = silent bugs)
 
 1. **Structural changes happen only at a BARRIER.** `spawn`/`despawn`/`insert`/`remove` are legal
@@ -770,7 +800,7 @@ settings check, the world, the movement modes, every menu, the key binds, the in
 `docs/TESTING.md`**, together with what a failure at each step means. Read it before saying a change
 works, and extend it when a behaviour lands.
 
-**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 73
+**`npm run check:ecs` is the automated gate for the ECS** (`scripts/check-ecs.mjs`, 74
 assertion groups, ends with `RESULT: OK` / `RESULT: FAILED`). It compiles the ECS plus the fixed lane
 with the same `tsc` the build uses into `node_modules/.cache/voxelengine-ecs-check` (git-ignored, so
 it writes nothing tracked; Node still resolves the real `three`), then asserts what no type-checker
