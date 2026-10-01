@@ -55,9 +55,11 @@ export function createPackReloadDriver(deps: PackReloadDeps): PackReloadDriver {
 //      fresh snapshot, then `installPacks` puts it in force.
 //   3. THE CONTENT PHASE IS RE-RUN, then the caches are dropped — in that order, so nothing answers with the
 //      previous chain's bytes afterwards.
-//   4. THE WORLD IS NOT REBUILT. Success only marks every loaded chunk STALE, and the chunk stream re-meshes
-//      them at `MESH_BUDGET_PER_FRAME` — MC's `allChanged()` -> "invalidate compiled geometry" -> rebuild
-//      over the following frames, for the same reason (doing it in one frame is the hitch).
+//   4. THE WORLD IS NOT REBUILT. Success only marks every loaded chunk STALE, and the chunk stream re-resolves
+//      their LOOKS in place, `RESTYLE_BUDGET_PER_FRAME` a frame (P1.18i) — MC's `allChanged()` -> "invalidate
+//      compiled geometry" -> rebuild over the following frames, minus the rebuild: a new chain changes what a
+//      block LOOKS like, while a mesh's vertices depend on the voxels alone (every uv is a per-face constant),
+//      so the geometry survives a reload untouched and only its look -> material list is resolved again.
 //   5. A FAILURE KEEPS THE OLD CHAIN: the previous snapshot is re-installed and re-derived before the error is
 //      reported — MC's `rollbackResourcePacks`. Nothing is ever left half-applied.
 //   6. THE PLAYER SEES AN OVERLAY, not a frozen frame: the LOADING SCREEN is raised through the same
@@ -165,12 +167,12 @@ const reloadPacksNow = async (): Promise<string> => {
     deps.stage.announce({ progress: 0.7, key: "loading.packs.apply" });
     await deps.stage.paint();
     dropPackDerivedCaches();
-    // ---- 4. MARK THE WORLD STALE (do NOT rebuild it here) ----
+    // ---- 4. MARK THE WORLD STALE (do NOT rebuild or re-mesh it here) ----
     deps.stage.announce({ progress: 0.85, key: "loading.packs.mesh" });
     await deps.stage.paint();
     const stale = deps.voxel.markAllStale();
     deps.noteSnapshot(snap);
-    return `${chainLine}; ${derivedLine}; ${stale} chunk(s) marked stale`;
+    return `${chainLine}; ${derivedLine}; ${stale} chunk(s) queued for a restyle (looks only, no re-mesh)`;
   } catch (err) {
     // ROLLBACK: put the last good chain back and re-derive from it, so a bad pack leaves the engine exactly
     // as it was (MC's rollbackResourcePacks) instead of half-swapped.

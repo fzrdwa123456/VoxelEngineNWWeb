@@ -46,6 +46,11 @@ export const RENDER_RADIUS_CHUNKS = 8;
 /** Meshes built per frame, so the initial fill spreads over frames instead of stalling.
  *  Air chunks bail out immediately, so a high value mostly costs cheap early-outs. */
 const MESH_BUDGET_PER_FRAME = 24;
+/** Looks re-resolved per frame after a PACK RELOAD (P1.18i). MUCH higher than the meshing budget because the
+ *  work is not comparable: a re-mesh reads a 32^3 neighbourhood and rewrites every vertex buffer, while a
+ *  restyle is one lookup per material group in a chunk that is already built. It is still budgeted, so the
+ *  frame cannot grow with the size of the streamed window. */
+const RESTYLE_BUDGET_PER_FRAME = 128;
 
 const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
   [1, 0, 0],
@@ -96,6 +101,7 @@ const NO_MESH: ChunkMeshFactory = {
       faces: 0,
       rebuild: () => 0,
       apply: () => 0,
+      restyle: () => 0,
       dispose: () => {},
     }) as unknown as ChunkMeshEntry["geom"],
   getMaterial: () => new THREE.MeshBasicMaterial(),
@@ -256,11 +262,17 @@ export class ChunkStreamSystem {
     // table and the textures, so a new chain changes every mesh's material list. Budgeted, unlike a block
     // edit: the player is not waiting on any one chunk here, and rebuilding ~2000 of them in a single frame is
     // the hitch Minecraft avoids by invalidating the geometry and rebuilding over the following frames.
-    // This is BULK work, so it goes to the pool when there is one.
-    let reloadBudget = MESH_BUDGET_PER_FRAME;
-    for (const key of this.voxel.takeStale(reloadBudget)) {
-      reloadBudget--;
-      if (!this.queueRebuild(key)) break;
+    //
+    // RESTYLE, NOT RE-MESH (P1.18i). A reload only changes what a block LOOKS like, and a mesh's vertex data
+    // depends on the VOXELS alone (every uv is a per-face constant), so the geometry is still correct — only
+    // the look → material list it stores has to be resolved again, which is what ChunkGeometry.restyle does in
+    // place. That is the difference between a reload costing a few thousand chunk meshes and costing a few
+    // thousand lookups: the mesh, its buffers and its groups all stay exactly where they are. A non-bulk reason
+    // to mark a chunk stale (a future change that moves vertices) must re-mesh instead — see ROADMAP P1.18i.
+    let restyleBudget = RESTYLE_BUDGET_PER_FRAME;
+    for (const key of this.voxel.takeStale(restyleBudget)) {
+      restyleBudget--;
+      this.restyle(key);
     }
 
     let budget = MESH_BUDGET_PER_FRAME;
@@ -337,7 +349,8 @@ export class ChunkStreamSystem {
   /** Hand one chunk to a worker. False = the pool is saturated (or there is none): the caller stops asking
    *  this frame and comes back to that chunk later. */
   private requestMesh(key: string): boolean {
-    if (!this.pool || this.cache.inFlight.has(key)) return false;
+    if (!this.hasPool || this.cache.inFlight.has(key)) return false;
+    const pool = this.pool!;
     const parts = key.split(",");
     const cx = Number(parts[0]);
     const cy = Number(parts[1]);
@@ -347,31 +360,39 @@ export class ChunkStreamSystem {
     for (const [dx, dy, dz] of NEIGHBOURS) this.voxel.ensureChunk(cx + dx, cy + dy, cz + dz);
     const chunk = this.voxel.getChunk(cx, cy, cz);
     if (chunk === null) return false;
-    if (!this.pool.request(key, gatherChunkMeshInput(this.voxel, chunk, cx, cy, cz))) return false;
+    if (!pool.request(key, gatherChunkMeshInput(this.voxel, chunk, cx, cy, cz))) return false;
     this.cache.inFlight.add(key);
     return true;
   }
 
-  /** The reload path (bulk re-mesh after a chain change): off-thread when possible, otherwise exactly what it
-   *  always did. */
-  private queueRebuild(key: string): boolean {
-    if (!this.pool) {
-      this.rebuild(key);
-      return true;
-    }
-    if (this.cache.meshes.has(key) || this.cache.empty.has(key)) return this.requestMesh(key);
-    // No mesh and not known empty: it needs one only if the window still wants it.
-    return this.wanted?.has(key) ? this.requestMesh(key) : true;
+  /** The reload path (a chain change): re-resolve this chunk's LOOKS in place. Nothing is meshed, so there is
+   *  no pool to consult and nothing to fail — a chunk with no mesh has nothing to restyle (it is either in
+   *  `empty`, or undecided and therefore already covered by the streaming budget below). */
+  private restyle(key: string): void {
+    const entry = this.cache.meshes.get(key);
+    if (!entry) return;
+    entry.geom.restyle(this.voxel);
+    // The material CACHE was dropped by the reload (see the pack driver), so these come back from the new
+    // chain's textures. `groups` is untouched: a slot index still means the same material index.
+    entry.mesh.material = this.materialsFor(entry.geom);
   }
 
   /** The streaming path (a chunk the window wants that has not been decided yet). */
   private queueBuild(key: string): boolean {
-    if (!this.pool) {
+    if (!this.hasPool) {
       this.build(key);
       return true;
     }
     if (this.cache.meshes.has(key) || this.cache.empty.has(key)) return true;
     return this.requestMesh(key);
+  }
+
+  /** Is there a worker to hand a job to RIGHT NOW? A pool that lost every worker answers "saturated" for ever,
+   *  so it is treated as ABSENT and this lane meshes on its own thread — a broken worker degrades the world's
+   *  speed, never its content. Asked again per chunk rather than cached, because a worker can die at any time
+   *  and the pool reports the new count immediately (P1.18i). */
+  private get hasPool(): boolean {
+    return this.pool !== null && this.pool.workers > 0;
   }
 
   /** Wrapped chunk identities of the window, ordered near-first, top Y chunk first */

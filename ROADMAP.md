@@ -129,8 +129,9 @@ or building a sphere before there is any terrain to put on it.
   prioritisation (the build budget is spent near-first, which is a proxy for it).
 - **GAP** `logarithmicDepthBuffer` is not enabled. Camera `near = 0.1, far = 5000`; planet scale
   needs reversed-Z or logarithmic depth.
-- **GAP** Meshing runs on the **main thread**, budgeted to `MESH_BUDGET_PER_FRAME = 24` chunk
-  rebuilds per frame. A Worker would violate iron rule 3 as written — see §4.
+- **GAP** Chunk GENERATION runs on the **main thread** (the fill is cheap — a uniform chunk allocates
+  nothing — but it owns the world's `Map`). MESHING left this list in P1.18h (workers, `hardwareConcurrency
+  - 1`) and a pack reload no longer re-meshes at all (P1.18i) — see §4 for the route and what is left of it.
 
 ## 3.7 UI
 - **GAP** The inventory's block selection has no observable effect in the world (§3.2). The stacks
@@ -970,9 +971,10 @@ Still outstanding:
     grows. `setPalette` re-pointed every existing voxel the moment a pack reordered its blocks; a merge
     cannot, and a block an install no longer names keeps its number (it just draws as the missing block).
   * THE WORLD IS NOT REBUILT: success only marks every loaded chunk STALE (`markAllStale`), and the chunk
-    stream re-meshes them at `MESH_BUDGET_PER_FRAME` — MC's `allChanged()` -> "invalidate compiled geometry"
-    -> rebuild over the following frames. Block edits keep their UNBUDGETED path (that IS one chunk the
-    player is waiting for), which is why the two queues are separate sets on the voxel world.
+    stream re-resolves their LOOKS at `RESTYLE_BUDGET_PER_FRAME` — MC's `allChanged()` -> "invalidate compiled
+    geometry" -> rebuild over the following frames, minus the rebuild, because a chain change moves no vertex
+    (P1.18i). Block edits keep their UNBUDGETED path (that IS one chunk the player is waiting for), which is
+    why the two queues are separate sets on the voxel world.
   * THE PLAYER SEES THE LOADING SCREEN, not a frozen frame: four stages (`loading.packs.scan/build/apply/
     mesh`) through the SAME `SetLoadingStage` command the startup and the world entry use, one
     announce-paint-yield per stage, then the outcome as a raw toast.
@@ -1283,15 +1285,48 @@ Still outstanding:
     capability (a `host/` object the plugin may not import), and absent = exactly the behaviour before this
     round. A worker that dies answers `null` for its job and that chunk is meshed on the main thread, so a
     failure costs a frame and never a hole.
-  VERIFIED: `tsc` 0; `check:ecs` **74/74** with a group of its own — the pure mesher's faces/slots/fast paths
+  VERIFIED: `tsc` 0; `check:ecs` **75/75** with a group of its own — the pure mesher's faces/slots/fast paths
   driven directly, the queue→drain→apply orchestration with the REAL mesher behind a fake transport, one job
   per chunk in flight, the failure fallback, and the two thread rules (an edit stays local, a pack reload's
-  stale chunks go to the workers); the package builds a `dist/assets/mesh-worker-*.js` chunk of its own; and on
-  a real run the boot logs `RENDER meshing: 11 worker(s)` while entering a world went from
+  stale chunks are handled without a worker job); the package builds a `dist/assets/mesh-worker-*.js` chunk of
+  its own; and on a real run the boot logs `RENDER meshing: 11 worker(s)` while entering a world went from
   **`WORLD ready at 2301ms` to 97ms** (same click path, same spawn window), with `mode=game locked=1`, 60 fps
   and `stalls=0` afterwards. STILL OPEN: chunk GENERATION is still on the main thread (it is cheap now — a
   uniform fill per chunk — and it owns the world's `Map`, so it is the next thing to move once terrain is real),
   and nothing else has been parallelized: the schedule's batches remain computed-not-executed.
+- **P1.18i — the pack reload RESTYLES instead of re-meshing, and a failing worker is loud.** `DONE`. The two
+  things P1.18h left as warts, found by reading a real 154 s log (44 pack reloads, ~2856 chunks marked stale
+  each time, worst frames 33–54 ms).
+  * **WHY A RELOAD NEVER NEEDED A RE-MESH**: a mesh's vertex data depends on the VOXELS alone — every uv is a
+    per-face constant — so a new resource chain cannot invalidate a single position, normal or uv. What the
+    chain changes is what a block LOOKS like, and the LOOK is stored on the geometry as one resolved
+    `ChunkFaceSpec` per group. `ChunkGeometry` now keeps each slot's KEY (`(value << 2) | kind`) beside its
+    specs, and `restyle(voxel)` re-resolves that list IN PLACE. The palette is append-only (`mergePalette`), so
+    an already-stored value still names its block; `geometry.groups` needs no update either (a slot index is
+    still the same material index). This is the difference between a reload costing a few thousand chunk meshes
+    and costing a few thousand LOOKUPS: the mesh, its GPU buffers and its groups never move, and the pool is
+    not asked for anything.
+  * the stale queue keeps its own budget (`RESTYLE_BUDGET_PER_FRAME = 128`, vs 24 for meshing) because the work
+    is not comparable — one lookup per material group vs a 32³ neighbourhood scan and a full vertex rewrite. It
+    stays budgeted so a frame cannot grow with the size of the streamed window.
+  * **A FAILING WORKER IS PER-WORKER AND LOUD** (`host/browser/mesh-pool.ts`): a slot tracks its OWN pending
+    job ids (the old handler failed every job in the pool), a failure reports ONE line through an injected log
+    (`MESH worker failed (i/N): <why>; J job(s) re-mesh on the main thread; K worker(s) left`), the DEAD WORKER
+    IS TERMINATED AND DROPPED so the others keep the throughput, and a pool that loses every worker reports
+    `workers = 0`. That last one was a real hazard: the chunk stream read "no free slot" as "saturated" and
+    would have stopped meshing the world entirely, so `ChunkStreamSystem.hasPool` treats a pool with no worker
+    as ABSENT (main-thread meshing), and the render plugin hands the stream `null` for a pool that never
+    started one (`main thread only (no worker started)`) — before this, a machine that blocks module workers
+    got a pool object with zero slots and never meshed anything.
+  VERIFIED: `tsc` 0; `check:ecs` **75/75** with the reload assertion FLIPPED (the gate drives a real
+  `VoxelWorld`, marks every chunk stale, and asserts every loaded mesh is restyled EXACTLY once while not one
+  chunk is re-meshed on this thread AND not one is handed to a worker), plus source assertions for the pool's
+  per-worker retirement, `hasPool`, the plugin's zero-worker guard and the geometry's slot keys. In the real
+  app a pack toggle inside a LOADED world logged `2856 chunk(s) queued for a restyle (looks only, no re-mesh)`
+  and the ground switched to the new pack's texture after ONE 31–39 ms frame, back to ~17 ms with `stalls=0`
+  (the A/B was made unambiguous with a throwaway pack that overrides `block/grass_block_top.png`); the worker
+  failure path was driven against the REAL compiled pool with a stubbed `Worker` (per-slot failure, drop,
+  terminate, the pool-empty line, and the no-worker-start line).
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`

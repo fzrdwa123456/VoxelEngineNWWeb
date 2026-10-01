@@ -471,9 +471,23 @@ where it is:
 * **BLOCK EDITS STAY ON THE MAIN THREAD** (the player is watching one block — a round trip would put the mesh
   a frame or two behind the click) and so does the no-pool environment (the Node gate, a browser without
   workers): the pool is an INJECTED capability, absent = the behaviour the engine had before.
-* a worker that dies does not leave a hole: its job comes back as `null` and that chunk is meshed here.
+* a worker that dies does not leave a hole: **only its own jobs** come back as `null` and those chunks are
+  meshed here, the failure is reported to `debug.log` ONCE per worker, and the DEAD WORKER IS DROPPED so the
+  rest of the pool keeps its throughput (P1.18i). A pool that ends up with no worker at all reports
+  `workers = 0`, which the lane reads as "no pool" (`ChunkStreamSystem.hasPool`) rather than as "saturated
+  for ever" — otherwise a broken worker pool would silently stop meshing the world, and the render plugin
+  hands the stream `null` for a pool that never started one.
+* **A PACK RELOAD RESTYLES, IT DOES NOT RE-MESH (P1.18i).** A new resource chain changes what a block LOOKS
+  like, while a mesh's vertices depend on the VOXELS alone (every uv is a per-face constant) — so
+  `VoxelWorld.markAllStale` queues LOOK work, and `ChunkGeometry.restyle` re-resolves the material of every
+  existing slot in place (it keeps each slot's `(value, kind)` key for exactly this). The mesh, its buffers
+  and its `geometry.groups` all stay where they are, and nothing is handed to a worker: a reload costs a few
+  thousand LOOKUPS instead of a few thousand chunk meshes. `RESTYLE_BUDGET_PER_FRAME` (128) spreads them over
+  a couple of frames. A future reason to mark a chunk stale that MOVES vertices must re-mesh instead.
   MEASURED: entering a world went from `WORLD ready at 2301ms` to **97ms** with 11 workers on a 12-thread
-  machine, and the app logs `RENDER meshing: N worker(s)` at boot.
+  machine, and the app logs `RENDER meshing: N worker(s)` at boot; toggling a resource pack in a LOADED world
+  logs `2856 chunk(s) queued for a restyle (looks only, no re-mesh)` and the world shows the new texture
+  after ONE 39ms frame with `stalls=0`.
 
 ## Iron rules (breaking any of these = silent bugs)
 

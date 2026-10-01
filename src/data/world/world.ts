@@ -106,7 +106,8 @@ export class VoxelWorld {
   /** Chunk identities whose mesh is stale because the RESOURCE CHAIN changed (P1.49ab, the pack reload).
    *  Separate from `dirty` on purpose: a block edit is one chunk the player is waiting for and is rebuilt
    *  UNBUDGETED, while a texture change touches every loaded chunk and must be spread over frames — the
-   *  chunk stream drains this at MESH_BUDGET_PER_FRAME via takeStale(). */
+   *  chunk stream drains this at RESTYLE_BUDGET_PER_FRAME via takeStale(), and for a chain change that work is
+   *  a look re-resolution rather than a re-mesh (P1.18i). */
   private readonly stale = new Set<string>();
 
   /** The block ids a voxel value names, in value order (1..N). DERIVED: the composition root hands the block

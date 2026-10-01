@@ -18,9 +18,14 @@ export function createPlugin(host: PluginHost): DiscoveredPlugin {
   // …and the meshing WORKER POOL (P1.18h), same direction: the pool is a `host/` object (it creates Workers),
   // so the root builds it and this adapter narrows it. Absent = the chunk stream meshes on the main thread.
   const pool = host.instances.meshPool as RenderWiring["pool"];
-  const built = createRenderPlugin({ world: host.world, mesh, pool });
+  // A pool with NO live worker is worse than no pool at all: `request` answers "saturated" for ever, so the
+  // chunk stream would stop asking and NOTHING would ever be meshed. Hand it `null` instead, which is the
+  // documented pre-P1.18h behaviour (mesh on this thread). P1.18i: a pool can start non-empty and lose every
+  // worker later, which the stream handles itself by asking `workers` again.
+  const usable = pool && pool.workers > 0 ? pool : null;
+  const built = createRenderPlugin({ world: host.world, mesh, pool: usable });
   host.log(
-    `RENDER meshing: ${pool && pool.workers > 0 ? `${pool.workers} worker(s)` : "main thread only"}`,
+    `RENDER meshing: ${usable ? `${usable.workers} worker(s)` : `main thread only${pool ? " (no worker started)" : ""}`}`,
   );
   // What the root DRIVES: the boot driver primes/warms the chunk stream, the menu frame steps the background.
   host.world.insertResource(RENDER_HANDLES, {

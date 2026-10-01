@@ -121,6 +121,9 @@ export class ChunkGeometry {
   private indexAttr: THREE.Uint32BufferAttribute;
   private capacityFaces: number;
   private faceCount = 0;
+  /** One slot KEY per entry of `specs`, in the same order: `(value << 2) | kind`. Kept so a PACK RELOAD can
+   *  re-resolve the looks WITHOUT re-meshing — see `restyle()`. */
+  private readonly slotKeys: number[] = [];
 
   constructor() {
     this.capacityFaces = CHUNK_FACES_INITIAL;
@@ -161,6 +164,7 @@ export class ChunkGeometry {
   apply(voxel: VoxelWorld, mesh: MeshResult): number {
     this.faceCount = 0;
     this.specs.length = 0;
+    this.slotKeys.length = 0;
     this.geometry.clearGroups();
 
     if (mesh.faces === 0) {
@@ -183,6 +187,7 @@ export class ChunkGeometry {
       // The palette lives on the world (P1.47), and an id it does not name falls back to the engine
       // untextured block, which resolves to the checker — a value outside the palette still draws SOMETHING.
       this.specs.push(specFor(voxel.idOf(value) ?? "missing", kind));
+      this.slotKeys.push(key);
       if (count > 0) this.geometry.addGroup(start * 6, count * 6, slot);
     }
 
@@ -203,11 +208,27 @@ export class ChunkGeometry {
     if (chunk === null) {
       this.faceCount = 0;
       this.specs.length = 0;
+      this.slotKeys.length = 0;
       this.geometry.clearGroups();
       this.geometry.setDrawRange(0, 0);
       return 0;
     }
     return this.apply(voxel, meshChunk(gatherChunkMeshInput(voxel, chunk, cx, cy, cz)));
+  }
+
+  /** Re-resolve the material of every existing slot, in place, WITHOUT touching the vertex data. This is the
+   *  PACK RELOAD path (P1.18i): positions, normals and uvs depend only on the VOXELS, and every uv is a
+   *  per-face constant, so a reload that only changes what a block LOOKS like cannot invalidate the mesh.
+   *  The palette is append-only (`mergePalette`), so an already-stored value still names its block, and
+   *  `geometry.groups` (materialIndex = slot index, in the same order) needs no update either.
+   *
+   *  Returns the number of looks written, so the caller can report the work it just avoided. */
+  restyle(voxel: VoxelWorld): number {
+    for (let slot = 0; slot < this.slotKeys.length; slot++) {
+      const key = this.slotKeys[slot];
+      this.specs[slot] = specFor(voxel.idOf(key >>> 2) ?? "missing", key & 3);
+    }
+    return this.slotKeys.length;
   }
 
   dispose(): void {

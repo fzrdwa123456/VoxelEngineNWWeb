@@ -638,6 +638,7 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
 
   const applied = [];   // faces applied through a geometry (the WORKER path)
   const rebuilt = [];   // sync rebuilds (the main-thread path)
+  const restyled = [];  // look re-resolutions (the PACK RELOAD path, P1.18i)
   const fakeMesh = {
     createGeometry: () => ({
       // A real three.js Mesh is built around this in `applyResult`, and its constructor reads
@@ -652,6 +653,12 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
       rebuild: () => {
         rebuilt.push(1);
         return 0;
+      },
+      // What a real geometry does here: rewrite its look list in place. Nothing about the vertices is
+      // touched, which is the whole point of the assertion below.
+      restyle: () => {
+        restyled.push(1);
+        return 1;
       },
       dispose: () => {},
     }),
@@ -716,13 +723,23 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
     // (the same step keeps streaming the rest of the window, so the assertion is about THIS key, not a count)
     assert(!requests.slice(asked).includes(meshed[0]), "…so the edited chunk itself is not handed to a worker");
   }
-  // A PACK RELOAD is BULK: it marks every chunk stale and those go to the pool.
+  // A PACK RELOAD is BULK, and it RESTYLES instead of re-meshing (P1.18i): a new chain changes what a block
+  // LOOKS like, while the vertex data depends on the VOXELS alone (every uv is a per-face constant), so the
+  // geometry is still correct and only its look list has to be resolved again. That turns a reload from
+  // "thousands of chunk meshes" into "thousands of lookups".
+  // Drain the transport first, so what follows is about the reload and nothing else.
+  for (let i = 0; i < 200 && cache.inFlight.size > 0; i++) stream.step();
   rebuilt.length = 0;
+  restyled.length = 0;
   const askedBeforeReload = requests.length;
+  const meshesBefore = cache.meshes.size;
+  assert(meshesBefore > 0, "the window has real meshes for a reload to restyle");
   voxel.markAllStale();
-  stream.step();
-  assert(requests.length > askedBeforeReload, "a PACK RELOAD's stale chunks go to the WORKERS instead");
-  equal(rebuilt.length, 0, "…and none of them is meshed on this thread");
+  for (let i = 0; i < 64 && voxel.staleCount > 0; i++) stream.step();
+  equal(voxel.staleCount, 0, "the reload's queue drains over frames (budgeted, so it is never one long frame)");
+  equal(restyled.length, meshesBefore, "every loaded mesh is RESTYLED exactly once…");
+  equal(rebuilt.length, 0, "…and NOT ONE of them is re-meshed on this thread");
+  equal(requests.length, askedBeforeReload, "…nor handed to a worker: a reload costs lookups, not geometry");
 
   // ===== 3. THE WIRING, asserted where it lives =====
   // Read directly: this group sits above the section's `readSource`/`stripComments` helpers (they are defined
@@ -732,13 +749,24 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   assert(/new ChunkStreamSystem\(w\.world, w\.mesh, w\.pool \?\? null\)/.test(systems),
     "the pool is the chunk stream's third dependency (absent = main thread, which the gate uses)");
   const root = read("boot/main.ts");
-  assert(/const meshPool: MeshWorkerPool = createMeshWorkerPool\(\);/.test(root),
-    "the composition root builds the pool");
+  assert(/const meshPool: MeshWorkerPool = createMeshWorkerPool\(\{ log: logDebug \}\)/.test(root),
+    "the composition root builds the pool, with the log sink worker failures are reported to");
   assert(/meshPool,/.test(root), "…and hands it in as a host instance");
   const poolSrc = read("host/browser/mesh-pool.ts");
   assert(/createMeshWorkerPool/.test(poolSrc), "the pool creates the workers (a host object: a plugin may not import it)");
   assert(/slot\.worker\.postMessage\(job, transfer\)/.test(poolSrc),
     "…and posts each job WITH its buffers as transferables (no copy on the way in)");
+  // A FAILING WORKER IS LOUD AND LOCAL (P1.18i): it is reported, its own jobs fall back to this thread, and it
+  // is DROPPED so the rest of the pool keeps working. It used to fail every job in the pool and say nothing.
+  assert(/MESH worker failed/.test(poolSrc) && /slots\.splice\(at, 1\)/.test(poolSrc),
+    "a worker that dies is logged and dropped, instead of being left in the rotation");
+  assert(/get hasPool\(\)/.test(read("plugins/render/systems/chunk-stream.ts")),
+    "…and a pool with no worker left is treated as ABSENT (main-thread meshing), not as saturated for ever");
+  assert(/pool\.workers > 0 \? pool : null/.test(read("plugins/render/plugin.ts")),
+    "…including a pool that never started one: the plugin hands the stream null instead");
+  const geomSrc = read("host/browser/chunkmesh.ts");
+  assert(/restyle\(voxel: VoxelWorld\): number/.test(geomSrc) && /this\.slotKeys\.push\(key\)/.test(geomSrc),
+    "the geometry keeps each slot's (value, kind), which is what makes a restyle possible without the mesher");
   const worker = read("host/browser/mesh-worker.ts");
   assert(/meshChunk\(input\)/.test(worker) && /result\.transfer/.test(worker),
     "the worker runs the pure mesher and transfers the result back");

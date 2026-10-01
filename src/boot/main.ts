@@ -501,8 +501,9 @@ const chunkMeshFactory: ChunkMeshFactory = { createGeometry: () => new ChunkGeom
 // independent per chunk, so it runs on `hardwareConcurrency - 1` workers. The pool is a `host/` object (it
 // creates Workers), handed in as a host instance like the mesher itself; if the environment has no Worker the
 // pool reports 0 and the chunk stream keeps meshing on this thread. The results are applied inside the render
-// lane (`chunk.stream` drains them), so nothing touches the scene from a worker callback.
-const meshPool: MeshWorkerPool = createMeshWorkerPool();
+// lane (`chunk.stream` drains them), so nothing touches the scene from a worker callback. A worker that FAILS
+// later is reported to debug.log and dropped (P1.18i) — a dead worker must not look like a slow world.
+const meshPool: MeshWorkerPool = createMeshWorkerPool({ log: logDebug });
 // THE RENDER HANDLES COME FROM THE PLUGIN THAT PUBLISHES THEM (P1.45): the render plugin is DISCOVERED
 // now, so the root no longer CONSTRUCTS it - but the boot driver still primes and warms the chunk stream,
 // and the published resource is how it reaches the very instance the plugin registered.

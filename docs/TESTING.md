@@ -32,6 +32,22 @@ holes or wrong faces), the first frames after the entry may run 40–50 ms (the 
 `stalls` must stay 0. Then check the one path that stays on the main thread: **dig and place a block** — the
 block must change on the SAME click, not a frame or two later (block edits are deliberately not sent to a
 worker), and digging the block you stand on must still drop you correctly.
+**A PACK RELOAD IN A RUNNING WORLD (P1.18i)** — the one behaviour a log line cannot prove, so LOOK at the
+world: enter a world, then raise the pause menu (ESC, or drag/move the window once — a geometry change pauses
+too), Settings → Resource Packs, and toggle a pack that ships a BLOCK TEXTURE (the sample pack does not: it
+only ships language files and backgrounds, so the ground will NOT change — drop a pack in
+`resourcepacks/<name>/assets/voxel/textures/block/grass_block_top.png` to test it for real). The log must say
+`N chunk(s) queued for a restyle (looks only, no re-mesh)` and the world behind the panel must show the NEW
+texture as soon as the panel comes down — the geometry was NOT rebuilt (no worker jobs, and the same
+`mesh.faces` count per chunk). ONE frame of 30–45 ms at the reload is expected (the material cache is
+dropped); the frames after it must be back at ~17 ms with `stalls=0`. If the ground keeps the OLD texture,
+`restyle` did not run (check that the reload reached `chunk.stream`, i.e. that the mode went back to `game`);
+if the world shows HOLES or wrong faces, geometry was rebuilt from a stale gather.
+**A FAILING WORKER IS REPORTED, NOT SILENT (P1.18i)**: there is no way to break a worker from the outside any
+more (the worker is bundled inside the exe), so this is asserted by the gate and by the throwaway pool test —
+`MESH worker failed (i/N): <why>; J job(s) re-mesh on the main thread; K worker(s) left` appears in
+`debug.log`, and the world keeps meshing (nothing about a broken worker may be silent). `main thread only (no
+worker started)` at boot means the Worker could not be created at all — the world still works, just slower.
 At the MAIN MENU (and on the loading screen) the GAMEPLAY UI must be absent: no crosshair, no hotbar,
 and the hotbar's slots must not respond to a click. F3 must do nothing there, and F3+F4 must not open
 the mode picker — check the same at the pause menu, where F3 MUST still work (a world is running). Then
@@ -730,7 +746,8 @@ world's chunks stale (they are re-meshed at the per-frame budget, not in one hit
    fail and the layer is ignored, which is itself worth seeing once).
 4. Press **F7**. Expected: the loading screen appears with four stages
    (`重新扫描资源包…` / `重建语言与方块表…` / `应用新资源包…` / `重画区块…`), then a toast
-   `pack reload OK — PACKS installed: ... files=N+1; I18N ... fr=1; BLOCKREG ...; palette ...; M chunk(s) marked stale`.
+   `pack reload OK — PACKS installed: ... files=N+1; I18N ... fr=1; BLOCKREG ...; palette ...; M chunk(s)
+   queued for a restyle (looks only, no re-mesh)`.
 5. The log gets one `PACKS reloaded #1: ...` line with the SAME summary. `files` and the language list are
    the proof that the folders were re-read (this was verified by hand: `files=12 ... zh/en/ja/fr` at boot
    became `files=13 ... zh/en/ja/de=1/fr=2` after a reload that ran while a new `de.json` was created).
@@ -750,9 +767,12 @@ world's chunks stale (they are re-meshed at the per-frame budget, not in one hit
 7. Enter a world and walk around until the chunks are meshed.
 8. Edit a texture a visible block uses (e.g. `assets/voxel/textures/block/grass_block_top.png` in a pack),
    then press **F7**. Expected: the loading screen comes and goes, the toast reports
-   `N chunk(s) marked stale` with N > 0, and the blocks change appearance over the next second or two
-   (`chunk.stream` rebuilds `MESH_BUDGET_PER_FRAME` = 24 per frame) — the player keeps walking, nothing
-   freezes, and the position/inventory are untouched.
+   `N chunk(s) queued for a restyle (looks only, no re-mesh)` with N > 0, and the blocks show the NEW texture
+   within a frame or two (`chunk.stream` restyles `RESTYLE_BUDGET_PER_FRAME` = 128 a frame, and a restyle is a
+   material lookup — NOT a re-mesh, P1.18i) — the player keeps walking, nothing freezes, the position and the
+   inventory are untouched, and the geometry is the SAME (the flat ground's surface must not flicker or gap).
+   ONE frame of 30–45 ms at the reload itself is expected (the material cache is dropped with the chain); the
+   frames after it must be back at ~17 ms with `stalls=0`.
 9. Add a block to a pack's `data/blocks.json`, F7, then look in the backpack: the new block is there and
    placing it puts the right texture in the world (the palette MERGES, so the blocks already placed keep
    their numbers — that is the MC lesson this copies, see `VoxelWorld.mergePalette`).
