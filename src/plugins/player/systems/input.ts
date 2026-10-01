@@ -582,7 +582,23 @@ export class PlayerInputSystem {
     this.rawFrameDx = 0;
     this.rawFrameDy = 0;
     this.diag.look.applied++;
-    this.pending.push({ kind: "look", yaw: -dx * this.sensitivity, pitch: -dy * this.sensitivity });
+    const yaw = -dx * this.sensitivity;
+    const pitch = -dy * this.sensitivity;
+    // **A LOOK IS ADDITIVE, SO THERE IS NEVER A REASON FOR TWO OF THEM TO QUEUE (measured bug)**: the fixed
+    // lane drains this queue 120 times a second, while `frameLook()` runs once per DRAWN frame — and with the
+    // display-rate limit lifted (the vertical-sync switch OFF) that is 500-650 times a second. Pushing one
+    // intent per frame then grew the queue without bound: every tick drained an ever-longer backlog of tiny
+    // rotations, so the game got slower and slower the longer sync stayed off (and the array grew forever).
+    // Ten small turns ARE one bigger turn, so the pending intent is ACCUMULATED into instead: the queue holds
+    // at most one look, whatever the frame rate does. (The key/motion intents are edge-driven, so they are
+    // produced at the EVENT rate — bounded by the input device, not by the frame rate.)
+    const last = this.pending[this.pending.length - 1];
+    if (last !== undefined && last.kind === "look") {
+      last.yaw += yaw;
+      last.pitch += pitch;
+      return;
+    }
+    this.pending.push({ kind: "look", yaw, pitch });
   }
 
   /** **Grab the mouse — the ONE way in (P1.72).** The native capture (Win32 `ClipCursor` + a hidden

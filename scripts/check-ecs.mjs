@@ -2432,6 +2432,13 @@ check("diagnostics declares every external target it actually touches", () => {
   // …and the FPS cap is NOT an external read any more: it is a resource, so the schedule does not
   // model it and listing it here would be a lie in the other direction.
   assert(!DIAGNOSTICS_ACCESS.readsExternal.includes("fpsCap"), "the frame cap is a resource now");
+  // THE GPU TIMESTAMP IS SAMPLED, NOT PER FRAME (P1.88): with the display-rate limit lifted the lane draws
+  // 500-650 frames a second, and a timestamp resolve per frame is a GPU sync point per frame for a number
+  // printed once a second. It is throttled AND gated on the panel being visible.
+  const diag = stripComments(readSource("src/plugins/render/systems/diagnostics.ts"));
+  assert(/const GPU_SAMPLE_MS = 250/.test(diag), "the GPU timestamp query has a sampling interval");
+  assert(/panelVisible && now - this\.gpuSampleAt >= GPU_SAMPLE_MS/.test(diag),
+    "…and is only issued while the F3 panel is on screen");
 });
 
 check("the frame cap is world state AND a persisted setting", () => {
@@ -3830,6 +3837,19 @@ check("player.input is a scheduled system with a declared access set", () => {
 check("the device handlers only QUEUE; step() is what writes the components", () => {
   // The hand-off is the whole point of the migration: the decisions (which key, which delta, which jump
   // branch, every race guard) still happen at event time; the writes moved into the system run.
+  //
+  // …AND A LOOK INTENT IS COALESCED (P1.88, a measured bug): the fixed lane drains this queue 120 times a
+  // second, `frameLook()` runs once per DRAWN frame, and with the display-rate limit lifted that is 500-650
+  // times a second. One intent per frame then grew the queue without bound — the game got slower the longer
+  // the vertical-sync switch stayed OFF. Ten small turns are one bigger turn, so the trailing look intent is
+  // accumulated into instead of queued behind.
+  const inputSrc = stripComments(readSource("src/plugins/player/systems/input.ts"));
+  assert(
+    /const last = this\.pending\[this\.pending\.length - 1\];[\s\S]{0,240}last\.kind === "look"[\s\S]{0,240}last\.yaw \+= yaw;/.test(
+      inputSrc,
+    ),
+    "frameLook() accumulates into the pending look intent (the queue cannot grow with the frame rate)",
+  );
   const { PlayerInputSystem } = load("plugins/player/systems/input.js");
   const devices = world.resource(INPUT_STATE);
   const ui = world.resource(UI_MODAL);

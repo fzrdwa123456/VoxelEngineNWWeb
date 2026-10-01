@@ -130,6 +130,12 @@ that used to lie. In a world, open the pause menu → Settings → Graphics:
 5. The F3 panel's first line shows the same three numbers next to the FPS.
 6. Quit and relaunch: the switch keeps its value (it is in `settings.json` now, so the settings check repairs a
    hand-edited `"vsync": "yes"` and reports it) — and `game\config\vsync.json` must NOT come back.
+7. **SYNC OFF MUST STAY FLAT OVER TIME (P1.88 — this used to be a real bug)**: turn sync OFF, then play —
+   walk, turn the mouse continuously, dig — for **at least a minute**, and watch the `FRAME` lines. `avg` and
+   `max` must stay where they started (the drawn rate jumps to a few hundred fps and `stalls` stays 0); they
+   must NOT drift upwards second by second (that was the look-intent queue growing without bound: one intent
+   per drawn frame, drained 120 times a second). If the F3 panel is open, `GPU:` only refreshes ~4 times a
+   second now — the timestamp query is sampled instead of issued per frame.
 
 AFTER the presentation objects became resources (`host/browser/presentation.ts`, §5.2 P1.7: the scene, the
 camera, the renderer, the frame sampler, the canvas host, the UI mount root and the chunk-mesh cache —

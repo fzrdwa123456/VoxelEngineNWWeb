@@ -2356,6 +2356,21 @@ Still outstanding:
   command's deferral, the schema key, the fixed launch arguments and the absence of the vsync file; the real
   app's log shows the boot line, the webview arguments and `raf=`/`target=` per second, and toggling the switch
   in-game changes the frame rate within one frame with no relaunch (see TESTING.md).
+- **P1.88 — the vertical-sync switch OFF no longer degrades over time, and the GPU timestamp stops being
+  sampled per frame.** `DONE` (both found by playing with the switch off, as reported). Two "it gets worse the
+  longer you play" bugs, both caused by the P1.86 change that lifted Chromium's display-rate limit:
+  * **A LOOK INTENT IS NOW COALESCED.** `player.input.frameLook()` runs once per DRAWN frame and queues one
+    `look` intent, while the fixed lane drains that queue 120 times a second. At 60fps the queue is always
+    empty; with sync OFF the lane draws 500-650 frames a second, so the queue grew by ~4-5 intents per tick —
+    **unbounded**, and every tick drained a longer backlog of tiny rotations, so the game slowed down the
+    longer sync stayed off (and the array grew for ever). Ten small turns ARE one bigger turn, so the trailing
+    look intent is accumulated into instead: at most one look is ever queued, whatever the frame rate. The
+    key/motion intents are edge-driven and therefore bounded by the input device, not by the frame rate.
+  * **THE GPU TIMESTAMP IS SAMPLED, NOT PER FRAME.** `diagnostics` resolved a GPU timestamp query on every
+    render frame — one GPU sync point per frame, for a number printed once a second. It is now throttled to
+    4 Hz AND only while the F3 panel is visible.
+  VERIFIED: `tsc` 0; `check:ecs` 75/75 with both facts asserted (the coalescing, the sampling interval and the
+  panel gate); and a real run with sync OFF for a minute holds a flat frame time instead of drifting.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

@@ -26,7 +26,7 @@ mod rawinput;
 mod webview;
 pub use display::display_refresh_milli_hz;
 pub use rawinput::WindowsRawInput;
-pub use webview::{make_webview_transparent, WindowsWebview};
+pub use webview::WindowsWebview;
 
 /// Is that window the FOREGROUND one right now? (the platform fact the policy keeps asking for)
 pub fn is_foreground(window: NativeWindow) -> bool {

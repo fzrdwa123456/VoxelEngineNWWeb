@@ -62,51 +62,6 @@ impl WebviewBackend for WindowsWebview {
     }
 }
 
-/// **The WebView's default background becomes TRANSPARENT (P1.87)**, so the NATIVE render layer behind it (a
-/// child window drawn by wgpu, `crate::native`) is visible wherever the page does not paint.
-///
-/// It is set unconditionally, and that is deliberate: whether the world is drawn by the web renderer (the page
-/// paints its own background, as it always has) or by the native one (the page's background is made
-/// transparent by the front end, and the world shows through) is the FRONT END's decision. WebView2's default
-/// is an OPAQUE colour, which would paint over the native layer no matter what the CSS said.
-///
-/// `ICoreWebView2Controller2::SetDefaultBackgroundColor` is the documented switch (the `2` interface is the
-/// one that takes an alpha channel), reached through the same `with_webview` door the accelerator keys use.
-pub fn make_webview_transparent(window: &WebviewWindow, log_root: std::path::PathBuf) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Controller2, COREWEBVIEW2_COLOR};
-    use windows::core::Interface;
-
-    let root_for_outer_log = log_root.clone();
-    match window.with_webview(move |webview| {
-        // SAFETY: `with_webview` guarantees this runs while the webview is alive, on the right thread (the
-        // same contract as the accelerator-key switch next door).
-        let result = unsafe {
-            webview
-                .controller()
-                .cast::<ICoreWebView2Controller2>()
-                .and_then(|controller| {
-                    controller.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
-                        A: 0,
-                        R: 0,
-                        G: 0,
-                        B: 0,
-                    })
-                })
-        };
-        let line = match result {
-            Ok(()) => "webview2: default background TRANSPARENT (the native render layer shows through)".to_string(),
-            Err(e) => format!("webview2: FAILED to make the background transparent: {e}"),
-        };
-        crate::game::append_boot(&log_root, &line);
-    }) {
-        Ok(()) => {}
-        Err(e) => crate::game::append_boot(
-            &root_for_outer_log,
-            &format!("webview2: with_webview (transparency) failed: {e}"),
-        ),
-    }
-}
-
 /// ===== Option A: turn off WebView2's **browser accelerator keys** =====
 ///
 /// WebView2 defaults to `AreBrowserAcceleratorKeysEnabled = true`, so these keys are taken over by

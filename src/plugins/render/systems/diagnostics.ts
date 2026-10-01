@@ -25,6 +25,10 @@ import {
   type InputDiagnostics,
 } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
+
+/** How often the GPU timestamp query may be issued (P1.88): the value is printed once a second, so sampling
+ *  it faster than this buys nothing — and at an uncapped frame rate it cost one GPU sync point PER FRAME. */
+const GPU_SAMPLE_MS = 250;
 import { setUiText, UI_STATE, UI_TEXT } from "../../ui/components";
 import type { VoxelWorld } from "../../../data/world/world";
 
@@ -96,6 +100,8 @@ export class DiagnosticsSystem {
   private readonly debugLog: DebugLogSink;
   /** The F3 panel's widget handles, spawned by the HUD view during wiring */
   private readonly f3: F3Panel;
+  /** When the GPU timestamp query was last issued (see the throttle in `step`) */
+  private gpuSampleAt = 0;
 
   constructor(private readonly world: World) {
     const player = world.resource(LOCAL_PLAYER);
@@ -134,13 +140,24 @@ export class DiagnosticsSystem {
     // Diagnostic queue incremental forwarding (SPACE/MOUSE, implemented in debuglog.ts)
     this.debugLog.forward(this.diag);
 
-    // Read the real GPU render time (ms, last frame's total render pass), EMA-smoothed in perf.ts
-    this.renderer
-      .resolveTimestampsAsync("render")
-      .then((ms) => {
-        if (typeof ms === "number" && ms > 0) this.perf.noteGpu(ms);
-      })
-      .catch(() => {});
+    // Read the real GPU render time (ms, last frame's total render pass), EMA-smoothed in perf.ts.
+    //
+    // **SAMPLED, NOT PER FRAME (P1.88 — measured bug).** This used to resolve a GPU timestamp query on EVERY
+    // render frame. At 60fps that is one map per frame; with the display-rate limit lifted (the vertical-sync
+    // switch OFF) the lane draws 500-650 frames a second, i.e. 500-650 GPU query maps a second — a sync point
+    // each — for a number that is printed once a second. It is also pointless while the panel is hidden. So it
+    // is throttled to ~4 Hz AND only while the F3 panel is on screen.
+    const panelVisible = this.world.get(this.f3.panel, UI_STATE)?.hidden !== false;
+    const now = performance.now();
+    if (panelVisible && now - this.gpuSampleAt >= GPU_SAMPLE_MS) {
+      this.gpuSampleAt = now;
+      this.renderer
+        .resolveTimestampsAsync("render")
+        .then((ms) => {
+          if (typeof ms === "number" && ms > 0) this.perf.noteGpu(ms);
+        })
+        .catch(() => {});
+    }
 
     // The F3 panel's text. Its VISIBILITY is the panel's own UI_STATE (ui.picker toggles it) — read here,
     // not mirrored into a field, because a second copy is how "the panel was toggled but the text kept
