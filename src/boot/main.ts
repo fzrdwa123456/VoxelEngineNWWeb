@@ -1635,10 +1635,13 @@ const goTransparent = (): void => {
 };
 
 const startNativeLayer = async (): Promise<void> => {
-  // ON unless the settings file says `"renderer": "web"`: this round exists to be tested, and the fallback
-  // below is what makes that safe. The line is logged either way, so the choice in force is never a guess.
-  if (readSettings().renderer === "web") {
-    logDebug("NATIVE renderer off (settings.json renderer=web): the web renderer draws the world");
+  // **The WEB renderer is the default (P1.87): three.js draws the world, exactly as it always has.** The native
+  // layer is kept, finished, behind an explicit opt-in — `"renderer": "native"` in settings.json — because it
+  // works (Dx12, a real present-mode switch) but cannot share the screen with the WebView: WebView2's windowed
+  // hosting paints opaque over it, so the HTML UI has to stand down while a world runs (the HUD goes with it).
+  // Until the HUD is drawn natively, the web renderer is the one that plays.
+  if (readSettings().renderer !== "native") {
+    logDebug("NATIVE renderer off (settings.json renderer=web): three.js draws the world");
     return;
   }
   try {
