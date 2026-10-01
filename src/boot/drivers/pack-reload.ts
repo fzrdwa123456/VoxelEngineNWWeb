@@ -13,6 +13,7 @@ import { discoverBlockEntries } from "../../data/assets/blocks";
 import { refreshMenuBackground, menuBgKind } from "../../data/assets/background";
 import { notifyConfigChange } from "../../core/services/bus";
 import { CHUNK_MATERIAL, ICON_BAKE, MENU_BACKGROUND } from "../../data/globals/gfx";
+import { RENDER_HANDLES } from "../../data/globals/render-handles";
 import { UI_PAINT } from "../../data/globals/paint";
 import { PACK_RELOAD, UI_MODAL, LOOP_STATE, type LoopState, type LocaleState } from "../../data/globals/resources";
 import { SetLoadingStage, ShowToast } from "../../data/globals/commands";
@@ -56,10 +57,15 @@ export function createPackReloadDriver(deps: PackReloadDeps): PackReloadDriver {
 //   3. THE CONTENT PHASE IS RE-RUN, then the caches are dropped — in that order, so nothing answers with the
 //      previous chain's bytes afterwards.
 //   4. THE WORLD IS NOT REBUILT. Success only marks every loaded chunk STALE, and the chunk stream re-resolves
-//      their LOOKS in place, `RESTYLE_BUDGET_PER_FRAME` a frame (P1.18i) — MC's `allChanged()` -> "invalidate
-//      compiled geometry" -> rebuild over the following frames, minus the rebuild: a new chain changes what a
-//      block LOOKS like, while a mesh's vertices depend on the voxels alone (every uv is a per-face constant),
-//      so the geometry survives a reload untouched and only its look -> material list is resolved again.
+//      their LOOKS in place (P1.18i) — MC's `allChanged()` -> "invalidate compiled geometry" -> rebuild over the
+//      following frames, minus the rebuild: a new chain changes what a block LOOKS like, while a mesh's vertices
+//      depend on the voxels alone (every uv is a per-face constant), so the geometry survives a reload untouched
+//      and only its look -> material list is resolved again.
+//      …AND THE QUEUE IS DRAINED BEHIND THIS SCREEN (`restyleBehindScreen`), the way `enterWorld` drains the
+//      spawn window's meshing into the same loading screen (`warmUp`). The per-frame budget in `chunk.stream`
+//      stays as the fallback (a gate, a driver-less reload); behind the screen the whole queue is resolved
+//      before the world is drawn again, so no game frame carries the material rebuild and the new textures are
+//      on screen the instant the screen comes down.
 //   5. A FAILURE KEEPS THE OLD CHAIN: the previous snapshot is re-installed and re-derived before the error is
 //      reported — MC's `rollbackResourcePacks`. Nothing is ever left half-applied.
 //   6. THE PLAYER SEES AN OVERLAY, not a frozen frame: the LOADING SCREEN is raised through the same
@@ -150,6 +156,31 @@ const dropPackDerivedCaches = (): void => {
   );
 }
 
+/** Re-resolve the LOOKS of the chunks the reload just marked stale, BEHIND the loading screen (P1.18i), and
+ *  answer how many of them that covered.
+ *
+ *  The driver drives the chunk stream by hand here for the same reason `enterWorld` drives it for the spawn
+ *  window (`warmUp`): the work belongs where the user is already waiting. Left to the game frames it costs a
+ *  burst of the material rebuild in the first frame after the screen comes down (measured 32 ms) plus ~24
+ *  frames in which the rest of the window still shows the PREVIOUS chain's looks — so the new textures appear
+ *  a fraction of a second late. Behind the screen it costs a macrotask per batch.
+ *
+ *  NOT `chunkStream.step()`: a reload happens in a world whose window is already built, so this must mesh
+ *  nothing, generate nothing and hand no job to a worker. Bounded by the system (`RESTYLE_DRAIN_BATCHES`), so
+ *  whatever is left over is drained by ordinary game frames and a huge world cannot wedge this screen. */
+const restyleBehindScreen = async (): Promise<number> => {
+  const total = deps.voxel.staleCount;
+  if (total === 0) return 0;
+  await deps.world
+    .resource(RENDER_HANDLES)
+    .chunkStream.restyleStale(deps.stage.paint, (done, all) => {
+      // The bar owns the tail of the reload, and it is a REAL measurement: the queue it counts is the work
+      // that is actually left (see `VoxelWorld.staleCount`).
+      deps.world.commands.send(SetLoadingStage, { progress: 0.85 + 0.12 * (all > 0 ? done / all : 1) });
+    });
+  return total - deps.voxel.staleCount;
+};
+
 /** ONE reload, start to finish. Returns the summary line; throws when the reload AND its rollback failed. */
 const reloadPacksNow = async (): Promise<string> => {
   const previous = deps.lastGoodSnapshot();
@@ -167,20 +198,26 @@ const reloadPacksNow = async (): Promise<string> => {
     deps.stage.announce({ progress: 0.7, key: "loading.packs.apply" });
     await deps.stage.paint();
     dropPackDerivedCaches();
-    // ---- 4. MARK THE WORLD STALE (do NOT rebuild or re-mesh it here) ----
+    // ---- 4. MARK THE WORLD STALE, then resolve the LOOKS behind this screen (never re-mesh it here) ----
     deps.stage.announce({ progress: 0.85, key: "loading.packs.mesh" });
     await deps.stage.paint();
     const stale = deps.voxel.markAllStale();
+    const restyled = await restyleBehindScreen();
     deps.noteSnapshot(snap);
-    return `${chainLine}; ${derivedLine}; ${stale} chunk(s) queued for a restyle (looks only, no re-mesh)`;
+    return (
+      `${chainLine}; ${derivedLine}; ${stale} chunk(s) stale, ${restyled} restyled behind the screen ` +
+      `(looks only, no re-mesh${restyled < stale ? `, ${stale - restyled} left for the next frames` : ""})`
+    );
   } catch (err) {
     // ROLLBACK: put the last good chain back and re-derive from it, so a bad pack leaves the engine exactly
-    // as it was (MC's rollbackResourcePacks) instead of half-swapped.
+    // as it was (MC's rollbackResourcePacks) instead of half-swapped. The world is re-resolved behind the SAME
+    // screen (nothing has been drawn with the failed chain: the screen was up for the whole reload).
     if (previous) {
       installPacks(previous, getEnabledPacks());
       rebuildDerivedFromChain();
       dropPackDerivedCaches();
       deps.voxel.markAllStale();
+      await restyleBehindScreen();
       deps.noteSnapshot(previous);
     }
     throw err;

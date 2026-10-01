@@ -482,12 +482,20 @@ where it is:
   `VoxelWorld.markAllStale` queues LOOK work, and `ChunkGeometry.restyle` re-resolves the material of every
   existing slot in place (it keeps each slot's `(value, kind)` key for exactly this). The mesh, its buffers
   and its `geometry.groups` all stay where they are, and nothing is handed to a worker: a reload costs a few
-  thousand LOOKUPS instead of a few thousand chunk meshes. `RESTYLE_BUDGET_PER_FRAME` (128) spreads them over
-  a couple of frames. A future reason to mark a chunk stale that MOVES vertices must re-mesh instead.
+  thousand LOOKUPS instead of a few thousand chunk meshes. A future reason to mark a chunk stale that MOVES
+  vertices must re-mesh instead.
+* **…and the RELOAD DRIVER drains that queue BEHIND THE LOADING SCREEN** (`restyleBehindScreen` →
+  `chunkStream.restyleStale`, reached through the published `RENDER_HANDLES`), which is the same shape as the
+  world entry driving `warmUp` into the same screen. `restyleNext(128)` is the ONE batch both callers use —
+  the render lane takes one per frame (`step`), a driver takes as many as it can while it holds the screen —
+  so the reload's cost is paid where the user is already waiting. Left to the game frames it was a 32 ms
+  frame (the material rebuild) plus ~24 frames in which the window still showed the previous chain. The loop
+  is BOUNDED (`RESTYLE_DRAIN_BATCHES` = 256 batches), so a world larger than this one cannot wedge a reload's
+  screen: whatever is left is drained by ordinary game frames.
   MEASURED: entering a world went from `WORLD ready at 2301ms` to **97ms** with 11 workers on a 12-thread
   machine, and the app logs `RENDER meshing: N worker(s)` at boot; toggling a resource pack in a LOADED world
-  logs `2856 chunk(s) queued for a restyle (looks only, no re-mesh)` and the world shows the new texture
-  after ONE 39ms frame with `stalls=0`.
+  logs `3016 chunk(s) stale, 3016 restyled behind the screen (looks only, no re-mesh)` with no game frame
+  over ~20 ms and `stalls=0`.
 
 ## Iron rules (breaking any of these = silent bugs)
 

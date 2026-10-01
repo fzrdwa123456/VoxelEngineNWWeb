@@ -51,6 +51,11 @@ const MESH_BUDGET_PER_FRAME = 24;
  *  restyle is one lookup per material group in a chunk that is already built. It is still budgeted, so the
  *  frame cannot grow with the size of the streamed window. */
 const RESTYLE_BUDGET_PER_FRAME = 128;
+/** Batches one SCREEN-DRIVEN drain may take (`restyleStale`): 256 × 128 = 32768 chunks, four times the whole
+ *  chunk map this engine can hold (32 × 32 × 8 = 8192), so it is a runaway guard and not a limit the working
+ *  case can reach (~24 batches for a 3000-chunk world). Anything left over is drained by ordinary game
+ *  frames, which is what keeps a reload's screen from ever being wedged by the size of the world. */
+const RESTYLE_DRAIN_BATCHES = 256;
 
 const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
   [1, 0, 0],
@@ -269,11 +274,11 @@ export class ChunkStreamSystem {
     // place. That is the difference between a reload costing a few thousand chunk meshes and costing a few
     // thousand lookups: the mesh, its buffers and its groups all stay exactly where they are. A non-bulk reason
     // to mark a chunk stale (a future change that moves vertices) must re-mesh instead — see ROADMAP P1.18i.
-    let restyleBudget = RESTYLE_BUDGET_PER_FRAME;
-    for (const key of this.voxel.takeStale(restyleBudget)) {
-      restyleBudget--;
-      this.restyle(key);
-    }
+    //
+    // The reload DRIVER normally drains this whole queue behind the loading screen (`restyleStale`), so this
+    // batch is what is left for a reload that was not driven (a gate, or a world with no screen up).
+    this.restyleNext();
+
 
     let budget = MESH_BUDGET_PER_FRAME;
     for (const key of this.wanted) {
@@ -375,6 +380,50 @@ export class ChunkStreamSystem {
     // The material CACHE was dropped by the reload (see the pack driver), so these come back from the new
     // chain's textures. `groups` is untouched: a slot index still means the same material index.
     entry.mesh.material = this.materialsFor(entry.geom);
+  }
+
+  /** Re-resolve up to `limit` of the chunks a chain change marked STALE, and answer how many the queue handed
+   *  back (0 = nothing left). THE SYNC CORE OF THE RELOAD, shared by its two callers: the render lane takes one
+   *  batch per frame (`step`) and the reload driver takes as many as it can behind the loading screen
+   *  (`restyleStale`). Public for the same reason `prime`/`warmUp` are: the gate drives it directly.
+   *
+   *  It meshes NOTHING and asks the pool for NOTHING — that is the whole point of the restyle path (P1.18i) —
+   *  so the only cost is one look resolution per material group of a chunk that is already on screen. */
+  restyleNext(limit: number = RESTYLE_BUDGET_PER_FRAME): number {
+    const batch = this.voxel.takeStale(limit);
+    for (const key of batch) this.restyle(key);
+    return batch.length;
+  }
+
+  /** DRAIN THE WHOLE STALE QUEUE FOR A CALLER THAT CAN YIELD (P1.18i) — the pack reload driver, which runs this
+   *  behind the loading screen exactly the way `enterWorld` runs `warmUp` behind it. Every batch is the same
+   *  budgeted `restyleNext` the render lane uses, and `yieldTo` is the driver's `paint()`: one macrotask, so the
+   *  screen stays alive (and its bar moves) while this runs.
+   *
+   *  WHY THE SCREEN IS THE RIGHT PLACE FOR IT: the alternative is paying it in the first game frames — 3016
+   *  stale chunks at 128 a frame is ~24 frames in which the whole queue is still resolving, so the new textures
+   *  appear a fraction of a second LATE and one of those frames carries the material rebuild. The reload is
+   *  already an act the user waits on, and a screen that covers real work is honest.
+   *
+   *  BOUNDED (`RESTYLE_DRAIN_BATCHES`), so a world much larger than this one cannot wedge a reload's screen:
+   *  whatever is left when the guard runs out is drained by ordinary game frames. */
+  async restyleStale(
+    yieldTo: () => Promise<void>,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<void> {
+    const total = this.voxel.staleCount;
+    let last = -1;
+    for (let guard = 0; guard < RESTYLE_DRAIN_BATCHES; guard++) {
+      const left = this.voxel.staleCount;
+      onProgress?.(total - left, total);
+      if (left === 0) return;
+      // No progress can only mean the queue is being re-marked as fast as we drain it (a second reload):
+      // stop rather than spin, and let the game frames finish it.
+      if (left === last) return;
+      last = left;
+      this.restyleNext();
+      await yieldTo();
+    }
   }
 
   /** The streaming path (a chunk the window wants that has not been decided yet). */

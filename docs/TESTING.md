@@ -37,12 +37,14 @@ world: enter a world, then raise the pause menu (ESC, or drag/move the window on
 too), Settings → Resource Packs, and toggle a pack that ships a BLOCK TEXTURE (the sample pack does not: it
 only ships language files and backgrounds, so the ground will NOT change — drop a pack in
 `resourcepacks/<name>/assets/voxel/textures/block/grass_block_top.png` to test it for real). The log must say
-`N chunk(s) queued for a restyle (looks only, no re-mesh)` and the world behind the panel must show the NEW
-texture as soon as the panel comes down — the geometry was NOT rebuilt (no worker jobs, and the same
-`mesh.faces` count per chunk). ONE frame of 30–45 ms at the reload is expected (the material cache is
-dropped); the frames after it must be back at ~17 ms with `stalls=0`. If the ground keeps the OLD texture,
-`restyle` did not run (check that the reload reached `chunk.stream`, i.e. that the mode went back to `game`);
-if the world shows HOLES or wrong faces, geometry was rebuilt from a stale gather.
+`N chunk(s) stale, M restyled behind the screen (looks only, no re-mesh)` with M == N, and the world behind
+the panel must ALREADY show the NEW texture — the whole queue is resolved while the screen is up, so not one
+game frame carries the work and the geometry was never rebuilt (no worker jobs, same `mesh.faces` per chunk).
+The loading screen stays up a little longer for it (a macrotask per 128 stale chunks, tens of ms here) and
+that is the trade: if the screen instead goes down with `M < N` in the line, the drain hit its guard and the
+rest is on the game frames. NO frame may exceed ~20 ms after the reload; if the ground keeps the OLD texture,
+`restyleStale` did not run (check that the driver reached `RENDER_HANDLES`), and if the world shows HOLES or
+wrong faces, geometry was rebuilt from a stale gather.
 **A FAILING WORKER IS REPORTED, NOT SILENT (P1.18i)**: there is no way to break a worker from the outside any
 more (the worker is bundled inside the exe), so this is asserted by the gate and by the throwaway pool test —
 `MESH worker failed (i/N): <why>; J job(s) re-mesh on the main thread; K worker(s) left` appears in
@@ -745,9 +747,10 @@ world's chunks stale (they are re-meshed at the per-frame budget, not in one hit
    containing `{"main.single": "Solo"}` (save it as UTF-8 **without** a BOM — a BOM makes `JSON.parse`
    fail and the layer is ignored, which is itself worth seeing once).
 4. Press **F7**. Expected: the loading screen appears with four stages
-   (`重新扫描资源包…` / `重建语言与方块表…` / `应用新资源包…` / `重画区块…`), then a toast
+   (`重新扫描资源包…` / `重建语言与方块表…` / `应用新资源包…` / `重画区块…`, the last one moving while the
+   stale queue is drained), then a toast
    `pack reload OK — PACKS installed: ... files=N+1; I18N ... fr=1; BLOCKREG ...; palette ...; M chunk(s)
-   queued for a restyle (looks only, no re-mesh)`.
+   stale, M restyled behind the screen (looks only, no re-mesh)`.
 5. The log gets one `PACKS reloaded #1: ...` line with the SAME summary. `files` and the language list are
    the proof that the folders were re-read (this was verified by hand: `files=12 ... zh/en/ja/fr` at boot
    became `files=13 ... zh/en/ja/de=1/fr=2` after a reload that ran while a new `de.json` was created).
@@ -767,12 +770,10 @@ world's chunks stale (they are re-meshed at the per-frame budget, not in one hit
 7. Enter a world and walk around until the chunks are meshed.
 8. Edit a texture a visible block uses (e.g. `assets/voxel/textures/block/grass_block_top.png` in a pack),
    then press **F7**. Expected: the loading screen comes and goes, the toast reports
-   `N chunk(s) queued for a restyle (looks only, no re-mesh)` with N > 0, and the blocks show the NEW texture
-   within a frame or two (`chunk.stream` restyles `RESTYLE_BUDGET_PER_FRAME` = 128 a frame, and a restyle is a
-   material lookup — NOT a re-mesh, P1.18i) — the player keeps walking, nothing freezes, the position and the
-   inventory are untouched, and the geometry is the SAME (the flat ground's surface must not flicker or gap).
-   ONE frame of 30–45 ms at the reload itself is expected (the material cache is dropped with the chain); the
-   frames after it must be back at ~17 ms with `stalls=0`.
+   `N chunk(s) stale, N restyled behind the screen (looks only, no re-mesh)` with N > 0, and the blocks show
+   the NEW texture the moment the screen is down — the queue was resolved BEHIND it (P1.18i), so no game frame
+   carries a material rebuild and the geometry is the SAME (the flat ground's surface must not flicker or
+   gap). The whole reload must stay under ~20 ms per frame with `stalls=0`.
 9. Add a block to a pack's `data/blocks.json`, F7, then look in the backpack: the new block is there and
    placing it puts the right texture in the world (the palette MERGES, so the blocks already placed keep
    their numbers — that is the MC lesson this copies, see `VoxelWorld.mergePalette`).

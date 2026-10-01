@@ -14,6 +14,13 @@ export interface RenderHandles {
     needsWarmUp(x: number, z: number): boolean;
     prime(x: number, z: number): void;
     warmUp(yieldTo: () => Promise<void>, onProgress?: (done: number, total: number) => void): Promise<void>;
+    /** Re-resolve the LOOKS of the chunks a chain change marked stale, in batches, yielding in between
+     *  (P1.18i): the PACK RELOAD driver drives this behind the loading screen, the way `warmUp` is driven
+     *  behind it on a world entry. Meshes nothing, asks the pool for nothing. Bounded by the system. */
+    restyleStale(
+      yieldTo: () => Promise<void>,
+      onProgress?: (done: number, total: number) => void,
+    ): Promise<void>;
   };
   /** The MENU frame drives this too (`menuFrame`): the background own step, once per ui frame. */
   readonly menuBackground: { step(): void };

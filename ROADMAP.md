@@ -1309,6 +1309,16 @@ Still outstanding:
   * the stale queue keeps its own budget (`RESTYLE_BUDGET_PER_FRAME = 128`, vs 24 for meshing) because the work
     is not comparable — one lookup per material group vs a 32³ neighbourhood scan and a full vertex rewrite. It
     stays budgeted so a frame cannot grow with the size of the streamed window.
+  * **THE QUEUE IS DRAINED BEHIND THE LOADING SCREEN**, which is the second half of the round and the reason
+    the game frames are untouched: `chunkStream.restyleStale(yieldTo, onProgress)` runs the same
+    `restyleNext(128)` batch the render lane uses, yielding between batches, and the reload driver drives it
+    from `restyleBehindScreen()` — the SAME shape as `enterWorld` driving `warmUp` into that screen, reached
+    through the published `RENDER_HANDLES` (a plugin type a driver may not import). The loop is BOUNDED
+    (`RESTYLE_DRAIN_BATCHES` = 256 batches), so a world larger than this one cannot wedge a reload's screen:
+    whatever is left is drained by ordinary game frames. WHY: left to the game frames, the first frame after
+    the screen came down carried the material rebuild (measured 32 ms) and the window showed the PREVIOUS
+    chain's looks for ~24 more frames. The driver also drains on the ROLLBACK path, so a failed reload puts
+    the old chain's looks back behind the same screen.
   * **A FAILING WORKER IS PER-WORKER AND LOUD** (`host/browser/mesh-pool.ts`): a slot tracks its OWN pending
     job ids (the old handler failed every job in the pool), a failure reports ONE line through an injected log
     (`MESH worker failed (i/N): <why>; J job(s) re-mesh on the main thread; K worker(s) left`), the DEAD WORKER
@@ -1320,13 +1330,15 @@ Still outstanding:
     got a pool object with zero slots and never meshed anything.
   VERIFIED: `tsc` 0; `check:ecs` **75/75** with the reload assertion FLIPPED (the gate drives a real
   `VoxelWorld`, marks every chunk stale, and asserts every loaded mesh is restyled EXACTLY once while not one
-  chunk is re-meshed on this thread AND not one is handed to a worker), plus source assertions for the pool's
-  per-worker retirement, `hasPool`, the plugin's zero-worker guard and the geometry's slot keys. In the real
-  app a pack toggle inside a LOADED world logged `2856 chunk(s) queued for a restyle (looks only, no re-mesh)`
-  and the ground switched to the new pack's texture after ONE 31–39 ms frame, back to ~17 ms with `stalls=0`
-  (the A/B was made unambiguous with a throwaway pack that overrides `block/grass_block_top.png`); the worker
-  failure path was driven against the REAL compiled pool with a stubbed `Worker` (per-slot failure, drop,
-  terminate, the pool-empty line, and the no-worker-start line).
+  chunk is re-meshed on this thread AND not one is handed to a worker), plus the sync batch the screen drain
+  loops (empty queue, one restyle per mesh, no worker job) and source assertions for the pool's per-worker
+  retirement, `hasPool`, the plugin's zero-worker guard, the geometry's slot keys, `restyleStale`'s guard and
+  the driver's two `restyleBehindScreen()` calls. In the real app a pack toggle inside a LOADED world logged
+  `3016 chunk(s) stale, 3016 restyled behind the screen (looks only, no re-mesh)` and the ground switched to
+  the new pack's texture with NO game frame over ~35 ms, back to ~17 ms with `stalls=0` (the A/B was made
+  unambiguous with a throwaway pack that overrides `block/grass_block_top.png`); the worker failure path was
+  driven against the REAL compiled pool with a stubbed `Worker` (per-slot failure, drop, terminate, the
+  pool-empty line, and the no-worker-start line).
 - **P1.21 — the ui plugin is REMOVABLE (mechanically).** `DONE`. Disabling `ui` in the manifest used
   to crash the boot: the composition root did `installOutcome.apiOf("ui")!` and threw when it was missing.
   It now logs `PLUGIN ui is not installed - the ui lane is off …` and carries on, and `installPlugins`

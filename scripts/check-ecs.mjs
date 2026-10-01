@@ -741,6 +741,31 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   equal(rebuilt.length, 0, "…and NOT ONE of them is re-meshed on this thread");
   equal(requests.length, askedBeforeReload, "…nor handed to a worker: a reload costs lookups, not geometry");
 
+  // THE SAME DRAIN, DRIVEN BY HAND (P1.18i): the pack reload driver calls `restyleStale` behind the loading
+  // screen, exactly the way the world-entry driver calls `warmUp` behind it. The async wrapper is asserted by
+  // SHAPE below (this gate has no async groups); what is asserted HERE is the sync batch both callers share —
+  // it must empty the queue, restyle every mesh once, and mesh nothing (no worker, no rebuild).
+  restyled.length = 0;
+  rebuilt.length = 0;
+  applied.length = 0;
+  const askedBeforeBatches = requests.length;
+  const meshesAtDrain = cache.meshes.size;
+  const marked = voxel.markAllStale();
+  let taken = 0;
+  let batches = 0;
+  for (let i = 0; i < 512 && voxel.staleCount > 0; i++) {
+    taken += stream.restyleNext(128);
+    batches++;
+  }
+  equal(voxel.staleCount, 0, "a batch-driven drain leaves the queue EMPTY");
+  equal(taken, marked, "…having taken every chunk the reload marked stale");
+  equal(batches, Math.ceil(marked / 128), "…one batch per 128 of them (the budgeted core both callers share)");
+  equal(restyled.length, meshesAtDrain, "…restyling every loaded mesh exactly once, and");
+  equal(rebuilt.length, 0, "…re-meshing none of them,");
+  equal(applied.length, 0, "…applying no worker result,");
+  equal(requests.length, askedBeforeBatches, "…and asking the pool for nothing at all");
+  equal(stream.restyleNext(128), 0, "an empty queue hands back nothing (so a caller can loop on it)");
+
   // ===== 3. THE WIRING, asserted where it lives =====
   // Read directly: this group sits above the section's `readSource`/`stripComments` helpers (they are defined
   // further down the file), so it uses `fs` the way the chunk-stream group next door does.
@@ -770,6 +795,33 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   const worker = read("host/browser/mesh-worker.ts");
   assert(/meshChunk\(input\)/.test(worker) && /result\.transfer/.test(worker),
     "the worker runs the pure mesher and transfers the result back");
+  // THE SCREEN-DRIVEN DRAIN, end to end (P1.18i): the stream can run the whole queue for a caller that yields,
+  // the reload driver is that caller, and it runs it AFTER marking the world stale — behind the screen it
+  // already has up, instead of leaving ~24 frames of it to the game.
+  // (Raw source, not `stripComments`: that helper is defined further down the file, so it is in its TDZ here.)
+  const streamSrc = read("plugins/render/systems/chunk-stream.ts");
+  assert(
+    /async restyleStale\(\s*yieldTo: \(\) => Promise<void>,/.test(streamSrc) &&
+      /this\.restyleNext\(\);\s*await yieldTo\(\)/.test(streamSrc),
+    "the stream can drain the whole stale queue in batches for a caller that yields (the loading screen)",
+  );
+  assert(/RESTYLE_DRAIN_BATCHES/.test(streamSrc) && /guard < RESTYLE_DRAIN_BATCHES/.test(streamSrc),
+    "…under a guard, so a world larger than this one can never wedge a reload's screen");
+  assert(/restyleStale\(/.test(read("data/globals/render-handles.ts")),
+    "…and the reload driver may only reach it through the published handle (a plugin type it cannot import)");
+  const reloadSrc = read("boot/drivers/pack-reload.ts");
+  assert(/await restyleBehindScreen\(\)/.test(reloadSrc), "the reload driver DRIVES that drain…");
+  assert(
+    reloadSrc.indexOf("deps.voxel.markAllStale()") < reloadSrc.indexOf("await restyleBehindScreen()"),
+    "…after it marks the world stale (there is nothing to resolve before that)",
+  );
+  assert(
+    (reloadSrc.match(/await restyleBehindScreen\(\)/g) || []).length === 2,
+    "…on BOTH paths: the successful reload and its rollback (the old chain's looks too)",
+  );
+  assert(!/queued for a restyle/.test(reloadSrc),
+    "…and the summary no longer promises work the game frames will do later",
+  );
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {
