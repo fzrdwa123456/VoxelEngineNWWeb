@@ -20,7 +20,10 @@ export interface ShellSnapshot {
   settings: Record<string, unknown>;
   settingsProblem: string | null;
   windowMode: string;
-  vsyncDisabled: boolean;
+  /** The display's refresh rate in **milli-Hz** (`59940` for a 59.94Hz panel), or 0 when the platform
+   *  could not answer. Ratio-exact on purpose: the frame pacing is locked to it, and a rounded 60 against a
+   *  59.94Hz panel is a duplicated frame every ~16 seconds. */
+  displayRefreshMilliHz: number;
   focused: boolean;
   browserArgs: string;
   platform: string;
@@ -54,7 +57,7 @@ const state: ShellState = {
     settings: {},
     settingsProblem: null,
     windowMode: "windowed",
-    vsyncDisabled: true,
+    displayRefreshMilliHz: 0,
     focused: true,
     browserArgs: "",
     platform: "tauri",

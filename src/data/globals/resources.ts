@@ -171,6 +171,11 @@ export interface LoopState {
   physAcc: number;
   /** Frame-cap accumulator: one frame is drawn once its budget has passed */
   renderAcc: number;
+  /** Seconds since the last DRAWN frame. With the display-rate limit lifted (see game.rs) a vblank is no
+   *  longer a frame, so the render lane needs the real interval since the frame before it — this is the
+   *  `delta` every `world.render()` call gets. It equals `renderAcc`'s input on a machine where rAF is
+   *  locked to the display, and it is the only place the two differ. */
+  sinceDraw: number;
   /** The size the renderer was last sized to (0 = never) */
   appliedViewportW: number;
   appliedViewportH: number;
@@ -193,6 +198,7 @@ export function createLoopState(): LoopState {
     mode: "load",
     physAcc: 0,
     renderAcc: 0,
+    sinceDraw: 0,
     appliedViewportW: 0,
     appliedViewportH: 0,
     rendererReady: false,
@@ -212,6 +218,11 @@ export interface FrameProbeState {
   stalls: number;
   stallMax: number;
   statAt: number;
+  /** **VBLANKS seen since the last FRAME line** (P1.86). Printed as `raf=N/s`, and it is the ONE number that
+   *  says whether the display-rate limit really came off: `raf=60` next to `n=60` means the browser is still
+   *  pinning rAF to the panel (so "unsynced" can never be faster), while `raf=400` next to `n=60` means the
+   *  pacing is doing the work — which is what the vertical-sync switch now means. */
+  vblanks: number;
   /** Histogram of the per-frame look sample count (index = count, the last bucket folds the tail) */
   readonly pfBuckets: number[];
   pxMin: number;
@@ -234,6 +245,7 @@ export function createFrameProbe(): FrameProbeState {
     stalls: 0,
     stallMax: 0,
     statAt: 0,
+    vblanks: 0,
     pfBuckets: new Array<number>(FRAME_PF_BUCKETS).fill(0),
     pxMin: Number.POSITIVE_INFINITY,
     pxMax: 0,
@@ -449,6 +461,21 @@ export function isMenuUi(state: UiModalState): boolean {
 export interface FrameCapState {
   /** Frames per second, or 0 for unlimited */
   cap: number;
+  /** LOCK to the display: never draw more frames than the panel can show, whatever the cap says.
+   *
+   *  THIS IS THE SWITCH THAT USED TO NEED A RESTART. It was a WebView2 launch argument
+   *  (`--disable-gpu-vsync`), and a command-line flag can only be given before the webview exists — so
+   *  toggling it wrote a file and asked the user to relaunch (P1.86). It is a PACE now: the launch
+   *  arguments lift the display-rate limit unconditionally, and this value decides how often the loop
+   *  actually draws, on the NEXT frame. See `pacingTargetHz`. */
+  vsync: boolean;
+  /** The display's refresh rate in Hz, AS MEASURED BY THE PLATFORM (0 = it could not answer).
+   *
+   *  Measured, not assumed: the "60" this code used to log was a hard-coded string, and a cap of exactly
+   *  60 on a panel that really runs at 59.94 drifts against it — one duplicated frame every ~16 seconds,
+   *  which reads as a stutter nobody can explain. Ratio-accurate answers (59.94, 119.88) come from the
+   *  platform's own timing info. */
+  refreshHz: number;
 }
 
 /** The cap's DOMAIN, here rather than in the settings panel that draws it: a value the widget cannot
@@ -460,12 +487,70 @@ export const CAP_MIN = 30;
 export const CAP_MAX = 240;
 export const CAP_STEP = 2;
 
+/** The plausible refresh-rate window. A platform answer outside it is refused as "unknown" rather than
+ *  believed: a broken query must not be able to turn "synced" into a 5 fps or a 1000 fps target. */
+export const REFRESH_MIN_HZ = 20;
+export const REFRESH_MAX_HZ = 500;
+
 export const FPS_CAP = defineResource<FrameCapState>("fpsCap");
 
 /** Sanitising factory: a hand-edited settings.json can hold anything, and a NaN/negative cap would
- *  make the frame gate's 1/cap budget nonsense. Anything unusable becomes "unlimited". */
-export function createFrameCap(cap = 0): FrameCapState {
-  return { cap: sanitizeFrameCap(cap) };
+ *  make the frame gate's 1/cap budget nonsense. Anything unusable becomes "unlimited".
+ *  `vsync` defaults to TRUE: "run at the panel's rate" is what a game means by vertical sync, and the
+ *  WebView2 build's `--disable-gpu-vsync` default (inherited from the NW.js package.json) was the
+ *  opposite of what the switch's own label said. */
+export function createFrameCap(cap = 0, vsync = true, refreshHz = 0): FrameCapState {
+  // `!== false`, not `=== true`: the settings file is the other reader of this rule, and its rule is
+  // "absent or unusable means ON" (the sane default) — a hand-edited `"vsync": "yes"` must not turn the
+  // pacing off, which is what `=== true` would do.
+  return { cap: sanitizeFrameCap(cap), vsync: vsync !== false, refreshHz: refreshHzFromMilliHz(refreshHz) };
+}
+
+/** The platform's answer (milli-Hz) -> the value in force, or 0 for "unknown". Pure, so `check:ecs` can
+ *  sweep it: a refresh the loop cannot trust must reach `pacingTargetHz` as 0, never as a number. */
+export function refreshHzFromMilliHz(milliHz: number): number {
+  if (!Number.isFinite(milliHz) || milliHz <= 0) return 0;
+  const hz = milliHz / 1000;
+  return hz >= REFRESH_MIN_HZ && hz <= REFRESH_MAX_HZ ? hz : 0;
+}
+
+/** The rate the loop AIMS at, in Hz; 0 = no pacing (draw on every vblank).
+ *
+ *  WHY THIS IS A VALUE AND NOT A BROWSER FLAG: WebView2 takes its arguments before the page exists, so
+ *  "which present mode" cannot be switched at runtime — but `--disable-frame-rate-limit` (given at launch,
+ *  unconditionally) lifts Chromium's own display-rate limit, and then the ONLY thing that decides the frame
+ *  rate is this number, read by the loop every frame. The switch therefore takes effect on the next frame.
+ *    * vsync OFF -> the cap alone (0 = uncapped: draw every vblank, as fast as the machine can);
+ *    * vsync ON  -> the cap, but never above the panel's refresh (a cap of 240 on a 60Hz panel means 60:
+ *      drawing frames the panel cannot show buys nothing and costs power);
+ *    * an UNKNOWN refresh (0) falls back to 60 — never to "uncapped", which is the one answer that would
+ *      make "synced" mean the opposite of its label. */
+export function pacingTargetHz(cap: number, vsync: boolean, refreshHz: number): number {
+  if (!vsync) return cap > 0 ? cap : 0;
+  const refresh = refreshHz > 0 ? refreshHz : 60;
+  return cap > 0 ? Math.min(cap, refresh) : refresh;
+}
+
+/** The frame-pacing decision as a PURE function: given the accumulator, this vblank's delta and the target
+ *  rate, does this vblank DRAW, and what is the accumulator afterwards?
+ *
+ *  It is the same sum the loop has always used (`acc += delta; if (acc < budget) skip; acc %= budget`),
+ *  extracted so it can be asserted — the arithmetic is where "locked to 60" quietly turns into "one
+ *  duplicated frame every few seconds" when the target is a rounded rate the panel does not have.
+ *
+ *  **KNOWN LIMIT, MEASURED (P1.86)**: a draw can only happen on a callback, and with the display-rate limit
+ *  lifted Chromium delivers roughly 1.8 callbacks per panel refresh (`raf=108/s` while drawing 57/s). A target
+ *  EQUAL to the panel rate therefore lands at ~57 fps with a repeated frame every ~20th refresh: waiting for
+ *  the full period lands on the callback AFTER it. A rate well below the callback rate (a 30 cap) is EXACT
+ *  (measured avg 33.05-33.63ms), and an exact 60 needs a real vblank reference (DWM's `qpcVBlank`, which
+ *  `platform/windows/display.rs` already talks to) rather than a callback-counted one. **Do not "fix" this
+ *  with a fudge factor**: a 4% early budget was measured and changed nothing (16.2-18.6ms frames either way). */
+export function paceFrame(acc: number, delta: number, targetHz: number): { draw: boolean; acc: number } {
+  if (!(targetHz > 0)) return { draw: true, acc: 0 }; // uncapped: every vblank draws
+  const budget = 1 / targetHz;
+  const next = acc + delta;
+  if (next < budget) return { draw: false, acc: next };
+  return { draw: true, acc: next % budget };
 }
 
 /** The same rule, for a value that arrives at RUNTIME (the SetFpsCap command): the factory sanitises

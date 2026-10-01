@@ -55,6 +55,9 @@ export function createStartupDriver(deps: StartupDeps): () => Promise<void> {
     uiScale: getUIScaleMode(),
     windowMode: getWindowMode(),
     fpsCap: deps.world.resource(FPS_CAP).cap,
+    // The vertical-sync switch is a normal setting now (P1.86): it used to live in its own
+    // `config/vsync.json`, which nothing validated and which only applied at the next launch.
+    vsync: deps.world.resource(FPS_CAP).vsync,
     keybinds: getBindsAll(),
     diagLog: isDiagLogEnabled(),
     enabledPacks: getEnabledPacks(),

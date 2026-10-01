@@ -181,6 +181,23 @@ pub fn is_fullscreen(_window: &WebviewWindow) -> bool {
     true
 }
 
+/// **The display's refresh rate in milli-Hz, or 0 when the platform cannot answer** (P1.86).
+///
+/// The frame pacing locks to this number, so it is the platform's answer rather than a measurement the page
+/// makes (a rAF delta cannot see the panel any more: the launch arguments lift Chromium's display-rate
+/// limit), and it is EXACT to the ratio where the platform knows one — a 59.94Hz panel answered as "60" is a
+/// duplicated frame every ~16 seconds. 0 is a legal answer: the front end paces at a plain 60 then.
+#[cfg(target_os = "windows")]
+pub fn display_refresh_milli_hz() -> u32 {
+    windows::display_refresh_milli_hz()
+}
+
+/// No other backend answers yet: 0 = "unknown", which the pacing treats as 60Hz.
+#[cfg(not(target_os = "windows"))]
+pub fn display_refresh_milli_hz() -> u32 {
+    0
+}
+
 pub fn native_window(window: &WebviewWindow) -> Option<NativeWindow> {
     CURSOR.native_window(window)
 }

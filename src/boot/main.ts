@@ -1,8 +1,8 @@
 import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
-import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, type InputDiagnostics } from "../data/globals/resources";
-import { SetFpsCap, ShowToast } from "../data/globals/commands";
+import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, paceFrame, pacingTargetHz, refreshHzFromMilliHz, type InputDiagnostics } from "../data/globals/resources";
+import { SetFpsCap, SetVsync, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
@@ -61,7 +61,7 @@ import { PointerLock } from "../host/browser/pointerlock";
 import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS } from "../data/assets/i18n";
 import { loadUIScaleMode, getUIScaleMode } from "../data/globals/uiscale";
 import { loadFont, getFontId } from "../data/globals/fonts";
-import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, isGpuVsyncDisabled, setGpuVsyncDisabled, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, writeSettings, getWindowMode, setWindowMode, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
+import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, shellInfo, queryDisplayRefreshMilliHz, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, writeSettings, getWindowMode, setWindowMode, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
@@ -136,7 +136,8 @@ import "@fontsource/fusion-pixel-12px-monospaced-sc";
 // The NW.js build had nothing to wait for here: require("node:fs") is synchronous and nw.Window was
 // already there. A Tauri command is **asynchronous**, while loadLang/loadFont/loadBinds below and the
 // whole UI read settings and resource packs synchronously, so these two are fetched up front, once:
-//   preloadShell() -> settings / window mode / vsync switch (readSettings() stays synchronous, from memory)
+//   preloadShell() -> settings / window mode / the display's refresh rate (readSettings() stays synchronous,
+//                     from memory)
 //   preloadPacks() -> every byte of resourcepacks + mods (resolveTexture() stays synchronous after it)
 // Top-level await needs ESM (index.html is a <script type="module"> already).
 // **Wrap it in try/catch**: a throw out of here kills the whole module while initShell() has not run
@@ -229,7 +230,14 @@ logDebug(
   `DIAGLOG probes ${diagLogAtBoot ? "enabled" : "disabled"} at boot ` +
     `(settings.json diagLog=${diagLogAtBoot}${diagLogAtBoot ? "" : "; no probe lines in this run"})`,
 );
-const saveSettings = (fpsCapOverride?: number): void => {
+/** Persist the settings in force.
+ *
+ *  **A value that arrives through a COMMAND must be HANDED here, not read back**: a command applies at the next
+ *  barrier, so reading the resource inside this function writes the PREVIOUS value to disk — and a pushed
+ *  label/slider is only refreshed when its panel opens, so the file and the screen then disagree until the next
+ *  launch. That is what `justSet` is for: the two settings the frame pacing owns (both are read by the loop
+ *  every frame, so both must go through the barrier). */
+const saveSettings = (justSet: { cap?: number; vsync?: boolean } = {}): void => {
     // Read-modify-write merge, avoids clobbering other settings (windowMode etc.)
   const s = readSettings();
   s.language = getLang();
@@ -238,10 +246,10 @@ const saveSettings = (fpsCapOverride?: number): void => {
   s.windowMode = getWindowMode();
   s.keybinds = getBindsAll();
   s.diagLog = isDiagLogEnabled();
-  // The override exists because the frame cap reaches the world through a COMMAND, which applies at
-  // the next barrier: persisting the resource here would write the PREVIOUS value to disk. Every other
-  // setting is a config singleton, so it is already settled when this runs.
-  s.fpsCap = fpsCapOverride ?? world.resource(FPS_CAP).cap;
+  s.fpsCap = justSet.cap ?? world.resource(FPS_CAP).cap;
+  // The vertical-sync switch is a setting like the rest now (P1.86): it used to live in its own
+  // `config/vsync.json`, which no settings check ever validated, and it only took effect at the next launch.
+  s.vsync = justSet.vsync ?? world.resource(FPS_CAP).vsync;
   // The switched-off resource packs travel with every save (P1.49aa): the value in force is the one the
   // chain was installed with, so a save can never lose it.
   s.enabledPacks = getEnabledPacks();
@@ -324,11 +332,16 @@ scene.add(chunkGroup);
 // canControl() reads it, so a seventh surface cannot be silently missed at five OR sites — and the
 // freeze no longer waits for the asynchronous pointerlockchange.
 const uiModal = createUiModalState();
-// The frame cap (0 = unlimited): a RESOURCE, because the frame gate below reads it every frame and
-// diagnostics prints it into the F3 panel — see ecs/resources.ts. Loaded from settings.json here;
-// `onFpsCap` writes it back. Physics still advances at fixed steps either way: only drawing and the
-// stats sample are gated.
-const frameCap = createFrameCap(Number(readSettings().fpsCap ?? 0));
+// The frame PACING (P1.86): the cap (0 = unlimited) AND whether to lock to the display's refresh. Both are
+// RESOURCES, because the loop reads them every frame — see ecs/resources.ts. Loaded from the settings file
+// here; `onFpsCap`/`onSetVsync` write them back. Physics still advances at fixed steps either way: only
+// drawing and the stats sample are gated. The refresh rate is the PLATFORM's answer (milli-Hz), read from
+// the preload snapshot and re-asked whenever the window mode changes.
+const frameCap = createFrameCap(
+  Number(readSettings().fpsCap ?? 0),
+  readSettings().vsync !== false,
+  shellInfo().displayRefreshMilliHz,
+);
 world.insertResource(FPS_CAP, frameCap);
 /** Does any modal surface own the mouse right now? */
 const uiOpen = (): boolean => isModalUi(uiModal);
@@ -827,21 +840,31 @@ const onFpsCap = (cap: number): void => {
   // The cap is BOTH world state (the frame gate reads the resource every frame) and a setting. The world
   // half goes through the barrier as a command — this used to be a direct `frameCap.cap = cap` from a UI
   // callback, the last world value changed outside a system run — and the config half is written here,
-  // because configuration is not world state. `saveSettings(cap)` takes the value because the command
+  // because configuration is not world state. `saveSettings({ cap })` takes the value because the command
   // has not applied yet: reading the resource would persist the previous cap.
   world.commands.send(SetFpsCap, { cap });
-  saveSettings(cap);
+  saveSettings({ cap });
     logDebug(`FPS cap set to ${cap === 0 ? "unlimited" : cap}`);
 };
-const onToggleGpuVsync = (disabled: boolean): boolean => {
-  const ok = setGpuVsyncDisabled(disabled);
+/** The vertical-sync switch (P1.86). **Runtime, and that is the whole point**: this used to write a WebView2
+ *  launch argument (`config/vsync.json`) and tell the user to relaunch, which is exactly as broken as it
+ *  sounds next to a slider that applies instantly. The launch arguments now lift the display-rate limit
+ *  unconditionally and THIS value decides the pacing — world state through a command (the loop reads it every
+ *  frame), the setting written here, and the toast says what happened on the next frame. */
+const onSetVsync = (on: boolean): void => {
+  world.commands.send(SetVsync, { vsync: on });
+  // HANDED the value, like the cap: the command applies at the next barrier, so reading the resource here
+  // would persist the state the user just left (measured: the file kept flipping back to the previous value).
+  saveSettings({ vsync: on });
+  const target = pacingTargetHz(frameCap.cap, on, frameCap.refreshHz);
+  logDebug(
+    `VSYNC ${on ? "on" : "off"} (applies immediately): target ` +
+      `${target > 0 ? `${target.toFixed(2)} fps` : "uncapped"}` +
+      `${frameCap.refreshHz > 0 ? `, display ${frameCap.refreshHz.toFixed(2)}Hz` : ", display rate unknown"}`,
+  );
   // A COMMAND, not a view call: the message and its deadline are world state (ecs/ui/toast.ts), and the
   // key is passed through untranslated so a language switch re-translates a toast that is already up.
-  world.commands.send(ShowToast, {
-    key: ok ? (disabled ? "toast.vsyncOff" : "toast.vsyncOn") : "toast.vsyncFail",
-  });
-    logDebug(`GPU vsync ${disabled ? "disabled" : "enabled"} ${ok ? "written to manifest, restart to apply" : "write failed"}`);
-  return ok;
+  world.commands.send(ShowToast, { key: on ? "toast.vsyncOn" : "toast.vsyncOff" });
 };
 
 /** The "Diagnostic log" switch in the settings panel: it only controls whether the **diagnostic probe
@@ -870,6 +893,15 @@ const onSetWindowMode = (mode: WindowMode): void => {
   suppressGeometryPause(); // our own window-mode change is NOT "the user is messing with the window"
   setWindowMode(mode);
     logDebug(`window mode ${mode === "fullscreen" ? "fullscreen" : "windowed"}`);
+  // …and the refresh rate may be a different MONITOR now (a fullscreen switch is how a second display gets
+  // used), so the pacing target is re-asked. The value is a measurement, not a setting: it lands in the
+  // resource the loop reads, and the next frame paces against the new number.
+  void queryDisplayRefreshMilliHz().then((milliHz) => {
+    const hz = refreshHzFromMilliHz(milliHz);
+    if (hz === frameCap.refreshHz) return;
+    frameCap.refreshHz = hz;
+    logDebug(`DISPLAY refresh ${hz > 0 ? `${hz.toFixed(2)}Hz` : "unknown (pacing falls back to 60)"}`);
+  });
 };
 
 /** The resource packs the user has ENABLED (P1.49ae). Written to settings.json AT ONCE and applied when the pack
@@ -904,8 +936,8 @@ const menu = createPauseMenu(world, {
         logDebug("RESUME back to game -> relock");
   },
   onFpsCap,
-  onToggleGpuVsync,
-  isGpuVsyncDisabled: () => isGpuVsyncDisabled(),
+  onSetVsync,
+  isVsyncOn: () => frameCap.vsync,
   onToggleDiagLog,
   isDiagLogEnabled: () => isDiagLogEnabled(),
   getFpsCap: () => frameCap.cap,
@@ -977,8 +1009,8 @@ const mainMenu = createMainMenu(world, {
   },
   getFpsCap: () => frameCap.cap,
   onFpsCap,
-  isGpuVsyncDisabled,
-  onToggleGpuVsync,
+  isVsyncOn: () => frameCap.vsync,
+  onSetVsync,
   isDiagLogEnabled,
   onToggleDiagLog,
   getWindowMode,
@@ -1223,6 +1255,8 @@ timer.connect(document);  // Page Visibility API: delta=0 when minimized/backgro
 // chain: it is started once (the boot block at the bottom of this file calls `frame()`) and never
 // restarted or cancelled, `setLoopMode()` only writes the mode, and the next frame obeys it.
 //   * "game": fixed-step physics + the render lane + the ui lane (all inside world.render)
+//             — and the FIXED STEP runs on every vblank, whether or not that vblank draws (P1.86): the
+//             display-rate limit is lifted at launch, so one drawn frame can span several vblanks.
 //   * "menu": nothing is simulated and the last world frame stays on screen; the ui lane alone is
 //             pumped — the main menu is the one state where the user still clicks things while the
 //             simulation is stopped — plus the panorama background when that mode has one
@@ -1234,16 +1268,15 @@ timer.connect(document);  // Page Visibility API: delta=0 when minimized/backgro
 // The loop's own state is a RESOURCE (`LOOP_STATE`, ecs/resources.ts): the mode, the two accumulators,
 // the size the canvas was last set to and the geometry-suppression deadline used to be seven module-level
 // `let`s here. The frame BODY stays this file's (a rAF callback is not a lane) — what moved is its state.
-// Fixed-step physics: step size (decoupled from frame timing, MC-style fixed tps)
+/** Fixed-step physics: step size (decoupled from frame timing, MC-style fixed tps)
+ *  This is `PHYS_DT`, and the advance below runs on EVERY vblank — see `frame()` for why the fixed lane may
+ *  not live inside the drawing body any more. */
 const PHYS_DT = 1 / 120;
 
-/** The game's frame: advance the simulation at a FIXED step (frame-rate independent movement), gate
- *  drawing and stats on the frame cap, then run the render lane and the ui lane. */
-function renderFrame(): void {
-  timer.update();
-  const delta = Math.min(timer.getDelta(), 0.1);
-
-    // Fixed-step physics advance: movement is independent of frame duration, constant per step (removes movement jitter from uneven frame timing)
+/** Advance the simulation by the time that really passed, at a FIXED step (frame-rate independent movement).
+ *  Called once per vblank, BEFORE the pacing gate: with the display-rate limit lifted, rAF fires several
+ *  times per drawn frame, and a vblank that draws nothing must still move the world. */
+function advanceFixed(delta: number): void {
   loop.physAcc += delta;
   let steps = 0;
   while (loop.physAcc >= PHYS_DT && steps < 12) {
@@ -1251,15 +1284,37 @@ function renderFrame(): void {
     loop.physAcc -= PHYS_DT;
     steps++;
   }
+}
 
-  // FPS cap gate: skip rendering and stats until the frame budget is reached (physics already advanced above at fixed steps)
-  if (frameCap.cap > 0) {
-    const budget = 1 / frameCap.cap;
-    loop.renderAcc += delta;
-    if (loop.renderAcc < budget) return;
-    loop.renderAcc %= budget;
-  }
+/** Count this vblank into the frame pacing and answer whether it DRAWS (P1.86).
+ *
+ *  The rate comes from `pacingTargetHz` — the settings (cap + the sync switch) against the display rate the
+ *  PLATFORM measured — so both switches take effect on the next frame. The loop used to compare against the
+ *  cap only, inside the game body, while the browser's own display-rate limit decided everything else; the
+ *  launch arguments now lift that limit unconditionally (game.rs) and this is the only pacer left.
+ *
+ *  Skips are cheap by construction: the caller returns before the look, the mode body and the frame probe,
+ *  so a skipped vblank costs the physics above plus this sum. That is also why `frameProbe` keeps meaning
+ *  "drawn frames" — and why the FRAME line's `avg` stays 16.67ms at 60fps on a machine whose rAF runs at
+ *  hundreds of hertz. */
+function paceWantsFrame(delta: number): boolean {
+  loop.sinceDraw += delta;
+  // The UI screens (menu / load) are not part of the frame-rate setting: they always pace at the display's
+  // rate. They were never gated before (they simply ran at rAF's rate), and without this a menu would pump
+  // the ui lane thousands of times a second for nothing once the display-rate limit is lifted.
+  const target =
+    loop.mode === "game"
+      ? pacingTargetHz(frameCap.cap, frameCap.vsync, frameCap.refreshHz)
+      : pacingTargetHz(0, true, frameCap.refreshHz);
+  const pacing = paceFrame(loop.renderAcc, delta, target);
+  loop.renderAcc = pacing.acc;
+  return pacing.draw;
+}
 
+/** The GAME body: the render lane + the ui lane. The fixed step has ALREADY run for this vblank (`frame`),
+ *  because it must advance whether or not this vblank draws; what is left is drawing, and the `delta` it
+ *  gets is the time since the last DRAWN frame, not since the last vblank. */
+function renderFrame(delta: number): void {
   // Per-frame systems: view interpolation -> chunk meshing -> diagnostics -> draw
   // (alpha = remainder of the physics tick). The ECS command barrier runs first inside render().
   world.render(Math.min(loop.physAcc / PHYS_DT, 1), delta);
@@ -1356,9 +1411,12 @@ function frameProbe(): void {
   for (let i = 0; i < probe.pfBuckets.length; i++) {
     if (probe.pfBuckets[i] > 0) pf.push(`${i}:${probe.pfBuckets[i]}`);
   }
+  const target = pacingTargetHz(frameCap.cap, frameCap.vsync, frameCap.refreshHz);
   logDebug(
     `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
-      `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
+      `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms raf=${probe.vblanks}/s ` +
+      `target=${target > 0 ? `${target.toFixed(2)}fps` : "uncapped"} ` +
+      `mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
       `pf=[${pf.join(" ")}] px=${probe.pxN > 0 ? `${probe.pxMin.toFixed(1)}/${(probe.pxSum / probe.pxN).toFixed(1)}/${probe.pxMax.toFixed(1)}` : "-"} (${probe.pxN})`,
   );
   probe.statAt = now;
@@ -1367,6 +1425,7 @@ function frameProbe(): void {
   probe.max = 0;
   probe.stalls = 0;
   probe.stallMax = 0;
+  probe.vblanks = 0;
   probe.pfBuckets.fill(0);
   probe.pxMin = Number.POSITIVE_INFINITY;
   probe.pxMax = 0;
@@ -1375,30 +1434,47 @@ function frameProbe(): void {
 }
 
 /** One frame. The mode picks the body; the chain re-arms itself, and the try/catch keeps ONE bad frame
- *  from killing the loop for good (a broken chain used to freeze the picture until a restart). */
+ *  from killing the loop for good (a broken chain used to freeze the picture until a restart).
+ *
+ *  A VBLANK IS NOT NECESSARILY A FRAME (P1.86). The launch arguments lift Chromium's display-rate limit, so
+ *  rAF can fire several times per refresh; `paceWantsFrame` decides which of those draws, and a skipped one
+ *  returns before the look, the lane bodies and the probe — after the fixed step, which must not skip.
+ *  `timer` is advanced here rather than in the game body because the physics accumulator needs the real
+ *  interval on EVERY vblank, in every mode. */
 function frame(): void {
+  timer.update();
+  const delta = Math.min(timer.getDelta(), 0.1);
+  probe.vblanks++; // the rAF rate against the drawn rate: `raf=N/s` in the FRAME line (P1.86)
+  let drew = true;
   try {
+    if (loop.mode === "game") advanceFixed(delta);
     applyViewportSize(); // before the mode body: the canvas follows the window whoever is drawing
     // THE PACK RELOAD CHECK (P1.49ab): Minecraft's shape — a plain flag set by the key handler and checked
     // once per frame (`pendingReload` + `runTick`), never a tick state machine. It only STARTS the driver.
     packReload.maybeReload();
     // THE PACK PAGE'S LIVE LISTING (P1.49ad): the same "poll once per frame, do nothing unless asked" shape.
     packReload.maybePollListing();
-    // THE LOOK IS APPLIED ONCE PER FRAME, here, before any fixed step: the raw deltas that arrived since
-    // the last frame become ONE `look` intent, so a frame's rotation is exactly that frame's mouse
-    // movement. It used to be an 8 ms `setInterval` poll feeding several intents per frame, which the
-    // browser's input-task priority stretched to 9-12 ms as soon as a key was held (measured: `pf` went
-    // from "90% of frames at exactly 2 samples" to a 0/1/2/3 spread) — the judder the user reported.
-    input.frameLook();
-    if (loop.mode === "game") renderFrame();
-    else if (loop.mode === "menu") menuFrame();
-    else if (loop.mode === "load") loadFrame();
+    drew = paceWantsFrame(delta);
+    if (drew) {
+      // Time since the last DRAWN frame: what the render lane and the ui lane mean by `delta`.
+      const drawnDelta = loop.sinceDraw;
+      loop.sinceDraw = 0;
+      // THE LOOK IS APPLIED ONCE PER DRAWN FRAME, here, before any fixed step: the raw deltas that arrived
+      // since the last frame become ONE `look` intent, so a frame's rotation is exactly that frame's mouse
+      // movement. It used to be an 8 ms `setInterval` poll feeding several intents per frame, which the
+      // browser's input-task priority stretched to 9-12 ms as soon as a key was held (measured: `pf` went
+      // from "90% of frames at exactly 2 samples" to a 0/1/2/3 spread) — the judder the user reported.
+      input.frameLook();
+      if (loop.mode === "game") renderFrame(drawnDelta);
+      else if (loop.mode === "menu") menuFrame();
+      else if (loop.mode === "load") loadFrame();
+    }
   } catch (err) {
     logDebug(`frame error: ${String((err as Error)?.message || err)}`);
   }
-  // Diagnostics go last: what it measures is the full "this frame to the next" period (a blocked frame
-  // body counts into it as well).
-  frameProbe();
+  // Diagnostics go last — and only for a DRAWN frame: what the FRAME line measures is the interval between
+  // frames, so a skipped vblank must not enter it (see `paceWantsFrame`).
+  if (drew) frameProbe();
   requestAnimationFrame(frame);
 }
 
@@ -1424,7 +1500,17 @@ function inWorld(): boolean {
 // `let`s here with this free function beside them — state with no owner, reachable by the menu frame only
 // through a closure. The object is built with the other systems below, and a MENU frame calls its step().
 
-logDebug(`BOOT render=rAF(60Hz) winFocused=${winFocused()}`);
+// The render/pacing line: the refresh rate is the PLATFORM's answer (it used to be a hard-coded "60Hz",
+// which was a guess printed as a fact), and the target is what the two switches add up to right now.
+// The webview's own launch arguments are printed next to it: they are where the display-rate limit is lifted,
+// so "why is `raf=` not 60/s" is answered by that line.
+logDebug(`BOOT webview args: ${shellInfo().browserArgs || "(none)"}`);
+const bootTarget = pacingTargetHz(frameCap.cap, frameCap.vsync, frameCap.refreshHz);
+logDebug(
+  `BOOT render=rAF(pacing ${bootTarget > 0 ? `${bootTarget.toFixed(2)}fps` : "uncapped"}; ` +
+    `vsync=${frameCap.vsync ? "on" : "off"}; cap=${frameCap.cap === 0 ? "unlimited" : frameCap.cap}; ` +
+    `display=${frameCap.refreshHz > 0 ? `${frameCap.refreshHz.toFixed(2)}Hz` : "unknown"}) winFocused=${winFocused()}`,
+);
 
 // ===== Boot: the startup and the two per-frame checks (P1.18e) =====
 // The startup itself is `boot/drivers/startup.ts` (its stage list and the settings check live there) and

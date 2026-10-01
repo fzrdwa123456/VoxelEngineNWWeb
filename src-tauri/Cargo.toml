@@ -44,9 +44,13 @@ serde_json = "1"
 # (windows 0.61.3 / webview2-com 0.38.2). TARGET-GATED, because they are the Windows backend's
 # business: a macOS/Linux build now reaches `platform/mod.rs`'s `compile_error!` - which names the
 # one file a port has to write - instead of failing inside a crate it would never call.
+#
+# THE TWO GRAPHICS FEATURES (P1.86): `platform/windows/display.rs` asks DWM for the display's refresh
+# RATE as an exact ratio (`DwmGetCompositionTimingInfo`), which the front end's frame pacing locks to.
+# Both are opt-in in the `windows` crate, hence spelled out here.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = "0.61"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 # Raw mouse input and SetCursorPos declare `extern "system"` directly (copied from the original
 # rawinput/src/lib.rs), and deliberately do **not** pull in the windows crate: one less dependency

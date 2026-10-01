@@ -2312,6 +2312,50 @@ Still outstanding:
   `.so` is still produced (127 MB) and the full Android chain still ends with a 133.7 MB APK. The
   `--debug` chain was then checked for real: the exe starts standalone and `game\logs\boot.log`
   contains the FRONT END's own probe lines, i.e. the embedded frontend really is running.
+- **P1.86 — the vertical-sync switch stops needing a restart: the frame rate becomes OURS (pacing), and the
+  display rate comes from the platform.** `DONE`, by request («我不想要重启我想要运行生效»). The switch had been a
+  WebView2 launch argument (`config/vsync.json` → `--disable-gpu-vsync`) since the port, which is the one
+  shape a runtime switch cannot have: Chromium reads its flags before the webview exists, so the button wrote a
+  file, showed "(restart to apply)" — and, because the flag was the only lever, "off" could not even be faster
+  (rAF stays pinned to the panel without `--disable-frame-rate-limit`). So the switch was **inert and
+  restart-bound at the same time**.
+  * **THE FLAGS BECOME FIXED** (`game.rs::EXTRA_BROWSER_ARGS` = `--disable-gpu-vsync
+    --disable-frame-rate-limit`): the display-rate limit is lifted unconditionally, which is what hands the
+    frame-rate question to the page. Nothing the user can switch may be a launch argument any more.
+  * **THE PACING BECOMES THE FEATURE**: `pacingTargetHz(cap, vsync, refreshHz)` + `paceFrame(acc, delta,
+    target)` are PURE functions in `data/globals/resources.ts`, and the loop calls them once per vblank.
+    Unsynced = the cap (0 = uncapped); synced = the cap but never above the panel. Both settings are read from
+    `FPS_CAP` every frame, so the switch applies on the next frame and persists in `settings.json` (it is in
+    the settings check's schema now, which the old `vsync.json` never was).
+  * **A VBLANK IS NOT A FRAME**: the fixed step runs on EVERY vblank (before the gate), while the look, the
+    lane bodies and `frameProbe` run only on drawn ones — so the `FRAME` line and the FPS number still mean
+    "drawn frames". The menu/load modes pace at the display rate whatever the settings say (they were never
+    part of the frame-rate setting, and an unpaced ui lane at an unthrottled rAF rate is pure waste).
+  * **THE REFRESH RATE COMES FROM THE PLATFORM** (`platform::display_refresh_milli_hz` →
+    `DwmGetCompositionTimingInfo().rateRefresh`, MILLI-Hz): a rAF-derived measurement cannot see the panel any
+    more, and rounding 59.94 to 60 drifts — one duplicated frame every ~16 seconds. 0 = unknown → a plain 60,
+    never "uncapped". `display_refresh` is also a command, re-asked when the window mode changes (a fullscreen
+    switch is how a program lands on a second monitor).
+  * the `rAF(60Hz)` boot line was a **hard-coded string**, and it is now the real answer plus the pacing target;
+    the `FRAME` line gained `raf=N/s` next to `n=` — the one number that says whether the browser really let go
+    (60 next to 60 = it did not).
+  WHAT THIS STILL CANNOT DO: switch the GPU's present mode (FIFO/immediate) at runtime. That is a swapchain
+  concept and no browser exposes one — the honest limit that made "pacing" the right answer rather than a
+  relaunch. See AGENTS.md's pacing note.
+  **MEASURED WART, and the next step if the user wants it**: with the display-rate limit lifted, Chromium
+  delivers ~1.8 callbacks per panel refresh (`raf=108/s` while drawing 57/s), so a target EQUAL to the panel's
+  60Hz lands at **~57fps** (16.2-18.6ms frames, one repeated panel frame every ~20th refresh) instead of the
+  16.67ms the engine held before. Rates well below the callback rate are EXACT (a 30 cap measured
+  33.05-33.63ms), and the sync-off mode really is uncapped (measured 490fps, i.e. the switch does something
+  dramatic). An early budget (a 4% "lead") was tried and **measured to change nothing**, so it was removed
+  rather than shipped as a fudge. The correct cure is a real VBLANK CLOCK: `platform/windows/display.rs`
+  already reads DWM's timing (`qpcVBlank` + `rateRefresh`), so the loop could draw once per panel vblank
+  (exact 60, aligned, and lower input latency) instead of counting callbacks. Not done this round.
+  VERIFIED: `tsc` 0; `check:ecs` 75/75 with the pacing arithmetic asserted directly (a 400Hz rAF draws 9 frames
+  in 60 vblanks, not 60; a cap above the refresh means the refresh; an unknown rate falls back to 60) plus the
+  command's deferral, the schema key, the fixed launch arguments and the absence of the vsync file; the real
+  app's log shows the boot line, the webview arguments and `raf=`/`target=` per second, and toggling the switch
+  in-game changes the frame rate within one frame with no relaunch (see TESTING.md).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

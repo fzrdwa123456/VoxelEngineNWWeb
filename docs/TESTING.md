@@ -78,7 +78,8 @@ skipping the entity instead of just its input
 → ESC: the pause menu is a WIDGET tree now, so check what a migration could have broken: Resume,
 Settings → every entry (the FPS slider drags in steps of 2 across 30..240, its right end reads the
 "unlimited" word, and setting it in ONE panel and then opening the other shows the SAME value — the
-slider is bound to the value in force, so the two settings panels cannot drift; vsync shows a toast;
+slider is bound to the value in force, so the two settings panels cannot drift; vsync shows a toast and
+takes effect AT ONCE — see the P1.86 checklist at the end of this section;
 Language and
 Fonts switch language and font LIVE — the labels re-translate without a reload; Resource packs lists
 what is in `game\resourcepacks\`; UI scale and Window mode apply), then Back, then ESC steps back one
@@ -104,6 +105,31 @@ grep `SCHEDULE` in `logs\debug.log` for the batch grouping of each stage, and tr
 grouping as a real change (it means a system's access moved). `logs\debug.log`'s ESC line now starts
 with `modal=<bool>` — that is the UI_MODAL resource the freeze gate reads, next to the individual
 container flags it came from.
+
+**THE VERTICAL-SYNC SWITCH IS RUNTIME NOW (P1.86)** — walk this one, because the whole round is about a button
+that used to lie. In a world, open the pause menu → Settings → Graphics:
+1. The row reads `VSync` with a hint that says it LOCKS TO THE REFRESH (there must be **no "(restart to
+   apply)" anywhere** in the panel any more).
+2. Toggle it. The toast must appear IMMEDIATELY and the frame rate must change **within a frame or two,
+   with no relaunch**: `vsync on` = the cap, never above the panel; `vsync off` = the cap alone (so with the
+   FPS slider at its top, "unlimited", the rate goes UP — that is the switch doing something at all).
+3. Read `logs\debug.log`: every `FRAME` line now carries `raf=N/s` and `target=…fps`. With sync ON the drawn
+   rate must be ~55-60/s on a 60Hz panel (`raf=` reads ~108/s — Chromium delivers about two callbacks per
+   refresh, which is why a target EQUAL to the panel rate lands a little under it: **KNOWN, measured, and the
+   price of the switch being runtime**). With sync OFF and the cap unlimited the rate follows the machine
+   (measured ~490fps on this box, `target=uncapped`) — that jump, within a frame of the click, is the proof the
+   switch works. **`raf=60/s` while the cap is unlimited means the display-rate limit did NOT come off** — the
+   launch arguments are printed one line above as `BOOT webview args: …` and must contain
+   `--disable-frame-rate-limit` (and must NOT contain `--disable-gpu-vsync`: that one makes the synced case
+   submit between vblanks).
+   A rate well below the callback rate is EXACT: set the FPS cap to 30 and the log must read `target=30.00fps`
+   with `avg≈33.3ms` and `n≈30` — that is the pacing arithmetic doing its job.
+4. The boot line is real now: `BOOT render=rAF(pacing 59.94fps; vsync=on; cap=unlimited; display=59.94Hz)`.
+   `display=` is the PLATFORM's answer in milli-Hz (a 59.94Hz panel must read 59.94, not 60 — rounding it is
+   what makes a "locked 60" stutter once every ~16 s), and `unknown` must still pace at 60, never uncapped.
+5. The F3 panel's first line shows the same three numbers next to the FPS.
+6. Quit and relaunch: the switch keeps its value (it is in `settings.json` now, so the settings check repairs a
+   hand-edited `"vsync": "yes"` and reports it) — and `game\config\vsync.json` must NOT come back.
 
 AFTER the presentation objects became resources (`host/browser/presentation.ts`, §5.2 P1.7: the scene, the
 camera, the renderer, the frame sampler, the canvas host, the UI mount root and the chunk-mesh cache —

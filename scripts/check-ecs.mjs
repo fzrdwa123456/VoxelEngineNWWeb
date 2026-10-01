@@ -2493,11 +2493,11 @@ check("the frame cap is world state AND a persisted setting", () => {
 
   const main = stripComments(readSource("src/boot/main.ts"));
   assert(/insertResource\(FPS_CAP/.test(main), "the composition root provides the resource");
-  assert(/createFrameCap\(Number\(readSettings\(\)\.fpsCap/.test(main), "…loading it at boot");
+  assert(/createFrameCap\(\s*Number\(readSettings\(\)\.fpsCap/.test(main), "…loading it at boot");
   assert(/s\.fpsCap\s*=/.test(main), "…and writing it back");
   assert(/commands\.send\(SetFpsCap/.test(main), "onFpsCap sends the command instead of assigning");
   assert(
-    /saveSettings\(cap\)/.test(main),
+    /saveSettings\(\{ cap \}\)/.test(main),
     "…and persists the value it was handed (the command is deferred, so saving the resource here would write the previous cap)",
   );
   // The cap LABEL is a push, and the number it shows arrives through that same command at the next
@@ -2509,11 +2509,91 @@ check("the frame cap is world state AND a persisted setting", () => {
   assert(/const renderCap = \(justSet\?: number\)/.test(menuSrc), "…and reads the resource only when it has none");
   equal(countOf(main, /\blet fpsCap\b|\bfpsCap = cap\b/g), 0, "no closure variable left behind");
   // The gate reads the resource, and diagnostics reads it too —from the World, not from a callback.
-  assert(/frameCap\.cap > 0/.test(main), "the frame gate reads the resource");
+  assert(/pacingTargetHz\(frameCap\.cap, frameCap\.vsync, frameCap\.refreshHz\)/.test(main),
+    "the frame gate reads the resource through the pacing");
   assert(
     /world\.resource\(FPS_CAP\)/.test(readSource("src/plugins/render/systems/diagnostics.ts")),
     "diagnostics reads the resource",
   );
+
+  // ===== THE VERTICAL-SYNC SWITCH IS A PACE, NOT A LAUNCH ARGUMENT (P1.86) =====
+  // It used to be `--disable-gpu-vsync` on the WebView2 command line: a file, a "restart to apply" hint and a
+  // button that could not do what it said. The launch arguments now lift Chromium's display-rate limit
+  // UNCONDITIONALLY and this value decides the rate — so the arithmetic below is the whole feature.
+  equal(R.createFrameCap().vsync, true, "vertical sync is ON by default (run at the panel's rate)");
+  equal(R.createFrameCap(0, false).vsync, false, "…and a stored false survives");
+  equal(R.createFrameCap(0, "yes").vsync, true, "a hand-edited non-boolean is refused");
+  // The refresh rate comes from the PLATFORM in milli-Hz, and a broken answer must reach the pacing as
+  // "unknown" (0) rather than as a number.
+  equal(R.refreshHzFromMilliHz(59_940), 59.94, "DWM's ratio survives as 59.94Hz, not as 60");
+  equal(R.refreshHzFromMilliHz(60_000), 60, "…and a real 60Hz panel as 60");
+  equal(R.refreshHzFromMilliHz(144_000), 144, "a high-refresh panel is understood");
+  equal(R.refreshHzFromMilliHz(0), 0, "no answer is 'unknown'");
+  equal(R.refreshHzFromMilliHz(-1), 0, "…and so is a nonsense one");
+  equal(R.refreshHzFromMilliHz(10_000), 0, "…including a rate no display has");
+  // THE TARGET: sync + cap against the display.
+  equal(R.pacingTargetHz(0, true, 59.94), 59.94, "synced and uncapped locks to the measured refresh");
+  equal(R.pacingTargetHz(0, false, 59.94), 0, "unsynced and uncapped paces nothing at all");
+  equal(R.pacingTargetHz(30, true, 59.94), 30, "a cap below the refresh is honoured while synced");
+  equal(R.pacingTargetHz(240, true, 59.94), 59.94,
+    "a cap ABOVE the refresh means the refresh: drawing frames the panel cannot show buys nothing");
+  equal(R.pacingTargetHz(240, false, 59.94), 240, "…but an unsynced cap really is the cap");
+  equal(R.pacingTargetHz(0, true, 0), 60,
+    "an unknown display rate falls back to 60 — never to 'uncapped', which would invert the label");
+  equal(R.pacingTargetHz(30, true, 0), 30, "…and a cap under that fallback still wins");
+  // THE ARITHMETIC: one drawn frame per budget, and an uncapped target draws on every vblank.
+  // 60 vblanks of a 400Hz rAF = 150ms of real time = 9 frames at 60fps (and NOT 60, which is what the loop
+  // would draw if the pacing were missing — the whole reason the gate exists).
+  let acc = 0;
+  let drawn = 0;
+  for (let i = 0; i < 60; i++) {
+    const p = R.paceFrame(acc, 1 / 400, R.pacingTargetHz(0, true, 60)); // rAF at 400Hz, locked to a 60Hz panel
+    acc = p.acc;
+    if (p.draw) drawn++;
+  }
+  equal(drawn, 9, "a 400Hz rAF draws 9 frames in 60 vblanks, not 60");
+  equal(R.paceFrame(0, 1 / 60, 0).draw, true, "an uncapped target draws every vblank");
+  equal(R.paceFrame(0, 0.001, 60).draw, false, "a 60fps target skips a 1ms vblank");
+  equal(R.paceFrame(0, 1 / 30, 30).draw, true, "…and draws the one that completes its budget");
+  // The RUNTIME switch: a command (the loop reads the resource every frame), and the file is written by the
+  // caller — exactly the cap's split.
+  const vsyncWorld = new World();
+  vsyncWorld.insertResource(R.FPS_CAP, R.createFrameCap(0, true));
+  const { SetVsync } = load("data/globals/commands.js");
+  vsyncWorld.commands.send(SetVsync, { vsync: false });
+  equal(vsyncWorld.resource(R.FPS_CAP).vsync, true, "the command is deferred: nothing changes before a barrier");
+  vsyncWorld.commands.flush();
+  equal(vsyncWorld.resource(R.FPS_CAP).vsync, false, "the barrier applies it — on the NEXT frame, not at the next launch");
+  assert(/s\.vsync = justSet\.vsync \?\? world\.resource\(FPS_CAP\)\.vsync/.test(main),
+    "…and the setting is persisted like the cap — HANDED the value, for the same deferred-command reason");
+  assert(/saveSettings\(\{ vsync: on \}\)/.test(main), "…and the switch hands it");
+  assert(/commands\.send\(SetVsync/.test(main), "…through the command, not by assigning the resource");
+  assert(/vsync: deps\.world\.resource\(FPS_CAP\)\.vsync/.test(
+    stripComments(readSource("src/boot/drivers/startup.ts"))),
+    "the settings check knows the key (so a hand-edited value is repaired, not silently kept)");
+  // NO RESTART ANYWHERE: the hint is gone from the surface, and the launch arguments no longer depend on a
+  // file — they lift the display-rate limit for good.
+  const menuNow = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  assert(!/restartHint/.test(menuNow) && /settings\.vsyncHint/.test(menuNow),
+    "the row explains what sync MEANS instead of asking for a restart");
+  assert(/isVsyncOn: cb\.isVsyncOn/.test(stripComments(readSource("src/plugins/ui/views/mainmenu.ts"))) &&
+    /isVsyncOn: cb\.isVsyncOn/.test(menuNow), "both settings panels drive the runtime switch");
+  const gameRs = readSource("src-tauri/src/game.rs");
+  assert(/EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit"/.test(gameRs),
+    "the launch arguments lift the display-rate limit unconditionally (that is what makes the switch runtime)");
+  // …and `--disable-gpu-vsync` is deliberately ABSENT: it makes the compositor submit between the panel's
+  // vblanks, which the synced case pays for in repeated frames (measured: 21ms frames). The launches are
+  // fixed; this is the one flag they may not carry.
+  assert(!/EXTRA_BROWSER_ARGS: &str = "[^"]*disable-gpu-vsync/.test(gameRs),
+    "…without un-syncing the compositor, so a synced frame still lands on a vblank");
+  assert(!/vsync_path|read_vsync_disabled|write_vsync_disabled/.test(gameRs),
+    "…and the vsync switch FILE is gone: nothing about the frame rate needs a relaunch");
+  assert(/pub fn apply_browser_args\(\)/.test(gameRs), "…so the arguments no longer depend on the game root");
+  assert(/fn display_refresh\(\)/.test(readSource("src-tauri/src/lib.rs")),
+    "the display's refresh rate is a command of its own (a fullscreen switch can change monitor)");
+  assert(/displayRefreshMilliHz/.test(readSource("src/data/globals/shell.ts")) &&
+    /display_refresh_milli_hz/.test(readSource("src-tauri/src/lib.rs")),
+    "…and it arrives with the preload snapshot too");
 });
 
 check("the loop is ONE rAF chain whose body the MODE picks", () => {
@@ -2542,7 +2622,7 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   equal(countOf(main, /cancelAnimationFrame\(/g), 0, "the chain is never cancelled or restarted");
   // The body dispatches on the mode, and a menu frame is the ui lane (+ the background), nothing else.
   // The MODE is `LOOP_STATE.mode` now (ecs/resources.ts): the loop body dispatches on world data.
-  assert(/if \(loop\.mode === "game"\) renderFrame\(\)/.test(main), "a game frame runs the fixed step + render");
+  assert(/if \(loop\.mode === "game"\) renderFrame\(drawnDelta\)/.test(main), "a game frame runs the render lane");
   assert(/else if \(loop\.mode === "menu"\) menuFrame\(\)/.test(main), "a menu frame runs the menu body");
   assert(/function menuFrame\(\)[\s\S]{0,200}world\.renderUi\(\)/.test(main), "…which is the ui lane alone");
   // …and a LOAD frame is the ui lane alone too, because the loading screen is widget data and the
@@ -2550,6 +2630,20 @@ check("the loop is ONE rAF chain whose body the MODE picks", () => {
   // loading screen could not have been painted by the loop before `renderer.init()`.
   assert(/else if \(loop\.mode === "load"\) loadFrame\(\)/.test(main), "a load frame runs the loading screen");
   assert(/function loadFrame\(\)[\s\S]{0,200}world\.renderUi\(\)/.test(main), "…which is the ui lane alone");
+  // …and a VBLANK that does not draw still runs the fixed step (P1.86): the display-rate limit is lifted, so
+  // rAF fires more often than frames are drawn, and the simulation must not ride the drawing rate. The look,
+  // the lane bodies and the frame probe all stay inside the `if (drew)` block, which is what keeps the FRAME
+  // line meaning "drawn frames".
+  assert(/advanceFixed\(delta\)[\s\S]{0,1200}drew = paceWantsFrame\(delta\)/.test(main),
+    "the fixed step runs on EVERY vblank, before the pacing gate");
+  assert(/if \(drew\) \{[\s\S]{0,600}input\.frameLook\(\)/.test(main),
+    "a skipped vblank does not publish a look intent");
+  assert(/if \(drew\) frameProbe\(\)/.test(main), "…and does not enter the FRAME statistics");
+  // The FRAME line carries the vblank rate against the drawn rate: `raf=60/s` with `n=60` means the browser
+  // is still pinning rAF to the panel, `raf=400/s` with `n=60` means the pacing is doing the work — the one
+  // number that tells whether the display-rate limit really came off, and the setting that now depends on it.
+  assert(/raf=\$\{probe\.vblanks\}\/s/.test(main), "the FRAME line reports the rAF rate next to the drawn rate");
+  assert(/probe\.vblanks\+\+/.test(main), "…counted once per vblank");
   // …and BOTH flows have to be in that mode while their screen is up: the startup starts in it, and a
   // world entry (driven from the MENU) has to switch into it, or every frame in between is a menu frame
   // that draws the panorama behind an opaque screen for nothing.
@@ -2870,7 +2964,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
       "settings.vsync",
       "settings.on",
       "settings.off",
-      "settings.restartHint",
+      "settings.vsyncHint",
       "settings.packsOff",
       "settings.packsOn",
       "settings.packsNone",

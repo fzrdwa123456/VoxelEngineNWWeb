@@ -75,7 +75,7 @@ src/
 │   └── input/               keybinds.ts (the bind table, its validation and the settings file) +
 │                            bind-gesture.ts (the rebind gesture's EVENT-TIME half)
 ├── host/                  the boundary: the only place with side effects
-│   ├── desktop/             shell.ts (Tauri: settings/logs/window/vsync), packs.ts (the pack-chain
+│   ├── desktop/             shell.ts (Tauri: settings/logs/window/display refresh), packs.ts (the pack-chain
 │   │                        preload), debuglog.ts (the diagnostic-queue forwarder)
 │   └── browser/             viewport.ts, rawinput.ts, pointerlock.ts, mousecapture.ts, window-guards.ts,
 │                            presentation.ts (the GPU/DOM factories), chunkmesh.ts (the GPU half of the
@@ -271,7 +271,10 @@ is the whole reason the third one is separate.
 rAF game loop — ONE chain; `frame()` picks its body from `loopMode` (see setLoopMode in main.ts):
 
   frame()          // one rAF chain for the whole process, re-armed at the end of every frame
-    "game" -> renderFrame():
+                   // a VBLANK is not necessarily a FRAME (P1.86): the webview's launch arguments lift
+                   // Chromium's display-rate limit, so rAF can fire several times per refresh and
+                   // `paceWantsFrame` decides which of those draws — see the pacing note below
+    "game": timer.update()                                       // real delta, EVERY vblank
       accumulator += delta
       while (acc >= 1/120 && steps < 12) world.stepFixed(1/120)  // fixed tps, MC-style
                                                                  // (steps<12 = spiral-of-death clamp)
@@ -283,9 +286,10 @@ rAF game loop — ONE chain; `frame()` picks its body from `loopMode` (see setLo
             4. player.movement    // query-driven locomotion (PROVISIONAL)
             5. player.collision   // re-integrate + resolve the tick against the voxel world
             6. player.interaction // break / place (polled, rate-limited)
-      FPS-cap gate: when FPS_CAP.cap > 0 and the frame budget is not yet met, RETURN here
-                    (physics above already advanced; only drawing/stats are gated)
-      world.render(alpha, delta)                 // alpha = remainder of the physics tick
+      PACING GATE: `paceWantsFrame(delta)` — the cap and the vertical-sync switch against the display
+                   rate the PLATFORM measured. A skipped vblank RETURNS here (the fixed step above has
+                   already run; the look, the lanes and the FRAME probe are all skipped with it).
+      world.render(alpha, drawnDelta)            // alpha = remainder of the physics tick
           BARRIER again, so a UI/menu command lands before this frame is drawn
           render lane:
             1. cameraView.render(alpha)            // position lerp + orientation quaternion
@@ -312,7 +316,38 @@ rAF game loop — ONE chain; `frame()` picks its body from `loopMode` (see setLo
     "load" -> loadFrame():                      // a LOADING SCREEN IS UP (the startup, and an entry
       world.renderUi()                          //   into a world): the ui lane alone, because the screen
                                                 //   is widget data. See "Boot" below.
+                                                // Both UI modes are paced at the DISPLAY rate whatever the
+                                                // settings say: they were never part of the frame-rate
+                                                // setting, and without pacing a lifted display-rate limit
+                                                // would pump the ui lane hundreds of times a second.
 ```
+
+**FRAME PACING IS OURS, AND IT IS WHY THE VSYNC SWITCH NEEDS NO RESTART (P1.86).** The webview's launch
+arguments lift Chromium's own display-rate limit *unconditionally* (`--disable-gpu-vsync
+--disable-frame-rate-limit`, `game.rs`), and two values then decide the rate, both read by the loop every
+frame: `FPS_CAP.cap` and `FPS_CAP.vsync`. `pacingTargetHz(cap, vsync, refreshHz)` (a pure function in
+`data/globals/resources.ts`) is the whole rule — unsynced means the cap (0 = uncapped), synced means the cap
+but never above the panel — and `paceFrame` is the accumulator test, extracted so the arithmetic can be
+asserted. Three consequences worth knowing:
+
+* **the display's refresh rate comes from the PLATFORM, not from a measurement** (`platform::display_refresh_milli_hz`
+  → DWM's own timing ratio, in MILLI-Hz): a rAF delta cannot see the panel any more (rAF fires *more* often
+  than the panel refreshes), and a 59.94Hz panel answered as "60" drifts — one duplicated frame every ~16
+  seconds. 0 = "unknown", which paces at a plain 60 — never at "uncapped", which would invert the switch's
+  own label;
+* **a vblank is not a frame**: the fixed step runs on every vblank (before the gate) and the look, the lane
+  bodies and `frameProbe` run only on drawn ones, which is what keeps the `FRAME` line — and the FPS number —
+  meaning "drawn frames". The `FRAME` line's `raf=N/s` next to `n=` is the one number that says whether the
+  browser really let go (60 next to 60 = it did not);
+* **what this still cannot do** is switch the GPU's present mode (FIFO / immediate) at runtime: that is a
+  swapchain concept and no browser exposes one. Pacing is what the switch's label promises, and the old
+  shape — a `config/vsync.json` file plus a "restart to apply" hint — is gone along with the file.
+  **AND THE SYNCS ARE NOT ALL EQUAL (measured)**: a target equal to the panel rate lands at ~57fps rather than
+  60, because the unthrottled callback rate (~1.8 per panel refresh) does not divide into the panel's rate —
+  see `paceFrame`'s note. `--disable-gpu-vsync` is deliberately NOT in the launch arguments either (it made the
+  synced case submit between vblanks, i.e. the judder), so presents stay vblank-locked and the compositor shows
+  the newest frame once per refresh. An exact 60 needs a vblank clock; do not paper over it with a fudge factor
+  (a 4% early budget was measured and changed nothing).
 
 **There is ONE loop and ONE MODE, not three loops and a pile of flags.** `setLoopMode("load" | "game" |
 "menu")` is a PURE MODE WRITE — the chain is already running, so there is nothing to start, stop or
@@ -582,12 +617,16 @@ where it is:
 - **CONFIGURATION splits the same way, by whether it is READ ON THE TICK.** A setting that a system or
   the reconciler asks for every step/frame IS world state and lives in a resource (`KEYMAP` — read by
   movement/interaction/input every tick; `LOCALE` — the reconciler re-derives every widget's text from
-  it every frame; `FONT`/`UI_SCALE`; `FPS_CAP`). A setting read only when its panel opens, or written
-  only when it changes, is plain configuration and stays in its module (`windowMode`, `vsyncDisabled`,
-  the settings FILE itself). Either way the config module owns the file and the validation, and the
+  it every frame; `FONT`/`UI_SCALE`; `FPS_CAP`, which holds the cap, the vertical-sync switch AND the
+  measured refresh rate, because the loop's pacing reads all three every frame). A setting read only
+  when its panel opens, or written only when it changes, is plain configuration and stays in its module
+  (`windowMode`, the settings FILE itself). Either way the config module owns the file and the validation, and the
   resource is the single owner of the value in force. `background.ts` and `data/assets/blockregistry.ts` are
   neither: they derive their answer from the PACK CHAIN, which never changes after boot, so they are
   assets — the menu background kind is memoised because the menu frame asks for it every frame.
+  **A setting that needs a RELAUNCH is not a setting** (P1.86): the vertical-sync switch was one — a
+  `config/vsync.json` that only the next launch read, sitting next to a slider that applied at once — and the
+  fix was to move the *decision* into the loop's pacing instead of leaving it in the launch arguments.
 - **Never keep a CACHED DERIVATION of another resource's state.** `INPUT_STATE` used to carry
   `clickLockAllowed`, a copy of `!isModalUi(UI_MODAL)` kept in sync by `pointerlock.applyCursor()`;
   the mouse-button path asks UI_MODAL at the moment of the question now, which is why a click can no
@@ -769,6 +808,10 @@ untouched.
   no longer carries `additionalBrowserArgs` at all: it used to be a second copy, and the copies had drifted
   (the config had `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`, the host's list did not,
   so switching vsync off silently re-enabled those three components).
+  **Since P1.86 the list is FIXED** (`game.rs::EXTRA_BROWSER_ARGS` = `--disable-gpu-vsync
+  --disable-frame-rate-limit`) — nothing the user can switch may be a launch argument, because a launch
+  argument can only apply at the next launch. What those two flags buy is a *page-decided* frame rate; see
+  the pacing note in the frame-loop section.
 - **NEVER move a window flag into `tauri.windows.conf.json`** (learned the hard way, P1.80): the platform
   overlay is merged with `json_patch::merge` (RFC 7386) - objects merge recursively, **arrays are REPLACED
   wholesale** - so a partial `app.windows: [{ label, ... }]` entry silently drops `center`, the size,

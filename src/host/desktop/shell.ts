@@ -1,11 +1,11 @@
-// ===== The Tauri shell: settings / logs / window / vsync (the NW.js version's platform/shell.ts) =====
+// ===== The Tauri shell: settings / logs / window / display (the NW.js version's platform/shell.ts) =====
 //
 // The original read and wrote files synchronously through `eval("require")("node:fs")` and drove the
 // window through `nw.Window.get()`. Tauri has no synchronous IPC, so the strategy here is:
 //
-//   * **Read**: at startup `preloadShell()` pulls settings / window mode / the vsync switch into memory
-//     in ONE invoke, and `readSettings()` reads memory afterwards — it stays **synchronous**, so not one
-//     call site changes.
+//   * **Read**: at startup `preloadShell()` pulls settings / window mode / the display's refresh rate into
+//     memory in ONE invoke, and `readSettings()` reads memory afterwards — it stays **synchronous**, so not
+//     one call site changes.
 //   * **Write**: `writeSettings()` updates memory first, then fire-and-forgets to Rust.
 //   * **Logs**: batch (64 lines or 200ms) and send one `append_log`. The original did one synchronous
 //     appendFile per line; carried over to Tauri that becomes one IPC per frame — a necessary behaviour
@@ -311,18 +311,17 @@ export function onCaptureLost(cb: () => void): void {
   captureLostListeners.add(cb);
 }
 
-// ===== The GPU vsync switch =====
-// The original rewrote its own package.json's chromium-args; here it lands in config\vsync.json, which
-// run() reads before creating the window to decide whether to add --disable-gpu-vsync. Likewise it
-// **takes effect on restart**.
-export function isGpuVsyncDisabled(): boolean {
-  return state.snapshot.vsyncDisabled;
-}
-
-export function setGpuVsyncDisabled(disabled: boolean): boolean {
-  state.snapshot.vsyncDisabled = disabled;
-  void invoke("set_vsync_disabled", { disabled }).catch(() => {});
-  return true;
+// ===== The DISPLAY's refresh rate =====
+// **The frame pacing is locked to this number, so it has to be the ratio the panel really runs at** — a
+// 59.94Hz panel answered as "60" gives one duplicated frame every ~16 seconds, which reads as a stutter
+// nobody can explain. The platform can answer exactly (Windows: DWM's own timing ratio), and it may answer
+// "unknown" (0), which the pacing turns into a plain 60 rather than into "uncapped".
+//
+// **Why the platform and not the loop:** this used to be a hard-coded `rAF(60Hz)` line in the boot log, and
+// a rAF-derived measurement cannot work once the display-rate limit is lifted (rAF then fires far MORE often
+// than the panel refreshes, so what it measures is the machine, not the display).
+export function queryDisplayRefreshMilliHz(): Promise<number> {
+  return invoke<number>("display_refresh").catch(() => 0);
 }
 
 // ===== Window mode: windowed / fullscreen =====

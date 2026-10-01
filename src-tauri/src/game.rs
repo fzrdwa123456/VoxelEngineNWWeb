@@ -1,5 +1,5 @@
-// Game data root, settings.json, logs, the vsync switch — the counterpart of the "filesystem" half
-// of the original NW.js build's platform/shell.ts (the nw.Window half lives in win.rs).
+// Game data root, settings.json, logs, the webview's launch arguments — the counterpart of the "filesystem"
+// half of the original NW.js build's platform/shell.ts (the nw.Window half lives in win.rs).
 //
 // Portable layout: in release the exe sits in release\VoxelEngineTauri\ and the data in the sibling
 // game\; in dev the exe sits in src-tauri\target\debug\ and the data is taken straight from the repo
@@ -58,10 +58,6 @@ pub fn settings_bad_path(root: &Path) -> PathBuf {
 
 pub fn logs_dir(root: &Path) -> PathBuf {
     root.join("logs")
-}
-
-fn vsync_path(root: &Path) -> PathBuf {
-    root.join("config").join("vsync.json")
 }
 
 // ===== settings.json =====
@@ -159,46 +155,37 @@ pub fn append_boot(root: &Path, message: &str) {
     }
 }
 
-// ===== GPU vsync switch =====
-// The original NW.js build wrote --disable-gpu-vsync into its own package.json's chromium-args, which
-// takes effect on restart. Tauri's WebView2 arguments can only be supplied at launch, so this leaves a
-// switch file that run() reads before creating the window to decide whether to append
-// --disable-gpu-vsync to the window host's launch arguments (the host owns the variable's name -
-// see `platform::browser_args_base`). Same semantics: effective on restart.
-// The default matches the NW.js build: vsync is off by default (the original app/package.json's
-// chromium-args already carried this flag).
-pub fn read_vsync_disabled(root: &Path) -> bool {
-    match fs::read_to_string(vsync_path(root)) {
-        Ok(t) => serde_json::from_str::<Value>(&t)
-            .ok()
-            .and_then(|v| v.get("disabled").and_then(Value::as_bool))
-            .unwrap_or(true),
-        Err(_) => true,
-    }
-}
+// ===== The webview's launch arguments (P1.86) =====
+// These are FIXED now, and that is the point: a WebView2 argument can only be supplied before the webview
+// exists, so anything the user may switch at runtime must NOT be one. The flag below is what makes that
+// possible: **`--disable-frame-rate-limit`** lifts Chromium's OWN display-rate limit, so rAF stops being
+// pinned to the panel's refresh and the frame rate becomes something the page decides. The vertical-sync
+// switch then lives in the front end (`FPS_CAP.vsync` + `pacingTargetHz`): "synced" paces the loop at the
+// display's measured refresh rate, "unsynced" draws on every vblank.
+//
+// **`--disable-gpu-vsync` IS DELIBERATELY NOT HERE (measured, not assumed).** It makes the compositor submit
+// WITHOUT waiting for vertical blank, and with it the synced case measured 55-60fps with 21ms frames — the
+// submits land between the panel's vblanks and the panel repeats frames (judder), because the unthrottled
+// BeginFrame source delivers ~2 callbacks per refresh and a time-based pacer can only submit on a callback.
+// Left OUT, the compositor keeps its vblank-locked presents: the panel shows the newest frame once per
+// refresh, which is the smoothness the switch's "synced" state is FOR. The cost is that "unsynced" cannot
+// tear (a browser presents through its compositor either way) — what it buys instead is a much higher render
+// rate and therefore lower input-to-photon latency.
+const EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit";
+//
+// THE OLD SHAPE, for the record: this read `config/vsync.json` and appended `--disable-gpu-vsync` only when
+// it said so, which meant the switch could only ever apply at the next launch - and the setting could not be
+// validated by the settings check (`diffSettings` knows settings.json, which this file was not). The file is
+// dead now; a `vsync.json` left behind by an older build is ignored.
 
-pub fn write_vsync_disabled(root: &Path, disabled: bool) -> bool {
-    let body = json!({ "disabled": disabled });
-    fs::write(
-        vsync_path(root),
-        format!("{}\n", serde_json::to_string_pretty(&body).unwrap()),
-    )
-    .is_ok()
-}
 /// Must be called before `tauri::Builder`: the window host reads its launch arguments from the
 /// environment **before the webview exists**, so this is the only moment they can be set.
 ///
-/// The host owns the list (`crate::platform::browser_args_base`); this only appends
-/// `--disable-gpu-vsync` when the switch asks for it. **Publish unconditionally (P1.81)** - the
+/// The host owns the list (`crate::platform::browser_args_base`). **Publish unconditionally (P1.81)** - the
 /// arguments used to live in `tauri.conf.json` as a second copy, so "publish nothing" still meant
 /// "the config's list applies". That key is gone now, so a host that takes arguments must always be
 /// handed them.
-pub fn apply_browser_args(root: &Path) {
+pub fn apply_browser_args() {
     let base = crate::platform::browser_args_base();
-    let args = if read_vsync_disabled(root) {
-        format!("{base} --disable-gpu-vsync")
-    } else {
-        base.to_string()
-    };
-    crate::platform::publish_browser_args(&args);
+    crate::platform::publish_browser_args(&format!("{base} {EXTRA_BROWSER_ARGS}"));
 }

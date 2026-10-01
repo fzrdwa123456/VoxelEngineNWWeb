@@ -41,6 +41,21 @@ export const SetFpsCap = defineCommand<{ cap: number }>(
   },
 );
 
+/** The vertical-sync switch (P1.86). It used to be a WebView2 LAUNCH ARGUMENT, so toggling it wrote a file
+ *  and told the user to restart — and a restart-later switch sitting next to instant ones (the cap, the
+ *  diagnostic log) reads as a broken button. Chromium's present mode really is launch-only; what is NOT
+ *  launch-only is OUR pacing, and that is what the switch drives now (the launch arguments lift the
+ *  display-rate limit unconditionally, and `pacingTargetHz` decides the rate on the next frame).
+ *
+ *  A COMMAND, like the cap: the loop reads the resource every frame, so it is world state, and a UI
+ *  callback may not assign it. The settings FILE is written by the caller (config is not world state). */
+export const SetVsync = defineCommand<{ vsync: boolean }>(
+  "setVsync",
+  (world, { vsync }) => {
+    world.resource(FPS_CAP).vsync = vsync === true;
+  },
+);
+
 /** HOT-PLUG one plugin: install it if it is not installed, uninstall it if it is (P1.24).
  *
  *  Assembly as a COMMAND, which is the whole point: installing a plugin adds systems to the schedule and

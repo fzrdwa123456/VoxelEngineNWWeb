@@ -15,6 +15,7 @@ import {
   DEBUG_LOG,
   F3_PANEL,
   FPS_CAP,
+  pacingTargetHz,
   INPUT_DIAGNOSTICS,
   LOCAL_PLAYER,
   VOXEL,
@@ -56,6 +57,10 @@ export const DIAGNOSTICS_ACCESS: SystemAccess = {
 interface F3Stats {
   fps: number;
   fpsCap: number;
+  /** The vertical-sync switch and the display rate the pacing is locked to (P1.86): the frame rate is a
+   *  product of all three, so printing the cap alone was telling half the story. */
+  vsync: boolean;
+  refreshHz: number;
   x: number;
   y: number;
   z: number;
@@ -143,6 +148,8 @@ export class DiagnosticsSystem {
     this.renderF3Panel({
       fps: stats.fps,
       fpsCap: this.frameCap.cap,
+      vsync: this.frameCap.vsync,
+      refreshHz: this.frameCap.refreshHz,
       x,
       y,
       z,
@@ -170,7 +177,9 @@ export class DiagnosticsSystem {
     const diff = topFinite ? (info.feet - (info.top as number)).toFixed(4) : "-";
     const diffE = topFinite ? (info.feet - (info.top as number)).toExponential(2) : "-";
     let text =
-      `FPS: ${info.fps.toFixed(1)} (${t("f3.cap")} ${info.fpsCap === 0 ? t("f3.unlimited") : info.fpsCap})\n` +
+      `FPS: ${info.fps.toFixed(1)} (${t("f3.cap")} ${info.fpsCap === 0 ? t("f3.unlimited") : info.fpsCap}` +
+      ` · vsync ${info.vsync ? "on" : "off"} · ${info.refreshHz > 0 ? `${info.refreshHz.toFixed(2)}Hz` : "rate ?"}` +
+      ` · target ${pacingTargetHz(info.fpsCap, info.vsync, info.refreshHz) > 0 ? `${pacingTargetHz(info.fpsCap, info.vsync, info.refreshHz).toFixed(0)}fps` : t("f3.unlimited")})\n` +
       `XYZ: ${info.x.toFixed(2)} / ${info.y.toFixed(2)} / ${info.z.toFixed(2)}\n` +
       `${t("f3.chunks")}: ${info.chunks}\n` +
       (info.gpuMs !== null

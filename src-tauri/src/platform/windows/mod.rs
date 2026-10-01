@@ -21,8 +21,10 @@ use crate::cursor_model::{
 };
 use crate::platform::{CursorBackend, NativeWindow};
 
+mod display;
 mod rawinput;
 mod webview;
+pub use display::display_refresh_milli_hz;
 pub use rawinput::WindowsRawInput;
 pub use webview::WindowsWebview;
 

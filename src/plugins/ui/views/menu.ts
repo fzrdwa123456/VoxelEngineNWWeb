@@ -84,8 +84,11 @@ import {
 export interface SettingsCallbacks {
   getFpsCap: () => number;
   onFpsCap: (cap: number) => void;
-  isGpuVsyncDisabled: () => boolean;
-  onToggleGpuVsync: (disabled: boolean) => boolean;
+  /** The vertical-sync switch (P1.86): READ from the world's frame pacing (it is locked to a measured
+   *  refresh rate, so the label can be honest about the rate in force), and SET through a command. It
+   *  applies on the next frame — the row needs no "restart" hint any more. */
+  isVsyncOn: () => boolean;
+  onSetVsync: (on: boolean) => void;
   /** The "Diagnostic log" switch: it only gates whether probe lines reach `debug.log`,
    *  and is on by default. */
   isDiagLogEnabled: () => boolean;
@@ -298,27 +301,27 @@ export function buildSettingsPanel(
   // Spawned AFTER the slider, so it is the right-hand end of the row.
   const capValue = spawnLabel(world, capCtl, "settings.value", "", { raw: true });
 
-  // 2. GPU vsync: a two-state button on the right, with the restart note beside it.
+  // 2. Vertical sync: a two-state button on the right. It used to carry a "(restart to apply)" hint — the
+  //    switch was a WebView2 launch argument (P1.86) — and it is a frame-pacing value now, so it applies on
+  //    the next frame like every other row here. The hint is what the switch MEANS instead.
   const gpuCtl = spawnPanel(world, spawnRow("settings.vsync"), "settings.rowCtl");
-  spawnLabel(world, gpuCtl, "settings.rowMeta", "settings.restartHint");
-  let gpuVsyncDisabled = opts.isGpuVsyncDisabled();
+  spawnLabel(world, gpuCtl, "settings.rowMeta", "settings.vsyncHint");
+  let vsyncOn = opts.isVsyncOn();
   const gpuBtn = spawnButton(
     world,
     gpuCtl,
     "settings.rowBtn",
     `${id}.vsync`,
     "",
-    gpuVsyncDisabled ? "settings.off" : "settings.on",
+    vsyncOn ? "settings.on" : "settings.off",
   );
   const renderGpu = (): void => {
-    setUiText(world, gpuBtn, gpuVsyncDisabled ? "settings.off" : "settings.on");
+    setUiText(world, gpuBtn, vsyncOn ? "settings.on" : "settings.off");
   };
   onUiAction(actions, `${id}.vsync`, () => {
-    const next = !gpuVsyncDisabled;
-    if (opts.onToggleGpuVsync(next)) {
-      gpuVsyncDisabled = next;
-      renderGpu();
-    }
+    vsyncOn = !vsyncOn;
+    opts.onSetVsync(vsyncOn);
+    renderGpu();
   });
 
   // --- "Diagnostic log": whether the FRAME/LOOK/RAWLAG/RAWMON/STALL/PHYS/SPACE#/MOUSE# lines
@@ -676,8 +679,8 @@ export class Menu {
       onWindowModeChange: cb.onWindowModeChange,
       getFpsCap: cb.getFpsCap,
       onFpsCap: cb.onFpsCap,
-      isGpuVsyncDisabled: cb.isGpuVsyncDisabled,
-      onToggleGpuVsync: cb.onToggleGpuVsync,
+      isVsyncOn: cb.isVsyncOn,
+      onSetVsync: cb.onSetVsync,
       isDiagLogEnabled: cb.isDiagLogEnabled,
       onToggleDiagLog: cb.onToggleDiagLog,
       getWindowMode: cb.getWindowMode,

@@ -48,7 +48,9 @@ struct ShellSnapshot {
     settings: Value,
     settings_problem: Option<String>,
     window_mode: String,
-    vsync_disabled: bool,
+    /// The display's refresh rate in MILLI-Hz (59940 for a 59.94Hz panel), 0 = the platform could not
+    /// answer. The front end's frame pacing locks to it (P1.86) - see `platform::display_refresh_milli_hz`.
+    display_refresh_milli_hz: u32,
     focused: bool,
     browser_args: String,
     platform: String,
@@ -72,7 +74,7 @@ fn preload_shell(state: State<'_, AppState>, window: tauri::WebviewWindow) -> Sh
         settings,
         settings_problem: state.problem.clone(),
         window_mode,
-        vsync_disabled: game::read_vsync_disabled(&root),
+        display_refresh_milli_hz: platform::display_refresh_milli_hz(),
         focused: window.is_focused().unwrap_or(false),
         browser_args: platform::browser_args_in_force(),
         platform: format!("tauri/{} {}", tauri::VERSION, std::env::consts::OS),
@@ -217,9 +219,14 @@ fn window_is_fullscreen(window: tauri::WebviewWindow) -> bool {
     platform::is_fullscreen(&window)
 }
 
+/// **The display's refresh rate, in milli-Hz (0 = unknown)** — asked again when the window mode changes,
+/// because a fullscreen switch is how a program lands on a SECOND monitor with a different rate.
+///
+/// It is a command of its own (not just a field of the preload) for exactly that reason, and it is the
+/// platform's answer rather than a measurement: see `platform::display_refresh_milli_hz` (P1.86).
 #[tauri::command]
-fn set_vsync_disabled(state: State<'_, AppState>, disabled: bool) -> bool {
-    game::write_vsync_disabled(&state.root, disabled)
+fn display_refresh() -> u32 {
+    platform::display_refresh_milli_hz()
 }
 
 #[tauri::command]
@@ -247,7 +254,7 @@ pub fn run() {
     // The original initShell(): truncate both logs at startup
     game::truncate_logs(&root);
     // Must run before the Builder: WebView2 arguments can only be supplied before the webview is created
-    game::apply_browser_args(&root);
+    game::apply_browser_args();
 
     let read = game::read_settings_checked(&root);
 
@@ -274,7 +281,7 @@ pub fn run() {
             cursor_trace,
             window_session_active,
             window_is_fullscreen,
-            set_vsync_disabled,
+            display_refresh,
             rawinput_start,
             rawinput_stats,
             game_root_of,
