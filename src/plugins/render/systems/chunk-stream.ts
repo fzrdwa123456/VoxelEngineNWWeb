@@ -60,6 +60,18 @@ const LOD_MESH_COST = 9;
 /** How long a chunk that APPEARS takes to fade in (P1.98). ~13 frames at 60fps: long enough to read as a fade
  *  rather than a pop, short enough that a walking player never sees a translucent wall. */
 export const FADE_IN_MS = 220;
+/** How long a chunk that LEAVES the window takes to fade out (P1.99). A little LONGER than the fade in on
+ *  purpose: where the two meet (a coarse chunk leaving as the fine one that replaces it arrives) the leaving
+ *  mesh must still be there while the arriving one is still nearly invisible, or the seam shows a one-frame
+ *  gap of sky between them. */
+export const FADE_OUT_MS = 260;
+/** How many meshes may be fading OUT at once. A NORMAL move retires a whole STRIP of the window rather than a
+ *  handful — the window is a square, so crossing one chunk column drops ~15 columns × 8 Y chunks, measured at
+ *  ~250 meshes with both rings — so this cap sits above that and is there for the MASS unload: a teleport into a
+ *  world (the whole previous window, thousands of meshes) would otherwise hold every one of those GPU buffers
+ *  alive for a fade nobody can see, since they are all hundreds of blocks away and behind the camera. Past this
+ *  many, the rest are removed at once, exactly as they always were. */
+const FADE_OUT_MAX = 512;
 /** Looks re-resolved per frame after a PACK RELOAD (P1.18i). MUCH higher than the meshing budget because the
  *  work is not comparable: a re-mesh reads a 32^3 neighbourhood and rewrites every vertex buffer, while a
  *  restyle is one lookup per material group in a chunk that is already built. It is still budgeted, so the
@@ -156,11 +168,21 @@ export class ChunkStreamSystem {
    *  far chunk was built or rebuilt. `markFarStale()` fills this from the MESH CACHE instead, and the same
    *  budgeted restyle pass drains it. */
   private readonly farStale = new Set<string>();
-  /** THE APPEARANCE FADE (P1.98): the chunks that are fading in right now. A chunk that APPEARS (a first build —
-   *  never an edit, see `rebuild`) gets a per-chunk copy of its material, transparent at 0 opacity, and the copy
-   *  is ramped to 1 and swapped back for the SHARED one. Per-chunk copies are needed because the chunk materials
-   *  are shared per (look, tier) by the material cache, and there are only ever a handful of these alive. */
-  private readonly fading: Array<{ entry: ChunkMeshEntry; clones: THREE.Material[]; elapsed: number }> = [];
+  /** THE APPEARANCE FADES (P1.98/P1.99): the chunks that are fading in or out right now.
+   *
+   *  IN: a chunk that APPEARS (a first build — never an edit, see `rebuild`) gets a per-chunk copy of its
+   *  material, transparent at 0 opacity, and the copy is ramped to 1 and swapped back for the SHARED one.
+   *  OUT: a chunk that LEAVES the window keeps its mesh in the scene and is ramped 1 → 0, and only then are
+   *  the mesh, its geometry and the copies taken down — removing it on the frame it left is exactly the pop
+   *  the fade exists to hide (and at the ring boundary it left on the same frame the fine chunk replacing it
+   *  started fading in).
+   *
+   *  Per-chunk copies are needed because the chunk materials are shared per (look, tier) by the material
+   *  cache, and there are only ever a bounded number of these alive. `key` is kept so a chunk that comes
+   *  BACK while it is still fading out can take its own dying mesh down (`killDying`) instead of leaving two
+   *  meshes for one chunk in the scene for the length of a fade. */
+  private readonly fading: Array<{ key: string; entry: ChunkMeshEntry; clones: THREE.Material[]; elapsed: number; out: boolean }> =
+    [];
   /** `J` switches the fade off (P1.98) — for A/B comparing "pop" against "fade", and for a machine where the
    *  blending costs something. */
   private fadeEnabled = true;
@@ -471,6 +493,10 @@ export class ChunkStreamSystem {
       this.cache.empty.add(key);
       return;
     }
+    // …and the same ghost rule as `build`: whatever brings a key back, it may not leave the previous mesh
+    // fading out beside the new one (P1.99). (`drain` already drops a result whose key left the window, so this
+    // is the second line of defence rather than the only one.)
+    this.killDying(key);
     const geom = this.mesh.createGeometry();
     if (geom.apply(this.voxel, result) === 0) {
       geom.dispose();
@@ -492,7 +518,7 @@ export class ChunkStreamSystem {
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, fresh);
     this.place(fresh);
-    this.beginFade(fresh); // a chunk that APPEARED fades in (P1.98)
+    this.beginFade(key, fresh); // a chunk that APPEARED fades in (P1.98)
   }
 
   /** Hand one chunk to a worker. False = the pool is saturated (or there is none): the caller stops asking
@@ -662,12 +688,15 @@ export class ChunkStreamSystem {
     const far = this.farWanted;
     for (const [key, entry] of this.cache.meshes) {
       if (wanted.has(key) || (far !== null && far.has(key))) continue;
-      this.cache.group.remove(entry.mesh);
-      entry.geom.dispose();
       this.cache.meshes.delete(key);
       this.cache.empty.delete(key);
       // A job for a chunk that left the window is dropped when it comes back (`drain` checks this set).
       this.cache.inFlight.delete(key);
+      // THE MESH IS NOT REMOVED HERE (P1.99): it leaves the CACHE (so nothing treats the chunk as loaded, and
+      // the streaming budget may rebuild it) while it stays in the SCENE, fading out. Removing it on this frame
+      // is the pop the fade exists to hide — and at the ring boundary the mesh that leaves is the coarse one the
+      // fine chunk replacing it has only just started to fade in behind.
+      if (!this.beginFadeOut(key, entry)) this.removeMesh(entry);
     }
   }
 
@@ -712,6 +741,10 @@ export class ChunkStreamSystem {
     const cy = Number(parts[1]);
     const cz = Number(parts[2]);
 
+    // A chunk that is BACK while its previous mesh is still fading out: the ghost goes first, or the same
+    // chunk is in the scene twice (P1.99).
+    this.killDying(key);
+
     // Boundary faces are culled against neighbouring chunks, so those must exist first
     for (const [dx, dy, dz] of NEIGHBOURS) this.voxel.ensureChunk(cx + dx, cy + dy, cz + dz);
 
@@ -728,7 +761,7 @@ export class ChunkStreamSystem {
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
-    this.beginFade(entry); // a chunk that APPEARED fades in (P1.98)
+    this.beginFade(key, entry); // a chunk that APPEARED fades in (P1.98)
   }
 
   /** A FAR-RING chunk's mesh (P1.93). Procedural and main-thread: `buildLodMeshInput` samples the height field
@@ -745,6 +778,8 @@ export class ChunkStreamSystem {
     const cx = Number(parts[0]);
     const cy = Number(parts[1]);
     const cz = Number(parts[2]);
+
+    this.killDying(key); // a coarse chunk that came back while its ghost was still fading out (P1.99)
 
     const input = buildLodMeshInput(
       this.lod,
@@ -768,7 +803,7 @@ export class ChunkStreamSystem {
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
-    this.beginFade(entry); // a far chunk that APPEARED fades in too (P1.98) — it covers 64×64 blocks
+    this.beginFade(key, entry); // a far chunk that APPEARED fades in too (P1.98) — it covers 64×64 blocks
     return LOD_MESH_COST;
   }
 
@@ -814,31 +849,77 @@ export class ChunkStreamSystem {
     }
   }
 
-  /** START A CHUNK'S APPEARANCE FADE (P1.98). Called when a mesh is created for the first time — NEVER from
-   *  `rebuild`, which is the edit the player is watching (a dug block must change instantly, P1.18i).
+  /** START A CHUNK'S FADE IN (P1.98). Called when a mesh is created for the first time — NEVER from `rebuild`,
+   *  which is the edit the player is watching (a dug block must change instantly, P1.18i).
    *
    *  The chunk's materials are shared per (look, tier), so a per-chunk opacity needs a COPY: the copies are made
    *  from the very materials `materialsFor` just resolved (so a `G` tint or an `H` wireframe comes along), given
    *  `transparent` + 0 opacity, and swapped back for the shared ones when the fade ends. `depthWrite` stays ON:
    *  the chunk keeps occluding itself correctly (depth-tested), so a fading chunk never shows its own back
    *  faces — the only thing it blends with is what is already drawn behind it. */
-  private beginFade(entry: ChunkMeshEntry): void {
+  private beginFade(key: string, entry: ChunkMeshEntry): void {
     if (!this.fadeEnabled) return;
+    this.pushFade(key, entry, false);
+  }
+
+  /** START A CHUNK'S FADE OUT (P1.99), and answer whether the fade took the mesh over.
+   *
+   *  `false` means "remove it now, exactly as before": the effect is switched off (the `J` key), or so many
+   *  chunks are leaving at once (a teleport's whole window) that fading them all would hold every one of their
+   *  GPU buffers alive for nothing.
+   *
+   *  The mesh deliberately stays in the scene and the entry is ALREADY out of the cache when this is called
+   *  (see `unloadOutside`): the chunk is no longer wanted, so nothing may treat it as loaded, while its pixels
+   *  are still on screen for the length of the fade. `removeMesh` is the other half of the bargain. */
+  private beginFadeOut(key: string, entry: ChunkMeshEntry): boolean {
+    if (!this.fadeEnabled) return false;
+    let leaving = 0;
+    for (const fade of this.fading) if (fade.out) leaving++;
+    if (leaving >= FADE_OUT_MAX) return false;
+    return this.pushFade(key, entry, true);
+  }
+
+  /** The shared half of both directions: the per-chunk copies, `transparent`, and the fade entry. */
+  private pushFade(key: string, entry: ChunkMeshEntry, out: boolean): boolean {
     const resolved = this.materialsFor(entry.geom, entry.step);
     const shared = Array.isArray(resolved) ? resolved : [resolved];
     const clones = shared.map((material) => {
       const copy = material.clone();
       copy.transparent = true;
-      copy.opacity = 0;
+      copy.opacity = out ? 1 : 0;
       return copy;
     });
     entry.mesh.material = Array.isArray(resolved) ? clones : clones[0];
-    this.fading.push({ entry, clones, elapsed: 0 });
+    this.fading.push({ key, entry, clones, elapsed: 0, out });
+    return true;
   }
 
-  /** Ramp the fades in flight and finish the ones that are done. A fade whose mesh no longer holds its own
-   *  copies is DROPPED (its chunk was edited, restyled or re-materialised in the meantime) rather than fought
-   *  over — that is what keeps this from needing a call in every other path. */
+  /** TAKE A VISIBLE MESH DOWN: it is out of the scene and its geometry is freed. (The fade copies are freed by
+   *  the caller, `dropFade`.) Only ever called for a mesh that has already left the cache. */
+  private removeMesh(entry: ChunkMeshEntry): void {
+    this.cache.group.remove(entry.mesh);
+    entry.geom.dispose();
+  }
+
+  /** A chunk that left the window has COME BACK while it was still fading out: its dying mesh has to go, or the
+   *  chunk would be drawn twice for the rest of that fade (once by the new mesh, once by the ghost at whatever
+   *  opacity it had reached — and with the previous chain's look, if a pack reload happened in between). */
+  private killDying(key: string): void {
+    for (let i = this.fading.length - 1; i >= 0; i--) {
+      const fade = this.fading[i];
+      if (!fade.out || fade.key !== key) continue;
+      this.removeMesh(fade.entry);
+      for (const clone of fade.clones) clone.dispose();
+      this.fading.splice(i, 1);
+    }
+  }
+
+  /** Ramp the fades in flight and finish the ones that are done. IN reaches full opacity and gets the SHARED
+   *  material back; OUT reaches zero, and is then taken out of the scene.
+   *
+   *  A fade whose mesh no longer holds its own copies is DROPPED — that is what keeps this from needing a call
+   *  in every other path — but an OUT fade is still RETIRED when that happens: its whole point is the removal,
+   *  and dropping the entry without removing the mesh would leave a ghost in the scene for ever. */
   private advanceFades(deltaMs: number): void {
     if (this.fading.length === 0) return;
     // Wall-clock time is not used here: the LANE's delta is, so the fade is frame-rate independent and the gate
@@ -847,30 +928,39 @@ export class ChunkStreamSystem {
     for (let i = this.fading.length - 1; i >= 0; i--) {
       const fade = this.fading[i];
       const current = Array.isArray(fade.entry.mesh.material) ? fade.entry.mesh.material : [fade.entry.mesh.material];
-      if (current[0] !== fade.clones[0]) {
-        this.dropFade(i);
+      const mine = current[0] === fade.clones[0];
+      if (!mine) {
+        if (fade.out) {
+          this.removeMesh(fade.entry);
+          for (const clone of fade.clones) clone.dispose();
+          this.fading.splice(i, 1);
+        } else this.dropFade(i);
         continue;
       }
       fade.elapsed += stepMs;
-      const t = fade.elapsed / FADE_IN_MS;
+      const t = fade.elapsed / (fade.out ? FADE_OUT_MS : FADE_IN_MS);
       if (t >= 1) {
-        this.dropFade(i, true);
+        this.dropFade(i, !fade.out);
         continue;
       }
-      for (const clone of fade.clones) clone.opacity = t;
+      const opacity = fade.out ? 1 - t : t;
+      for (const clone of fade.clones) clone.opacity = opacity;
     }
   }
 
-  /** End ONE fade: put the SHARED material back on the mesh and free the copies. `keepMaterial` false leaves
-   *  whatever the mesh holds (the caller already replaced it). */
+  /** End ONE fade: put the SHARED material back on the mesh (an IN fade), or take the mesh down (an OUT one),
+   *  and free the copies either way. `keepMaterial` false leaves whatever the mesh holds — the caller used it
+   *  when it already replaced or removed the material itself. */
   private dropFade(index: number, keepMaterial = false): void {
     const fade = this.fading[index];
     this.fading.splice(index, 1);
-    if (keepMaterial) fade.entry.mesh.material = this.materialsFor(fade.entry.geom, fade.entry.step);
+    if (fade.out) this.removeMesh(fade.entry);
+    else if (keepMaterial) fade.entry.mesh.material = this.materialsFor(fade.entry.geom, fade.entry.step);
     for (const clone of fade.clones) clone.dispose();
   }
 
-  /** End every fade at once (the `J` switch turning the effect off). */
+  /** End every fade at once (the `J` switch turning the effect off): the ones that were arriving reach full
+   *  opacity now, and the ones that were leaving are taken down now. */
   private finishAllFades(): void {
     for (let i = this.fading.length - 1; i >= 0; i--) this.dropFade(i, true);
   }

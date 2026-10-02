@@ -621,32 +621,53 @@ where it is:
   the view distance for LESS geometry than the single flat-radius-8 window (629k faces / 91 MB)**. The warm-up
   still builds only the fine ring (the entry time is unchanged); the far ring streams in over the first ~3 s
   of play.
-* **A CHUNK THAT APPEARS FADES IN (P1.98 — `FADE_IN_MS` = 220 ms, `J` switches it off).** The reported complaint
-  was «区块加载就闪» — a chunk that streams in popped at full opacity, which reads as a flash (worst on the far
-  ring, whose chunks cover 64×64 blocks). A chunk that appears is now drawn with its OWN COPY of the material
-  (`transparent`, opacity 0 → 1) and the SHARED material goes back on the mesh (the copies disposed) when the
-  fade ends. Four things are load-bearing:
+* **A CHUNK THAT APPEARS FADES IN AND ONE THAT LEAVES FADES OUT (P1.98/P1.99 — `FADE_IN_MS` = 220 ms,
+  `FADE_OUT_MS` = 260 ms, `J` switches both off).** The reported complaint was «区块加载就闪» — a chunk that
+  streams in popped at full opacity, which reads as a flash (worst on the far ring, whose chunks cover 64×64
+  blocks), and the mirror image of it: a chunk that LEAVES the window vanished on the frame it left — which is
+  the same pop, at the ring boundary, where the coarse mesh disappears as the fine one replacing it starts to
+  fade in. Both directions draw the chunk with its OWN COPY of the material (`transparent`) and swap the SHARED
+  one back when the fade ends; the difference is which end of the opacity range they start at and what happens
+  at the end (`FADE_IN` puts the shared material back, `FADE_OUT` takes the mesh, its geometry and the copies
+  down). Five things are load-bearing:
   * **THE COPY IS WHAT MAKES IT POSSIBLE AT ALL.** A chunk's materials are shared per (look, tier), so a
-    per-chunk opacity needs a clone; `beginFade` makes the copies from the very resolution `materialsFor` just
+    per-chunk opacity needs a clone; `pushFade` makes the copies from the very resolution `materialsFor` just
     returned, so a `G` tint or an `H` wireframe comes along with them. `depthWrite` stays ON: the chunk keeps
     occluding itself correctly (depth-tested), so a fading chunk never shows its own back faces — the only thing
-    it blends with is what is already drawn behind it.
+    it blends with is what is already drawn behind it. (A consequence worth knowing: because the coarse surface
+    is never BELOW the fine one, a leaving coarse chunk blends OVER the fine chunk arriving behind it — the ring
+    swap reads as a cross-fade rather than as a hole.)
   * **IT IS DRIVEN BY THE LANE'S DELTA, NOT BY WALL-CLOCK TIME** (`step(deltaMs = 1000/60)`, the plugin passing
     `ctx.dt * 1000`), which is what makes the fade frame-rate independent and what lets the gate finish one with
-    a single big `step`.
+    a single big `step`. `FADE_OUT_MS` is deliberately a little LONGER than `FADE_IN_MS`: where the two meet, the
+    leaving mesh must still be there while the arriving one is still nearly invisible.
   * **AN EDIT NEVER FADES (P1.18i).** `beginFade` is called from `build`, `buildFar` and `applyResult` — the
     FIRST appearance of a chunk — and never from `rebuild`, because the block the player just dug is the one
     thing they are watching. A fade already in flight when that chunk is edited is DROPPED by the guard at the
     top of `advanceFades` (a mesh that no longer holds its own copies); that guard is also what frees it, which
-    is why no other path (edit, restyle, pack reload) has to remember to end a fade.
-  * **`J` TURNS IT OFF** and ends every fade in flight at once (`finishAllFades`) — with it off, a chunk that
-    appears is drawn with the shared material immediately, at full opacity. Ending them at the switch is not
-    cosmetic: with the effect off nothing would ever finish a fade, so a chunk caught mid-fade would stay
-    translucent for ever.
+    is why no other path (edit, restyle, pack reload) has to remember to end a fade. An OUT fade hit by that
+    guard is still RETIRED instead of dropped: its whole point is the removal, so dropping the entry without
+    removing the mesh would leave a ghost in the scene for ever.
+  * **A MESH THAT LEAVES THE WINDOW LEAVES THE CACHE AT ONCE AND THE SCENE LATER.** `unloadOutside` deletes the
+    key (so nothing treats the chunk as loaded and the streaming budget may rebuild it) and then hands the ENTRY
+    to `beginFadeOut`, which answers whether the fade took the mesh over. The mesh, its geometry and the copies
+    are only taken down when the fade ends — or at once when `J` is off, or past `FADE_OUT_MAX` leaving meshes at
+    the same time. That cap is sized for the MASS unload (a teleport into a world = the whole previous window,
+    thousands of meshes, all hundreds of blocks away and behind the camera): a NORMAL move retires a whole STRIP
+    — the window is a square, so crossing one column drops ~15 columns × 8 Y chunks, measured at ~250 meshes.
+    A chunk that comes BACK while its ghost is still fading takes that ghost down first (`killDying`, called by
+    `build`/`buildFar`), or the same chunk would be in the scene twice for the rest of the fade.
+  * **`J` TURNS BOTH OFF** and ends every fade in flight at once (`finishAllFades`): the arriving ones reach full
+    opacity now, the leaving ones are taken down now. Ending them at the switch is not cosmetic: with the effect
+    off nothing would ever finish a fade, so a chunk caught mid-fade would stay translucent for ever.
   The gate drives all of it on a real stream (0 opacity on the first step → no progress with a zero delta → half
   the opacity at half the time → the shared material back, copies freed, at `FADE_IN_MS` → an edit cutting a
   fade short without the chunk going translucent again → a window move with `J` off giving opaque chunks at once
-  and with `J` on giving invisible ones again).
+  and with `J` on giving invisible ones again → and, for the other direction, a leaving chunk that is STILL IN
+  THE SCENE at full opacity, at half the way down at half the time, and out of the scene with its geometry and
+  its copies freed at `FADE_OUT_MS` → a chunk that comes back while its ghost is fading → `J` off removing a
+  leaving chunk at once). Both directions were mutation-tested: removing the `beginFadeOut` call, and never
+  taking a ghost out of the scene, each fail the assertion that exists for it.
 
 ## Iron rules (breaking any of these = silent bugs)
 

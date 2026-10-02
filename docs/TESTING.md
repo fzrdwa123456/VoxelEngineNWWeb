@@ -91,10 +91,11 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   toggle it, and it must compose with `G`: press both and you get a tier-COLORED wireframe — the combination to
   use when checking the LOD's shape. Also worth a look while it is on: a dug block's hole must show its own
   faces (P1.91) and the ring seam must show no missing triangles (P1.95).
-→ **`J` — THE APPEARANCE FADE (P1.98)**: walk or sprint forward and watch the chunks that stream in at the edge
-  of the view: each one must come in INVISIBLE and reach full opacity over ~0.2 s (about 13 frames) instead of
-  popping. The far ring is where it matters most — a far chunk covers 64×64 blocks, so without the fade the
-  coarse terrain visibly snaps into place as you turn; with it, it fades in. Three things must also hold:
+→ **`J` — THE APPEARANCE FADE (P1.98 in, P1.99 out)**: walk or sprint forward and watch the chunks that stream in
+  at the edge of the view: each one must come in INVISIBLE and reach full opacity over ~0.2 s (about 13 frames)
+  instead of popping. The far ring is where it matters most — a far chunk covers 64×64 blocks, so without the
+  fade the coarse terrain visibly snaps into place as you turn; with it, it fades in. Three things must also
+  hold:
   (a) DIG a block while its chunk is still fading in (dig at the edge of the view, right where a chunk just
       appeared): the hole must be visible IMMEDIATELY — an edit never fades, or the block you just broke would
       stay invisible for another 0.2 s (this is the P1.18i rule);
@@ -103,6 +104,18 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (c) press `J` again: the fade is back. It must be a real switch in both directions.
   It must also compose: `G` + `J` gives tier-coloured chunks fading in, and `H` + `J` gives a wireframe fading
   in (with `H` on, a fade is very visible as the lines brightening).
+→ **THE OTHER DIRECTION: A LEAVING CHUNK FADES OUT (P1.99)**: stand still, then walk BACKWARDS (or fly) and turn
+  around to watch the trailing edge — the chunks that leave the streaming window must FADE AWAY over ~0.26 s
+  instead of vanishing on the frame they go. The place it is easiest to see is the RING BOUNDARY: at the moment a
+  fine chunk appears where a coarse one was, the coarse mesh must still be on screen and fade out WHILE the fine
+  one fades in — no flash of sky between them, just a cross-fade. Three things must also hold:
+  (a) it must not leave ghosts: walk back and forth over a chunk boundary several times and look for a chunk
+      drawn twice / a stuck half-transparent patch (a returning chunk's fading ghost has to be taken down);
+  (b) with `J` off, a leaving chunk must vanish at once, exactly as before (the key switches the EFFECT);
+  (c) performance: F3 while walking and flying — crossing a chunk boundary puts a whole strip of meshes (~250)
+      into the transparent pass for 0.26 s, so the frame time must not visibly jump (it is bounded by
+      `FADE_OUT_MAX`, past which the rest are removed at once); a teleport-sized unload (entering a world) must
+      NOT hold thousands of meshes alive — that is what the cap is for.
 → **A PACK SWITCH MUST RESTYLE BOTH RINGS (P1.97 — this was a real bug)**: stand somewhere the far ring is on
   screen (fly up ~200 blocks, or just look at the horizon), open Settings → Resource packs and toggle a pack
   that changes BLOCK LOOKS (in the sample install, disabling the mod drops the block textures to the engine's

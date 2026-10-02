@@ -1338,7 +1338,7 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   equal(view.restylePending, 0, "…and both queues are empty afterwards");
 });
 
-check("a chunk that APPEARS fades in (P1.98) - an EDIT never does, and J turns it off", () => {
+check("a chunk that APPEARS fades in, one that LEAVES fades out (P1.98/P1.99) - an EDIT never fades", () => {
   // The reported complaint: a chunk that streams in POPPED at full opacity, which reads as a flash. The fix is
   // a per-chunk appearance fade — the chunk draws with its OWN copy of the material, starting at 0 opacity and
   // ramped by the LANE's delta, and the shared material is put back (copies freed) when it ends. What the gate
@@ -1348,9 +1348,13 @@ check("a chunk that APPEARS fades in (P1.98) - an EDIT never does, and J turns i
   //   * an EDIT stays instant: `rebuild` never starts a fade, even for a chunk that is mid-fade (P1.18i);
   //   * the copies do not leak (every one is disposed when its fade ends);
   //   * `J` turns the effect off, ends what is in flight at once, and a chunk that appears afterwards is drawn
-  //     with the shared material immediately.
+  //     with the shared material immediately;
+  //   * and the OTHER direction (P1.99): a chunk that LEAVES the streaming window keeps its mesh in the scene,
+  //     ramped 1 → 0, and is taken down (mesh out, geometry freed, copies freed) only when that fade ends —
+  //     removing it on the frame it left is the same pop, at the ring boundary where the coarse mesh vanishes
+  //     as the fine one replacing it starts fading in.
   const L = load("data/world/lod.js");
-  const { ChunkStreamSystem, FADE_IN_MS } = load("plugins/render/systems/chunk-stream.js");
+  const { ChunkStreamSystem, FADE_IN_MS, FADE_OUT_MS } = load("plugins/render/systems/chunk-stream.js");
   const { AIR, CHUNK_SIZE } = load("data/world/chunk.js");
   const { VoxelWorld } = load("data/world/world.js");
   const P = loadPresentation();
@@ -1363,22 +1367,36 @@ check("a chunk that APPEARS fades in (P1.98) - an EDIT never does, and J turns i
   fadeWorld.insertResource(LOCAL_PLAYER, localPlayer);
   const positionRow = entityIndex(localPlayer);
   const startX = C.POSITION.x[positionRow];
-  const fadeCache = P.createChunkMeshCache({ add() {}, remove() {} });
+  // EVERY MOVE THIS GROUP MAKES IS UNDONE IN A `finally`. The row belongs to the world the whole gate runs on,
+  // and the group after this one builds its window from it — so an assertion that throws here used to leave the
+  // player four chunks away and fail "a window still needs warming" two checks later (measured). The body is
+  // deliberately NOT re-indented: the `try` is a safety net, not a new scope.
+  try {
+  // What LEFT THE SCENE and what was FREED: a fade-out's whole contract is "the mesh stays in the scene until
+  // the fade ends, and is out of it (with its geometry freed) the moment it does".
+  const leftScene = [];
+  const disposedGeoms = [];
+  const fadeCache = P.createChunkMeshCache({ add() {}, remove: (mesh) => leftScene.push(mesh) });
   fadeWorld.insertResource(P.CHUNK_MESHES, fadeCache);
   fadeWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
   const fadeEdges = createKeyEventLog();
   fadeWorld.insertResource(KEY_EVENTS, fadeEdges);
   let fadeGen = 0;
   const fadeFactory = {
-    createGeometry: () => ({
-      geometry: { dispose() {}, morphAttributes: {} },
-      // ONE look (`specs: []`): the mesh then holds a single material, and the assertions read it directly.
-      specs: [],
-      apply: () => 5,
-      rebuild: () => 5,
-      restyle: () => 1,
-      dispose() {},
-    }),
+    createGeometry: () => {
+      const geom = {
+        geometry: { dispose() {}, morphAttributes: {} },
+        // ONE look (`specs: []`): the mesh then holds a single material, and the assertions read it directly.
+        specs: [],
+        apply: () => 5,
+        rebuild: () => 5,
+        restyle: () => 1,
+        dispose() {
+          disposedGeoms.push(geom);
+        },
+      };
+      return geom;
+    },
     // `shared: true` is what the material CACHE hands out; a fade copy is a clone, and the fake's clone clears
     // the mark (a real clone is not the cached instance either).
     getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++fadeGen }),
@@ -1475,9 +1493,84 @@ check("a chunk that APPEARS fades in (P1.98) - an EDIT never does, and J turns i
     freshCopies.length,
     "…and start invisible, exactly like the first fill did",
   );
+  // ===== FADE OUT (P1.99) =====
+  // The other half of the same complaint. A chunk that left the streaming window used to vanish on the frame it
+  // left; it now leaves the CACHE at once (nothing may treat it as loaded) while its MESH stays in the scene,
+  // ramped 1 → 0, and is taken down when the fade ends. Two chunks of movement, so the window really moves
+  // (the fine window is coarse-aligned) and only a handful of meshes retire — a mass unload is capped by
+  // FADE_OUT_MAX and removes the rest at once, which is asserted separately below.
+  //
+  // The window IS filled first (`step(0)`, so nothing moves): the meshes only exist for the columns the budget
+  // reached, and a move can only retire what is there. Then a few BIG steps drain what the earlier moves left in
+  // flight — which also empties the OUT-fade budget: the cap exists for a mass unload, and a saturated cap makes
+  // a leaving mesh be removed at once instead of fading (this group moved the window twice before this point).
+  for (let i = 0; i < 400 && fadeStream.pendingCount() > 0; i++) fadeStream.step(0);
+  for (let i = 0; i < 4; i++) fadeStream.step(1000);
+  const settled = new Map(fadeCache.meshes);
+  C.POSITION.x[positionRow] += 2 * CHUNK_SIZE;
+  fadeStream.step(0);
+  const ghosts = [...settled.entries()].filter(([k]) => !fadeCache.meshes.has(k)).map(([, e]) => e);
+  assert(ghosts.length > 0, `the move retired chunks from the window (${ghosts.length})`);
+  const ghostCopies = ghosts.map(materialOf);
+  equal(
+    ghostCopies.filter((m) => m.shared === false && m.transparent === true && m.opacity === 1).length,
+    ghostCopies.length,
+    "a chunk that LEAVES starts its fade at full opacity instead of vanishing",
+  );
+  equal(
+    ghosts.filter((g) => leftScene.includes(g.mesh)).length,
+    0,
+    "…and its mesh is still in the scene while it fades",
+  );
+  fadeStream.step(FADE_OUT_MS / 2);
+  assert(ghostCopies.every((m) => Math.abs(m.opacity - 0.5) < 1e-6), "half the fade-out time is half the way down");
+  fadeStream.step(FADE_OUT_MS);
+  equal(
+    ghosts.filter((g) => leftScene.includes(g.mesh)).length,
+    ghosts.length,
+    "…and at FADE_OUT_MS every leaving mesh is out of the scene",
+  );
+  assert(ghosts.every((g) => disposedGeoms.includes(g.geom)), "…with its geometry freed");
+  assert(ghostCopies.every((m) => fakeDisposed.includes(m)), "…and the copies the fade made freed");
+
+  // …and a chunk that COMES BACK while its ghost is still fading out must not be drawn twice: the dying mesh
+  // goes the moment its key is built again. (Without this the chunk would be in the scene twice for the rest of
+  // the fade — once faded to wherever it got, and with the PREVIOUS chain's look after a pack reload.)
+  fadeStream.step(1000);
+  const beforeBack = new Map(fadeCache.meshes);
+  C.POSITION.x[positionRow] += 2 * CHUNK_SIZE;
+  fadeStream.step(0);
+  const leftKeys = [...beforeBack.keys()].filter((k) => !fadeCache.meshes.has(k));
+  assert(leftKeys.length > 0, `chunks left the window (${leftKeys.length})`);
+  C.POSITION.x[positionRow] -= 2 * CHUNK_SIZE;
+  fadeStream.step(0);
+  const backKeys = leftKeys.filter((k) => fadeCache.meshes.has(k));
+  assert(backKeys.length > 0, `chunks came back while their ghosts were still fading (${backKeys.length})`);
+  equal(
+    backKeys.filter((k) => leftScene.includes(beforeBack.get(k).mesh)).length,
+    backKeys.length,
+    "a returning chunk's ghost is taken down instead of being drawn beside the new mesh",
+  );
+
+  // J OFF: with the effect switched off a chunk that leaves is removed at once, exactly as it always was (the
+  // key switches the EFFECT, not the streaming) — and the meshes that were fading out are taken down now.
+  publishKeyEdge(fadeEdges, { code: "KeyJ", down: true, repeat: false });
+  fadeStream.step(1000);
+  const beforeOffMove = new Map(fadeCache.meshes);
+  C.POSITION.x[positionRow] += 2 * CHUNK_SIZE;
+  fadeStream.step(0);
+  const goneOff = [...beforeOffMove.entries()].filter(([k]) => !fadeCache.meshes.has(k));
+  assert(goneOff.length > 0, `the move retired chunks with the fade off (${goneOff.length})`);
+  equal(
+    goneOff.filter(([, e]) => leftScene.includes(e.mesh)).length,
+    goneOff.length,
+    "with the fade OFF a chunk that leaves is removed at once, as it always was",
+  );
   // Put the shared player back where this group found it: the row belongs to the world the whole gate runs on.
-  C.POSITION.x[positionRow] = startX;
-  C.PREV_POSITION.x[positionRow] = startX;
+  } finally {
+    C.POSITION.x[positionRow] = startX;
+    C.PREV_POSITION.x[positionRow] = startX;
+  }
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {

@@ -2677,6 +2677,43 @@ Still outstanding:
   `1000/60` fails the "no time, no progress" one.
   NOT CHANGED, BY REQUEST: nothing else — no shader, no fog, no distance-based fade, and the far ring's build
   cost is untouched (the fade is one clone and one material swap per chunk).
+- **P1.99 — the other half: a chunk that LEAVES now fades out too.** `DONE`, by request («不理先，加入淡出效果»,
+  after asking whether only the fade-in existed — it did, and the answer named the three places a chunk vanished
+  on the frame it left).
+  THE GAP: P1.98 faded a chunk IN, but every disappearance was instant — `unloadOutside` (the chunk left the
+  streaming window), a chunk whose geometry became empty, and the ring swap, where the coarse mesh vanished on
+  exactly the frame the fine chunk replacing it started to fade in. That last one is visible: the fine chunk is
+  nearly invisible for its first frames, so the seam showed a flash of sky.
+  THE MECHANISM: `unloadOutside` now deletes the KEY at once (nothing may treat the chunk as loaded, and the
+  streaming budget may rebuild it) and hands the ENTRY to `beginFadeOut`, which makes the same per-chunk copies
+  `beginFade` does — from the resolution `materialsFor` just returned, so a `G` tint or an `H` wireframe comes
+  along — and ramps opacity 1 → 0 over `FADE_OUT_MS` (260, deliberately longer than the 220 of the fade in: where
+  the two meet, the leaving mesh must still be there while the arriving one is still nearly invisible). When the
+  fade ends the mesh leaves the scene AND its geometry is freed. Three things it needs to be correct rather than
+  approximately right:
+  * **A LEAVING MESH IS OUT OF THE CACHE BUT STILL IN THE SCENE**, so the fade list is the only owner of it —
+    and the guard in `advanceFades` (a mesh that no longer holds its copies) must RETIRE an out fade instead of
+    dropping it, or a ghost would stay in the scene for ever.
+  * **A CHUNK THAT COMES BACK WHILE ITS GHOST IS FADING** takes the ghost down (`killDying` from
+    `build`/`buildFar`/`applyResult`), or the same chunk is drawn twice for the rest of the fade — with the
+    previous chain's look, if a pack reload happened in between.
+  * **`FADE_OUT_MAX` = 512** caps how many meshes may be leaving at once, because the two cases are not alike: a
+    NORMAL move retires a whole STRIP (the window is a square, so crossing one column drops ~15 columns × 8 Y
+    chunks — measured ~250 with both rings), while a MASS unload (a teleport into a world: the whole previous
+    window, thousands of meshes) is all hundreds of blocks away and behind the camera. Past the cap the rest are
+    removed at once, exactly as before. `J` (P1.98) switches both directions off.
+  VERIFIED: `tsc` 0; `check:ecs` **78/78** with the fade-out driven end to end on a real stream: the window is
+  filled, the window moves two chunks, and the leaving meshes are still in the scene at full opacity, at exactly
+  0.5 at half the time, and out of the scene (geometry disposed, copies freed) at `FADE_OUT_MS`; a chunk that
+  comes back while its ghost is fading has the ghost taken down; and with `J` off a leaving chunk is removed at
+  once. BOTH NEW RULES WERE MUTATION-TESTED: removing the `beginFadeOut` call fails "a chunk that LEAVES starts
+  its fade at full opacity", and never taking a ghost down fails "at FADE_OUT_MS every leaving mesh is out of the
+  scene".
+  ALSO FIXED IN THE GATE, found by this work: the fade group moved the shared player row and restored it on the
+  last line, so an assertion that threw left the player four chunks away and failed the NEXT group's "a re-entry
+  into this window shows no screen" (measured) — the moves are now undone in a `finally`.
+  NOT CHANGED, BY REQUEST: nothing else — an edit still never fades (P1.18i), and the fine ring still fades in
+  (P1.98: its own edge pops the same way; the alternative is recorded in the P1.98 note).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
