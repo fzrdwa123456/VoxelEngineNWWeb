@@ -28,17 +28,20 @@ The code is organized as a **microkernel + plugins** tree (`core/` mechanism, `p
 zero allocation on the hot path, structure changes only at a barrier). Both are written out in
 `docs/ARCHITECTURE.md`, and the two sections right after the directory map below are the short version.
 
-**Current world state: a NOISE-TERRAIN, EDITABLE voxel world exists, streamed in TWO rings (P1.92/P1.93).**
+**Current world state: a NOISE-TERRAIN, EDITABLE voxel world exists, streamed as a LADDER of LOD rungs
+(P1.92/P1.93/P2.03).**
 `src/data/world/` is a chunk system (32³ chunks) generated from a height field: `data/world/terrain.ts`
 answers the first air layer of every column (value noise, 4 octaves, exactly periodic on the torus), and
 `generateChunk()` in `data/world/world.ts` writes grass over a dirt band over stone into that column. The
-streamed window is a **FINE ring** of real chunks (14×14 columns, ~448 blocks) plus a **FAR ring** drawn from
-the same field at 2×2 blocks per super voxel (`data/world/lod.ts`), which reaches ~512 blocks — see the LOD
-bullet in the streaming section below. `plugins/player/systems/collision.ts` resolves the player AABB against
+streamed window is a **FINE ring** of real chunks (rung 1: 8×8 columns, 256 blocks) plus **up to five coarser
+rungs** drawn from the same field (`data/world/lod.ts`, 2×2 up to 32×32 blocks per super voxel) — how many fit
+is the TORUS LAP's business, and the biggest world-size preset (16384 blocks) holds all six, reaching 7168
+blocks. See the LOD bullet in the streaming section below.
+`plugins/player/systems/collision.ts` resolves the player AABB against
 the fine world (you land, walk, jump, climb hills) and `plugins/player/systems/interaction.ts` breaks and
 places blocks with the mouse.
-Topology is unchanged and deliberate: **X/Z is a TORUS** (`WORLD_CHUNKS_X/Z` = 1024 blocks, so the noise is
-periodic on the same lap) and **Y is bounded** (`[WORLD_MIN_Y, WORLD_MAX_Y)` = 256 blocks); below
+Topology is unchanged and deliberate: **X/Z is a TORUS** (the lap is the world-size setting — 1024 blocks by
+default) and **Y is bounded** (`[WORLD_MIN_Y, WORLD_MAX_Y)` = 256 blocks); below
 WORLD_MIN_Y everything is bedrock, and the ground occupies roughly `TERRAIN_MIN_Y..TERRAIN_MAX_Y`
 (96..160) with air and build space above it. There are no biomes, ores, caves, trees or water yet, and the
 planet/LOD systems are still gone. `generateChunk()` is still the ONE place that decides what the ground
@@ -566,11 +569,13 @@ where it is:
   machine, and the app logs `RENDER meshing: N worker(s)` at boot; toggling a resource pack in a LOADED world
   logs `3016 chunk(s) stale, 3016 restyled behind the screen (looks only, no re-mesh)` with no game frame
   over ~20 ms and `stalls=0`.
-* **THE WINDOW IS TWO RINGS (P1.93 — `data/world/lod.ts`).** The inner ring is real 32³ chunks as before; the
-  outer ring is drawn from the SAME height field at `step` (2) fine chunks per coarse chunk, so a far chunk is
-  a 32³ array of 2×2×1 super voxels that goes through the very same `meshChunk` — the placement scales the mesh
-  by `(step, 1, step)` and nothing in `mesh.ts` changed. Three properties make it work, and each is a thing to
-  keep:
+* **THE WINDOW IS A LADDER OF RUNGS (P1.93/P2.03 — `data/world/lod.ts`).** The inner rung is real 32³ chunks as
+  before; each rung outside it is twice as coarse — a 32³ array of `step × step × 1` super voxels that goes
+  through the very same `meshChunk` (the placement scales the mesh by `(step, 1, step)`, and nothing in
+  `mesh.ts` changed). Rung L has `step = 2^(L-1)`, its own cells are `32·step` blocks across, its ANNULUS is
+  `policy.reach` of those cells wide, and its HOLE — what it only BUILDS and keeps hidden — is exactly the
+  coverage of everything inside it, so the radii grow with the ladder (the shipped `reach` 4 gives 128, 384,
+  896, 1792, 3584 and 7168 blocks). Three properties make it work, and each is a thing to keep:
   * **CONSERVATIVE, SO CRACKS ARE IMPOSSIBLE.** Every super voxel takes the MAXIMUM height of the fine columns
     it covers, so the coarse surface is never below the fine one and a crack (a solid fine block with an air
     coarse voxel over it) is impossible. The gate asserts exactly that, pointwise, against the real generator —
@@ -593,44 +598,57 @@ where it is:
   * **ITS PRICE**: a far chunk is procedural, so a block edited out in the far ring is not reflected there
     (it is correct wherever the player can actually reach, because the fine ring owns that). That is why no
     edit is ever routed into a far key — the two rings' keys cannot even collide (`"<step>:cx,cy,cz"`).
-  THE RINGS TILE: the fine ring is an EVEN span of columns (coarse columns [-r, r] = fine [-2r, 2r+1]) so it
-  meets the far ring with no gap and no overlap; the gate enumerates both sets and asserts it. **AND IT MUST BE
-  ANCHORED** (P1.94 — measured bug): the window is built around `fineBase(policy, playerColumn)`, i.e. the
-  player's column rounded down to the COARSE grid, not around the player's own column. Anchored on the raw
-  column, every ODD column left one fine column owned by neither ring — a 32-block-wide, full-depth column
-  with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through — and one owned by
-  both. `fineBase(null, pc) === pc`, so the no-LOD path is untouched, and the gate tiles every parity.
-  * **THE DRAWN RING IS NOT THE BUILT RING (P2.00 — the seam).** Tiling is what makes the two rings meet, and
-    it is also what made the seam POP: a column leaving the fine ring was a BRAND NEW far column, so there was
-    nothing behind the fine mesh while the far budget caught up — a flash of sky, and the appearance fades
-    (P1.98/P1.99) only shortened it. `unloadOutside`… the fix is the READY RESERVE: the far ring BUILDS every
-    coarse chunk within `farRadius` (including the ones the fine ring covers — that is `farBuildInner`, 0 in
-    `DEFAULT_LOD`) but DRAWS a covered one only while the fine chunks of its column are not all there yet
-    (`refreshFarVisibility`, which also waits for their fade to END — a translucent fine chunk over nothing is
-    the sky showing through it). Walking, the trailing column's coarse chunk was built long before (it spent the
-    whole width of the fine ring in the reserve) and is drawn in the same step the fine chunks leave; the
-    leading column keeps its coarse chunk up until the fine ones that replace it are opaque. **This is the shape
-    all three reference implementations have**: Voxy mips every section up four levels and only draws the level
-    its children do not cover, Cubyz draws a parent node until all 8 of its children are meshed, Distant
-    Horizons keeps the LOD image under the vanilla one and blends the two by DISTANCE in a post-process pass
-    (and disables MC's own per-chunk fade-in, "to prevent vanilla chunks from flashing on the Distant Horizons
-    border"). None of them fades a chunk in or out at that boundary. The reserve is invisible, so it costs no
-    draw calls; it costs the far budget the extra build (one coarse ring at the fine window's edge, ~24 columns
-    at the shipped shape) and it is built AFTER the drawn ring, so entering a world looks exactly as before.
+  THE RUNGS TILE, AND THAT IS NOW A RANGE PROBLEM, NOT A RADIUS ONE (P2.03). Every rung's cells are aligned to
+  the WORLD (a coarse cell must not move as the player walks, or the far terrain would crawl), while the range
+  that covers the window is measured from the window's own centre — so a rung whose centre is off its own grid
+  has asymmetric, RECTANGULAR ends. `LodTier` therefore carries a `LodSpan` per axis (`lo`, `hi`, and the
+  `holeLo`/`holeHi` inside it) rather than a radius. **AND THE RUNGS CROP EACH OTHER**: a coarse cell that is
+  only half covered by the finer coverage cannot be owned by both — a gap is a see-through hole and an overlap
+  is z-fighting — so the rung inside gives the cell up, which is why a rung's annulus can end up one cell
+  thinner than `reach`. The gate's tiling sweep (several policies, both axes on different alignments) is what
+  caught the symmetric version leaving a 64-block gap and a z-fighting strip at every boundary above step 2.
+  **AND IT MUST BE ANCHORED** (P1.94 — measured bug): the window is built around
+  `fineBase(policy, playerColumn)`, i.e. the player's column rounded down to the second rung's grid, not around
+  the player's own column; `fineBase(null, pc) === pc`, so the no-LOD path is untouched, and the gate tiles
+  every parity.
+  * **THE DRAWN RUNG IS NOT THE BUILT RUNG (P2.00 — the seam), AT EVERY RUNG.** Tiling is what makes the rungs
+    meet, and it is also what made the seam POP: a cell leaving the finer rung was a BRAND NEW coarse cell, so
+    there was nothing behind the finer mesh while the far budget caught up — a flash of sky, and the appearance
+    fades (P1.98/P1.99) only shortened it. The fix is the READY RESERVE: every rung BUILDS its hole (the whole
+    area the rungs inside it cover) but DRAWS one of those cells only while the finer chunks of that cell are
+    not all there yet (`refreshFarVisibility`, which also waits for their fade to END — a translucent chunk
+    over nothing is the sky showing through it). Walking, the trailing cell's coarse chunk was built long before
+    (it spent the whole width of the finer rung in the reserve) and is drawn in the same step the finer chunks
+    leave; the leading cell keeps its coarse chunk up until the finer ones that replace it are opaque. **This is
+    the shape all three reference implementations have**: Voxy mips every section up four levels and only draws
+    the level its children do not cover, Cubyz draws a parent node until all 8 of its children are meshed,
+    Distant Horizons keeps the LOD image under the vanilla one and blends the two by DISTANCE in a post-process
+    pass (and disables MC's own per-chunk fade-in, "to prevent vanilla chunks from flashing on the Distant
+    Horizons border"). None of them fades a chunk in or out at that boundary. The reserve is invisible, so it
+    costs no draw calls; it costs the far budget the extra builds (each rung's hole is the whole inner coverage)
+    and it is built AFTER the drawn annulus, so entering a world looks exactly as before.
+  * **A COARSE CELL'S CHILDREN ARE FOUND IN THE FINER RUNG'S OWN SPACE** (`finerCells`): the cells `2·cc` and
+    `2·cc + 1`, wrapped by the FINER rung's period. Wrapping by the fine period (which the two-rung version
+    could get away with, because its only coarse rung had the fine chunks as children) left a rung's children
+    unmatchable at the torus seam — a rung-3 reserve stayed drawn for ever one cell outside the wrap, which is
+    exactly what the gate's last handover assertion found.
 * **THE TORUS LAP IS A SETTING (P2.02 — `data/world/size.ts`).** X/Z wraps, and how far you walk before the world
   repeats was a hard-coded 32 chunks = 1024 blocks. It is a choice now, because it is the number that bounds a
-  distance LOD: a ring at radius R is unambiguous only while `R < lap/2` — past that its far edge starts showing
+  distance LOD: a rung at radius R is unambiguous only while `R ≤ lap/2` — past that its far edge starts showing
   the terrain that is closer the OTHER way round (the same hill twice on screen). 1024 blocks therefore caps this
-  engine at two tiers (448 blocks), while the five or six tiers a "planet-like" world wants need 8192/16384. So:
+  engine at two rungs, while the six a "planet-like" world wants need 16384. So:
   * the value lives in `size.ts` — a leaf module `world.ts` and `terrain.ts` both import (`world.ts` imports
     `terrain.ts`, so a value in either could not be shared without a cycle) — and EVERY reader asks it:
     `wrapChunkX/Z`, `terrainPeriod()` (the field must repeat exactly on the lap or the seam is a cliff), the LOD
     sampler's `wrapBlock` and the chunk stream's `nearestWrap`. A hard-coded 32 anywhere would silently disagree.
   * **A LEGAL SIZE IS A MULTIPLE OF 16 CHUNKS (512 blocks)**, and that is not arbitrary: the terrain's coarsest
-    noise octave is 512 blocks per lattice cell and every octave must DIVIDE the lap, and the LOD rings are powers
-    of two so the wrap has to land on a column grid both can align to. `sanitizeWorldChunks` clamps into
-    `[32, 256]` and snaps onto that grid; `worldSizeFitsLod` is the rule that refuses a size too small for the
-    rings in force.
+    noise octave is 512 blocks per lattice cell and every octave must DIVIDE the lap, and the rungs are powers
+    of two so the wrap has to land on a cell grid both can align to. `sanitizeWorldChunks` clamps into
+    `[32, 512]` (1024–16384 blocks) and snaps onto that grid; `lodTierFits` is the rule that refuses a rung too
+    wide for the lap in force (`(hole + 2·reach + 1)·step ≤ lap`, the extra cell being the alignment wobble — a
+    rung that appeared and vanished as the player walked would rebuild the outer ring every few steps).
+  * **HOW MANY RUNGS A WORLD GETS IS THEREFORE A READ NUMBER**, not the policy's: the five presets hold 2, 3, 4,
+    5 and 6 rungs, and the world-entry driver logs which one it built (`WORLD LOD ladder: N rung(s) …`).
   * **IT IS APPLIED BY THE WORLD-ENTRY DRIVER, AND IT RESETS EVERYTHING**: `setWorldChunks` (which answers whether
     anything moved), then `VoxelWorld.reset()` and `chunkStream.resetForNewWorld()` — a chunk key is a WRAPPED
     identity and a mesh belongs to the old lap, so nothing may survive. `wanted = null` is what makes
@@ -639,8 +657,9 @@ where it is:
     (`WORLD_SIZE`) the driver reads, changed by the `SetWorldSize` command from the world-type panel (presets +
     a slider bound to the value in force), and persisted as `worldXZ`.
 * **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** In a world, `G` tints every chunk mesh by its
-  TIER: the fine ring in `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a
-  textured block keeps its texture and takes the hue), `H` switches every chunk mesh to three.js's TRIANGLE
+  RUNG: `LOD_TIER_TINT` has one colour per rung the shipped ladder can have (six, indexed by the rung — a colour
+  MULTIPLIES the material, so a textured block keeps its texture and takes the hue), `H` switches every chunk
+  mesh to three.js's TRIANGLE
   WIREFRAME (the mesher emits triangles, so what you see is the mesh's real triangle edges, not the block grid),
   and `J` switches the APPEARANCE FADE off and on (see the next bullet). All three are handled by `chunk-stream`
   itself — that system owns the meshes and their materials, and a toggle is one material swap per entry
@@ -1164,9 +1183,10 @@ When work lands, move the entry here and delete it there.
   materialise — measured on the spawn window: 465 of 2312 chunks, 14.5 MB — but raising the period, or
   giving the field a bigger amplitude, needs eviction first.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
-  world — now at ~512 blocks instead of ~256 (the far ring, P1.93), which makes it more noticeable, not less.
-  Raise `DEFAULT_LOD.farRadius` (data/world/lod.ts) to push it out, or reintroduce a `scene.fog`. The torus lap
-  is 1024 blocks, so a far radius past coarse ±8 starts showing the world's own far side.
+  world — now at up to 7168 blocks instead of ~256 (the outer rung, P2.03), which makes it more noticeable, not
+  less. Raise `DEFAULT_LOD.reach` or `tiers` (data/world/lod.ts) to push it out, or reintroduce a `scene.fog` —
+  but a rung only exists on a world whose lap can hold it (`lodTierFits`), so a wider ladder needs the bigger
+  world-size preset too.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
   `VoxelWorld.topSolidY()`, used by plugins/render/systems/diagnostics.ts and the F3 panel.

@@ -23,11 +23,13 @@
 
 /** The lap every world used before the size was a choice: 32 × 32 = 1024 blocks */
 export const DEFAULT_WORLD_CHUNKS = 32;
-/** 32 chunks = 1024 blocks (the historical lap, and the smallest world the two rings fit in: the far ring
- *  reaches ±7 coarse columns = ±480 blocks, which must stay inside the half-lap). */
+/** 32 chunks = 1024 blocks (the historical lap, and the smallest world the first two rungs fit in).
+ *  The ladder decides how many rungs a lap can hold (`lodLadder`): 32 chunks → 2, 64 → 3, 128 → 4, 256 → 5,
+ *  512 → 6, which is the whole point of this being a setting. */
 export const WORLD_CHUNKS_MIN = 32;
-/** 256 chunks = 8192 blocks: the lap the five-tier ladder wants (R_max = 3584 blocks) with room to spare. */
-export const WORLD_CHUNKS_MAX = 256;
+/** 512 chunks = 16384 blocks: the lap the SIX-rung ladder wants (its outermost rung reaches ±6144 blocks, which
+ *  must stay inside the half-lap). */
+export const WORLD_CHUNKS_MAX = 512;
 /** Legal sizes land on this multiple: 16 chunks = 512 blocks. TWO things need it — the terrain's coarsest
  *  noise octave is 512 blocks per lattice cell and every octave's cell size must DIVIDE the lap (terrain.ts),
  *  and the LOD rings are powers of two (a fine ring that is a whole number of coarse columns), so the wrap has
@@ -50,11 +52,12 @@ export function worldPeriodBlocks(): number {
   return chunksX * 32;
 }
 
-/** The sizes the world-type panel offers as buttons, in chunks per side: 1024 / 2048 / 4096 / 8192 blocks. They
- *  are the laps the LOD ladder wants — 2 tiers need 1024 (the historical world), 3 need 2048, 5 need 8192 —
- *  because a tier at radius R repeats itself once `R ≥ lap/2` (see the header). A "custom" size is the slider
+/** The sizes the world-type panel offers as buttons, in chunks per side: 1024 / 2048 / 4096 / 8192 / 16384
+ *  blocks. They are the laps the LOD LADDER wants — 2 rungs need 1024 (the historical world), 3 need 2048, 4
+ *  need 4096, 5 need 8192 and the shipped 6 need 16384 — because a rung at radius R repeats itself once
+ *  `R ≥ lap/2` (see lod.ts `lodLadder`, which drops the rungs that do not fit). A "custom" size is the slider
  *  next to them, on the SAME grid (`WORLD_CHUNKS_STEP`). */
-export const WORLD_SIZE_PRESETS: readonly number[] = [32, 64, 128, 256];
+export const WORLD_SIZE_PRESETS: readonly number[] = [32, 64, 128, 256, 512];
 
 /** Clamp a hand-edited or dragged value into the legal domain, SNAPPING it onto the step: a slider can only
  *  express these, and the value in force must always be one the UI can show (the same rule `sanitizeFrameCap`
@@ -77,9 +80,6 @@ export function setWorldChunks(x: unknown, z: unknown = x): boolean {
   return true;
 }
 
-/** IS THIS SIZE LEGAL for the rings in force? The far ring's outer radius (`farRadius` coarse columns) must stay
- *  inside the half-lap, which is the invariant that keeps the wrap from showing the same terrain twice (lod.ts).
- *  Pure, so the settings panel can refuse a value and `check:ecs` can sweep it. */
-export function worldSizeFitsLod(chunks: number, step: number, farRadius: number): boolean {
-  return farRadius * step < sanitizeWorldChunks(chunks) / 2;
-}
+/** IS THIS SIZE LEGAL for the ladder in force? The LADDER owns that rule now (`lodLadder` drops the rungs that
+ *  would reach past the half-lap), so this module only carries the values; the gate sweeps the ladder against
+ *  every legal size. */

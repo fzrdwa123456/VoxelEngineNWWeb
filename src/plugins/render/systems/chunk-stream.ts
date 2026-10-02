@@ -30,7 +30,7 @@ import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { FADE_OPTIONS, LOCAL_PLAYER, VOXEL, type FadeOptions } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
-import { buildLodMeshInput, fineBase, isFarBuildColumn, isFarColumn, isFineCoveredColumn, tierTint, type LodPolicy } from "../../../data/world/lod";
+import { buildLodMeshInput, fineBase, inTierAnnulus, inTierHole, lodLadder, tierOfStep, tierTint, type LodPolicy, type LodTier } from "../../../data/world/lod";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
@@ -149,13 +149,30 @@ export class ChunkStreamSystem {
   /** The ONE material every chunk mesh shares (CHUNK_MATERIAL, ecs/presentation.ts): a GPU object, so the
    *  world owns it instead of chunkmesh.ts keeping a module-level `let` */
   private readonly material: ChunkMaterialState;
-  /** Column offsets ordered near-first, so the ground under the player appears first */
-  private readonly offsets: ReadonlyArray<readonly [number, number]>;
-  /** The FAR RING's column offsets, in COARSE chunk units, near-first (empty when LOD is off) */
-  private readonly farOffsets: ReadonlyArray<readonly [number, number]>;
-  /** The READY RESERVE (P2.00): the coarse columns the FINE ring covers, built (so the handover at the ring
-   *  boundary never has to wait for a coarse chunk) and left invisible while the fine chunks are there. */
-  private readonly farReserveOffsets: ReadonlyArray<readonly [number, number]>;
+  /** Column offsets ordered near-first, so the ground under the player appears first. With no LOD this is the
+   *  whole window and never changes; with LOD it is REBUILT per window position (`buildLadder`), because rung 1's
+   *  range is cropped onto the second rung's grid. */
+  private offsets: ReadonlyArray<readonly [number, number]>;
+  /** THE LADDER IN FORCE (P2.03): one entry per rung the world's lap can hold, with the cells it draws and the
+   *  ones it only builds (its reserve). REBUILT whenever the window moves (`buildLadder`): the cells are aligned
+   *  to the WORLD so they never shift under the player, but the ranges that cover the window are measured from
+   *  the window's own centre, and a rung's two ends fall asymmetrically whenever that centre is off its grid. */
+  private tiers: ReadonlyArray<{
+    readonly step: number;
+    readonly hole: number;
+    readonly reach: number;
+    readonly draw: ReadonlyArray<readonly [number, number]>;
+    readonly reserve: ReadonlyArray<readonly [number, number]>;
+  }>;
+  /** The SAME ladder as `tiers`, in `lod.ts`'s own shape: the ranges the visibility test and the reserve logic
+   *  ask about (a rung's hole, its coverage, whether a cell is inside them). Kept beside the key lists because
+   *  the keys are what the build budget walks and the ranges are what a frame QUERIES. */
+  private ladder: readonly LodTier[] = [];
+  /** The window centre `ladder`/`offsets` were built for, so a query about a DIFFERENT position (the entry's
+   *  `needsWarmUp` asks about the spawn before anything has stepped) builds it rather than reading an empty
+   *  window — an empty window answers "nothing to build", which would enter a world with no loading screen and
+   *  no primed chunks (`prime` lives inside that branch). */
+  private ladderCentre: readonly [number, number] | null = null;
   /** The palette values the far ring writes, resolved once: a coarse chunk is procedural, so it is handed the
    *  layer values instead of asking the world for them (see data/world/lod.ts). */
   private readonly layers: { readonly stone: number; readonly dirt: number; readonly grass: number };
@@ -244,6 +261,7 @@ export class ChunkStreamSystem {
     this.material = world.resource(CHUNK_MATERIAL);
     // The per-tier fade choice (P2.01): a resource, because this system reads it every step.
     this.fadeOptions = world.resource(FADE_OPTIONS);
+    // THE FINE WINDOW when there is no LOD at all: the original square, built once.
     const offsets: Array<[number, number]> = [];
     if (this.lod === null) {
       for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
@@ -251,42 +269,10 @@ export class ChunkStreamSystem {
           offsets.push([dx, dz]);
         }
       }
-    } else {
-      // The FINE ring in coarse terms: coarse columns [-r, r] = fine columns [-2r, 2r+1] — an EVEN span, so
-      // it meets the far ring exactly (see lod.ts: an odd span would leave a column owned by neither).
-      const r = this.lod.fineRadius;
-      for (let dx = -2 * r; dx <= 2 * r + 1; dx++) {
-        for (let dz = -2 * r; dz <= 2 * r + 1; dz++) {
-          offsets.push([dx, dz]);
-        }
-      }
+      offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
     }
-    offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
     this.offsets = offsets;
-
-    const far: Array<[number, number]> = [];
-    const reserve: Array<[number, number]> = [];
-    if (this.lod !== null) {
-      const reach = this.lod.farRadius;
-      for (let cx = -reach; cx <= reach; cx++) {
-        for (let cz = -reach; cz <= reach; cz++) {
-          if (isFarColumn(this.lod, cx, cz)) far.push([cx, cz]);
-          // …and the READY RESERVE (P2.00): the coarse chunks the fine ring COVERS. They are built like any
-          // other far chunk and stay INVISIBLE until the fine chunks that cover them are gone (see
-          // `refreshFarVisibility`), which is what makes the handover at the ring boundary a swap instead of a
-          // hole. They are built AFTER the drawn ring (`farKeys` iterates this second) so entering a world
-          // looks exactly as it did — by the time a column's coarse chunk is needed it has been in the reserve
-          // for the whole width of the fine window.
-          else if (isFarBuildColumn(this.lod, cx, cz)) reserve.push([cx, cz]);
-        }
-      }
-      const nearFirst = (a: readonly [number, number], b: readonly [number, number]) =>
-        Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1]));
-      far.sort(nearFirst);
-      reserve.sort(nearFirst);
-    }
-    this.farOffsets = far;
-    this.farReserveOffsets = reserve;
+    this.tiers = [];
 
     // The layer values in the palette IN FORCE, read once (the palette only changes at boot and on a reload).
     const stone = this.voxel.valueOf("stone") || 1;
@@ -307,6 +293,74 @@ export class ChunkStreamSystem {
         this.voxel.ensureChunk(pcx + dx, cy, pcz + dz);
       }
     }
+  }
+
+  /** REBUILD THE LADDER for the window at `(pcx, pcz)` (fine chunk columns — the window's own centre).
+   *
+   *  Why this is not just a constructor's job (P2.03): a rung's cells are aligned to the WORLD (a coarse cell
+   *  must not move as the player walks, or the far terrain would crawl), but the RANGES that cover the window
+   *  are measured from the window's centre, and the two ends of a rung fall asymmetrically whenever that centre
+   *  is not on the rung's own grid. Those ranges change as the player crosses a column, so they are recomputed
+   *  here — a handful of integers per rung, next to the key sets the move already builds. */
+  private buildLadder(pcx: number, pcz: number): void {
+    if (this.lod === null) {
+      this.tiers = [];
+      this.ladder = [];
+      return;
+    }
+    const ladder = lodLadder(this.lod, worldChunksX(), pcx * CHUNK_SIZE, pcz * CHUNK_SIZE);
+    this.ladder = ladder;
+    this.ladderCentre = [pcx, pcz];
+    const nearFirst = (a: readonly [number, number], b: readonly [number, number]) =>
+      Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1]));
+    const tiers: Array<{
+      step: number;
+      hole: number;
+      reach: number;
+      draw: ReadonlyArray<readonly [number, number]>;
+      reserve: ReadonlyArray<readonly [number, number]>;
+    }> = [];
+    for (const tier of ladder) {
+      const draw: Array<[number, number]> = [];
+      const reserve: Array<[number, number]> = [];
+      // RUNG 1 IS THE FINE RING: its cells are `wanted` (real 32³ chunks), not coarse keys — a `1:` key would
+      // be a procedural copy of a chunk the world already has, drawn in the same place.
+      if (tier.step === 1) {
+        tiers.push({ step: tier.step, hole: tier.hole, reach: tier.reach, draw, reserve });
+        continue;
+      }
+      // The cells are the two ranges INTERSECTED (a rung with a hole on one axis only cannot happen — the
+      // recursion crops both axes together — but intersecting keeps the loop honest whatever the ladder says).
+      for (let cx = tier.x.lo; cx < tier.x.hi; cx++) {
+        for (let cz = tier.z.lo; cz < tier.z.hi; cz++) {
+          if (inTierAnnulus(tier, cx, cz)) draw.push([cx, cz]);
+          else if (inTierHole(tier, cx, cz)) reserve.push([cx, cz]);
+        }
+      }
+      draw.sort(nearFirst);
+      reserve.sort(nearFirst);
+      tiers.push({ step: tier.step, hole: tier.hole, reach: tier.reach, draw, reserve });
+    }
+    this.tiers = tiers;
+    // THE FINE RING is rung 1: its own ranges, so the fine window and the coarse rings cannot disagree about
+    // where the window ends (that boundary is where the P1.94 empty column lived).
+    const fine = ladder[0];
+    const offsets: Array<[number, number]> = [];
+    for (let dx = fine.x.lo; dx < fine.x.hi; dx++) {
+      for (let dz = fine.z.lo; dz < fine.z.hi; dz++) {
+        offsets.push([dx, dz]);
+      }
+    }
+    offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
+    this.offsets = offsets;
+  }
+
+  /** Make sure the ladder and the window's `offsets` describe the window at `(pcx, pcz)`. Cheap when they
+   *  already do (two integer comparisons), so every reader may ask. */
+  private ensureLadder(pcx: number, pcz: number): void {
+    if (this.lod === null) return;
+    if (this.ladderCentre !== null && this.ladderCentre[0] === pcx && this.ladderCentre[1] === pcz) return;
+    this.buildLadder(pcx, pcz);
   }
 
   /** Chunks in the window whose mesh has not been DECIDED yet — neither built nor known to be empty
@@ -331,10 +385,10 @@ export class ChunkStreamSystem {
   needsWarmUp(x: number, z: number): boolean {
     // The same ALIGNMENT the window builder uses (see step): a warm-up asked about a different column set than
     // the one it will build would answer "everything is decided" and skip the screen for a cold window.
-    const wanted = this.wantedKeys(
-      fineBase(this.lod, Math.floor(x / CHUNK_SIZE)),
-      fineBase(this.lod, Math.floor(z / CHUNK_SIZE)),
-    );
+    const pcx = fineBase(this.lod, Math.floor(x / CHUNK_SIZE));
+    const pcz = fineBase(this.lod, Math.floor(z / CHUNK_SIZE));
+    this.ensureLadder(pcx, pcz); // …and the ladder/offsets that answer it must be THIS window's
+    const wanted = this.wantedKeys(pcx, pcz);
     for (const key of wanted) {
       if (!this.cache.meshes.has(key) && !this.cache.empty.has(key)) return true;
     }
@@ -418,6 +472,10 @@ export class ChunkStreamSystem {
     const moved = pcx !== this.lastPcx || pcz !== this.lastPcz;
     this.lastPcx = pcx;
     this.lastPcz = pcz;
+
+    // …and THE LADDER follows the window: the rungs' cells do not move, but which of them cover the window do
+    // (see `buildLadder`). Before the key sets, because they are built FROM it.
+    this.ensureLadder(pcx, pcz);
 
     if (moved || this.wanted === null) {
       this.wanted = this.wantedKeys(pcx, pcz);
@@ -548,6 +606,12 @@ export class ChunkStreamSystem {
     this.beginFade(key, fresh); // a chunk that APPEARED fades in (P1.98)
   }
 
+  /** How many rungs the ladder in force has (P2.03) — the LAP caps it (`lodLadder`), so the entry can report
+   *  the truth instead of the number the policy asked for. */
+  get lodTiers(): number {
+    return this.tiers.length;
+  }
+
   /** THE WORLD SIZE CHANGED (P2.02): drop every mesh, every "decided" answer and the window bookkeeping.
    *
    *  Called by the world-entry driver, before the new world is primed, and only when the size actually moved.
@@ -571,6 +635,9 @@ export class ChunkStreamSystem {
     this.farStale.clear();
     this.wanted = null;
     this.farWanted = null;
+    // The LADDER goes too: the lap decides how many rungs fit, so the one built for the old world is not even
+    // the right SHAPE any more, and `ladderCentre = null` is what makes the next query rebuild it.
+    this.ladderCentre = null;
   }
 
   /** Hand one chunk to a worker. False = the pool is saturated (or there is none): the caller stops asking
@@ -710,33 +777,36 @@ export class ChunkStreamSystem {
     return out;
   }
 
-  /** THE FAR RING's wanted keys (P1.93), in COARSE chunk units, ordered near-first.
+  /** THE LADDER's wanted keys (P1.93/P2.03), in each rung's COARSE columns, ordered rung by rung and
+   *  near-first inside a rung.
    *
    *  The key is `"<step>:<cx>,<cy>,<cz>"`: the prefix is what keeps a coarse identity from EVER being confused
-   *  with a fine one. That matters because both live in the same `meshes`/`empty` maps, while the world's dirty
-   *  keys (`takeDirty`, `markDirty`) are fine keys in fine units — an edit must never be able to name a coarse
-   *  entry, because a coarse chunk is procedural and has nothing to rebuild (see lod.ts).
+   *  with a finer one. That matters because every rung lives in the same `meshes`/`empty` maps, while the
+   *  world's dirty keys (`takeDirty`, `markDirty`) are fine keys in fine units — an edit must never be able to
+   *  name a coarse entry, because a coarse chunk is procedural and has nothing to rebuild (see lod.ts).
    *
    *  Empty when LOD is off, which is what keeps the single-window path byte-for-byte what it was.
    *
-   *  THE DRAWN RING COMES FIRST, THEN THE RESERVE (P2.00). Both are in the same set and the build budget walks
-   *  it in order, so a world entry still fills the ring the player can SEE first (the reserve is invisible and
-   *  is only needed once the window starts to move — and a column spends the whole width of the fine ring in
-   *  the reserve before it is needed). */
+   *  INSIDE A RUNG, THE DRAWN ANNULUS COMES FIRST, THEN THE RESERVE (P2.00). Both are in the same set and the
+   *  build budget walks it in order, so a world entry fills the ring the player can SEE first (the reserve is
+   *  invisible and only needed once the window starts to move — and a column spends the whole width of its rung
+   *  in the reserve before it is needed). */
   private farKeys(pcx: number, pcz: number): Set<string> {
     const out = new Set<string>();
     if (this.lod === null) return out;
-    const step = this.lod.step;
-    const period = worldChunksX() / step; // the torus in COARSE columns (the lap is the world-size setting)
-    const ccx = Math.floor(pcx / step);
-    const ccz = Math.floor(pcz / step);
-    const wrap = (v: number): number => ((v % period) + period) % period;
-    for (const offsets of [this.farOffsets, this.farReserveOffsets]) {
-      for (const [dx, dz] of offsets) {
-        const cx = wrap(ccx + dx);
-        const cz = wrap(ccz + dz);
-        for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y; cy--) {
-          out.add(`${step}:${cx},${cy},${cz}`);
+    for (const tier of this.tiers) {
+      if (tier.draw.length === 0) continue; // rung 1 IS the fine ring: it has no coarse keys
+      const period = worldChunksX() / tier.step; // the torus in this rung's columns
+      const ccx = Math.floor(pcx / tier.step);
+      const ccz = Math.floor(pcz / tier.step);
+      const wrap = (v: number): number => ((v % period) + period) % period;
+      for (const offsets of [tier.draw, tier.reserve]) {
+        for (const [dx, dz] of offsets) {
+          const cx = wrap(ccx + dx);
+          const cz = wrap(ccz + dz);
+          for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y; cy--) {
+            out.add(`${tier.step}:${cx},${cy},${cz}`);
+          }
         }
       }
     }
@@ -823,16 +893,18 @@ export class ChunkStreamSystem {
     this.beginFade(key, entry); // a chunk that APPEARED fades in (P1.98)
   }
 
-  /** A FAR-RING chunk's mesh (P1.93). Procedural and main-thread: `buildLodMeshInput` samples the height field
-   *  for the whole chunk plus its six planes, so this reads NO world chunk, allocates no voxel data and hands
-   *  nothing to a worker. The result is applied through the same geometry path a worker's result takes, so a
-   *  far mesh and a fine one are indistinguishable to the draw — the only difference is `step`, which the
-   *  placement turns into the mesh's scale.
+  /** A COARSE chunk's mesh (P1.93/P2.03 — any rung of the ladder). Procedural and main-thread:
+   *  `buildLodMeshInput` samples the height field for the whole chunk plus its six planes, so this reads NO world
+   *  chunk, allocates no voxel data and hands nothing to a worker. The result is applied through the same
+   *  geometry path a worker's result takes, so a coarse mesh and a fine one are indistinguishable to the draw —
+   *  the only difference is `step` (read from the KEY, so one function serves every rung), which the placement
+   *  turns into the mesh's scale and the material factory into the tier's tint.
    *  Returns what the chunk cost the frame's far budget: `LOD_MESH_COST` when it produced geometry, 1 when it
    *  was uniform (or produced no face), which is the 10× difference the budget is spent in. */
   private buildFar(key: string): number {
     if (this.lod === null) return 0;
     const colon = key.indexOf(":");
+    const step = Number(key.slice(0, colon));
     const parts = key.slice(colon + 1).split(",");
     const cx = Number(parts[0]);
     const cy = Number(parts[1]);
@@ -841,7 +913,7 @@ export class ChunkStreamSystem {
     this.killDying(key); // a coarse chunk that came back while its ghost was still fading out (P1.99)
 
     const input = buildLodMeshInput(
-      this.lod,
+      step,
       cx,
       cy,
       cz,
@@ -856,13 +928,13 @@ export class ChunkStreamSystem {
       this.cache.empty.add(key);
       return 1;
     }
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, this.lod.step));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, step));
     mesh.matrixAutoUpdate = false;
-    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step: this.lod.step };
+    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step };
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
-    this.beginFade(key, entry); // a far chunk that APPEARED fades in too (P1.98) — it covers 64×64 blocks
+    this.beginFade(key, entry); // a coarse chunk that APPEARED fades in too (P1.98)
     return LOD_MESH_COST;
   }
 
@@ -1063,52 +1135,100 @@ export class ChunkStreamSystem {
    *  reference implementations get from nesting their levels (see `isFarBuildColumn`).
    *
    *  Cheap enough to run every frame: only the covered columns need the test (a column outside the fine ring is
-   *  always drawn), and the answer is memoised per column, so one column costs 4 × `CHUNK_Y_COUNT` lookups. */
+   *  always drawn), and the answer is memoised per column, so one column costs 4 × `CHUNK_Y_COUNT` lookups plus
+   *  four fade-set probes. */
   private refreshFarVisibility(): void {
-    if (this.lod === null) return;
-    const step = this.lod.step;
-    const period = worldChunksX() / step;
-    const ccx = Math.floor(this.lastPcx / step);
-    const ccz = Math.floor(this.lastPcz / step);
-    // The columns with a FINE chunk mid-fade, computed in ONE pass over the fades: a translucent fine chunk must
-    // not be uncovered, or the player looks through it at the sky.
-    const fadingColumns = new Set<string>();
+    if (this.lod === null || this.tiers.length <= 1) return;
+    // The COLUMN identities with a chunk mid-FADE-IN, in ONE pass over the fades and keyed BY THE RUNG the
+    // chunk belongs to: a rung's reserve must stay on screen while the FINER chunk that covers it is still
+    // translucent, or the player looks through the fading mesh at the sky. Keyed by rung because the answer is
+    // always asked of the rung immediately inside (`finerColumnFading`) — a chunk's own fade never holds its
+    // OWN reserve up, which is the difference between a hidden reserve and a coarse surface drawn over real
+    // terrain for the length of a fade (the gate's "NONE of them is drawn" assertion caught exactly that).
+    const fading = new Map<number, Set<string>>();
     for (const fade of this.fading) {
-      if (fade.out || fade.key.includes(":")) continue;
-      const parts = fade.key.split(",");
-      const fx = wrapChunkX(Math.floor(Number(parts[0]) / step));
-      const fz = wrapChunkZ(Math.floor(Number(parts[2]) / step));
-      fadingColumns.add(`${fx},${fz}`);
+      if (fade.out) continue;
+      const colon = fade.key.indexOf(":");
+      const step = colon >= 0 ? Number(fade.key.slice(0, colon)) : 1;
+      const parts = (colon >= 0 ? fade.key.slice(colon + 1) : fade.key).split(",");
+      let columns = fading.get(step);
+      if (columns === undefined) {
+        columns = new Set<string>();
+        fading.set(step, columns);
+      }
+      columns.add(`${parts[0]},${parts[2]}`);
     }
     const decided = new Map<string, boolean>();
     for (const entry of this.cache.meshes.values()) {
       if (entry.step <= 1) continue;
+      const tier = tierOfStep(this.ladder, entry.step);
+      if (tier === null) continue;
+      const period = worldChunksX() / entry.step;
+      const ccx = Math.floor(this.lastPcx / entry.step);
+      const ccz = Math.floor(this.lastPcz / entry.step);
       const rx = nearestWrap(entry.cx, ccx, period);
       const rz = nearestWrap(entry.cz, ccz, period);
-      if (!isFineCoveredColumn(this.lod, rx - ccx, rz - ccz)) {
+      // OUTSIDE ITS HOLE the rung is simply drawn: nothing finer covers it.
+      if (!inTierHole(tier, rx - ccx, rz - ccz)) {
         entry.mesh.visible = true;
         continue;
       }
-      const memoKey = `${rx},${rz}`;
+      // INSIDE IT, the chunk is the READY RESERVE (P2.00): drawn only while the chunks of the rung INSIDE this
+      // one are missing — and until they are opaque, because a translucent chunk over nothing is the sky showing
+      // through it. One memo per column covers all `CHUNK_Y_COUNT` chunks of it.
+      const memoKey = `${entry.step}:${rx},${rz}`;
       let ready = decided.get(memoKey);
       if (ready === undefined) {
-        ready = !fadingColumns.has(memoKey) && this.fineColumnDecided(rx, rz);
+        ready = !this.finerColumnFading(entry.step, rx, rz, fading) && this.finerColumnDecided(entry.step, rx, rz);
         decided.set(memoKey, ready);
       }
-      entry.mesh.visible = !ready;    }
+      entry.mesh.visible = !ready;
+    }
   }
 
-  /** Are the fine chunks of this COARSE column all DECIDED — built, or known to be empty (the cache's own
-   *  contract, and an empty chunk never becomes a mesh later)? `false` means the column has a hole in it, so the
-   *  coarse chunk that covers it must stay on screen. */
-  private fineColumnDecided(ccx: number, ccz: number): boolean {
-    const step = this.lod!.step;
-    for (let dx = 0; dx < step; dx++) {
-      for (let dz = 0; dz < step; dz++) {
-        const cx = wrapChunkX(ccx * step + dx);
-        const cz = wrapChunkZ(ccz * step + dz);
+  /** Is a chunk of the rung IMMEDIATELY INSIDE this one — the 2×2 cells of the next finer rung that cover
+   *  `(ccx, ccz)` — still FADING IN? A fade is a translucent chunk, so the coarser chunk under it must stay on
+   *  screen; hiding the reserve the moment the finer geometry exists would show the sky through it. */
+  private finerColumnFading(step: number, ccx: number, ccz: number, fading: Map<number, Set<string>>): boolean {
+    const finer = step > 2 ? step / 2 : 1;
+    const columns = fading.get(finer);
+    if (columns === undefined) return false;
+    const [fx, fz] = this.finerCells(finer, ccx, ccz);
+    for (let dx = 0; dx < 2; dx++) {
+      for (let dz = 0; dz < 2; dz++) {
+        if (columns.has(`${fx[dx]},${fz[dz]}`)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** The 2×2 cells of the rung INSIDE `step` that cover the cell `(ccx, ccz)`, as WRAPPED identities in that
+   *  rung's own cell space. A coarse cell is twice as wide on each axis, so its children are the cells
+   *  `2·cc` and `2·cc + 1` — measured in the FINER rung's space and wrapped by the FINER rung's period, which
+   *  is what a key holds (wrapping by the fine period instead left the ring's children unmatchable at the torus
+   *  seam: a rung-3 reserve stayed drawn for ever just outside the wrap). */
+  private finerCells(finer: number, ccx: number, ccz: number): [number[], number[]] {
+    const wrap = (v: number): number => {
+      const period = worldChunksX() / finer;
+      return ((v % period) + period) % period;
+    };
+    return [
+      [wrap(ccx * 2), wrap(ccx * 2 + 1)],
+      [wrap(ccz * 2), wrap(ccz * 2 + 1)],
+    ];
+  }
+
+  /** Are the chunks of the RUNGS INSIDE this one — the 2×2 cells of the next finer rung that cover
+   *  `(ccx, ccz)`, over the whole Y range — all DECIDED (built, or known to be empty: the cache's own contract,
+   *  and an empty chunk never becomes a mesh later)? `false` means the area still has a hole in it, so the
+   *  coarser chunk that covers it must stay on screen. */
+  private finerColumnDecided(step: number, ccx: number, ccz: number): boolean {
+    const finer = step > 2 ? step / 2 : 1;
+    const [fx, fz] = this.finerCells(finer, ccx, ccz);
+    for (let dx = 0; dx < 2; dx++) {
+      for (let dz = 0; dz < 2; dz++) {
         for (let cy = MIN_CHUNK_Y; cy < MIN_CHUNK_Y + CHUNK_Y_COUNT; cy++) {
-          const key = `${cx},${cy},${cz}`;
+          const key = finer === 1 ? `${fx[dx]},${cy},${fz[dz]}` : `${finer}:${fx[dx]},${cy},${fz[dz]}`;
           if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
           return false;
         }

@@ -64,30 +64,36 @@ and NO HOLES you can see the sky through. Fly up (double-tap Space) ~60 blocks a
 must be continuous across the whole streamed window, including the chunk borders (a line of missing faces or
 a step exactly every 32 blocks would be a generator bug at a chunk seam, not a rendering one)
 → dig down a few blocks in a hillside: the cut face must show grass, then dirt, then stone
-→ **THE FAR RING (P1.93)**: fly up to ~200 blocks and look out. Two things must be true and one must look
-  odd, by design: (a) the terrain reaches out to **~512 blocks** — from 200 up, the view is terrain well above
-  the horizon line a ~288-block window would have ended at (that line is where the old single window stopped);
-  (b) it fills in over the first ~3 s after entering (the loading screen only covers the fine ring, so the far
-  terrain appears while you watch — `FRAME` may show 20-30 ms frames for those seconds and then settles at
-  `n=61 avg=16.6 max≈17.7 stalls=0`); (c) the far terrain is **2× blockier** (one super voxel per 2×2 blocks:
-  the contour steps of the hills are twice as thick out there) and there is a **step/ledge where the rings
-  meet** (~448 blocks out). That ledge is the conservative-max choice, not a bug — it is what makes a crack
-  impossible — and nothing must show SKY through it.
-  Walk ~600 blocks (Shift ×25, or fly) away and the rings re-centre: the fine ring follows you, the far ring
-  drops what is behind and builds what is ahead (a second or two of fill-in). Fly past ~512 blocks from the
-  world's origin and the terrain you see is the world's OWN far side (the torus lap is 1024 blocks) — that is
+→ **THE LOD LADDER (P1.93/P2.03)**: fly up to ~200 blocks and look out. Two things must be true and one must look
+  odd, by design: (a) the terrain reaches out to the ladder's outermost rung — **7168 blocks (224 chunks) on the
+  biggest 世界大小 preset, and much less on a small lap**: the entry's `WORLD LOD ladder: N rung(s) …` line in
+  `debug.log` is the truth, and the DEFAULT 1024-block world only gets 2 rungs (~384 blocks). Raise 世界大小 and
+  enter again to get the rest (a 512-chunk lap is what holds all six);
+  (b) it fills in over the first seconds after entering (the loading screen only covers the fine ring, and each
+  rung's reserve makes it slower the further out it goes — `FRAME` may show 20-30 ms frames and then settles at
+  `n=61 avg=16.6 max≈17.7 stalls=0`);
+  (c) the terrain gets **blockier with distance** — every rung doubles its cell size (2×2 blocks per super voxel at
+  the first, 32×32 at the last), so the contour steps thicken as you look out, and there is a **step/ledge where
+  two rungs meet**. That ledge is the conservative-max choice, not a bug — it is what makes a crack impossible —
+  and nothing must show SKY through it.
+  Walk a few hundred blocks (Shift ×25, or fly) away and the ladder re-centres: the fine ring follows you, the
+  outer rungs drop what is behind and build what is ahead (a second or two of fill-in). Fly past half the lap
+  (512 blocks by default) from the world's origin and the terrain you see is the world's OWN far side — that is
   the geometry of the world, not a streaming bug.
-  A far chunk is PROCEDURAL: dig a hole at ~400 blocks out, then walk 400 blocks away and look back — the hole
-  is NOT there (the edit is only in the fine world). Digging anywhere you can actually reach is correct.
-→ **`G` — THE LOD VIEW (P1.94)**: press G in a world and every chunk mesh is tinted by its TIER — the fine ring
-  green (`LOD_TIER_TINT[0]`), the far ring blue (`[1]`). Fly up and the boundary between the two colours is
-  exactly where the coarse terrain starts (~448 blocks). Press G again and the real textures come back. It must
+  A far chunk is PROCEDURAL: dig a hole at ~400 blocks out (where a coarse rung is drawn), then walk 400 blocks
+  away and look back — the hole is NOT there (the edit is only in the fine world). Digging anywhere you can
+  actually reach is correct.
+→ **`G` — THE LOD VIEW (P1.94/P2.03)**: press G in a world and every chunk mesh is tinted by its RUNG —
+  `LOD_TIER_TINT` (six colours: green, blue, violet, yellow, orange, teal). Fly up and look for the bands: on a
+  big-lap world you must see up to SIX colours, each band starting where the one inside it ends; on the default
+  1024-block world only the first two appear (the lap cannot hold more — see the ladder bullet above). Press G
+  again and the real textures come back. It must
   NOT toggle on a held key (a repeat is one press) or on the key release, and it must survive walking (the
   colours follow the chunks, since they are a material, not a one-off paint).
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
-  diagonal of every quad). Fly up and look at the ring boundary: the fine ring's triangles are dense, the far
-  ring's are twice as big. Press H again for solid geometry. A held key (repeat) and the key release must NOT
+  diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser
+  one's are bigger by the step. Press H again for solid geometry. A held key (repeat) and the key release must NOT
   toggle it, and it must compose with `G`: press both and you get a tier-COLORED wireframe — the combination to
   use when checking the LOD's shape. Also worth a look while it is on: a dug block's hole must show its own
   faces (P1.91) and the ring seam must show no missing triangles (P1.95).
@@ -132,32 +138,40 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   session without touching the file (a held key or the key release must not toggle it). A hand-edited
   `"fadeLod": "yes"` must load as ON and `"fadeChunks": "yes"` as OFF (only a real `true` turns the fine ring's
   fade on), and the boot line must not report either as an unknown setting.
-→ **THE WORLD'S XZ SIZE (P2.02)**: 单人模式 → the world-type panel now has a **世界大小 (XZ 一圈)** section under
-  the two world types: four preset buttons (1024 / 2048 / 4096 / 8192) and a slider for anything between 1024 and
-  8192 blocks (in 512-block steps), with the chosen lap shown next to it. What to check:
+→ **THE WORLD'S XZ SIZE (P2.02) AND THE NUMBER OF LOD RUNGS (P2.03)**: 单人模式 → the world-type panel now has a
+  **世界大小 (XZ 一圈)** section under
+  the two world types: five preset buttons (1024 / 2048 / 4096 / 8192 / 16384) and a slider for anything between
+  1024 and 16384 blocks (in 512-block steps), with the chosen lap shown next to it. What to check:
   (a) clicking a preset moves the slider and the number (one value, two ways to say it — and the slider is bound
       to the value in force, so it can never show a size the world will not get);
   (b) the choice takes effect on the NEXT world entry, not immediately: `debug.log` shows
       `WORLD size 64x64 chunks (2048 blocks around) — the voxel map and every mesh were reset for the new lap`
       and the loading screen comes up again (the old world cannot be kept — a chunk is identified by a WRAPPED
       coordinate, so every stored chunk and mesh belongs to the old lap);
+  (b2) **the same entry line says how many rungs the new world got**: `WORLD LOD ladder: N rung(s) for this M-chunk
+      lap (the policy asks for up to 6; a bigger world in the world-type panel fits more)`. Expected: 1024 → 2,
+      2048 → 3, 4096 → 4, 8192 → 5, 16384 → 6. Those numbers are the ladder's promise — a rung whose far edge
+      would reach past half the lap is not built at all, so the SAME six-tier policy shows two tiers on the default
+      world. Press `G` after each and count the colour bands: they must match the log;
   (c) entering a world of the SAME size must NOT show that line and must not re-warm (a re-entry stays instant);
   (d) the size survives a restart (`config/settings.json` → `worldXZ`, in chunks), and a hand-edited
       `"worldXZ": 1` loads as 32 (clamped) while `"worldXZ": 50` loads as 48 (snapped onto the legal 512-block
       grid) — the panel must show the value in force, not the file's;
   (e) **the world really got bigger**: with a big lap, walk (Shift ×25 sprint) ONE direction for a while — you
       must NOT come back to where you started as quickly as on the default world. The terrain looks the same
-      locally either way: only the LAP changed, and that is the point (it is what lets more LOD tiers fit before
+      locally either way: only the LAP changed, and that is the point (it is what lets more LOD rungs fit before
       the world repeats).
-→ **THE RING SEAM MUST NEVER SHOW SKY (P2.00)**: this is the check the last three rounds were about. Walk (and
-  then fly) across a chunk boundary while watching the junction where the fine ring meets the far one — with `G`
-  on it is the line between the two colours. There must be NO frame in which you can see the sky through the
-  ground there, and no half-transparent "glass" patch: the far ring now builds the coarse chunks UNDER the fine
-  ring and only draws them when the fine chunks that cover them are missing, so the swap is instantaneous in
+→ **EVERY RUNG SEAM MUST NEVER SHOW SKY (P2.00/P2.03)**: this is the check the last rounds were about. Walk (and
+  then fly) across a chunk boundary while watching the junction where two rungs meet — with `G`
+  on it is the line between two colours (walk out far enough on a big-lap world to cross the SECOND and THIRD
+  junctions too). There must be NO frame in which you can see the sky through the
+  ground there, and no half-transparent "glass" patch: every rung builds the cells UNDER the finer rungs and only
+  draws them when the finer chunks that cover them are missing, so the swap is instantaneous in
   both directions. Watch it in both directions (walk forwards, then backwards) and at speed (fly), because a
   fast move is when the coarse chunk used to arrive too late. What you SHOULD see is only a small change of
-  detail at that line (the coarse surface can stand a block high — that is the conservative rule of P1.93, not a
-  bug). Also check `F3`: the reserve is invisible and costs no draw calls, so the frame time across a boundary
+  detail at that line (the coarse surface can stand a block high — that is the conservative rule of P1.93, and it
+  is worse at the outer rungs, where a cell is up to 32 blocks across, not a bug). Also check `F3`: the reserves
+  are invisible and cost no draw calls, so the frame time across a boundary
   must not jump (the far budget does the extra building) and `区块`/memory must not keep growing as you walk.
 → **A PACK SWITCH MUST RESTYLE BOTH RINGS (P1.97 — this was a real bug)**: stand somewhere the far ring is on
   screen (fly up ~200 blocks, or just look at the horizon), open Settings → Resource packs and toggle a pack
@@ -172,19 +186,23 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (d) `debug.log`'s reload line counts both queues now
       (`… <n> chunk(s) stale, <n> restyled behind the screen (looks only, no re-mesh)`), and the number is
       larger than the world's chunk count alone would give.
-→ **THE SEAM MUST NOT LEAK (P1.95 — this was a real bug, one block big)**: walk along the boundary between the
-  green (fine) and blue (far) rings with `G` on, and look at the terrain exactly where the two colours meet.
-  There must be NO single-block window you can see into (the far side's wall used to be culled wherever the
-  fine terrain stepped inside the coarse cell). Press G off and check the same line: no hole, no sliver of sky
+→ **THE SEAM MUST NOT LEAK (P1.95 — this was a real bug, one block big)**: walk along the boundary between two
+  rung colours with `G` on, and look at the terrain exactly where the two colours meet.
+  There must be NO single-block window you can see into (the coarse side's wall used to be culled wherever the
+  finer terrain stepped inside the coarse cell). Press G off and check the same line: no hole, no sliver of sky
   through solid-looking ground. The tell is that the holes were TINY (one block) and rare — they only appear
-  where a 2×2 fine cell straddles a height step on the seam, so walk the whole junction rather than one spot.
-→ **THE RINGS MUST TILE WHILE YOU WALK (P1.94 — this was a real bug)**: walk/sprint in ONE direction and keep
-  watching the junction between the two colours. There must never be a 32-block-wide slot of sky through the
-  ground, and never a strip that shimmers (two meshes in the same place). The old bug appeared only when the
-  player's chunk column was ODD, i.e. it came and went as you walked; the window is anchored to the coarse grid
-  now, so it must hold on EVERY column. If a slot ever appears, it is the anchoring (`fineBase` in
+  where a `step × step` cell straddles a height step on the seam, so walk the whole junction rather than one spot.
+  **On a big-lap world, check the OUTER junctions too** (step 4, 8, 16, 32): the check scales with the cell size,
+  and the outer rungs are where the tiling margin was thinnest before P2.03.
+→ **THE RUNGS MUST TILE WHILE YOU WALK (P1.94/P2.03 — this was a real bug)**: walk/sprint in ONE direction and
+  keep watching the junctions between the colours. There must never be a slot of sky through the
+  ground (a gap) and never a strip that shimmers (two meshes in the same place). The old bug appeared only when
+  the player's chunk column was ODD, i.e. it came and went as you walked; the window is anchored to the second
+  rung's grid now, so it must hold on EVERY column — and with six rungs, at every one of the five junctions.
+  If a slot ever appears, it is the ladder's geometry (`lodLadder`/`fineBase` in
   `data/world/lod.ts`, used by `step`/`prime`/`needsWarmUp`), not the mesher.
-→ fly far in one direction for ~30 s (the world is a TORUS of 1024 blocks: you come back to where you
+→ fly far in one direction for ~30 s (the world is a TORUS whose lap is the 世界大小 setting: 1024 blocks by
+default, so you come back to where you
 started) and confirm the terrain you arrive at matches where you began — the noise is periodic on that same
 lap, so the wrap must NOT show a cliff (it may show a single wrong block at the seam line: the ghost meshes
 at the lap are still missing, see the known gaps) → nothing streams in: the spawn window was meshed before

@@ -2799,15 +2799,15 @@ Still outstanding:
   WHAT MOVED: the period used to be `WORLD_CHUNKS_X/Z` constants in `data/world/world.ts`, duplicated in
   `terrain.ts` as `TERRAIN_PERIOD` with a gate assertion keeping them equal. It now lives in a leaf module
   `data/world/size.ts` that BOTH import (`world.ts` imports `terrain.ts`, so a value in either could not be shared
-  without a cycle): `worldChunksX/Z()`, `worldPeriodBlocks()`, `setWorldChunks()`, `sanitizeWorldChunks()`,
-  `worldSizeFitsLod()`. Every reader asks it — `wrapChunkX/Z`, `terrainPeriod()` (the noise MUST repeat exactly on
+  without a cycle): `worldChunksX/Z()`, `worldPeriodBlocks()`, `setWorldChunks()`, `sanitizeWorldChunks()`. Every
+  reader asks it — `wrapChunkX/Z`, `terrainPeriod()` (the noise MUST repeat exactly on
   the lap, so the lattice wrap is modulo the lap in force), the LOD sampler's `wrapBlock`, and the chunk stream's
   `nearestWrap`/`farKeys` periods.
   A LEGAL SIZE IS A MULTIPLE OF 16 CHUNKS (512 blocks), for two independent reasons: the terrain's coarsest octave
-  is 512 blocks per lattice cell and every octave has to divide the lap, and the LOD rings are powers of two, so
-  the wrap must land on a column grid both can align to. So "custom" is a custom multiple of 16: the panel offers
-  the presets 1024/2048/4096/8192 blocks as buttons AND a slider (32..256 chunks, step 16) bound to the value in
-  force, and the domain is declared ONCE (`size.ts`) so the panel, the command and the entry cannot disagree.
+  is 512 blocks per lattice cell and every octave has to divide the lap, and the LOD rungs are powers of two, so
+  the wrap must land on a cell grid both can align to. So "custom" is a custom multiple of 16: the panel offers
+  the presets 1024/2048/4096/8192/16384 blocks as buttons AND a slider (32..512 chunks, step 16) bound to the value
+  in force, and the domain is declared ONCE (`size.ts`) so the panel, the command and the entry cannot disagree.
   APPLIED ON ENTRY, NO RESTART (the user's choice): `enterWorld` starts by reading `WORLD_SIZE`, and when
   `setWorldChunks` reports the lap actually moved it resets the voxel map (`VoxelWorld.reset`) and every mesh
   (`chunkStream.resetForNewWorld`) — a chunk key is a WRAPPED identity and a mesh belongs to the old lap, so
@@ -2830,6 +2830,53 @@ Still outstanding:
   NOT DONE, AND THE NEXT STEP TOWARDS 5–6 TIERS: the ring ladder itself (a third, fourth… tier with its own
   radius, each finer tier's coverage becoming the next one's reserve), plus CHUNK EVICTION — a bigger lap makes the
   never-evicted chunk map (ROADMAP §3.2) matter more, because it grows with exploration rather than with the lap.
+- **P2.03 — the far ring becomes a LADDER of six rungs, each one the next's ready reserve.** `DONE`, by request
+  («先不管先弄lod层数吧弄个6层»).
+  WHAT IT REPLACES: P1.93's window was exactly TWO rings (a fine one and one coarse one at `step` 2). It is now
+  `DEFAULT_LOD = { tiers: 6, reach: 4 }`: rung 1 is the fine ring (real 32³ chunks), rung L has `step = 2^(L-1)`
+  cells of `32·step` blocks, its ANNULUS is `reach` of those cells wide, and its HOLE — what it only BUILDS and
+  keeps hidden — is exactly the coverage of everything inside it. The radii therefore grow: 128, 384, 896, 1792,
+  3584 and 7168 blocks, so the outermost rung is what the biggest world-size preset (512 chunks, 16384 blocks) is
+  for. **How many rungs a world gets is the LAP's business** (`lodTierFits`): the five presets hold 2, 3, 4, 5 and
+  6, the DEFAULT 1024-block world holds 2, and the world-entry driver logs the number it built. `reach` is 4
+  rather than 6 because a rung's hole is everything inside it — 6 would put the sixth rung at 12096 blocks and
+  need a lap this engine does not have.
+  THE HARD PART WAS THE TILING, AND IT IS WHY `LodTier` CARRIES RANGES. A rung's cells are aligned to the WORLD
+  (a coarse cell must not move as the player walks, or the far terrain crawls), while the range that covers the
+  window is measured from the window's own centre — so a rung whose centre is off its own grid has asymmetric,
+  rectangular ends and NO fixed radius. `LodTier` therefore holds a `LodSpan` per axis (`lo`, `hi`, `holeLo`,
+  `holeHi`) computed in absolute blocks by `lodLadder(policy, lap, centreX, centreZ)`, and the rungs CROP each
+  other: a coarse cell only half covered by the finer coverage cannot be owned by both (a gap is a see-through
+  hole, an overlap is z-fighting), so the rung inside gives the cell up. The first implementation kept the old
+  symmetric radius per rung and the gate's tiling sweep caught a 64-block gap plus a z-fighting strip at every
+  boundary above step 2 — the P1.94 bug in its general form.
+  THREE MORE FIXES THE LADDER EXPOSED, all in the reserve/window logic:
+    * the fade guard in `refreshFarVisibility` was keyed by the rung's OWN step, so a rung's reserve was held on
+      screen by its own fade-in (a coarse surface drawn over real terrain for 220 ms). It is now keyed by the rung
+      IMMEDIATELY INSIDE (`finerColumnFading`/`finerColumnDecided`), which is what the reserve actually waits for.
+    * `finerColumnDecided` wrapped the children with the FINE period. With two rings that was correct (the only
+      coarse rung's children ARE fine chunks); at rung 3 it made the children unmatchable at the torus seam, so a
+      rung-3 reserve stayed drawn for ever one cell outside the wrap. `finerCells` now wraps by the finer rung's
+      own period.
+    * the ladder and the window's `offsets` became POSITION-dependent, and they were built inside `step()` — so
+      `needsWarmUp`, which the entry driver asks BEFORE anything has stepped, read an EMPTY window and answered
+      "nothing to build" for a cold world. That branch also holds `prime`, so a first entry would have skipped the
+      loading screen AND the generation of the spawn window. `ensureLadder(pcx, pcz)` builds them for the position
+      being asked about (two integer comparisons when it already matches), and the gate now asks a cold LOD window
+      before any step.
+  ALSO: `tierTint` indexed `LOD_TIER_TINT` by `step - 1`, which only worked while the ladder had two rungs; it is
+  indexed by the rung now (six colours); the fine ring's offsets come from the ladder's rung 1 rather than the
+  policy, so the two can never disagree about where the window ends; and the gate's P1.95 wall check was passing
+  VACUOUSLY since the P1.93 signature change (`buildLodMeshInput(policy, …)` sampled with an object as `step`,
+  which produced an all-air chunk the `input.uniform` guard skipped) — fixed to `T2.step`, so those 500+ cells are
+  really inspected again.
+  VERIFIED: `tsc` 0; `check:ecs` **82/82** with a new P2.03 group (the rung count per preset AND that it does not
+  depend on where the window sits; every rung's step/reach/hole and the hole-is-the-inner-coverage identity in
+  fine chunks; the tiling over four policies with both axes on different alignments; and a REAL 3-rung stream
+  driven through the handover at rungs 2 and 3 — the cells a rung's hole gives up were the reserve, are drawn in
+  the same step, and the cells it claims stay drawn until the finer chunks over them are built AND opaque).
+  NOT DONE, AND THE NEXT STEPS: chunk eviction (a bigger lap and six rungs make the never-evicted chunk map matter
+  more), and the outer rim (no fog yet, so 7168 blocks of world ends visibly).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

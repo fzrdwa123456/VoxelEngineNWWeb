@@ -5,6 +5,7 @@
 import { RENDER_HANDLES } from "../../data/globals/render-handles";
 import { VOXEL, WORLD_SIZE } from "../../data/globals/resources";
 import { setWorldChunks, worldPeriodBlocks } from "../../data/world/size";
+import type { LodPolicy } from "../../data/world/lod";
 import { Teleport } from "../../plugins/player/commands";
 import { HUMANOID_BODY } from "../../plugins/player/components";
 import { WORLD_MAX_Y } from "../../data/world/world";
@@ -23,6 +24,9 @@ export interface WorldEntryDeps {
   readonly loop: LoopState;
   readonly player: Entity;
   readonly spawn: { readonly x: number; readonly y: number; readonly z: number };
+  /** The LOD policy in force, so the entry can say how many rungs the world it is building actually got
+   *  (the LAP caps the ladder — see `lodLadder`). */
+  readonly lod: LodPolicy;
   readonly setLoopMode: (mode: "load" | "game" | "menu") => void;
   readonly hideMainMenu: () => void;
   readonly showPauseMenu: () => void;
@@ -59,14 +63,22 @@ const enterWorld = async (mode: string): Promise<void> => {
   // anything moved), which is what keeps a re-entry free.
   {
     const wanted = deps.world.resource(WORLD_SIZE);
+    const handles = deps.world.resource(RENDER_HANDLES).chunkStream;
     if (setWorldChunks(wanted.chunksX, wanted.chunksZ)) {
       deps.world.resource(VOXEL).reset();
-      deps.world.resource(RENDER_HANDLES).chunkStream.resetForNewWorld();
+      handles.resetForNewWorld();
       deps.log(
         `WORLD size ${wanted.chunksX}x${wanted.chunksZ} chunks (${worldPeriodBlocks()} blocks around) ` +
           "— the voxel map and every mesh were reset for the new lap",
       );
     }
+    // THE LADDER IS CAPPED BY THE LAP (P2.03): a rung at radius R repeats itself once R >= lap/2, so a small
+    // world builds FEWER rungs than the policy asks for. Saying so here is the difference between "6 is set and
+    // it looks like 2" being a mystery and being a read number.
+    deps.log(
+      `WORLD LOD ladder: ${handles.lodTiers} rung(s) for this ${wanted.chunksX}-chunk lap ` +
+        `(the policy asks for up to ${deps.lod.tiers}; a bigger world in the world-type panel fits more)`,
+    );
   }
   // The entry watches the window for fiddling of its own (P1.62e): a drag during the loading is remembered
   // and makes this entry start on the pause menu instead of capturing behind the user's back.

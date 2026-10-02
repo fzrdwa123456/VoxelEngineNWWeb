@@ -32,6 +32,10 @@ export interface RenderHandles {
      *  the whole window for the new lap. Called by the world-entry driver, before it primes, and only when the
      *  size actually moved. */
     resetForNewWorld(): void;
+    /** HOW MANY LOD RUNGS the world in force actually got (P2.03): the ladder is capped by the lap, so a small
+     *  world builds fewer rungs than the policy asks for — and the entry says so, instead of leaving the player
+     *  to wonder why "6" looks like "2". */
+    readonly lodTiers: number;
   };
   /** The MENU frame drives this too (`menuFrame`): the background own step, once per ui frame. */
   readonly menuBackground: { step(): void };

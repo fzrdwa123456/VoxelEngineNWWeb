@@ -2,6 +2,7 @@ import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, paceFrame, pacingTargetHz, refreshHzFromMilliHz, type InputDiagnostics } from "../data/globals/resources";
+import { DEFAULT_LOD } from "../data/world/lod";
 import { createFadeOptions, createWorldSize, FADE_OPTIONS, WORLD_SIZE, type WorldSizeState } from "../data/globals/resources";
 import { SetFadeOption, SetFpsCap, SetVsync, SetWorldSize, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
@@ -1020,6 +1021,9 @@ const enterWorld = createWorldEntry({
   loop,
   player,
   spawn: SPAWN,
+  // The LOD policy in force: the entry reports how many RUNGS the world it is building actually gets (the lap
+  // caps the ladder — P2.03). It is the same object the render plugin builds its stream with.
+  lod: DEFAULT_LOD,
   setLoopMode,
   hideMainMenu: () => mainMenu.hide(),
   showPauseMenu: () => menu.show(),

@@ -297,7 +297,6 @@ const {
   WORLD_CHUNKS_MAX,
   WORLD_CHUNKS_STEP,
   WORLD_SIZE_PRESETS,
-  worldSizeFitsLod,
 } = load("data/world/size.js");
 
 // ===== 1. core: handles, storage, queries =====
@@ -1093,15 +1092,29 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   const { VoxelWorld, WORLD_MAX_Y } = load("data/world/world.js");
   const { FALLBACK_PALETTE } = load("data/world/palette.js");
   const policy = L.DEFAULT_LOD;
+  // THE LADDER IN FORCE for a shipped-size world (P2.03): rung 1 is the fine ring, rung 2 is the old far ring,
+  // and the rest are the new ones. The first two rungs are what most of this group is about — the properties
+  // that must hold for EVERY rung are asserted in the P2.03 group below.
+  const LADDER = L.lodLadder(policy, 512, 0, 0); // a 512-chunk lap: the whole shipped ladder fits
+  const T2 = LADDER[1];
+  equal(T2.step, 2, "rung 2 is the coarse ring the gate has always checked");
+  equal(T2.hole, policy.reach, "…whose hole is the fine window (4 of its 2-chunk cells)");
+  equal(T2.x.holeHi - T2.x.holeLo, T2.hole, "…and its cells are exactly that window");
 
-  // 1. THE RINGS TILE THE VIEW — FOR EVERY PLAYER COLUMN, not just an aligned one (P1.94 — measured bug).
-  //    The fine ring must be built around `fineBase(playerColumn)`, because it is a whole number of COARSE
-  //    columns while the far ring's inner hole is a whole number of coarse columns too. Built around the RAW
-  //    column, every ODD column left one fine column owned by NEITHER ring — a 32-block-wide, full-depth
-  //    column with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through —
-  //    and one owned by BOTH (two meshes in the same place, z-fighting). This loop is that regression test.
-  const tile = (raw) => {
+  // 1. THE RUNGS TILE THE VIEW — FOR EVERY PLAYER COLUMN, not just an aligned one (P1.94 — measured bug). The
+  //    fine ring must be built around `fineBase(playerColumn)`, because it is a whole number of the SECOND
+  //    rung's columns while that rung's hole is a whole number of them too. Built around the RAW column, every
+  //    ODD column left one fine column owned by NEITHER rung — a 32-block-wide, full-depth column with no
+  //    geometry whose neighbours' walls are culled, i.e. a hole you look straight through — and one owned by
+  //    BOTH (two meshes in the same place, z-fighting). This loop is that regression test.
+  const tile = (raw, zRaw = raw) => {
     const base = L.fineBase(policy, raw);
+    const zBase = L.fineBase(policy, zRaw);
+    // The two rungs' ranges for THIS window: exactly what `wantedKeys`/`farKeys` build (rung 1 in fine chunks,
+    // rung 2 in its own 2-chunk cells, both anchored on the world grid).
+    const here = L.lodLadder(policy, 512, base * CHUNK_SIZE, zBase * CHUNK_SIZE);
+    const t1 = here[0];
+    const t2 = here[1];
     const owner = new Map();
     let overlaps = 0;
     const claim = (x, z) => {
@@ -1109,34 +1122,38 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
       if (owner.has(k)) overlaps++;
       owner.set(k, 1);
     };
-    // The stream's own sets: fine = base + [-2r, 2r+1]; far = the coarse annulus around floor(base/step),
-    // expanded by `step` — exactly what `wantedKeys`/`farKeys` build.
-    for (let dx = -2 * policy.fineRadius; dx <= 2 * policy.fineRadius + 1; dx++) {
-      for (let dz = -2 * policy.fineRadius; dz <= 2 * policy.fineRadius + 1; dz++) claim(base + dx, base + dz);
+    for (let dx = t1.x.lo; dx < t1.x.hi; dx++) {
+      for (let dz = t1.z.lo; dz < t1.z.hi; dz++) claim(base + dx, zBase + dz);
     }
-    const cc = base / policy.step;
-    for (let cx = -policy.farRadius; cx <= policy.farRadius; cx++) {
-      for (let cz = -policy.farRadius; cz <= policy.farRadius; cz++) {
-        if (!L.isFarColumn(policy, cx, cz)) continue;
-        for (let dx = 0; dx < policy.step; dx++) {
-          for (let dz = 0; dz < policy.step; dz++) {
-            claim((cc + cx) * policy.step + dx, (cc + cz) * policy.step + dz);
+    const ccx = Math.floor(base / t2.step);
+    const ccz = Math.floor(zBase / t2.step);
+    for (let cx = t2.x.lo; cx < t2.x.hi; cx++) {
+      for (let cz = t2.z.lo; cz < t2.z.hi; cz++) {
+        if (!L.inTierAnnulus(t2, cx, cz)) continue;
+        for (let dx = 0; dx < t2.step; dx++) {
+          for (let dz = 0; dz < t2.step; dz++) {
+            claim((ccx + cx) * t2.step + dx, (ccz + cz) * t2.step + dz);
           }
         }
       }
     }
-    const reach = 2 * policy.farRadius;
+    // …and the promise: inside rung 2's OWN corner-to-corner extent, every fine column is claimed exactly once.
+    // A rectangle, not a square: the two axes' ranges are measured from their own centres.
+    const c2x = ccx + t2.x.hi;
+    const c2z = ccz + t2.z.hi;
+    const l2x = ccx + t2.x.lo;
+    const l2z = ccz + t2.z.lo;
     let gaps = 0;
-    for (let x = -reach; x <= reach + 1; x++) {
-      for (let z = -reach; z <= reach + 1; z++) if (!owner.has(`${base + x},${base + z}`)) gaps++;
+    for (let x = l2x * t2.step; x < c2x * t2.step; x++) {
+      for (let z = l2z * t2.step; z < c2z * t2.step; z++) if (!owner.has(`${x},${z}`)) gaps++;
     }
-    return { gaps, overlaps, size: owner.size, square: (2 * reach + 2) ** 2 };
+    return { gaps, overlaps, size: owner.size, square: (c2x - l2x) * t2.step * (c2z - l2z) * t2.step };
   };
-  for (const raw of [0, 1, 2, 3, 7, 8, 100, 101, 251, 252]) {
-    const t = tile(raw);
-    equal(t.gaps, 0, `player column ${raw}: no column is drawn by NEITHER ring`);
-    equal(t.overlaps, 0, `player column ${raw}: none is drawn by BOTH rings`);
-    equal(t.size, t.square, `player column ${raw}: the union is exactly the square the far radius promises`);
+  for (const [raw, zRaw] of [[0, 0], [1, 1], [2, 2], [3, 3], [7, 7], [8, 8], [100, 100], [101, 101], [251, 251], [252, 252], [4, 9], [9, 4]]) {
+    const t = tile(raw, zRaw);
+    equal(t.gaps, 0, `player column ${raw},${zRaw}: no column is drawn by NEITHER rung`);
+    equal(t.overlaps, 0, `player column ${raw},${zRaw}: none is drawn by BOTH rungs`);
+    equal(t.size, t.square, `player column ${raw},${zRaw}: the union is exactly the ladder's own rectangle`);
   }
   equal(L.fineBase(null, 7), 7, "with no LOD the alignment is the identity (the single-window path is untouched)");
   equal(L.fineBase(policy, 7), 6, "…and with LOD an odd column rounds DOWN to the coarse grid");
@@ -1152,11 +1169,11 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   let holes = 0;
   let faces = 0;
   let materialised = 0;
-  for (let cx = -policy.farRadius; cx <= policy.farRadius; cx += 3) {
-    for (let cz = policy.fineRadius + 1; cz <= policy.farRadius; cz += 3) {
-      if (!L.isFarColumn(policy, cx, cz)) continue;
+  for (let cx = T2.x.lo; cx < T2.x.hi; cx += 3) {
+    for (let cz = T2.z.holeHi; cz < T2.z.hi; cz += 3) {
+      if (!L.inTierAnnulus(T2, cx, cz)) continue;
       for (let cy = 2; cy <= 5; cy++) {
-        const input = L.buildLodMeshInput(policy, cx, cy, cz, stone, dirt, grass);
+        const input = L.buildLodMeshInput(T2.step, cx, cy, cz, stone, dirt, grass);
         const result = meshChunk(input);
         faces += result.faces;
         if (!input.uniform) materialised++;
@@ -1166,10 +1183,10 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
             : input.blocks[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE] !== 0;
         for (let lx = 0; lx < CHUNK_SIZE; lx += 7) {
           for (let lz = 0; lz < CHUNK_SIZE; lz += 7) {
-            for (let dx = 0; dx < policy.step; dx++) {
-              for (let dz = 0; dz < policy.step; dz++) {
-                const fx = cx * policy.step * CHUNK_SIZE + lx * policy.step + dx;
-                const fz = cz * policy.step * CHUNK_SIZE + lz * policy.step + dz;
+            for (let dx = 0; dx < T2.step; dx++) {
+              for (let dz = 0; dz < T2.step; dz++) {
+                const fx = cx * T2.step * CHUNK_SIZE + lx * T2.step + dx;
+                const fz = cz * T2.step * CHUNK_SIZE + lz * T2.step + dz;
                 for (let cy2 = 2; cy2 <= 5; cy2++) {
                   world.ensureChunk(Math.floor(fx / CHUNK_SIZE), cy2, Math.floor(fz / CHUNK_SIZE));
                 }
@@ -1188,8 +1205,8 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   assert(inspected > 100, `the sampler really was inspected (${inspected} fine voxels under coarse ones)`);
   equal(holes, 0, "every SOLID fine voxel is solid in the coarse voxel above it — no crack is possible");
   assert(faces > 0 && materialised > 0, "and the sampled chunks do produce geometry to draw");
-  equal(L.isFarColumn(policy, 0, 0), false, "the far ring never covers a column the fine ring owns");
-  equal(L.isFarColumn(policy, policy.farRadius + 1, 0), false, "…nor anything past its radius");
+  equal(L.isFarColumn(policy, 0, 0), false, "the far ring never covers a cell the fine ring owns");
+  equal(L.isFarColumn(policy, T2.x.hi + 1, 0), false, "…nor anything past its reach");
 
   // 2b. THE SIDE WALLS MAY NOT BE CULLED AGAINST A FINER NEIGHBOUR (P1.95 — measured bug, one block big).
   //     A far chunk's ±X/±Z quad is `step × step` BLOCKS wide while the neighbour on that side may be the FINE
@@ -1202,13 +1219,17 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   let wallCells = 0;
   let wallHoles = 0;
   let extraWalls = 0;
-  for (const [cx, cz] of [[policy.fineRadius + 1, 0], [0, policy.fineRadius + 1], [policy.fineRadius + 1, policy.fineRadius + 1]]) {
+  for (const [cx, cz] of [
+    [T2.x.holeHi, 0],
+    [0, T2.z.holeHi],
+    [T2.x.holeHi, T2.z.holeHi],
+  ]) {
     if (!L.isFarColumn(policy, cx, cz)) continue;
     for (let cy = 2; cy <= 5; cy++) {
-      const input = L.buildLodMeshInput(policy, cx, cy, cz, stone, dirt, grass);
+      const input = L.buildLodMeshInput(T2.step, cx, cy, cz, stone, dirt, grass);
       if (input.uniform) continue;
-      const gx0 = cx * policy.step * CHUNK_SIZE;
-      const gz0 = cz * policy.step * CHUNK_SIZE;
+      const gx0 = cx * T2.step * CHUNK_SIZE;
+      const gz0 = cz * T2.step * CHUNK_SIZE;
       // The west wall faces the coarse cell at `gx0 - step`, which covers `step × step` FINE BLOCKS.
       for (let ly = 0; ly < CHUNK_SIZE; ly++) {
         const y = cy * CHUNK_SIZE + ly;
@@ -1216,10 +1237,10 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
           const culled = input.planes[1 * CHUNK_SIZE * CHUNK_SIZE + ly * CHUNK_SIZE + lz] === 1;
           let solid = 0;
           let total = 0;
-          for (let dx = 0; dx < policy.step; dx++) {
-            for (let dz = 0; dz < policy.step; dz++) {
-              const fx = gx0 - policy.step + dx;
-              const fz = gz0 + lz * policy.step + dz;
+          for (let dx = 0; dx < T2.step; dx++) {
+            for (let dz = 0; dz < T2.step; dz++) {
+              const fx = gx0 - T2.step + dx;
+              const fz = gz0 + lz * T2.step + dz;
               for (let cy2 = 2; cy2 <= 5; cy2++) {
                 world.ensureChunk(Math.floor(fx / CHUNK_SIZE), cy2, Math.floor(fz / CHUNK_SIZE));
               }
@@ -1619,30 +1640,42 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
   //   * the column that enters the fine ring keeps its coarse chunk up until the fine chunks that replace it are
   //     built AND opaque, and only then hides.
   const L = load("data/world/lod.js");
-  // A TINY policy: the mechanism is geometry and bookkeeping, and the shipped ring is ~1800 coarse meshes.
-  const policy = { step: 2, fineRadius: 1, farRadius: 3, farBuildInner: 0 };
+  // A TINY ladder: the mechanism is geometry and bookkeeping, and the shipped one is ~7000 coarse keys. Two
+  // rungs of `reach` 2: the fine ring covers two fine chunks each way and rung 2 covers the cells around it,
+  // its hole being exactly that fine window. The ranges are built around the origin; for THIS policy they are
+  // the same wherever the window sits (a 2-cell hole and a 6-cell coverage, always), so the offsets below are
+  // the ones the stream computes around the player.
+  const policy = { tiers: 2, reach: 2 };
+  const T2 = L.lodLadder(policy, 32, 0, 0)[1];
+  const STEP = T2.step;
+  const HOLE = T2.hole;
+  const REACH = T2.reach;
+  equal(STEP, 2, "rung 2 is the 2-chunk ring…");
+  equal(REACH, 2, "…whose annulus is `reach` of its own cells wide…");
+  equal(T2.x.hi - T2.x.lo, 6, "…so its coverage is 6 cells across…");
+  equal(HOLE, 2, "…with the fine window as its 2-cell-wide hole");
   const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
   const { CHUNK_SIZE } = load("data/world/chunk.js");
   const { VoxelWorld, nearestWrap } = load("data/world/world.js");
   const P = loadPresentation();
 
-  // 1. THE SETS, as data (no stream needed): the drawn ring is exactly the coarse columns the fine ring does not
-  //    cover, every drawn column is BUILT, and the reserve covers the fine ring itself.
+  // 1. THE SETS, as data (no stream needed): the drawn annulus is exactly the coarse columns the finer rung does
+  //    not cover, every drawn column is BUILT, and the reserve is the hole itself.
   let built = 0;
   let reserved = 0;
-  for (let cx = -policy.farRadius; cx <= policy.farRadius; cx++) {
-    for (let cz = -policy.farRadius; cz <= policy.farRadius; cz++) {
-      const drawn = L.isFarColumn(policy, cx, cz);
-      const covered = L.isFineCoveredColumn(policy, cx, cz);
-      assert(!(drawn && covered), "a coarse column is never both DRAWN and covered by the fine ring (the tiling)");
-      if (L.isFarBuildColumn(policy, cx, cz)) {
+  for (let cx = T2.x.lo; cx < T2.x.hi; cx++) {
+    for (let cz = T2.z.lo; cz < T2.z.hi; cz++) {
+      const drawn = L.inTierAnnulus(T2, cx, cz);
+      const covered = L.inTierHole(T2, cx, cz);
+      assert(!(drawn && covered), "a coarse column is never both DRAWN and in the hole (the tiling)");
+      if (L.inTierCoverage(T2, cx, cz)) {
         built++;
         if (covered) reserved++;
       }
-      if (drawn) assert(L.isFarBuildColumn(policy, cx, cz), "every DRAWN coarse column is in the build set");
+      if (drawn) assert(L.inTierCoverage(T2, cx, cz), "every DRAWN coarse column is in the build set");
     }
   }
-  assert(reserved > 0, `the reserve really covers coarse columns the fine ring owns (${reserved})`);
+  assert(reserved > 0, `the reserve really covers coarse columns the finer rung owns (${reserved})`);
   assert(built > reserved, "…and the build set is a superset of the drawn ring, not all of it");
 
   const reserveWorld = new World();
@@ -1672,7 +1705,7 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
   // COARSE entries only (a key with the step prefix): the fine meshes live in the same cache and are always
   // drawn, so comparing THEIR columns against the COARSE player column means nothing.
   const coarse = () => [...reserveCache.meshes.entries()].filter(([key]) => key.includes(":"));
-  const period = 32 / policy.step; // the torus in coarse columns
+  const period = worldChunksX() / STEP; // the torus in THIS tier's columns
   /** Where a coarse entry sits relative to the player's coarse column — the same nearest-copy arithmetic the
    *  system uses (`nearestWrap`), because a key is a WRAPPED column and comparing it raw is meaningless. */
   const reachOf = (e, ccx, ccz) => [
@@ -1700,17 +1733,17 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
     // 3. WITH THE FINE RING THERE, THE RESERVE IS INVISIBLE — the state a player stands in. The coarse chunk
     //    under them exists but must not be drawn: it is a conservative 2×2-block surface that would show
     //    through the real chunks.
-    const ccx = Math.floor(stream.lastPcx / policy.step);
-    const ccz = Math.floor(stream.lastPcz / policy.step);
+    const ccx = Math.floor(stream.lastPcx / STEP);
+    const ccz = Math.floor(stream.lastPcz / STEP);
     const inWindow = coarse().filter(([, e]) => {
       const [dx, dz] = reachOf(e, ccx, ccz);
-      return Math.max(Math.abs(dx), Math.abs(dz)) <= policy.fineRadius;
+      return L.inTierHole(T2, dx, dz);
     });
     assert(inWindow.length > 0, `the reserve really has meshes in the cache (${inWindow.length})`);
     equal(inWindow.filter(([, e]) => e.mesh.visible).length, 0, "…and NONE of them is drawn while the fine chunks are there");
     const drawnBefore = coarse().filter(([, e]) => {
       const [dx, dz] = reachOf(e, ccx, ccz);
-      return Math.max(Math.abs(dx), Math.abs(dz)) > policy.fineRadius;
+      return L.inTierAnnulus(T2, dx, dz);
     });
     assert(drawnBefore.length > 0, `the drawn ring has meshes (${drawnBefore.length})`);
     equal(drawnBefore.filter(([, e]) => !e.mesh.visible).length, 0, "…while everything outside the fine ring is drawn");
@@ -1722,16 +1755,17 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
     const beforeMove = new Set(reserveCache.meshes.keys());
     const leavingEntries = coarse().filter(([, e]) => {
       const [dx, dz] = reachOf(e, ccx, ccz);
-      return dx === -policy.fineRadius && Math.abs(dz) <= policy.fineRadius;
+      // The cells on the TRAILING edge of the fine ring: in the rung's hole before the move, its annulus after.
+      return dx === T2.x.holeLo && dz >= T2.z.holeLo && dz < T2.z.holeHi;
     });
     assert(leavingEntries.length > 0, `the trailing column had coarse meshes (${leavingEntries.length})`);
     for (const [key, e] of leavingEntries) {
       assert(beforeMove.has(key), "…and they were the RESERVE: built before this move asked for anything");
       assert(e.mesh.visible === false, "…invisible while the fine ring was still there");
     }
-    C.POSITION.x[positionRow] += policy.step * CHUNK_SIZE; // one coarse column
+    C.POSITION.x[positionRow] += STEP * CHUNK_SIZE; // one coarse column
     stream.step(0);
-    const ccxAfter = Math.floor(stream.lastPcx / policy.step);
+    const ccxAfter = Math.floor(stream.lastPcx / STEP);
     equal(ccxAfter, ccx + 1, "the window really moved one coarse column");
     equal(
       leavingEntries.filter(([, e]) => !e.mesh.visible).length,
@@ -1744,7 +1778,8 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
     //    sky showing through it — and only then is it hidden.
     const enteredEntries = coarse().filter(([, e]) => {
       const [dx, dz] = reachOf(e, ccxAfter, ccz);
-      return dx === policy.fineRadius && Math.abs(dz) <= policy.fineRadius;
+      // The cells on the LEADING edge: the annulus of the old window, inside the hole of the new one.
+      return dx === T2.x.holeHi - 1 && dz >= T2.z.holeLo && dz < T2.z.holeHi;
     });
     assert(enteredEntries.length > 0, `the column the fine ring claimed has coarse meshes (${enteredEntries.length})`);
     equal(
@@ -1829,8 +1864,8 @@ check("the appearance fades are a per-ring SETTING (P2.01): LOD fades, real chun
     }),
     getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++gen }),
   };
-  // A tiny policy (5×5 coarse columns): the settings are about which tier fades, not about ring geometry.
-  const stream = new ChunkStreamSystem(world, factory, null, { step: 2, fineRadius: 1, farRadius: 2, farBuildInner: 0 });
+  // A tiny ladder (two rungs of reach 2): the settings are about which tier fades, not about ring geometry.
+  const stream = new ChunkStreamSystem(world, factory, null, { tiers: 2, reach: 2 });
   const materialOf = (e) => (Array.isArray(e.mesh.material) ? e.mesh.material[0] : e.mesh.material);
   const freshOf = (step, since) =>
     [...cache.meshes.entries()].filter(([key, e]) => e.step === step && !since.has(key)).map(([, e]) => e);
@@ -1883,8 +1918,8 @@ check("the appearance fades are a per-ring SETTING (P2.01): LOD fades, real chun
 
 check("the world's XZ LAP is a setting (P2.02): the noise, the torus and the rings all follow it", () => {
   // The lap was a hard-coded 32 chunks = 1024 blocks. It is a CHOICE now because it is the number that decides how
-  // far a distance LOD may reach: a ring at radius R is unambiguous only while `R < lap/2`, or its far edge starts
-  // showing the terrain that is closer the other way round (`worldSizeFitsLod`). Five or six tiers — what a
+  // far a distance LOD may reach: a rung at radius R is unambiguous only while `R < lap/2`, or its far edge starts
+  // showing the terrain that is closer the other way round (`lodTierFits`). Five or six rungs — what a
   // "planet-like" world wants — need 8192/16384 blocks, so the lap has to move for them.
   // Raw `fs` for the source assertions: `readSource`/`stripComments` are declared further down the file, so they
   // are in their TDZ here.
@@ -1906,15 +1941,24 @@ check("the world's XZ LAP is a setting (P2.02): the noise, the torus and the rin
     equal(sanitizeWorldChunks(preset), preset, `the preset ${preset} is a legal size`);
     equal(preset % WORLD_CHUNKS_STEP, 0, "…on the grid every legal size shares");
   }
-  // THE RINGS MUST STILL FIT: the shipped far ring reaches ±7 coarse columns = ±448 blocks, so the half-lap of
-  // the smallest legal world (512 blocks) is just enough — asserted, not hoped for.
+  // THE RUNGS MUST STILL FIT: a rung is unambiguous only while its outer radius stays inside the LAP's half
+  // (`lodTierFits`), and that single rule replaced the old hard-coded `worldSizeFitsLod`. Asserted as DATA: the
+  // smallest legal lap still holds the fine ring plus one coarse rung, and the rule really refuses a rung that
+  // would reach past the half-lap.
+  const smallLap = L.lodLadder(L.DEFAULT_LOD, WORLD_CHUNKS_MIN, 0, 0);
+  assert(smallLap.length >= 2, `the smallest legal lap still holds more than the fine ring (${smallLap.length})`);
+  for (const tier of smallLap) {
+    assert(L.lodTierFits(tier, WORLD_CHUNKS_MIN), `…and every rung the ladder kept fits (step ${tier.step})`);
+    const reachBlocks = Math.max(-tier.x.lo, tier.x.hi) * tier.step * CHUNK_SIZE;
+    assert(reachBlocks <= (WORLD_CHUNKS_MIN * CHUNK_SIZE) / 2, `…measured in blocks too (${reachBlocks})`);
+  }
+  // …and the rule really refuses a rung that would reach past the half-lap: the second rung of a policy whose
+  // reach is the whole smallest lap.
+  const tooFar = L.lodLadder({ tiers: 2, reach: 32 }, WORLD_CHUNKS_MIN, 0, 0);
+  equal(tooFar.length, 1, "a policy whose second rung would reach past the half-lap is cut to the fine ring");
   assert(
-    worldSizeFitsLod(WORLD_CHUNKS_MIN, L.DEFAULT_LOD.step, L.DEFAULT_LOD.farRadius),
-    "the smallest legal lap still fits the shipped far ring inside its half",
-  );
-  assert(
-    !worldSizeFitsLod(WORLD_CHUNKS_MIN, L.DEFAULT_LOD.step, 32),
-    "…and the rule really refuses a ring that would reach past the half-lap",
+    !L.lodTierFits({ step: 2, hole: 0, reach: 32 }, WORLD_CHUNKS_MIN),
+    "…which is exactly what `lodTierFits` says about it",
   );
 
   // 2. THE FIELD FOLLOWS THE LAP, AND THE LAP REALLY MOVES. This is the load-bearing one: the noise's lattice
@@ -2000,7 +2044,7 @@ check("the world's XZ LAP is a setting (P2.02): the noise, the torus and the rin
   assert(
     /if \(setWorldChunks\(wanted\.chunksX, wanted\.chunksZ\)\)/.test(entry) &&
       /resource\(VOXEL\)\.reset\(\)/.test(entry) &&
-      /chunkStream\.resetForNewWorld\(\)/.test(entry),
+      /resetForNewWorld\(\)/.test(entry),
     "the world entry sets the lap and resets the voxel map AND the meshes when it changed",
   );
   assert(
@@ -2038,6 +2082,376 @@ check("the world's XZ LAP is a setting (P2.02): the noise, the torus and the rin
     for (const key of ["main.xzTitle", "main.xzHint"]) {
       assert(typeof dict[key] === "string" && dict[key].length > 0, `${key} is translated (${lang})`);
     }
+  }
+});
+
+check("LOD is a LADDER, not two rings (P2.03): the rungs tile, nest, and each one reserves the next", () => {
+  // The window used to be exactly two rings. It is a LADDER now: rung 1 is the fine ring, rung L has
+  // `step = 2^(L-1)` and reaches the same number of its OWN columns out, and every rung's hole is exactly the
+  // coverage of the rung inside it — which is what makes each rung the next finer rung's READY RESERVE (P2.00),
+  // generalised. HOW MANY rungs exist is the LAP's business (`lodLadder`), so a default 1024-block world shows
+  // two and a 16384-block one shows six. This group asserts the ladder as DATA and then drives a real 3-rung
+  // stream through a handover at TWO different rungs, because "it works at step 2" was never the question.
+  const L = load("data/world/lod.js");
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+  const { VoxelWorld } = load("data/world/world.js");
+  const P = loadPresentation();
+
+  // 1. THE LADDER AS A FUNCTION OF THE LAP. The five presets are the sizes the world-type panel offers, and the
+  //    rung count per size is the promise the entry driver logs; the cap is the policy's.
+  const rungs = WORLD_SIZE_PRESETS.map((preset) => L.lodLadder(L.DEFAULT_LOD, preset, 0, 0).length);
+  equal(rungs.join(","), "2,3,4,5,6", "each preset lap holds one more rung than the one below it");
+  equal(L.lodLadder(L.DEFAULT_LOD, WORLD_CHUNKS_MIN * 16, 0, 0).length, L.DEFAULT_LOD.tiers, "…up to the cap");
+  equal(L.lodLadder({ tiers: 2, reach: 6 }, WORLD_CHUNKS_MAX, 0, 0).length, 2, "a shallower policy is capped too");
+  for (const [lap, tiers] of [
+    [31, 2],
+    [32, 2],
+    [64, 3],
+    [128, 4],
+    [256, 5],
+    [512, 6],
+  ]) {
+    equal(L.lodLadder(L.DEFAULT_LOD, lap, 0, 0).length, tiers, `a ${lap}-chunk lap holds ${tiers} rung(s)`);
+  }
+  // …and the count does NOT depend on where the window sits: a rung that appeared and vanished as the player
+  // walked would rebuild the outer ring every few steps. The fit rule carries the half-cell wobble for that.
+  for (const lap of WORLD_SIZE_PRESETS) {
+    const counts = new Set();
+    for (const c of [0, 1, 3, 7, 15, 31, 63, 100, 255]) {
+      counts.add(L.lodLadder(L.DEFAULT_LOD, lap, c * 32, c * 32 + 32).length);
+    }
+    equal(counts.size, 1, `a ${lap}-chunk lap holds the same number of rungs wherever the window is`);
+  }
+
+  // 2. EVERY RUNG, as data (the window's centre on the origin, where the two axes are identical): the step
+  //    doubles, the hole IS the inner rung's coverage (in BLOCKS, the only unit two rungs agree on), the
+  //    annulus is `reach` cells wide, and the radii grow.
+  const LADDER = L.lodLadder(L.DEFAULT_LOD, WORLD_CHUNKS_MAX, 0, 0);
+  equal(LADDER.length, L.DEFAULT_LOD.tiers, `the whole shipped ladder is there (${LADDER.length})`);
+  equal(LADDER[0].reach, L.DEFAULT_LOD.reach, "rung 1 IS the fine ring: the policy's reach…");
+  equal(LADDER[0].hole, 0, "…and no hole at all");
+  equal(LADDER[0].x.lo, -L.DEFAULT_LOD.reach, "…covering the window symmetrically");
+  let lastRadius = 0;
+  for (let i = 0; i < LADDER.length; i++) {
+    const tier = LADDER[i];
+    equal(tier.step, 2 ** i, `rung ${i + 1} has step ${2 ** i}`);
+    equal(tier.reach, L.DEFAULT_LOD.reach, "…whose annulus is `reach` of its own cells wide");
+    for (const axis of ["x", "z"]) {
+      const span = tier[axis];
+      if (i === 0) {
+        equal(span.holeHi - span.holeLo, 0, "the fine ring has no reserve at all");
+        equal(span.hi - span.lo, 2 * tier.reach, "…and its coverage is `reach` cells each way");
+        continue;
+      }
+      // The ANNULUS, per side: `reach` cells, one fewer where the tiling crop took a cell away (the rung inside
+      // gives up whatever the next rung's grid cuts in half).
+      const low = span.holeLo - span.lo;
+      const high = span.hi - span.holeHi;
+      assert(
+        (low === tier.reach || low === tier.reach - 1) && (high === tier.reach || high === tier.reach - 1),
+        `${axis}: the annulus is ${tier.reach} cells wide, ±1 for the crop (it is ${low}/${high})`,
+      );
+    }
+    equal(
+      tier.hole,
+      Math.max(tier.x.holeHi - tier.x.holeLo, tier.z.holeHi - tier.z.holeLo),
+      "the reported hole is the wider axis' (the lap test answers for the widest part of the rung)",
+    );
+    if (i > 0) {
+      const innerX = LADDER[i - 1].x;
+      const innerZ = LADDER[i - 1].z;
+      const innerStep = LADDER[i - 1].step;
+      equal(
+        (tier.x.holeHi - tier.x.holeLo) * tier.step,
+        (innerX.hi - innerX.lo) * innerStep,
+        `rung ${i + 1} x: its hole IS rung ${i}'s coverage, in fine chunks`,
+      );
+      equal(
+        (tier.z.holeHi - tier.z.holeLo) * tier.step,
+        (innerZ.hi - innerZ.lo) * innerStep,
+        `rung ${i + 1} z: its hole IS rung ${i}'s coverage, in fine chunks`,
+      );
+    }
+    const radius = Math.max(-tier.x.lo, tier.x.hi) * tier.step * 32;
+    assert(radius > lastRadius, `rung ${i + 1} reaches further out than the one inside it (${radius} blocks)`);
+    lastRadius = radius;
+  }
+  equal(lastRadius, 7168, "the outermost rung reaches 7 × 1024 = 7168 blocks (224 chunks), exactly");
+  assert(L.lodTierFits(LADDER[LADDER.length - 1], WORLD_CHUNKS_MAX), "…which is just inside the biggest lap's half");
+  assert(!L.lodTierFits({ step: 64, hole: 0, reach: 8 }, WORLD_CHUNKS_MAX), "…and one rung further would not be");
+
+  // 3. THE RUNGS TILE — asserted over the REAL sets the stream builds (`wantedKeys`/`farKeys`), for every
+  //    parity of the player column, for a window whose two axes sit on DIFFERENT alignments (which makes a
+  //    rung's coverage a rectangle), and for a policy that crops. Two rings used to be checked (`tile()` in the
+  //    LOD group); this is the general statement: inside the outermost reach, every FINE column is claimed by
+  //    exactly ONE rung — no see-through gap, no z-fighting overlap, which is what a symmetric range left at
+  //    every boundary (the P1.94 bug, generalised).
+  const claimOf = () => {
+    let overlaps = 0;
+    const owner = new Map();
+    const claim = (x, z) => {
+      const k = `${x},${z}`;
+      if (owner.has(k)) overlaps++;
+      owner.set(k, 1);
+    };
+    return { owner, claim, overlaps: () => overlaps };
+  };
+  for (const policy of [
+    { tiers: 2, reach: 2 },
+    { tiers: 6, reach: 4 },
+    { tiers: 6, reach: 5 },
+    { tiers: 4, reach: 3 },
+  ]) {
+    for (const [rawX, rawZ] of [[0, 0], [1, 0], [2, 2], [3, 7], [7, 3], [8, 8], [100, 101], [101, 100], [251, 252]]) {
+      const baseX = L.fineBase(policy, rawX);
+      const baseZ = L.fineBase(policy, rawZ);
+      const ladder = L.lodLadder(policy, WORLD_CHUNKS_MAX, baseX * 32, baseZ * 32);
+      const outer = ladder[ladder.length - 1];
+      const ccx = Math.floor(baseX / outer.step);
+      const ccz = Math.floor(baseZ / outer.step);
+      const t = claimOf();
+      const first = ladder[0];
+      for (let dx = first.x.lo; dx < first.x.hi; dx++) {
+        for (let dz = first.z.lo; dz < first.z.hi; dz++) t.claim(baseX + dx, baseZ + dz);
+      }
+      for (let i = 1; i < ladder.length; i++) {
+        const tier = ladder[i];
+        const tx = Math.floor(baseX / tier.step);
+        const tz = Math.floor(baseZ / tier.step);
+        for (let cx = tier.x.lo; cx < tier.x.hi; cx++) {
+          for (let cz = tier.z.lo; cz < tier.z.hi; cz++) {
+            if (!L.inTierAnnulus(tier, cx, cz)) continue;
+            for (let dx = 0; dx < tier.step; dx++) {
+              for (let dz = 0; dz < tier.step; dz++) {
+                t.claim((tx + cx) * tier.step + dx, (tz + cz) * tier.step + dz);
+              }
+            }
+          }
+        }
+      }
+      let gaps = 0;
+      const x0 = (ccx + outer.x.lo) * outer.step;
+      const x1 = (ccx + outer.x.hi) * outer.step;
+      const z0 = (ccz + outer.z.lo) * outer.step;
+      const z1 = (ccz + outer.z.hi) * outer.step;
+      for (let x = x0; x < x1; x++) {
+        for (let z = z0; z < z1; z++) if (!t.owner.has(`${x},${z}`)) gaps++;
+      }
+      equal(gaps, 0, `reach ${policy.reach} at ${rawX},${rawZ}: no fine column is drawn by NEITHER rung`);
+      equal(t.overlaps(), 0, `reach ${policy.reach} at ${rawX},${rawZ}: none is drawn by BOTH rungs`);
+      equal(t.owner.size, (x1 - x0) * (z1 - z0), `reach ${policy.reach} at ${rawX},${rawZ}: the union is exact`);
+    }
+  }
+  equal(L.tierOfStep(LADDER, 4)?.step, 4, "a step names its rung…");
+  equal(L.tierOfStep(LADDER, 3), null, "…and a step no rung has names nothing");
+  assert(
+    L.LOD_TIER_TINT.length >= L.DEFAULT_LOD.tiers &&
+      new Set(LADDER.map((tier) => L.tierTint(tier.step))).size === LADDER.length,
+    "the debug view has a colour per rung the shipped ladder can have",
+  );
+
+  // 4. A REAL 3-RUNG STREAM. The lap is 64 chunks so rung 3 fits (`2·4 < 32`), and the policy is the smallest
+  //    one the check can drive: rung 1 = fine columns [-2,2), rung 2 = step 2 (hole 1), rung 3 = step 4
+  //    (hole 1 = rung 2's whole coverage, in blocks).
+  const policy = { tiers: 3, reach: 2 };
+  const world = new World();
+  const voxel = new VoxelWorld();
+  world.insertResource(VOXEL, voxel);
+  world.insertResource(LOCAL_PLAYER, localPlayer);
+  const positionRow = entityIndex(localPlayer);
+  const startX = C.POSITION.x[positionRow];
+  const startZ = C.POSITION.z[positionRow];
+  const cache = P.createChunkMeshCache({ add() {}, remove() {} });
+  world.insertResource(P.CHUNK_MESHES, cache);
+  world.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  world.insertResource(FADE_OPTIONS, createFadeOptions());
+  world.insertResource(KEY_EVENTS, createKeyEventLog());
+  world.start();
+  let gen = 0;
+  const factory = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [],
+      apply: () => 5,
+      rebuild: () => 5,
+      restyle: () => 1,
+      dispose() {},
+    }),
+    getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++gen }),
+  };
+  const before = { x: worldChunksX(), z: worldChunksZ() };
+  try {
+    setWorldChunks(64);
+    const stream = new ChunkStreamSystem(world, factory, null, policy);
+    // Fill the whole window: every rung's COVERAGE (annulus + hole), over the whole Y range. The FIRST step is
+    // the one that builds the ladder and the key sets, so it is taken before anything is asserted about them.
+    stream.step(1000);
+    for (let i = 0; i < 400 && stream.pendingCount() > 0; i++) stream.step(1000);
+    equal(stream.lodTiers, 3, "the stream really runs three rungs on a 64-chunk lap");
+    const columns = worldChunksX(); // X and Z share the lap
+    const wrap = (step, v) => {
+      const period = columns / step;
+      return ((v % period) + period) % period;
+    };
+    // THE LADDER, REBUILT WHERE THE WINDOW IS — exactly what the stream does when the window moves: the cells
+    // are aligned to the WORLD, so WHICH of them cover the window changes as the player walks.
+    const ladderNow = () => L.lodLadder(policy, columns, stream.lastPcx * CHUNK_SIZE, stream.lastPcz * CHUNK_SIZE);
+    const ccOf = (step) => [Math.floor(stream.lastPcx / step), Math.floor(stream.lastPcz / step)];
+    const decidedColumns = (step) => {
+      const out = new Set();
+      const prefix = step === 1 ? "" : `${step}:`;
+      for (const key of [...cache.meshes.keys(), ...cache.empty.keys()]) {
+        if (!key.startsWith(prefix)) continue;
+        const parts = key.slice(prefix.length).split(",");
+        out.add(`${parts[0]},${parts[2]}`);
+      }
+      return out;
+    };
+    const farPending = () => {
+      let n = 0;
+      for (const key of stream.farWanted) if (!cache.meshes.has(key) && !cache.empty.has(key)) n++;
+      return n;
+    };
+    const KEY_Y = 8; // CHUNK_Y_COUNT: the world's Y split is not what this group is about
+    for (let i = 0; i < 4000 && farPending() > 0; i++) stream.step(0);
+    equal(farPending(), 0, "every rung's build set is BUILT (the drawn annulus AND the reserve)");
+    // The far builds ran with a ZERO delta (the window fill above), so their fades-in never advanced — and a
+    // rung's reserve must stay drawn while the rung inside it is still translucent. Two real-delta steps let
+    // them finish, which is the state a player is in a moment after the world appears.
+    stream.step(1000);
+    stream.step(1000);
+    for (let i = 1; i < ladderNow().length; i++) {
+      const tier = ladderNow()[i];
+      const [ccx, ccz] = ccOf(tier.step);
+      const decided = decidedColumns(tier.step);
+      assert(columns / tier.step > tier.x.hi - tier.x.lo, `rung ${i + 1}'s coverage cannot wrap onto itself`);
+      let built = 0;
+      for (let cx = tier.x.lo; cx < tier.x.hi; cx++) {
+        for (let cz = tier.z.lo; cz < tier.z.hi; cz++) {
+          if (!L.inTierCoverage(tier, cx, cz)) continue;
+          const key = `${wrap(tier.step, ccx + cx)},${wrap(tier.step, ccz + cz)}`;
+          assert(decided.has(key), `rung ${i + 1} decided its cell ${cx},${cz} (the reserve included)`);
+          built++;
+        }
+      }
+      equal(built, (tier.x.hi - tier.x.lo) * (tier.z.hi - tier.z.lo), `rung ${i + 1} covers its whole rectangle`);
+    }
+
+    // 5. WITH THE WINDOW WARM, EVERY RUNG'S RESERVE IS INVISIBLE AND ITS ANNULUS DRAWN — the state a player
+    //    stands in, checked per rung rather than only for step 2 (P2.00 asserted it for the shipped ring only).
+    /** The mesh keys of the cells a predicate picks out of a rung, at the window's current position. */
+    const cellKeys = (tier, predicate) => {
+      const [ccx, ccz] = ccOf(tier.step);
+      const keys = [];
+      for (let cx = tier.x.lo; cx < tier.x.hi; cx++) {
+        for (let cz = tier.z.lo; cz < tier.z.hi; cz++) {
+          if (!predicate(tier, cx, cz)) continue;
+          for (let cy = 0; cy < KEY_Y; cy++) {
+            const key = `${tier.step}:${wrap(tier.step, ccx + cx)},${cy},${wrap(tier.step, ccz + cz)}`;
+            if (cache.meshes.has(key)) keys.push(key);
+          }
+        }
+      }
+      return keys;
+    };
+    for (let i = 1; i < ladderNow().length; i++) {
+      const tier = ladderNow()[i];
+      const drawn = cellKeys(tier, L.inTierAnnulus);
+      const reserve = cellKeys(tier, L.inTierHole);
+      assert(reserve.length > 0, `rung ${i + 1} really keeps a reserve (${reserve.length} meshes)`);
+      equal(
+        reserve.filter((key) => cache.meshes.get(key).mesh.visible).length,
+        0,
+        `rung ${i + 1}: NONE of its reserve is drawn while the finer rungs are there`,
+      );
+      assert(drawn.length > 0, `rung ${i + 1} draws its annulus (${drawn.length} meshes)`);
+      equal(
+        drawn.filter((key) => !cache.meshes.get(key).mesh.visible).length,
+        0,
+        `rung ${i + 1}: …and everything outside its hole is drawn`,
+      );
+    }
+
+    // 6. THE HANDOVER AT *TWO* RUNGS. Move one whole cell of rung 2 (2 fine chunks), then one whole cell of
+    //    rung 3 (4 fine chunks). For each: the cells its hole GIVES UP were the RESERVE (already built, hidden)
+    //    and are DRAWN in the very step they leave the hole (no frame with nothing behind the fine mesh), and
+    //    the cells its hole CLAIMS stay drawn until the finer chunks that replace them are built AND opaque.
+    //    That is P2.00's property, per rung — and rung 3's finer rung is rung 2, so it drives the
+    //    coarser-than-step-2 path `finerColumnDecided` had never been through.
+    /** The ABSOLUTE cells of a rung's hole: the two frames differ between positions, so the comparison has to be
+     *  made in world cells rather than in either one's offsets. */
+    const holeCells = (tier) => {
+      const [ccx, ccz] = ccOf(tier.step);
+      const out = [];
+      for (let cx = tier.x.holeLo; cx < tier.x.holeHi; cx++) {
+        for (let cz = tier.z.holeLo; cz < tier.z.holeHi; cz++) out.push(`${ccx + cx},${ccz + cz}`);
+      }
+      return out;
+    };
+    const keysOfCells = (tier, cells) => {
+      const keys = [];
+      for (const cell of cells) {
+        const [ax, az] = cell.split(",").map(Number);
+        for (let cy = 0; cy < KEY_Y; cy++) {
+          const key = `${tier.step}:${wrap(tier.step, ax)},${cy},${wrap(tier.step, az)}`;
+          if (cache.meshes.has(key)) keys.push(key);
+        }
+      }
+      return keys;
+    };
+    for (const index of [1, 2]) {
+      const before = ladderNow()[index];
+      const beforeCell = Math.floor(stream.lastPcx / before.step); // READ NOW: `ccOf` would answer post-move
+      const holeBefore = holeCells(before);
+      const built = new Set(cache.meshes.keys());
+      const reserve = keysOfCells(before, holeBefore);
+      assert(reserve.length > 0, `rung ${index + 1}: its hole has meshes (${reserve.length})`);
+      for (const key of reserve) {
+        assert(built.has(key), `rung ${index + 1}: …and they were the RESERVE, built before the move`);
+        assert(cache.meshes.get(key).mesh.visible === false, `rung ${index + 1}: …invisible while they covered it`);
+      }
+      C.POSITION.x[positionRow] += before.step * CHUNK_SIZE; // one cell of THIS rung
+      stream.step(0);
+      const after = ladderNow()[index];
+      equal(
+        Math.floor(stream.lastPcx / after.step),
+        beforeCell + 1,
+        `rung ${index + 1}: the window moved one of its cells`,
+      );
+      const holeAfterCells = holeCells(after);
+      const holeAfter = new Set(holeAfterCells);
+      const leaving = holeBefore.filter((cell) => !holeAfter.has(cell));
+      const entering = holeAfterCells.filter((cell) => !holeBefore.includes(cell));
+      assert(leaving.length > 0, `rung ${index + 1}: the move retires cells from its hole (${leaving.length})`);
+      assert(entering.length > 0, `rung ${index + 1}: …and claims others (${entering.length})`);
+      equal(
+        keysOfCells(before, leaving).filter((key) => !cache.meshes.get(key).mesh.visible).length,
+        0,
+        `rung ${index + 1}: the cells that LEFT the hole are DRAWN in that same step (no hole behind them)`,
+      );
+      equal(
+        keysOfCells(after, entering).filter((key) => !cache.meshes.get(key).mesh.visible).length,
+        0,
+        `rung ${index + 1}: …and the ones it CLAIMED are still drawn while the finer chunks are not there`,
+      );
+      for (let i = 0; i < 400 && (stream.pendingCount() > 0 || farPending() > 0); i++) stream.step(1000);
+      stream.step(1000); // the swap waits for OPAQUE, not just present: let the finer fades finish
+      stream.step(1000);
+      const now = ladderNow()[index];
+      const stillHole = holeCells(now).filter((cell) => !holeBefore.includes(cell));
+      equal(
+        keysOfCells(now, stillHole).filter((key) => cache.meshes.get(key).mesh.visible).length,
+        0,
+        `rung ${index + 1}: …and hidden only once the finer chunks are there AND opaque`,
+      );
+    }
+  } finally {
+    C.POSITION.x[positionRow] = startX;
+    C.POSITION.z[positionRow] = startZ;
+    C.PREV_POSITION.x[positionRow] = startX;
+    C.PREV_POSITION.z[positionRow] = startZ;
+    setWorldChunks(before.x, before.z); // every later group assumes the default lap
   }
 });
 
@@ -2083,6 +2497,21 @@ check("the chunk stream can say whether a window still needs warming", () => {
   assert(meshCache.empty.size > 0, "the 'no geometry' answers were written into the world's cache");
   equal(stream.needsWarmUp(1, 3), false, "…so a re-entry into THIS window shows no screen");
   assert(stream.needsWarmUp(900, 900), "a window somewhere else still needs one");
+  // …AND WITH LOD ON IT MUST STILL BE ABLE TO ANSWER (P2.03). The ladder and the window's offsets are built for
+  // a POSITION now (the rungs' cells are aligned to the world, the ranges covering the window are not), and the
+  // entry asks this question BEFORE anything has stepped — a query that read the empty ladder would answer
+  // "nothing to build" for a cold world, which is a world entered with no loading screen and no primed chunks
+  // (`prime` lives inside the branch this gates).
+  const lodStream = new ChunkStreamSystem(streamWorld, undefined, null, { tiers: 2, reach: 2 });
+  // A COLD column — one the stub cache above never touched (its window wrapped around column 0) and one the
+  // ladder's own window does not wrap onto: the answer must be "yes" before any step has run, which is the whole
+  // point — the ladder and the offsets have to be built BY the question.
+  assert(lodStream.needsWarmUp(528, 528), "a COLD window with LOD on needs warming before anything has stepped");
+  equal(lodStream.lodTiers, 2, "…and answering it built the ladder");
+  for (let i = 0; i < 500 && lodStream.pendingCount() > 0; i++) lodStream.step();
+  equal(lodStream.pendingCount(), 0, "…and the window at the player (which the first step re-centred on) is decided");
+  equal(lodStream.needsWarmUp(1, 3), false, "…so a re-entry there shows no screen");
+  assert(lodStream.lodTiers >= 2, `…and the ladder is still there (${lodStream.lodTiers} rungs)`);
   // (read directly: the section's `readSource`/`stripComments` helpers are defined further down)
   // The entry driver lives in boot/drivers/ (P1.18e), so this reads THAT file: it asks the question
   // about the position it is entering.
