@@ -2586,13 +2586,18 @@ check("the frame cap is world state AND a persisted setting", () => {
   assert(/isVsyncOn: cb\.isVsyncOn/.test(stripComments(readSource("src/plugins/ui/views/mainmenu.ts"))) &&
     /isVsyncOn: cb\.isVsyncOn/.test(menuNow), "both settings panels drive the runtime switch");
   const gameRs = readSource("src-tauri/src/game.rs");
-  assert(/EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit --disable-gpu-vsync"/.test(gameRs),
-    "the launch arguments lift the display-rate limit AND the compositor's vblank wait (P1.89)");
-  // Both flags are LAUNCH-time, so the in-game switch is what decides the behaviour: synced paces the loop at
-  // the display rate, unsynced draws on every vblank and the unsynced present is what makes it visible.
+  // **NO EXTRA LAUNCH FLAGS (P1.90, by request: «把那个解锁flag的弄掉…就用浏览器那个默认的垂直同步»).** Both
+  // experiments are taken back out: the browser's own frame-rate limit and vblank wait are the default, and
+  // they are the smoothest thing this stack can do. The host's BASE list is still published (P1.81: it must be,
+  // or the config's absent copy would apply), but nothing is appended to it.
+  assert(!/EXTRA_BROWSER_ARGS/.test(gameRs), "no launch argument is appended to the host's list any more");
+  assert(/publish_browser_args\(crate::platform::browser_args_base\(\)\)/.test(gameRs),
+    "…the host's base list is still published unconditionally");
+  assert(!/disable-frame-rate-limit|disable-gpu-vsync/.test(stripComments(gameRs)),
+    "…and neither frame-rate/vsync experiment is left in the tree (the comment that documents them is not code)");
   assert(/pacingTargetHz\(frameCap\.cap, frameCap\.vsync, frameCap\.refreshHz\)/.test(
     stripComments(readSource("src/boot/main.ts"))),
-    "…while the rate in force is still the in-game switch's decision");
+    "the cap and the switch still pace the loop (a cap below the refresh is exact: it skips whole refreshes)");
   assert(!/vsync_path|read_vsync_disabled|write_vsync_disabled/.test(gameRs),
     "…and the vsync switch FILE stays gone: nothing about the frame rate needs a relaunch");
   assert(!/vsync_path|read_vsync_disabled|write_vsync_disabled/.test(gameRs),

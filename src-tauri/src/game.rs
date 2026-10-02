@@ -155,33 +155,29 @@ pub fn append_boot(root: &Path, message: &str) {
     }
 }
 
-// ===== The webview's launch arguments (P1.86, extended in P1.89) =====
-// These are FIXED now, and that is the point: a WebView2 argument can only be supplied before the webview
-// exists, so anything the user may switch at runtime must NOT be one. Two flags are published, and they do
-// different things:
+// ===== The webview's launch arguments: THE BROWSER'S OWN DEFAULTS, and that is final (P1.90) =====
+// **NO extra flags are published any more.** Two were tried and both were taken back out, on measurement:
 //
-//   * **`--disable-frame-rate-limit`** lifts Chromium's OWN display-rate limit, so rAF stops being pinned to
-//     the panel's refresh and the frame rate becomes something the page decides. The vertical-sync switch then
-//     lives in the front end (`FPS_CAP.vsync` + `pacingTargetHz`): "synced" paces the loop at the display's
-//     measured refresh rate, "unsynced" draws on every vblank.
-//   * **`--disable-gpu-vsync` (P1.89, requested: «把浏览器自带的垂直同步关了试试»)** drops the compositor's
-//     own vertical-blank wait, so a submitted frame is presented IMMEDIATELY instead of at the next refresh —
-//     the closest a WebView gets to a real `vsync off` (it can tear, and the input-to-photon latency stops
-//     depending on the swapchain's vblank alignment).
+//   * `--disable-frame-rate-limit` (P1.86/P1.89) lifted Chromium's own display-rate limit so the page could
+//     decide the frame rate. It worked, and it cost more than it bought: with rAF unpinned, the callback
+//     supply became elastic (`raf` settles at ~2x the drawn rate) so **the in-game cap stopped being honoured
+//     in the 60..200 band** (measured `target=96fps` → ~60fps drawn with 21-36ms worst frames — judder that
+//     looks like 30fps), the whole ui lane ran once per DRAWN frame (500-650 DOM reconciles a second instead
+//     of 60), and the higher rate bought nothing: the panel is still a 60Hz metronome.
+//   * `--disable-gpu-vsync` (P1.89) dropped the compositor's vblank wait. That IS what a game means by
+//     "vsync off" (immediate present, tearing), but it made the SYNCED case worse (21-30ms worst frames
+//     instead of 16.7ms), i.e. it charged the default mode for an option.
 //
-// WHAT IT COSTS, MEASURED (P1.86, when this flag was first tried and then left out): with presents unsynced,
-// a draw that lands BETWEEN two panel refreshes is shown mid-scan, so the "synced" in-game mode reads
-// 55-60fps with 21ms worst frames instead of a clean 16.7ms — the panel repeats a frame instead of waiting
-// for the next one. With the in-game switch OFF and the cap unlimited it is the opposite trade: the highest
-// frame rate and the lowest latency, at the price of tearing. So: **sync ON + this flag = worse smoothness
-// than before; sync OFF + this flag = what a game means by vsync off.** The flag is launch-time only, which is
-// why BOTH behaviours have to be reachable from the in-game switch rather than from the flag.
-const EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit --disable-gpu-vsync";
+// SO THE DEFAULT IS THE BROWSER'S: its frame-rate limit pins rAF to the display refresh and its present waits
+// for vertical blank — which IS `vsync on`, and it is the smoothest thing this stack can do (a clean 16.7ms,
+// `stalls=0`). The in-game switch and the cap still work on top of that, and they are now HONEST: a cap BELOW
+// the refresh is exact (it skips whole refreshes: 30fps = every 2nd), a cap AT or ABOVE it does nothing
+// (rAF cannot go faster), and "synced" means the same thing. What is GIVEN UP, deliberately: tearing and
+// sub-refresh latency are not reachable from a WebView at all — see ROADMAP P1.86/P1.90.
 //
-// THE OLD SHAPE, for the record: this read `config/vsync.json` and appended `--disable-gpu-vsync` only when
-// it said so, which meant the switch could only ever apply at the next launch - and the setting could not be
-// validated by the settings check (`diffSettings` knows settings.json, which this file was not). The file is
-// dead now; a `vsync.json` left behind by an older build is ignored.
+// THE OLD SHAPE, for the record: this once read `config/vsync.json` and appended `--disable-gpu-vsync` when it
+// said so, which meant the switch could only ever apply at the next launch. The file is dead; a `vsync.json`
+// left behind by an older build is ignored.
 
 /// Must be called before `tauri::Builder`: the window host reads its launch arguments from the
 /// environment **before the webview exists**, so this is the only moment they can be set.
@@ -191,6 +187,5 @@ const EXTRA_BROWSER_ARGS: &str = "--disable-frame-rate-limit --disable-gpu-vsync
 /// "the config's list applies". That key is gone now, so a host that takes arguments must always be
 /// handed them.
 pub fn apply_browser_args() {
-    let base = crate::platform::browser_args_base();
-    crate::platform::publish_browser_args(&format!("{base} {EXTRA_BROWSER_ARGS}"));
+    crate::platform::publish_browser_args(crate::platform::browser_args_base());
 }

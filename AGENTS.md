@@ -342,9 +342,9 @@ asserted. Three consequences worth knowing:
 * **what this still cannot do** is switch the GPU's present mode (FIFO / immediate) at runtime: that is a
   swapchain concept and no browser exposes one. Pacing is what the switch's label promises, and the old
   shape — a `config/vsync.json` file plus a "restart to apply" hint — is gone along with the file. The
-  compositor's own vblank wait IS switched off, but only at LAUNCH (`--disable-gpu-vsync`, P1.89), so it is a
-  property of the process, not of the in-game switch: with it on, "synced" can repeat a frame (a draw that
-  lands mid-refresh is shown as it is) and "unsynced" is a real immediate present — tearing included.
+  compositor's vblank wait and Chromium's frame-rate limit are the BROWSER'S DEFAULTS again (P1.90): both
+  experiments that lifted them are out of the launch arguments, because they cost the default mode more than
+  the option was worth (see the launch-argument note above).
   **AND THE SYNCS ARE NOT ALL EQUAL (measured)**: a target equal to the panel rate lands at ~57fps rather than
   60, because the unthrottled callback rate (~1.8 per panel refresh) does not divide into the panel's rate —
   see `paceFrame`'s note. `--disable-gpu-vsync` is deliberately NOT in the launch arguments either (it made the
@@ -811,13 +811,13 @@ untouched.
   no longer carries `additionalBrowserArgs` at all: it used to be a second copy, and the copies had drifted
   (the config had `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`, the host's list did not,
   so switching vsync off silently re-enabled those three components).
-  **Since P1.86 the list is FIXED** (`game.rs::EXTRA_BROWSER_ARGS` = `--disable-gpu-vsync
-  --disable-frame-rate-limit`, the second flag added in P1.89) — nothing the user can switch may be a launch
-  argument, because a launch argument can only apply at the next launch. What those two flags buy is a
-  *page-decided* frame rate AND an immediately-presented frame; what they cost is that a SYNCED draw can land
-  between two refreshes and the panel then repeats a frame (measured: 21ms worst frames with sync on). Both
-  behaviours come from the same flag, so the in-game vertical-sync switch is what picks between them; see the
-  pacing note in the frame-loop section.
+  **Since P1.90 NOTHING is appended**: the host publishes its BASE list and the WebView runs on Chromium's own
+  defaults — the frame-rate limit pins rAF to the display refresh and the present waits for vertical blank,
+  which is `vsync on` and the smoothest this stack can do. Two experiments were tried and taken back out
+  (`--disable-frame-rate-limit` P1.86/P1.89: it made the callback supply elastic, so the in-game cap stopped
+  being honoured between ~60 and ~200 and the whole ui lane ran once per drawn frame; `--disable-gpu-vsync`
+  P1.89: a real immediate present, but it charged the synced mode 21-30ms worst frames). Nothing the user can
+  switch may be a launch argument anyway, because a launch argument can only apply at the next launch.
 - **NEVER move a window flag into `tauri.windows.conf.json`** (learned the hard way, P1.80): the platform
   overlay is merged with `json_patch::merge` (RFC 7386) - objects merge recursively, **arrays are REPLACED
   wholesale** - so a partial `app.windows: [{ label, ... }]` entry silently drops `center`, the size,

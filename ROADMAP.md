@@ -2383,6 +2383,25 @@ Still outstanding:
   (96/100/228…) still cannot be phase-locked, and the achieved rate in the 60..200 band still does not follow
   the cap (measured: `target=96fps` → ~60fps drawn with 21-36ms worst frames). The cure for THAT is still a
   DWM vblank clock (P1.86's open item).
+- **P1.90 — the launch-argument experiments are taken back out: the browser's own defaults ship.** `DONE`, by
+  request («把那个解锁flag的弄掉…就用浏览器那个默认的垂直同步好了»). P1.86 and P1.89 had added
+  `--disable-frame-rate-limit` and `--disable-gpu-vsync`; both are gone from `game.rs`, so the WebView runs on
+  Chromium's own pacing: its frame-rate limit pins rAF to the display refresh and its present waits for
+  vertical blank — which IS `vsync on`, and it is the smoothest this stack can do (a clean ~16.7ms,
+  `stalls=0`).
+  WHAT THE EXPERIMENTS LEARNED, kept because it is why they are not worth keeping:
+  * unpinning rAF (`--disable-frame-rate-limit`) made the callback supply ELASTIC (`raf` settles at ~2× the
+    drawn rate), so the in-game cap stopped being honoured between ~60 and ~200 (`target=96fps` → ~60fps drawn
+    with 21-36ms worst frames — judder that reads as 30fps), the whole ui lane ran once per DRAWN frame
+    (500-650 DOM reconciles a second instead of 60), and the extra frames bought nothing: the panel is still a
+    60Hz metronome;
+  * un-syncing the compositor (`--disable-gpu-vsync`) is what a game means by "vsync off" (immediate present,
+    tearing), but it charged the DEFAULT mode for the option (21-30ms worst frames instead of 16.7ms).
+  SO THE SWITCH IS HONEST NOW, on top of the browser's defaults: a cap BELOW the refresh is exact (it skips
+  whole refreshes — 30fps = every 2nd, measured 33.05-33.63ms), a cap AT or above it does nothing (rAF cannot
+  exceed the refresh), and both positions of the vertical-sync switch pace at the refresh. What is given up
+  deliberately: tearing and sub-refresh latency are not reachable from a WebView (see P1.86's closing note and
+  the P1.87 native layer, which is where they WOULD be reachable).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
