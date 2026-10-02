@@ -147,6 +147,12 @@ export class ChunkStreamSystem {
   private lodTint = false;
   /** `H` draws the meshes as TRIANGLE WIREFRAME (P1.96) — the same material switch, one flag further. */
   private wireframe = false;
+  /** THE FAR RING'S LOOK QUEUE (P1.97). A chain change cannot mark the far ring through the WORLD: it is
+   *  procedural and holds no chunk in the voxel map (P1.93), so `VoxelWorld.markAllStale()` never names it and
+   *  every already-loaded far chunk kept the previous chain's materials — new textures only appeared once a
+   *  far chunk was built or rebuilt. `markFarStale()` fills this from the MESH CACHE instead, and the same
+   *  budgeted restyle pass drains it. */
+  private readonly farStale = new Set<string>();
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
   private readonly voxel: VoxelWorld;
@@ -501,11 +507,42 @@ export class ChunkStreamSystem {
    *  (`restyleStale`). Public for the same reason `prime`/`warmUp` are: the gate drives it directly.
    *
    *  It meshes NOTHING and asks the pool for NOTHING — that is the whole point of the restyle path (P1.18i) —
-   *  so the only cost is one look resolution per material group of a chunk that is already on screen. */
+   *  so the only cost is one look resolution per material group of a chunk that is already on screen.
+   *
+   *  BOTH QUEUES, ONE BUDGET (P1.97): the world's stale chunks (the fine ring) AND this system's own far-ring
+   *  queue. They are two independent sources of meshes, and a chain change invalidates both. */
   restyleNext(limit: number = RESTYLE_BUDGET_PER_FRAME): number {
     const batch = this.voxel.takeStale(limit);
     for (const key of batch) this.restyle(key);
+    // The far ring's queue, with whatever is left of the budget. Deleting from a Set while iterating it is safe.
+    for (const key of this.farStale) {
+      if (batch.length >= limit) break;
+      this.farStale.delete(key);
+      this.restyle(key);
+      batch.push(key);
+    }
     return batch.length;
+  }
+
+  /** EVERYTHING a chain change invalidated: the world's chunks plus the far ring. The reload's invariant is
+   *  "every mesh in CHUNK_MESHES has its looks re-resolved", and the far ring is the second source of meshes in
+   *  there — the one the world knows nothing about. */
+  get restylePending(): number {
+    return this.voxel.staleCount + this.farStale.size;
+  }
+
+  /** Mark every FAR-RING mesh for a look re-resolution (P1.97 — the pack reload calls this next to
+   *  `VoxelWorld.markAllStale`). Answers how many. A far entry's mesh is re-resolved by the same `restyle` the
+   *  fine ring uses: the geometry keeps its `(value, kind)` slots, so only the look → material list changes —
+   *  nothing is meshed, nothing is generated, nothing is handed to a worker. */
+  markFarStale(): number {
+    let n = 0;
+    for (const [key, entry] of this.cache.meshes) {
+      if (entry.step <= 1) continue; // 1 = a real chunk, which the WORLD's queue already covers
+      this.farStale.add(key);
+      n++;
+    }
+    return n;
   }
 
   /** DRAIN THE WHOLE STALE QUEUE FOR A CALLER THAT CAN YIELD (P1.18i) — the pack reload driver, which runs this
@@ -524,10 +561,10 @@ export class ChunkStreamSystem {
     yieldTo: () => Promise<void>,
     onProgress?: (done: number, total: number) => void,
   ): Promise<void> {
-    const total = this.voxel.staleCount;
+    const total = this.restylePending; // the world's chunks AND the far ring (P1.97)
     let last = -1;
     for (let guard = 0; guard < RESTYLE_DRAIN_BATCHES; guard++) {
-      const left = this.voxel.staleCount;
+      const left = this.restylePending;
       onProgress?.(total - left, total);
       if (left === 0) return;
       // No progress can only mean the queue is being re-marked as fast as we drain it (a second reload):

@@ -544,6 +544,16 @@ where it is:
   and its `geometry.groups` all stay where they are, and nothing is handed to a worker: a reload costs a few
   thousand LOOKUPS instead of a few thousand chunk meshes. A future reason to mark a chunk stale that MOVES
   vertices must re-mesh instead.
+* **A CHAIN CHANGE REACHES EVERY MESH IN THE CACHE — BOTH SOURCES (P1.97).** The reload's stale queue is filled
+  by `VoxelWorld.markAllStale()`, i.e. from the world's chunk map. That is only ONE of the two kinds of mesh in
+  `CHUNK_MESHES`: the FAR RING is procedural and holds no chunk in that map (P1.93), so it was never named, and
+  every already-loaded far chunk kept the previous chain's materials — only a far chunk that happened to be
+  built or rebuilt picked up the new textures. The driver therefore calls `markChainStale()`, which marks the
+  world's chunks AND `chunkStream.markFarStale()`; `ChunkStreamSystem.restyleNext` drains both queues under the
+  one budget, `restylePending` is the count for the reload bar, and `RenderHandles.chunkStream` publishes both.
+  The invariant to keep: **the reload's set is "everything in the CHUNK_MESHES cache", not "everything the world
+  holds"** — ANY new source of chunk meshes has to be marked here too, and the gate asserts that after a chain
+  change every entry in that cache has been re-resolved exactly once.
 * **…and the RELOAD DRIVER drains that queue BEHIND THE LOADING SCREEN** (`restyleBehindScreen` →
   `chunkStream.restyleStale`, reached through the published `RENDER_HANDLES`), which is the same shape as the
   world entry driving `warmUp` into the same screen. `restyleNext(128)` is the ONE batch both callers use —

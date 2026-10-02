@@ -2614,6 +2614,31 @@ Still outstanding:
   material carries the flag → a repeat and the key release are ignored → `G` does not disturb it → `H` again
   restores the solid look); live: 60 fps with the wireframe on, and the ring boundary is visible as a density
   change rather than a colour change.
+- **P1.97 — a resource-pack switch now reaches the LOD ring (the reload's set was too narrow).** `DONE`, by
+  request («已加载的lod切换资源包后不更新贴图当加载新的lod或者就lod被刷新后就加载新资源包的题图什么问题» — the
+  user's report was exact, including the two cases that DID work).
+  THE BUG: the reload's "re-resolve the looks" queue is filled by `VoxelWorld.markAllStale()`, which walks the
+  WORLD's chunk map. The FAR RING is procedural and deliberately holds no chunk in that map (P1.93: it costs the
+  world no voxel memory), so it was never named — and `restyle(key)` looks a chunk up by key, where a far entry's
+  key is `"2:cx,cy,cz"` in coarse units. Every already-loaded far chunk therefore kept the PREVIOUS chain's
+  material objects (the driver disposes and clears the material cache, but a mesh still holding the old material
+  keeps rendering the old texture), while a far chunk built AFTER the reload — or one that was rebuilt after
+  leaving and re-entering the ring — resolved fresh materials and looked right. Exactly the three behaviours
+  reported: loaded = stale look, new/refreshed = new look.
+  THE FIX is the second queue: `ChunkStreamSystem.markFarStale()` names every `step > 1` entry in the mesh cache,
+  `restyleNext` drains the world's queue AND that one under the same per-frame budget, `restylePending` is their
+  sum (the reload bar counts real work, so it has to see both), and the driver marks both in ONE place
+  (`markChainStale`) on the success path and the rollback path alike. Nothing is meshed: `restyle` re-resolves
+  the geometry's `(value, kind)` slots into the new chain's looks and swaps the material — and because that path
+  also re-applies the debug views, a `G`/`H` state survives a reload on the far ring too.
+  THE INVARIANT, now written down where it can be read: **a chain change must reach everything in the
+  CHUNK_MESHES cache, not everything the world holds.** The gate asserts it with a generation stamp on every
+  material the factory hands out: the world's queue alone leaves the far ring untouched (the bug, asserted as
+  the contrast), and after `markFarStale()` EVERY entry — fine and far — has been re-resolved with no mesh lost
+  and both queues empty.
+  VERIFIED: `tsc` 0; `check:ecs` 77/77; live: F7's reload line now counts the far ring as well
+  (`<n> chunk(s) stale, <n> restyled behind the screen`), and the far terrain takes the new chain's look without
+  being rebuilt.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

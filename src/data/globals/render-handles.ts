@@ -21,6 +21,13 @@ export interface RenderHandles {
       yieldTo: () => Promise<void>,
       onProgress?: (done: number, total: number) => void,
     ): Promise<void>;
+    /** Mark the FAR RING's meshes for a look re-resolution and answer how many (P1.97). A chain change has to
+     *  call this NEXT TO `VoxelWorld.markAllStale()`: the far ring is procedural and holds no chunk in the
+     *  world, so the world's queue can never name it. */
+    markFarStale(): number;
+    /** How much look work is queued in total — the world's stale chunks PLUS the far ring (P1.97). The reload
+     *  bar counts it, so it has to see both. */
+    readonly restylePending: number;
   };
   /** The MENU frame drives this too (`menuFrame`): the background own step, once per ui frame. */
   readonly menuBackground: { step(): void };

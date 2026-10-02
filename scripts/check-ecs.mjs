@@ -1203,6 +1203,7 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   viewWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
   const edges = createKeyEventLog();
   viewWorld.insertResource(KEY_EVENTS, edges);
+  let materialGen = 0;
   const recording = {
     createGeometry: () => ({
       geometry: { dispose() {}, morphAttributes: {} },
@@ -1212,8 +1213,9 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
       restyle: () => 1,
       dispose() {},
     }),
-    // The one thing this factory owes the assertion: it is ASKED for a tint, per mesh.
-    getMaterial: (_state, _spec, tint) => ({ tint: tint ?? null }),
+    // The one thing this factory owes the assertion: it is ASKED for a tint, per mesh — and every resolution is
+    // stamped, so "was this mesh re-resolved after the chain change" is observable (P1.97).
+    getMaterial: (_state, _spec, tint) => ({ tint: tint ?? null, gen: ++materialGen }),
   };
   const view = new ChunkStreamSystem(viewWorld, recording, null, policy);
   view.step();
@@ -1267,6 +1269,32 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   publishKeyEdge(edges, { code: "KeyH", down: true, repeat: false });
   view.step();
   equal(wires().every((w) => w === false), true, "H again puts the solid geometry back");
+
+  // 3c. A CHAIN CHANGE MUST REACH EVERY MESH IN THE CACHE (P1.97 — measured bug). The reload's stale queue is
+  //     filled from the WORLD (`VoxelWorld.markAllStale`), and the FAR RING is procedural — it holds no chunk in
+  //     that map — so every already-loaded far chunk used to keep the PREVIOUS chain's materials and only picked
+  //     the new ones up when it happened to be built or rebuilt. `markFarStale()` is the second queue.
+  const genOf = (e) => (Array.isArray(e.mesh.material) ? e.mesh.material[0] : e.mesh.material).gen;
+  const gens = (step) =>
+    [...viewCache.meshes.values()].filter((e) => step === undefined || e.step === step).map(genOf);
+  const farBefore = gens(2);
+  const fineBefore = gens(1);
+  assert(farBefore.length > 0, "the far ring has meshes in the cache (the case that broke)");
+  // The OLD path, on its own: the world's queue reaches the fine ring and CANNOT name a far chunk — the bug.
+  viewVoxel.markAllStale();
+  view.restyleNext(4096);
+  assert(gens(1).every((g, i) => g !== fineBefore[i]), "the world's queue does re-resolve the FINE ring");
+  equal(gens(2).join(","), farBefore.join(","), "…but it cannot reach the far ring — that was the bug");
+  // …and with the far queue marked, EVERY entry changes generation, with no mesh lost.
+  const marked = view.markFarStale();
+  assert(marked > 0, `markFarStale names the far meshes (${marked})`);
+  assert(view.restylePending >= marked, "…and the pending count includes them (the reload bar counts both queues)");
+  viewVoxel.markAllStale();
+  view.restyleNext(4096);
+  equal(gens(2).length, farBefore.length, "no far mesh left the cache");
+  assert(gens(2).every((g, i) => g !== farBefore[i]), "EVERY far mesh was re-resolved");
+  assert(gens(1).every((g, i) => g !== fineBefore[i]), "…and every fine one too");
+  equal(view.restylePending, 0, "…and both queues are empty afterwards");
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {

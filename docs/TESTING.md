@@ -91,6 +91,19 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   toggle it, and it must compose with `G`: press both and you get a tier-COLORED wireframe — the combination to
   use when checking the LOD's shape. Also worth a look while it is on: a dug block's hole must show its own
   faces (P1.91) and the ring seam must show no missing triangles (P1.95).
+→ **A PACK SWITCH MUST RESTYLE BOTH RINGS (P1.97 — this was a real bug)**: stand somewhere the far ring is on
+  screen (fly up ~200 blocks, or just look at the horizon), open Settings → Resource packs and toggle a pack
+  that changes BLOCK LOOKS (in the sample install, disabling the mod drops the block textures to the engine's
+  fallback — the most visible case). After the reload:
+  (a) the FINE ring changes look **immediately** (it always did);
+  (b) the FAR ring must change **too, without being rebuilt** — this is the fix. Before it, the already-loaded
+      far terrain kept the old textures and only a NEW or REBUILT far chunk looked right, so the world showed
+      two different looks in the same view, with the boundary between them being wherever the far ring happened
+      to be rebuilt;
+  (c) press `G` while doing it: the tier colours must survive the reload on BOTH rings;
+  (d) `debug.log`'s reload line counts both queues now
+      (`… <n> chunk(s) stale, <n> restyled behind the screen (looks only, no re-mesh)`), and the number is
+      larger than the world's chunk count alone would give.
 → **THE SEAM MUST NOT LEAK (P1.95 — this was a real bug, one block big)**: walk along the boundary between the
   green (fine) and blue (far) rings with `G` on, and look at the terrain exactly where the two colours meet.
   There must be NO single-block window you can see into (the far side's wall used to be culled wherever the
