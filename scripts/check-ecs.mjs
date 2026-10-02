@@ -1235,6 +1235,38 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   publishKeyEdge(edges, { code: "KeyG", down: true, repeat: false });
   view.step();
   equal(tierOf().filter((t) => !t.endsWith(":null")).length, 0, "pressing it again puts the plain look back");
+
+  // 3b. `H` — THE TRIANGLE WIREFRAME (P1.96): the same material switch, one flag further, and the two keys are
+  //     INDEPENDENT (a wireframe you can still colour by tier is what makes it useful while checking the LOD).
+  const wireOf = (m) => (Array.isArray(m) ? (m[0]?.wireframe ?? null) : (m?.wireframe ?? null));
+  const wires = () => [...viewCache.meshes.values()].map((e) => wireOf(e.mesh.material));
+  assert(wires().length > 0, "there are meshes to switch");
+  assert(wires().every((w) => w === false), "with H off every mesh is solid geometry");
+  publishKeyEdge(edges, { code: "KeyH", down: true, repeat: false });
+  view.step();
+  assert(wires().every((w) => w === true), "H draws EVERY chunk mesh as a triangle wireframe");
+  // …and it must also mark the material for RECOMPILATION: three.js caches a pipeline per material and the
+  // wireframe flag decides the primitive TOPOLOGY, so setting the flag alone leaves the world solid (measured).
+  const materials = [...viewCache.meshes.values()].flatMap((e) =>
+    Array.isArray(e.mesh.material) ? e.mesh.material : [e.mesh.material],
+  );
+  assert(materials.every((m) => m.needsUpdate === true), "…and asks three.js to rebuild those materials");
+  // A repeat and the key release are ignored, exactly like G.
+  publishKeyEdge(edges, { code: "KeyH", down: true, repeat: true });
+  publishKeyEdge(edges, { code: "KeyH", down: false, repeat: false });
+  view.step();
+  assert(wires().every((w) => w === true), "a repeat/keyup does not toggle the wireframe");
+  // …and it composes with the tint: G on, H on, then G off leaves the wireframe alone.
+  publishKeyEdge(edges, { code: "KeyG", down: true, repeat: false });
+  view.step();
+  assert(wires().every((w) => w === true), "G does not disturb the wireframe");
+  assert(tierOf().every((t) => !t.endsWith(":null")), "…and the tint came back with it");
+  publishKeyEdge(edges, { code: "KeyG", down: true, repeat: false });
+  view.step();
+  assert(wires().every((w) => w === true), "turning the tint off leaves the wireframe on");
+  publishKeyEdge(edges, { code: "KeyH", down: true, repeat: false });
+  view.step();
+  equal(wires().every((w) => w === false), true, "H again puts the solid geometry back");
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {

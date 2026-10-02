@@ -590,13 +590,20 @@ where it is:
   column, every ODD column left one fine column owned by neither ring — a 32-block-wide, full-depth column
   with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through — and one owned by
   both. `fineBase(null, pc) === pc`, so the no-LOD path is untouched, and the gate tiles every parity.
-* **`G` IS THE LOD VIEW (P1.94).** In a world, `G` tints every chunk mesh by its TIER: the fine ring in
-  `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a textured block keeps its
-  texture and takes the hue). It is handled by `chunk-stream` itself — that system owns the meshes and their
-  materials, and a retint is a material swap per entry (`toggleLodTint`), as cheap as the reload's restyle. The
-  key arrives through the same `KEY_EVENTS` log every other global chord uses (its own `KeyEdgeReader` cursor;
-  `player.input` still owns the DOM listeners), `G` is bound to nothing else, and the tint is part of the
-  material CACHE key, so the untinted materials stay cached and the view toggles off for free.
+* **`G` AND `H` ARE THE DEBUG VIEWS (P1.94/P1.96).** In a world, `G` tints every chunk mesh by its TIER: the
+  fine ring in `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a textured block
+  keeps its texture and takes the hue), and `H` switches every chunk mesh to three.js's TRIANGLE WIREFRAME (the
+  mesher emits triangles, so what you see is the mesh's real triangle edges, not the block grid). Both are
+  handled by `chunk-stream` itself — that system owns the meshes and their materials, and a toggle is one
+  material swap per entry (`refreshMaterials`), as cheap as the reload's restyle. The keys arrive through the
+  same `KEY_EVENTS` log every other global chord uses (its own `KeyEdgeReader` cursor, ONE drain for both;
+  `player.input` still owns the DOM listeners), neither key is bound to anything else, and a held key (repeat)
+  or the key release is ignored.
+  TWO PROPERTIES WORTH KEEPING: the tint is part of the material CACHE key, so a tinted world holds one extra
+  material per (look, tier) and the untinted materials stay cached; and the WIREFRAME flag is applied on EVERY
+  material resolution (`debugged`) rather than only on the key press, so a pack reload — which drops that cache
+  and builds fresh materials — cannot silently lose the view. The two keys are independent, so a tier-coloured
+  wireframe (the useful combination while checking the LOD) is just both pressed.
   MEASURED (this machine, P1.92 for comparison): the fine ring alone is 1568 chunks / 324 materialised /
   241k faces / 35 MB; the far ring adds 1408 chunks / 296 materialised / 245k faces / 35 MB at 0.83 ms per
   chunk, taking the visible world from ~256 to ~512 blocks for 486k faces and 70 MB in total — i.e. **twice

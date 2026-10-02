@@ -2599,6 +2599,21 @@ Still outstanding:
   precisely what hid this class of hole — one block across.
   NOT CHANGED, BY REQUEST: the world's outer rim still draws no walls (the documented "edge of the world") and
   the ring boundary is still a visible LEDGE (the conservative max), not a stitched seam.
+- **P1.96 — `H` shows the meshes as a triangle wireframe.** `DONE`, by request («现在添加个h键位显示三角形线框»).
+  `H` switches every chunk mesh to three.js's triangle wireframe: the mesher emits two triangles per face, so
+  what you see is the mesh's REAL triangle edges (a flat ground shows the diagonal of every quad), which is what
+  makes it useful for checking the things the last few rounds were about — a dug block's faces (P1.91), the ring
+  boundary (P1.93/P1.95) and the LOD's coarse tier (whose triangles are twice as big as the fine ring's).
+  HOW IT IS DONE, and the one non-obvious part: `wireframe` is a flag on the (shared, cached) chunk material, so
+  ONE key press switches every chunk at once — but it is applied on every material RESOLUTION (`debugged` in
+  `chunk-stream`), not only on the key press, so a pack reload (which drops the material cache and builds fresh
+  materials) cannot silently lose the view. Both debug keys now share one `KEY_EVENTS` drain and one
+  `refreshMaterials`, and they are independent: `G` + `H` gives a tier-COLOURED wireframe, which is the useful
+  combination while checking the LOD.
+  VERIFIED: `tsc` 0; `check:ecs` 77/77 with the `H` path driven end to end on a real stream (on → every entry's
+  material carries the flag → a repeat and the key release are ignored → `G` does not disturb it → `H` again
+  restores the solid look); live: 60 fps with the wireframe on, and the ring boundary is visible as a density
+  change rather than a colour change.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

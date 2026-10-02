@@ -84,6 +84,13 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   exactly where the coarse terrain starts (~448 blocks). Press G again and the real textures come back. It must
   NOT toggle on a held key (a repeat is one press) or on the key release, and it must survive walking (the
   colours follow the chunks, since they are a material, not a one-off paint).
+→ **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
+  real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
+  diagonal of every quad). Fly up and look at the ring boundary: the fine ring's triangles are dense, the far
+  ring's are twice as big. Press H again for solid geometry. A held key (repeat) and the key release must NOT
+  toggle it, and it must compose with `G`: press both and you get a tier-COLORED wireframe — the combination to
+  use when checking the LOD's shape. Also worth a look while it is on: a dug block's hole must show its own
+  faces (P1.91) and the ring seam must show no missing triangles (P1.95).
 → **THE SEAM MUST NOT LEAK (P1.95 — this was a real bug, one block big)**: walk along the boundary between the
   green (fine) and blue (far) rings with `G` on, and look at the terrain exactly where the two colours meet.
   There must be NO single-block window you can see into (the far side's wall used to be culled wherever the

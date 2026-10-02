@@ -145,6 +145,8 @@ export class ChunkStreamSystem {
    *  other consumer of a global chord (ui.picker, ui.navigation) — the DOM listeners are `player.input`'s. */
   private readonly keys: KeyEdgeReader;
   private lodTint = false;
+  /** `H` draws the meshes as TRIANGLE WIREFRAME (P1.96) — the same material switch, one flag further. */
+  private wireframe = false;
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
   private readonly voxel: VoxelWorld;
@@ -315,14 +317,25 @@ export class ChunkStreamSystem {
     // the scene is never touched from a worker callback and the order stays deterministic.
     this.drain();
 
-    // G: THE LOD VIEW (P1.94). The edges are published by `player.input` and every consumer keeps its own
-    // cursor, so a second consumer costs the log nothing. Handled HERE because this system owns the meshes and
-    // their materials — the toggle IS a material change, and no other system may touch a mesh.
-    let toggles = 0;
+    // G AND H: THE DEBUG VIEWS (P1.94/P1.96). The edges are published by `player.input` and every consumer
+    // keeps its own cursor, so a second consumer costs the log nothing. Handled HERE because this system owns
+    // the meshes and their materials — both toggles ARE material changes, and no other system may touch a mesh.
+    // One drain for both keys, and an ODD number of presses flips (a repeat or a key release is ignored).
+    let tintPresses = 0;
+    let wirePresses = 0;
     this.keys.drain((edge) => {
-      if (edge.down && !edge.repeat && edge.code === "KeyG") toggles++;
+      if (!edge.down || edge.repeat) return;
+      if (edge.code === "KeyG") tintPresses++;
+      else if (edge.code === "KeyH") wirePresses++;
     });
-    if ((toggles & 1) === 1) this.toggleLodTint();
+    if ((tintPresses & 1) === 1) {
+      this.lodTint = !this.lodTint;
+      this.refreshMaterials();
+    }
+    if ((wirePresses & 1) === 1) {
+      this.wireframe = !this.wireframe;
+      this.refreshMaterials();
+    }
 
     // THE FINE WINDOW IS COARSE-ALIGNED (P1.94 — measured bug). `fineBase` rounds the player's column DOWN to
     // the coarse grid the far ring's inner hole is built on; without it every odd column left one fine column
@@ -702,14 +715,36 @@ export class ChunkStreamSystem {
    *  keys its cache by it), so a tinted world costs one extra material per (look, tier) — not one per chunk. */
   private materialsFor(geom: ChunkMeshEntry["geom"], step: number): THREE.Material | THREE.Material[] {
     const tint = this.lodTint ? tierTint(step) : null;
-    if (geom.specs.length === 0) return this.mesh.getMaterial(this.material, undefined, tint);
-    return geom.specs.map((spec) => this.mesh.getMaterial(this.material, spec, tint));
+    if (geom.specs.length === 0) {
+      return this.debugged(this.mesh.getMaterial(this.material, undefined, tint));
+    }
+    return geom.specs.map((spec) => this.debugged(this.mesh.getMaterial(this.material, spec, tint)));
   }
 
-  /** G: flip the LOD view and re-resolve every mesh's material IN PLACE (the geometry is untouched — a retint
-   *  is a material swap, which is exactly as cheap as the pack reload's restyle). */
-  private toggleLodTint(): void {
-    this.lodTint = !this.lodTint;
+  /** Apply the debug view's material switches. They are set on the material the CACHE hands back — shared per
+   *  (look, tier), which is what makes ONE key press switch every chunk at once — and they are applied on
+   *  EVERY resolution rather than only on the key press, so a pack reload (which drops that cache and builds
+   *  fresh materials) cannot silently lose the view. `wireframe` is three.js's triangle wireframe: the mesher
+   *  emits triangles, so what you see is the mesh's real triangle edges, not the block grid. */
+  private debugged(material: THREE.Material): THREE.Material {
+    // `wireframe` lives on the CONCRETE materials (lambert/basic), not on the `Material` base the factory is
+    // typed with, so it is set through a cast and a material without one is simply left alone.
+    const m = material as THREE.Material & { wireframe?: boolean };
+    // THE FLAG MUST BE FOLLOWED BY A RECOMPILE. `wireframe` is not a draw-time-only setting: three.js picks the
+    // pipeline's PRIMITIVE TOPOLOGY from it (triangle list vs line list) and caches a pipeline PER MATERIAL, so
+    // the flag alone is not enough for the change to reach the GPU — the material has to be marked dirty. It is
+    // only marked when the value actually CHANGES, or every resolution would rebuild every chunk's pipeline
+    // every frame. (This is also why the gate asserts `needsUpdate` rather than only the flag.)
+    if (m.wireframe !== this.wireframe) {
+      m.wireframe = this.wireframe;
+      m.needsUpdate = true;
+    }
+    return material;
+  }
+
+  /** Re-resolve every entry's material IN PLACE after a debug toggle: the geometry is untouched, so this is a
+   *  material swap per chunk — exactly as cheap as the pack reload's restyle. */
+  private refreshMaterials(): void {
     for (const entry of this.cache.meshes.values()) {
       entry.mesh.material = this.materialsFor(entry.geom, entry.step);
     }
