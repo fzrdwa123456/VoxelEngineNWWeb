@@ -107,11 +107,24 @@ function wrapBlock(v: number): number {
  *  A cache of a DETERMINISTIC function of (cx, cz) cannot go stale — the field never changes — which is what
  *  makes module-level state safe here (the generator keeps its own scratch grid for the same reason). */
 let memoSampledKey = "";
-let memoSampled: Int16Array | null = null;
+let memoSampled: { readonly max: Int16Array; readonly min: Int16Array } | null = null;
 
-/** The (S+2)² grid of sampled heights for one coarse column: one height per super voxel, plus one cell of
- *  border on every side, because the ±X/±Z planes ARE the solidity of the neighbouring coarse cells. */
-function sampledGrid(policy: LodPolicy, cx: number, cz: number): Int16Array {
+/** The (S+2)² grids of sampled heights for one coarse column, plus one cell of border on every side, because
+ *  the ±X/±Z planes ARE the solidity of the neighbouring coarse cells.
+ *
+ *  TWO GRIDS, and the difference is the P1.95 fix: `max` is the MAXIMUM height over the `step × step` fine
+ *  columns a super voxel covers (conservative — the coarse surface is never BELOW the fine one, so the BODY
+ *  cannot leave a crack), and `min` is the MINIMUM (cull-safe — a face is only culled when the WHOLE covered
+ *  area is solid). They are used for different things: the body and the ±Y planes take `max` (the vertical
+ *  neighbour is always the same level, so max is exact there), while the ±X/±Z planes take `min`, because the
+ *  neighbour on those sides may be the FINE ring, whose geometry is per BLOCK. Culling a 2×2-wide quad with
+ *  `max` while the fine side is per block deleted the wall wherever the terrain stepped inside the cell — a
+ *  one-block hole you could see into (measured: 3 of 1024 cells on one wall, 2 of them showing the interior). */
+function sampledGrid(
+  policy: LodPolicy,
+  cx: number,
+  cz: number,
+): { readonly max: Int16Array; readonly min: Int16Array } {
   const key = `${cx},${cz}`;
   if (memoSampledKey === key && memoSampled !== null) return memoSampled;
   const S = CHUNK_SIZE;
@@ -119,25 +132,28 @@ function sampledGrid(policy: LodPolicy, cx: number, cz: number): Int16Array {
   const W = S + 2;
   const gx0 = cx * S * step;
   const gz0 = cz * S * step;
-  const grid = new Int16Array(W * W);
+  const maxGrid = new Int16Array(W * W);
+  const minGrid = new Int16Array(W * W);
   for (let j = 0; j < W; j++) {
     for (let i = 0; i < W; i++) {
       const bx = gx0 + (i - 1) * step;
       const bz = gz0 + (j - 1) * step;
-      let h = 0;
+      let hi = 0;
+      let lo = TERRAIN_MAX_Y;
       for (let dz = 0; dz < step; dz++) {
         for (let dx = 0; dx < step; dx++) {
-          // MAX over the covered fine columns: the conservative choice (see the header) — never lower.
           const t = terrainHeight(wrapBlock(bx + dx), wrapBlock(bz + dz));
-          if (t > h) h = t;
+          if (t > hi) hi = t;
+          if (t < lo) lo = t;
         }
       }
-      grid[j * W + i] = h;
+      maxGrid[j * W + i] = hi;
+      minGrid[j * W + i] = lo;
     }
   }
+  memoSampled = { max: maxGrid, min: minGrid };
   memoSampledKey = key;
-  memoSampled = grid;
-  return grid;
+  return memoSampled;
 }
 
 /** Build the mesh input for ONE coarse chunk: the whole 32³ array plus the six neighbour planes, all from a
@@ -156,7 +172,8 @@ export function buildLodMeshInput(
   const top = bottom + S;
   const grid = sampledGrid(policy, cx, cz);
   const W = S + 2;
-  const cellAt = (i: number, j: number): number => grid[j * W + i];
+  const cellAt = (i: number, j: number): number => grid.max[j * W + i];
+  const cellFloor = (i: number, j: number): number => grid.min[j * W + i];
 
   // The bounds of the CHUNK's own cells (a border cell that is solid above/below is there to cull a face, and
   // must not turn a uniform chunk into a materialised one).
@@ -164,33 +181,42 @@ export function buildLodMeshInput(
   let highest = TERRAIN_MIN_Y - 1;
   for (let j = 1; j <= S; j++) {
     for (let i = 1; i <= S; i++) {
-      const h = grid[j * W + i];
+      const h = grid.max[j * W + i];
       if (h < lowest) lowest = h;
       if (h > highest) highest = h;
     }
   }
 
   const planes = new Uint8Array(6 * S * S);
-  /** One plane cell: SOLID iff the terrain of that coarse column reaches y — the same `y < h` the world's
-   *  `isSolid` gives for a generated column, which is what keeps the rings culling each other correctly. */
-  const at = (plane: number, a: number, b: number, i: number, j: number, y: number): void => {
+  /** The ±Y planes: SOLID iff the coarse column's terrain reaches y. `max` is EXACT here — the chunk above or
+   *  below a far chunk is always a far chunk (the rings are split by COLUMN, so all 8 Y chunks of a column
+   *  belong to the same ring), i.e. the vertical neighbour has the very same super-voxel granularity. */
+  const atVertical = (plane: number, a: number, b: number, i: number, j: number, y: number): void => {
     planes[plane * S * S + a * S + b] = y < cellAt(i, j) ? 1 : 0;
+  };
+  /** The ±X/±Z planes: SOLID only if the WHOLE `step × step` area the quad covers is solid (`min`, not `max`),
+   *  because that neighbour may be the FINE ring, whose geometry is per block. It costs a few extra quads —
+   *  measured 3 of 1024 cells on a boundary wall, hidden behind the neighbour's own body — and it is what
+   *  closes the one-block holes. Between two FAR chunks `max` would be exact, so `min` only over-draws there,
+   *  which is cheaper than making the rule depend on where the player happens to stand. */
+  const atSide = (plane: number, a: number, b: number, i: number, j: number, y: number): void => {
+    planes[plane * S * S + a * S + b] = y < cellFloor(i, j) ? 1 : 0;
   };
   for (let ly = 0; ly < S; ly++) {
     const y = bottom + ly;
     for (let lz = 0; lz < S; lz++) {
-      at(PLANE.PX, ly, lz, S + 1, lz + 1, y); // the coarse cell just east of this chunk
-      at(PLANE.NX, ly, lz, 0, lz + 1, y); //     …just west
+      atSide(PLANE.PX, ly, lz, S + 1, lz + 1, y); // the coarse cell just east of this chunk
+      atSide(PLANE.NX, ly, lz, 0, lz + 1, y); //     …just west
     }
     for (let lx = 0; lx < S; lx++) {
-      at(PLANE.PZ, lx, ly, lx + 1, S + 1, y); // …just south
-      at(PLANE.NZ, lx, ly, lx + 1, 0, y); //     …just north
+      atSide(PLANE.PZ, lx, ly, lx + 1, S + 1, y); // …just south
+      atSide(PLANE.NZ, lx, ly, lx + 1, 0, y); //     …just north
     }
   }
   for (let lz = 0; lz < S; lz++) {
     for (let lx = 0; lx < S; lx++) {
-      at(PLANE.PY, lx, lz, lx + 1, lz + 1, top); //      the first block of the chunk above
-      at(PLANE.NY, lx, lz, lx + 1, lz + 1, bottom - 1); // the last block of the chunk below
+      atVertical(PLANE.PY, lx, lz, lx + 1, lz + 1, top); //      the first block of the chunk above
+      atVertical(PLANE.NY, lx, lz, lx + 1, lz + 1, bottom - 1); // the last block of the chunk below
     }
   }
 

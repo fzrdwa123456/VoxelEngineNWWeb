@@ -1136,6 +1136,56 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   equal(L.isFarColumn(policy, 0, 0), false, "the far ring never covers a column the fine ring owns");
   equal(L.isFarColumn(policy, policy.farRadius + 1, 0), false, "…nor anything past its radius");
 
+  // 2b. THE SIDE WALLS MAY NOT BE CULLED AGAINST A FINER NEIGHBOUR (P1.95 — measured bug, one block big).
+  //     A far chunk's ±X/±Z quad is `step × step` BLOCKS wide while the neighbour on that side may be the FINE
+  //     ring, whose surface is per block. Culling with the MAXIMUM height of the covered cell deletes the wall
+  //     wherever the terrain steps INSIDE the cell, and the fine block that is lower has no geometry either —
+  //     so you see into the terrain through a hole at most one block across (measured: 3 of 1024 cells on one
+  //     boundary wall, 2 of them showing the interior). The rule is therefore `min`: cull only when the WHOLE
+  //     covered area is solid. This asserts it PER BLOCK, which is what the old check missed — it ORed the two
+  //     z blocks of the cell together, and that hid exactly this case.
+  let wallCells = 0;
+  let wallHoles = 0;
+  let extraWalls = 0;
+  for (const [cx, cz] of [[policy.fineRadius + 1, 0], [0, policy.fineRadius + 1], [policy.fineRadius + 1, policy.fineRadius + 1]]) {
+    if (!L.isFarColumn(policy, cx, cz)) continue;
+    for (let cy = 2; cy <= 5; cy++) {
+      const input = L.buildLodMeshInput(policy, cx, cy, cz, stone, dirt, grass);
+      if (input.uniform) continue;
+      const gx0 = cx * policy.step * CHUNK_SIZE;
+      const gz0 = cz * policy.step * CHUNK_SIZE;
+      // The west wall faces the coarse cell at `gx0 - step`, which covers `step × step` FINE BLOCKS.
+      for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+        const y = cy * CHUNK_SIZE + ly;
+        for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+          const culled = input.planes[1 * CHUNK_SIZE * CHUNK_SIZE + ly * CHUNK_SIZE + lz] === 1;
+          let solid = 0;
+          let total = 0;
+          for (let dx = 0; dx < policy.step; dx++) {
+            for (let dz = 0; dz < policy.step; dz++) {
+              const fx = gx0 - policy.step + dx;
+              const fz = gz0 + lz * policy.step + dz;
+              for (let cy2 = 2; cy2 <= 5; cy2++) {
+                world.ensureChunk(Math.floor(fx / CHUNK_SIZE), cy2, Math.floor(fz / CHUNK_SIZE));
+              }
+              total++;
+              if (world.isSolid(fx, y, fz)) solid++;
+            }
+          }
+          wallCells++;
+          if (culled && solid < total) wallHoles++; // culled although part of it is air → a hole
+          if (!culled && solid === total) extraWalls++; // drawn although it is fully solid → harmless overdraw
+        }
+      }
+    }
+  }
+  assert(wallCells > 500, `the side walls really were inspected (${wallCells} cells)`);
+  equal(wallHoles, 0, "no side wall is culled while ANY block it covers is air — that was the one-block hole");
+  assert(
+    extraWalls < wallCells * 0.05,
+    `the cull-safe rule over-draws a little, not a lot (${extraWalls} of ${wallCells} cells)`,
+  );
+
   // 3. THE `G` LOD VIEW (P1.94): every mesh is tinted by its TIER, and pressing G again puts the look back.
   //    Driven on a real stream over a real world with a RECORDING factory, so this asserts the whole path:
   //    the key edge → the toggle → the material re-resolve → what each mesh ends up holding.

@@ -2574,6 +2574,31 @@ Still outstanding:
   `G` test driving a real stream with a recording factory: plain → tinted per tier → unchanged by a repeat or a
   key release → plain again); the real-stream tiling probe above. Not changed: the mesher, the ring policy
   numbers, the streaming budgets, and the far ring's procedural nature.
+- **P1.95 — the one-block holes at the LOD seam are closed (the cull-safe side planes).** `DONE`, by request
+  («边缘位置由于方块简化后边对不上可以看到侧面被剔除的部分导致的空洞非常的小只有一个方块那样»).
+  THE BUG, exactly as the user described it: a far chunk's ±X/±Z quad is `step × step` BLOCKS wide, but the
+  neighbour on that side may be the FINE ring, whose surface is per BLOCK. The plane was built from the MAXIMUM
+  height of the covered cell, so wherever the terrain stepped INSIDE that 2×2 area the wall was culled — and
+  the lower fine block has no geometry of its own either, so you saw straight into the terrain through a hole at
+  most one block across. Measured on the boundary wall of one far chunk: 863 of 1024 cells culled, 3 of them
+  covering at least one air fine block, 2 with the far chunk's own body solid behind (i.e. showing its
+  interior). Over three sampled boundary walls: 16 such cells.
+  THE FIX is a second sampled grid: the sampler now keeps BOTH the MAXIMUM and the MINIMUM height of the
+  covered `step × step` fine columns. The BODY and the ±Y planes take `max` (unchanged — the vertical neighbour
+  is always the same level, because the rings are split by COLUMN, so `max` is exact there and the conservatism
+  that makes cracks impossible is untouched); the ±X/±Z planes take `min`, i.e. a side wall is culled only when
+  the WHOLE area it covers is solid. That is the only rule that is safe against a neighbour at ANY level, so it
+  needs no knowledge of where the player stands (the alternative — a per-side "does this face the fine ring"
+  mask — would have to live in the far chunk's KEY, because the answer changes as the ring moves).
+  COST, measured on the far ring (1408 chunks / 296 materialised): **+2,439 faces (+1.0%)**, 35.5 → 35.9 MB,
+  0.83 → 0.87 ms per chunk. The extra walls are drawn where the neighbour cell is only PARTLY solid, i.e. they
+  are hidden behind the neighbour's own blocks — overdraw, not visible geometry.
+  THE GATE NOW CHECKS IT PER BLOCK: every ±X/±Z plane cell that says "solid" must have every fine block it
+  covers solid at that height, and the extra-wall ratio must stay small. Verified to FAIL on the old rule with
+  exactly 16 bad cells, so the assertion has teeth. The old check ORed the two z blocks of the cell, which is
+  precisely what hid this class of hole — one block across.
+  NOT CHANGED, BY REQUEST: the world's outer rim still draws no walls (the documented "edge of the world") and
+  the ring boundary is still a visible LEDGE (the conservative max), not a stitched seam.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

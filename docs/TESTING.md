@@ -84,6 +84,12 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   exactly where the coarse terrain starts (~448 blocks). Press G again and the real textures come back. It must
   NOT toggle on a held key (a repeat is one press) or on the key release, and it must survive walking (the
   colours follow the chunks, since they are a material, not a one-off paint).
+→ **THE SEAM MUST NOT LEAK (P1.95 — this was a real bug, one block big)**: walk along the boundary between the
+  green (fine) and blue (far) rings with `G` on, and look at the terrain exactly where the two colours meet.
+  There must be NO single-block window you can see into (the far side's wall used to be culled wherever the
+  fine terrain stepped inside the coarse cell). Press G off and check the same line: no hole, no sliver of sky
+  through solid-looking ground. The tell is that the holes were TINY (one block) and rare — they only appear
+  where a 2×2 fine cell straddles a height step on the seam, so walk the whole junction rather than one spot.
 → **THE RINGS MUST TILE WHILE YOU WALK (P1.94 — this was a real bug)**: walk/sprint in ONE direction and keep
   watching the junction between the two colours. There must never be a 32-block-wide slot of sky through the
   ground, and never a strip that shimmers (two meshes in the same place). The old bug appeared only when the

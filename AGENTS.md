@@ -561,10 +561,20 @@ where it is:
   a 32³ array of 2×2×1 super voxels that goes through the very same `meshChunk` — the placement scales the mesh
   by `(step, 1, step)` and nothing in `mesh.ts` changed. Three properties make it work, and each is a thing to
   keep:
-  * **CONSERVATIVE**: every super voxel takes the MAXIMUM height of the fine columns it covers, so the coarse
-    surface is never below the fine one and a crack (a solid fine block with an air coarse voxel over it) is
-    impossible. The gate asserts exactly that, pointwise, against the real generator — it is the one property
-    that must not regress.
+  * **CONSERVATIVE, SO CRACKS ARE IMPOSSIBLE.** Every super voxel takes the MAXIMUM height of the fine columns
+    it covers, so the coarse surface is never below the fine one and a crack (a solid fine block with an air
+    coarse voxel over it) is impossible. The gate asserts exactly that, pointwise, against the real generator —
+    it is the one property that must not regress.
+  * **TWO GRIDS, AND THE SIDES USE THE `min` ONE (P1.95 — measured bug, one block big).** The sampler builds
+    both the MAXIMUM and the MINIMUM height of the covered `step × step` fine columns. The BODY and the ±Y
+    planes take `max` (the vertical neighbour is always the same level, because the rings are split by COLUMN,
+    so max is EXACT there). The ±X/±Z planes take `min`, because the neighbour on those sides may be the FINE
+    ring, whose surface is per BLOCK: a `step × step`-wide quad culled with `max` loses its wall wherever the
+    terrain steps INSIDE the cell, and the lower fine block has no geometry either — you look into the terrain
+    through a hole at most one block across (measured: 16 such cells over three boundary walls). Culling with
+    `min` (only when the WHOLE covered area is solid) closes them for +1.0% far-ring faces, and the extra walls
+    are hidden behind the neighbour's own body. The gate checks it PER BLOCK — an earlier version of that check
+    ORed the two z blocks of the cell together and hid exactly this case.
   * **PROCEDURAL AND POOL-FREE**: a far chunk samples `terrainHeight` (one (S+2)² grid, memoised per column
     because a column's 8 chunks stream back to back), so it reads NO world chunk, generates nothing into the
     world's map, and never goes to a worker. Its cost is spent from a COST-WEIGHTED per-frame budget
