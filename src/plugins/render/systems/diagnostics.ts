@@ -147,7 +147,7 @@ export class DiagnosticsSystem {
     // switch OFF) the lane draws 500-650 frames a second, i.e. 500-650 GPU query maps a second — a sync point
     // each — for a number that is printed once a second. It is also pointless while the panel is hidden. So it
     // is throttled to ~4 Hz AND only while the F3 panel is on screen.
-    const panelVisible = this.world.get(this.f3.panel, UI_STATE)?.hidden !== false;
+    const panelVisible = this.f3Visible();
     const now = performance.now();
     if (panelVisible && now - this.gpuSampleAt >= GPU_SAMPLE_MS) {
       this.gpuSampleAt = now;
@@ -184,11 +184,20 @@ export class DiagnosticsSystem {
     });
   }
 
+  /** Is the F3 panel on screen? The HUD spawns it `hidden: true` (ui.picker toggles it), so the
+   *  predicate is `hidden === false` — NOT `hidden !== false`. The inverted form was a P1.88
+   *  regression: the GPU timestamp resolve was skipped exactly when the panel was VISIBLE, so the
+   *  F3 `GPU:` number froze while everything else kept updating. ONE predicate, asked by both the
+   *  sampler gate and the writer below, so the two can no longer disagree. */
+  private f3Visible(): boolean {
+    return this.world.get(this.f3.panel, UI_STATE)?.hidden === false;
+  }
+
   /** The F3 debug text: one preformatted string written into the panel's label widget. Moved here from
    *  the HUD view — the numbers are this system's output, and a render-lane system calling into a view was
    *  the last non-ECS edge in this file. */
   private renderF3Panel(info: F3Stats): void {
-    if (this.world.get(this.f3.panel, UI_STATE)?.hidden !== false) return;
+    if (!this.f3Visible()) return;
     const topFinite = info.top !== null && Number.isFinite(info.top);
     const topStr = topFinite ? (info.top as number).toFixed(4) : t("f3.none");
     const diff = topFinite ? (info.feet - (info.top as number)).toFixed(4) : "-";

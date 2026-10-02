@@ -723,6 +723,61 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
     // (the same step keeps streaming the rest of the window, so the assertion is about THIS key, not a count)
     assert(!requests.slice(asked).includes(meshed[0]), "…so the edited chunk itself is not handed to a worker");
   }
+
+  // ===== 2c. AN EDIT RETIRES A JOB THAT IS ALREADY IN FLIGHT FOR THAT CHUNK (P1.91) =====
+  // `drain`'s contract is "the in-flight set is the validity token: a key that is no longer in it was rebuilt
+  // on this thread in the meantime (a block edit)". That was DOCUMENTED BUT NOT IMPLEMENTED on the edit path:
+  // `rebuild` left the key in flight, so a worker whose planes were gathered BEFORE the edit came back a frame
+  // later and overwrote the fresh mesh — the face the player had just exposed vanished again, which is the
+  // other half of "some faces do not render when breaking blocks". A one-job, hand-delivered pool makes "was
+  // the stale result applied" a single number.
+  const { AIR } = load("data/world/chunk.js");
+  const voxel2 = new VoxelWorld();
+  const world2 = new World();
+  world2.insertResource(VOXEL, voxel2);
+  world2.insertResource(LOCAL_PLAYER, localPlayer);
+  const cache2 = P.createChunkMeshCache({ add() {}, remove() {} });
+  world2.insertResource(P.CHUNK_MESHES, cache2);
+  world2.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  const inFlight2 = [];   // requested, not yet DELIVERED (a real worker's round trip)
+  const arrived2 = [];    // delivered: what the next `take()` hands the lane
+  const staleApplied = [];  // apply() calls: a mesh refilled from a worker's result
+  const probeMesh = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [],
+      apply: () => { staleApplied.push(1); return 1; },
+      rebuild: () => 10,   // a mesh WITH faces, so the main-thread edit really installs one
+      restyle: () => 1,
+      dispose: () => {},
+    }),
+    getMaterial: () => ({}),
+  };
+  const pool2 = {
+    workers: 1,
+    get inFlight() { return inFlight2.length; },
+    request(key, input) {
+      // ONE job at a time: a saturated pool, so the scenario is a single chunk and nothing else.
+      if (inFlight2.length > 0) return false;
+      inFlight2.push({ key, result: meshChunk(input) });   // meshed NOW: the pre-edit world
+      return true;
+    },
+    take() { return arrived2.splice(0, arrived2.length); },
+  };
+  const stream2 = new ChunkStreamSystem(world2, probeMesh, pool2);
+  stream2.prime(1, 3);
+  stream2.step();
+  equal(inFlight2.length, 1, "one chunk is out at the pool (the transport is saturated)");
+  equal(cache2.inFlight.size, 1, "…and the lane holds its validity token");
+  const jobKey = inFlight2[0].key;
+  const jp = jobKey.split(",").map(Number);
+  voxel2.setBlock(jp[0] * CHUNK_SIZE + 1, jp[1] * CHUNK_SIZE + 1, jp[2] * CHUNK_SIZE + 1, AIR);
+  stream2.step();
+  assert(!cache2.inFlight.has(jobKey),
+    "a block edit RETIRES the in-flight token for the chunk it rebuilds (the worker's planes predate the edit)");
+  arrived2.push(inFlight2.shift());   // the worker finally answers…
+  stream2.step();
+  equal(staleApplied.length, 0, "…and its pre-edit result is DROPPED, not applied over the fresher mesh");
   // A PACK RELOAD is BULK, and it RESTYLES instead of re-meshing (P1.18i): a new chain changes what a block
   // LOOKS like, while the vertex data depends on the VOXELS alone (every uv is a per-face constant), so the
   // geometry is still correct and only its look list has to be resolved again. That turns a reload from
@@ -821,6 +876,59 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   );
   assert(!/queued for a restyle/.test(reloadSrc),
     "…and the summary no longer promises work the game frames will do later",
+  );
+});
+
+check("a block broken at a chunk border re-meshes the RIGHT face of its ±Z neighbour (P1.91)", () => {
+  // MEASURED BUG: `gatherChunkMeshInput` lays every neighbour plane out as `a * S + b`, but `makeSolidAt`
+  // read the ±Z planes as `lx + ly * S` — TRANSPOSED. A uniform plane is symmetric, so the swap was
+  // invisible until a block was broken on a ±Z chunk border (that is also why the flat world hid it): the
+  // plane stops being uniform, the mesher culls a cell from somewhere ELSE in the same 32x32 layer, and the
+  // newly exposed face is simply MISSING — the player looks through the terrain.
+  //
+  // This drives the real world through the real gatherer, with all six neighbours LOADED so the sealed
+  // count is exactly 0 and the face that must appear is unambiguous.
+  const { meshChunk, gatherChunkMeshInput } = load("data/world/mesh.js");
+  const { VoxelWorld } = load("data/world/world.js");
+  const { AIR } = load("data/world/chunk.js");
+  const voxel = new VoxelWorld();
+  // Chunk (0,2,0) spans y 64..95 — solid stone, and (being below the surface band) UNIFORM, so it takes the
+  // mesher's shell fast path, which is exactly where the plane read happens.
+  for (const [dx, dy, dz] of [
+    [0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+  ]) {
+    voxel.ensureChunk(dx, 2 + dy, dz);
+  }
+  const meshOf = (cx, cy, cz) => meshChunk(gatherChunkMeshInput(voxel, voxel.ensureChunk(cx, cy, cz), cx, cy, cz));
+  /** Every face's CENTROID, local to the chunk: a +Z face on voxel (x,y,z) sits at (x+.5, y+.5, z+1). */
+  const centroids = (m) => {
+    const out = [];
+    for (let i = 0; i < m.faces; i++) {
+      const c = [0, 0, 0];
+      for (let v = 0; v < 4; v++) for (let k = 0; k < 3; k++) c[k] += m.positions[i * 12 + v * 3 + k] / 4;
+      out.push(`${c[0]},${c[1]},${c[2]}`);
+    }
+    return out.sort().join(" | ");
+  };
+  equal(meshOf(0, 2, 0).faces, 0, "a solid chunk inside six LOADED solid neighbours is sealed: nothing to draw");
+
+  // Break the block the player digs PAST: in the +Z neighbour's first layer, at local (5, 2) of the plane
+  // z = 32 — so the block at local (5, 2, 31) must paint its +Z face.
+  voxel.setBlock(5, 66, 32, AIR);
+  equal(meshOf(0, 2, 0).faces, 1, "breaking a block on the far side of the +Z border exposes exactly ONE face here");
+  equal(centroids(meshOf(0, 2, 0)), "5.5,2.5,32", "…the face of the block the player dug past, not of a transposed cell");
+
+  // …and the mirrored direction through the -Z neighbour's last layer (which WRAPS: z = -1).
+  voxel.setBlock(5, 66, -1, AIR);
+  equal(centroids(meshOf(0, 2, 0)), "5.5,2.5,0 | 5.5,2.5,32", "…and the ±Z planes are read with the same layout");
+
+  // The source contract behind it: the two halves must keep ONE layout (`a * S + b`). (Raw fs read:
+  // `readSource`/`stripComments` are declared further down the file, so they are in their TDZ here.)
+  const meshSrc = require("node:fs").readFileSync(path.join(ROOT, "src", "data", "world", "mesh.ts"), "utf8");
+  assert(
+    /if \(lz === S\) return planes\[PLANE\.PZ \* PLANE_BYTES \+ lx \* S \+ ly\] === 1;/.test(meshSrc) &&
+      /planes\[plane \* PLANE_BYTES \+ a \* S \+ b\]/.test(meshSrc),
+    "the mesher READS the Z planes with the layout the gatherer WRITES (a * S + b)",
   );
 });
 
@@ -2439,6 +2547,16 @@ check("diagnostics declares every external target it actually touches", () => {
   assert(/const GPU_SAMPLE_MS = 250/.test(diag), "the GPU timestamp query has a sampling interval");
   assert(/panelVisible && now - this\.gpuSampleAt >= GPU_SAMPLE_MS/.test(diag),
     "…and is only issued while the F3 panel is on screen");
+  // THE PREDICATE IS `hidden === false` (P1.91 — measured bug). The HUD spawns the panel `hidden: true`
+  // and ui.picker toggles that field, so `hidden !== false` is TRUE WHILE IT IS UP: the sampler was
+  // skipped exactly when the panel was visible and the F3 `GPU:` number froze, while every other line
+  // kept updating. ONE predicate, asked by the sampler gate AND the text writer, so they cannot drift.
+  assert(/f3Visible\(\): boolean \{\s*return this\.world\.get\(this\.f3\.panel, UI_STATE\)\?\.hidden === false;/.test(diag),
+    "the F3 panel's visibility is `hidden === false`, read through ONE helper");
+  assert(/const panelVisible = this\.f3Visible\(\)/.test(diag) &&
+    /if \(!this\.f3Visible\(\)\) return;/.test(diag),
+    "…and both the sampler gate and the text writer ask that helper");
+  assert(!/\?\.hidden !== false/.test(diag), "the inverted form is gone (it skipped the resolve while VISIBLE)");
 });
 
 check("the frame cap is world state AND a persisted setting", () => {

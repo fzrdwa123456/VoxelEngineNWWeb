@@ -496,6 +496,12 @@ where it is:
 * a job's INPUT is small on purpose: the chunk's own voxels are omitted entirely while the chunk is UNIFORM
   (the value says it all and the scan only visits the boundary shell), and the only outside information is six
   32×32 neighbour SOLIDITY planes. All of it is built fresh per job and **transferred**, never copied.
+  **THE PLANES' LAYOUT IS A CONTRACT BETWEEN THE GATHERER AND THE MESHER**: `gatherChunkMeshInput` writes
+  every plane as `a * S + b`, and `makeSolidAt` must read it the same way (the pairs are (ly, lz) for ±X,
+  (lx, lz) for ±Y and (lx, ly) for ±Z). A uniform plane is symmetric, so reading one transposed hides until a
+  block is broken on that border — then the mesher culls a cell from elsewhere in the same layer and the
+  newly exposed face is simply MISSING (P1.91: the ±Z planes were read `lx + ly * S`). The gate drives a real
+  world through both halves and asserts WHICH face appears, not just how many.
 * the output's looks come back as KEYS (`(voxel value << 2) | kind`), because the palette, the block table and
   the pack chain behind them are main-thread state; `ChunkGeometry.apply` resolves each key with the SAME
   `specFor` the in-place scan used, so a chunk's material list is identical whichever thread meshed it.
@@ -505,7 +511,10 @@ where it is:
   business and the order stays deterministic.
 * `CHUNK_MESHES.inFlight` is the validity token: a key that is no longer in it was rebuilt on this thread (a
   block edit) or left the window, so a late result for it is dropped instead of overwriting fresher geometry.
-  It also keeps one chunk from being asked for twice.
+  It also keeps one chunk from being asked for twice. **THE EDIT PATH IS WHAT MAKES IT TRUE**: `rebuild`
+  DELETES the key before it re-meshes (P1.91), because a job already out was gathered from the world BEFORE
+  the edit — leaving it in flight let the pre-edit mesh land a frame later and put the removed face back.
+  The job is not cancelled (a worker is told nothing), it is dropped on arrival.
 * **BLOCK EDITS STAY ON THE MAIN THREAD** (the player is watching one block — a round trip would put the mesh
   a frame or two behind the click) and so does the no-pool environment (the Node gate, a browser without
   workers): the pool is an INJECTED capability, absent = the behaviour the engine had before.

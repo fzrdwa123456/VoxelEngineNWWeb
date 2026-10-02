@@ -474,8 +474,17 @@ export class ChunkStreamSystem {
    *  no new GPU buffers. That is what removes the per-click hitch: the mesh object and its buffers
    *  survive, only the vertex data inside them is rewritten.
    *  A chunk that had no mesh needs one built, and a chunk that just lost its last visible face
-   *  must go back into the "empty" set. */
+   *  must go back into the "empty" set.
+   *
+   *  RETIRING THE IN-FLIGHT TOKEN IS PART OF THE JOB (P1.91 — measured bug). A worker result is applied only
+   *  while its key is still in `cache.inFlight` (see `drain`), and the planes a job was gathered from are
+   *  read BEFORE the edit: a job already out for this chunk was meshed from the world as it was, so applying
+   *  it here would put the block's old geometry BACK — the face the player just exposed disappears a frame
+   *  or two later. `drain`'s contract ("a key that is no longer in it was rebuilt on this thread") was
+   *  documented but never implemented on this path; the edit is exactly the case that needs it. The job
+   *  itself is not cancelled (a worker is told nothing): its result is simply dropped when it lands. */
   private rebuild(key: string): void {
+    this.cache.inFlight.delete(key);
     const entry = this.cache.meshes.get(key);
     if (entry) {
       if (entry.geom.rebuild(this.voxel, entry.cx, entry.cy, entry.cz) > 0) {

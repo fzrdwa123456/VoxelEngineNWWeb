@@ -135,6 +135,22 @@ that used to lie. In a world, open the pause menu → Settings → Graphics:
    must NOT drift upwards second by second (that was the look-intent queue growing without bound: one intent
    per drawn frame, drained 120 times a second). If the F3 panel is open, `GPU:` only refreshes ~4 times a
    second now — the timestamp query is sampled instead of issued per frame.
+8. **THE F3 `GPU:` NUMBER MUST MOVE, AND THE PANEL MUST STAY LIVE (P1.91 — this was broken)**: press F3 and
+   watch the panel for ~5 seconds. Every line must keep changing — FPS, XYZ while walking, and `GPU:` (it is
+   sampled at ~4 Hz, so it steps a few times a second; a number that is FROZEN while the FPS next to it ticks
+   means the sampler's panel predicate is inverted again). Hide the panel (F3) and the timestamp resolve must
+   stop being issued at all — that is the point of the sample, not something to see.
+9. **BREAKING A BLOCK MUST NEVER LEAVE A MISSING FACE (P1.91 — two causes, both fixed)**: dig at a CHUNK
+   BORDER, which is where both bugs showed. Chunks are 32 blocks wide, so stand on a coordinate that is a
+   multiple of 32 (F3 shows your XYZ) and dig the block on that seam — the column at `x=32`, `z=32`, and the
+   seam lines every 32 blocks — several blocks deep, then walk around the hole and look at it from both
+   sides. Every exposed face of the hole must be drawn, including the face that looks across the seam into
+   the NEXT chunk, and nothing must look painted at a block you did not dig (the transposed plane did both).
+   Repeat while the world is still streaming (walk fast and dig immediately): the face must not appear and
+   then VANISH a frame later (that was a pre-edit worker mesh landing after the edit). A hole you can see the
+   sky through, or a stray face floating at the same height and one block over, is the same bug.
+   (In a flat world only the ±Z seam shows the first one — the ±X/±Y planes were read correctly — so dig
+   across a Z seam when checking by hand.)
 
 AFTER the presentation objects became resources (`host/browser/presentation.ts`, §5.2 P1.7: the scene, the
 camera, the renderer, the frame sampler, the canvas host, the UI mount root and the chunk-mesh cache —

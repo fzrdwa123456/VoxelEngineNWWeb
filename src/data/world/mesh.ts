@@ -88,8 +88,13 @@ function makeSolidAt(input: ChunkMeshInput): (lx: number, ly: number, lz: number
     if (lx === -1) return planes[PLANE.NX * PLANE_BYTES + ly * S + lz] === 1;
     if (ly === S) return planes[PLANE.PY * PLANE_BYTES + lx * S + lz] === 1;
     if (ly === -1) return planes[PLANE.NY * PLANE_BYTES + lx * S + lz] === 1;
-    if (lz === S) return planes[PLANE.PZ * PLANE_BYTES + lx + ly * S] === 1;
-    return planes[PLANE.NZ * PLANE_BYTES + lx + ly * S] === 1;
+    // The ±Z planes are laid out by the GATHERER as a * S + b with (a, b) = (lx, ly) — see
+    // gatherChunkMeshInput's `at(PLANE.PZ, lx, ly, ...)`. Reading them transposed here culled
+    // the WRONG cell once a ±Z neighbour stopped being uniform (a uniform plane is symmetric,
+    // so the swap is invisible until a block is broken at a chunk border): a dug block's face
+    // stayed hidden and its neighbour's showed through. Keep the two in step.
+    if (lz === S) return planes[PLANE.PZ * PLANE_BYTES + lx * S + ly] === 1;
+    return planes[PLANE.NZ * PLANE_BYTES + lx * S + ly] === 1;
   };
 }
 

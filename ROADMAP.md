@@ -2402,6 +2402,38 @@ Still outstanding:
   exceed the refresh), and both positions of the vertical-sync switch pace at the refresh. What is given up
   deliberately: tearing and sub-refresh latency are not reachable from a WebView (see P1.86's closing note and
   the P1.87 native layer, which is where they WOULD be reachable).
+- **P1.91 — two measured render bugs: the F3 `GPU:` number froze, and breaking a block could leave its face
+  unrendered.** `DONE`, by request («f3的gpu帧率显示数字不会动以及修复问题破坏方块时有些方块的面不会渲染出来»).
+  Both were real, and both were REGRESSIONS of the P1.88 pacing work rather than new code:
+  * **the F3 GPU number never moved** — `diagnostics.ts` gated the throttled `resolveTimestampsAsync` on
+    `UI_STATE.hidden !== false`, which is TRUE WHILE THE PANEL IS HIDDEN (the HUD spawns the F3 panel
+    `hidden: true`; `ui.picker` toggles that field). The sampler therefore ran exactly when the panel was
+    off screen and was skipped whenever it was up, so `perf.noteGpu` kept the value the last hidden frame
+    had left. `renderF3Panel` had the polarity RIGHT (`hidden !== false` → return), so the panel drew a
+    number nothing updated. Fixed with ONE predicate (`f3Visible()` = `?.hidden === false`) asked by both
+    the sampler gate and the writer, and the gate now asserts the predicate, both call sites and that the
+    inverted form is gone.
+  * **the face of a block broken at a ±Z chunk border was not drawn** — `gatherChunkMeshInput` lays the six
+    neighbour solidity planes out as `a * S + b`, but `makeSolidAt` read the ±Z planes as `lx + ly * S`,
+    i.e. TRANSPOSED. Uniform planes are symmetric, which is why the flat world never showed it and why it
+    surfaced only once an edit made a border plane non-uniform: the mesher then culled the cell at
+    (lx, ly) against the solidity of (ly, lx) — the dug block's exposed face was dropped (a hole you can
+    see through) and an unrelated cell in the same 32×32 layer was painted instead. Same layout on both
+    sides now, and the gate drives a REAL world through the real gatherer with all six neighbours loaded:
+    sealed = 0 faces, one dig = exactly 1 face, and its CENTROID must be the block the player dug past
+    (`5.5,2.5,32`). Verified to FAIL on the transposed read with the predicted wrong cell (`2.5,5.5,32`).
+  * **and a second, independent way the same face could come back**: `drain` documents the in-flight set as
+    the validity token ("a key no longer in it was rebuilt on this thread — a block edit — so its result is
+    dropped"), but `rebuild` never removed the key. A worker job gathered BEFORE the edit therefore landed
+    a frame or two later and overwrote the fresh mesh with the pre-edit geometry, so the face the player
+    had just exposed vanished again. `rebuild` retires the token now (the job is not cancelled — nothing is
+    told to a worker — it is dropped on arrival), which covers the edited chunk AND every dirty border
+    neighbour, because those are exactly the chunks whose planes the edit changed. The gate models a
+    saturated one-job pool whose reply is delivered by hand: the token must be gone after the edit step and
+    the late result must not reach `apply`.
+  VERIFIED: `tsc` 0 errors; `check:ecs` 75/75 (three new behavioural assertions plus the predicate ones, each
+  confirmed to fail against the old code); and a real block-breaking run at a chunk border with the F3 panel
+  up. Not changed: the P1.90 pacing decisions, the launch arguments, and the mesher's output format.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
