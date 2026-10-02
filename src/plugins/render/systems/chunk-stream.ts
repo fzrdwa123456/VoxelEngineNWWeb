@@ -30,7 +30,8 @@ import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
-import { buildLodMeshInput, isFarColumn, type LodPolicy } from "../../../data/world/lod";
+import { buildLodMeshInput, fineBase, isFarColumn, tierTint, type LodPolicy } from "../../../data/world/lod";
+import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
 /** Declared access. Reads the player's position and writes the block world plus the GPU meshes —
@@ -82,7 +83,9 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
  *  keeps this file free of a host import. */
 export interface ChunkMeshFactory {
   createGeometry(): ChunkMeshEntry["geom"];
-  getMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material;
+  /** `tint` is the DEBUG VIEW's colour for this mesh's LOD tier (null = the real look). A host that ignores
+   *  it draws the world normally, which is what a test factory does. */
+  getMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec, tint?: string | null): THREE.Material;
 }
 
 /** ONE finished meshing job, as this lane sees it (P1.18h). Declared here for the same reason the factory is:
@@ -138,6 +141,10 @@ export class ChunkStreamSystem {
   /** The palette values the far ring writes, resolved once: a coarse chunk is procedural, so it is handed the
    *  layer values instead of asking the world for them (see data/world/lod.ts). */
   private readonly layers: { readonly stone: number; readonly dirt: number; readonly grass: number };
+  /** The LOD VIEW (P1.94): `G` tints every mesh by its tier. Its own cursor into the key-edge log, like every
+   *  other consumer of a global chord (ui.picker, ui.navigation) — the DOM listeners are `player.input`'s. */
+  private readonly keys: KeyEdgeReader;
+  private lodTint = false;
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
   private readonly voxel: VoxelWorld;
@@ -224,13 +231,16 @@ export class ChunkStreamSystem {
     const stone = this.voxel.valueOf("stone") || 1;
     const dirt = this.voxel.valueOf("dirt") || stone;
     this.layers = { stone, dirt, grass: this.voxel.valueOf("grass") || dirt };
+    this.keys = new KeyEdgeReader(world.resource(KEY_EVENTS));
   }
 
   /** Generate (without meshing) every chunk in the window around a world position. Called once
    *  before the loop starts, so collision has real blocks on the very first tick. */
   prime(x: number, z: number): void {
-    const pcx = Math.floor(x / CHUNK_SIZE);
-    const pcz = Math.floor(z / CHUNK_SIZE);
+    // …and the SAME alignment: `prime` fills the world for the window `step()` will mesh, so a raw column here
+    // would generate one set of chunks and mesh another (with LOD, every odd column did exactly that).
+    const pcx = fineBase(this.lod, Math.floor(x / CHUNK_SIZE));
+    const pcz = fineBase(this.lod, Math.floor(z / CHUNK_SIZE));
     for (const [dx, dz] of this.offsets) {
       for (let cy = MIN_CHUNK_Y; cy < MIN_CHUNK_Y + CHUNK_Y_COUNT; cy++) {
         this.voxel.ensureChunk(pcx + dx, cy, pcz + dz);
@@ -258,7 +268,12 @@ export class ChunkStreamSystem {
    *  Asked about the POSITION being entered, not about the current window: `wanted` may still describe
    *  where the player stood last. */
   needsWarmUp(x: number, z: number): boolean {
-    const wanted = this.wantedKeys(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    // The same ALIGNMENT the window builder uses (see step): a warm-up asked about a different column set than
+    // the one it will build would answer "everything is decided" and skip the screen for a cold window.
+    const wanted = this.wantedKeys(
+      fineBase(this.lod, Math.floor(x / CHUNK_SIZE)),
+      fineBase(this.lod, Math.floor(z / CHUNK_SIZE)),
+    );
     for (const key of wanted) {
       if (!this.cache.meshes.has(key) && !this.cache.empty.has(key)) return true;
     }
@@ -300,8 +315,21 @@ export class ChunkStreamSystem {
     // the scene is never touched from a worker callback and the order stays deterministic.
     this.drain();
 
-    const pcx = Math.floor(POSITION.x[this.index] / CHUNK_SIZE);
-    const pcz = Math.floor(POSITION.z[this.index] / CHUNK_SIZE);
+    // G: THE LOD VIEW (P1.94). The edges are published by `player.input` and every consumer keeps its own
+    // cursor, so a second consumer costs the log nothing. Handled HERE because this system owns the meshes and
+    // their materials — the toggle IS a material change, and no other system may touch a mesh.
+    let toggles = 0;
+    this.keys.drain((edge) => {
+      if (edge.down && !edge.repeat && edge.code === "KeyG") toggles++;
+    });
+    if ((toggles & 1) === 1) this.toggleLodTint();
+
+    // THE FINE WINDOW IS COARSE-ALIGNED (P1.94 — measured bug). `fineBase` rounds the player's column DOWN to
+    // the coarse grid the far ring's inner hole is built on; without it every odd column left one fine column
+    // owned by neither ring (a 32-block-wide, full-depth hole) and one owned by both. With no LOD it is the
+    // identity, so the single-window path is unchanged.
+    const pcx = fineBase(this.lod, Math.floor(POSITION.x[this.index] / CHUNK_SIZE));
+    const pcz = fineBase(this.lod, Math.floor(POSITION.z[this.index] / CHUNK_SIZE));
     const moved = pcx !== this.lastPcx || pcz !== this.lastPcz;
     this.lastPcx = pcx;
     this.lastPcz = pcz;
@@ -387,7 +415,7 @@ export class ChunkStreamSystem {
     if (entry) {
       if (entry.geom.apply(this.voxel, result) > 0) {
         // A dig or a place can change WHICH LOOKS this chunk shows, so the material list follows the rebuild.
-        entry.mesh.material = this.materialsFor(entry.geom);
+        entry.mesh.material = this.materialsFor(entry.geom, entry.step);
         return;
       }
       this.cache.group.remove(entry.mesh);
@@ -407,7 +435,7 @@ export class ChunkStreamSystem {
       return;
     }
     const parts = key.split(",");
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, 1));
     mesh.matrixAutoUpdate = false;
     // A POOL result is always a FINE chunk: the far ring is procedural and never goes to a worker.
     const fresh: ChunkMeshEntry = {
@@ -451,7 +479,7 @@ export class ChunkStreamSystem {
     entry.geom.restyle(this.voxel);
     // The material CACHE was dropped by the reload (see the pack driver), so these come back from the new
     // chain's textures. `groups` is untouched: a slot index still means the same material index.
-    entry.mesh.material = this.materialsFor(entry.geom);
+    entry.mesh.material = this.materialsFor(entry.geom, entry.step);
   }
 
   /** Re-resolve up to `limit` of the chunks a chain change marked STALE, and answer how many the queue handed
@@ -588,7 +616,7 @@ export class ChunkStreamSystem {
     if (entry) {
       if (entry.geom.rebuild(this.voxel, entry.cx, entry.cy, entry.cz) > 0) {
         // A dig or a place can change WHICH LOOKS this chunk shows, so the material list follows the rebuild.
-        entry.mesh.material = this.materialsFor(entry.geom);
+        entry.mesh.material = this.materialsFor(entry.geom, entry.step);
         return;
       }
       this.cache.group.remove(entry.mesh);
@@ -619,7 +647,7 @@ export class ChunkStreamSystem {
       return;
     }
 
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, 1));
     mesh.matrixAutoUpdate = false;
     const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step: 1 };
     this.cache.group.add(mesh);
@@ -658,7 +686,7 @@ export class ChunkStreamSystem {
       this.cache.empty.add(key);
       return 1;
     }
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, this.lod.step));
     mesh.matrixAutoUpdate = false;
     const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step: this.lod.step };
     this.cache.group.add(mesh);
@@ -669,10 +697,22 @@ export class ChunkStreamSystem {
 
   /** The materials this chunk needs, one per LOOK group (P1.46). No specs means the geometry was built with
    *  the engine checker (the mesher emits groups only when it knows a block). Shared per spec key by the
-   *  CHUNK_MATERIAL resource, so chunks showing the same blocks reuse the same GPU materials. */
-  private materialsFor(geom: ChunkMeshEntry["geom"]): THREE.Material | THREE.Material[] {
-    if (geom.specs.length === 0) return this.mesh.getMaterial(this.material);
-    return geom.specs.map((spec) => this.mesh.getMaterial(this.material, spec));
+   *  CHUNK_MATERIAL resource, so chunks showing the same blocks reuse the same GPU materials.
+   *  `step` is the chunk's LOD tier: with the debug view on, the tier's colour is handed to the factory (which
+   *  keys its cache by it), so a tinted world costs one extra material per (look, tier) — not one per chunk. */
+  private materialsFor(geom: ChunkMeshEntry["geom"], step: number): THREE.Material | THREE.Material[] {
+    const tint = this.lodTint ? tierTint(step) : null;
+    if (geom.specs.length === 0) return this.mesh.getMaterial(this.material, undefined, tint);
+    return geom.specs.map((spec) => this.mesh.getMaterial(this.material, spec, tint));
+  }
+
+  /** G: flip the LOD view and re-resolve every mesh's material IN PLACE (the geometry is untouched — a retint
+   *  is a material swap, which is exactly as cheap as the pack reload's restyle). */
+  private toggleLodTint(): void {
+    this.lodTint = !this.lodTint;
+    for (const entry of this.cache.meshes.values()) {
+      entry.mesh.material = this.materialsFor(entry.geom, entry.step);
+    }
   }
 
   /** Geometry is chunk-local, so the mesh sits at the chunk origin of its nearest copy.

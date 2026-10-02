@@ -67,19 +67,38 @@ function textureFrom(url: string): THREE.Texture {
 
 /** The material for one look. `spec` omitted = the engine's checker (the mesher's own fallback and what a
  *  caller with no groups gets). Cached per SPEC KEY in the CHUNK_MATERIAL resource: a GPU object belongs to
- *  the world, and one material per look is shared by every chunk that shows it. */
-export function getChunkMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material {
+ *  the world, and one material per look is shared by every chunk that shows it.
+ *
+ *  `tint` is the LOD VIEW's colour for the mesh's tier (P1.94, the `G` key): it MULTIPLIES the material, so a
+ *  textured look keeps its texture and takes the hue, and a colour-only look is multiplied by it. It is part of
+ *  the cache key, so a tinted world holds one extra material per (look, tier) — not one per chunk — and the
+ *  UNTINTED cache entries are untouched: the toggle can always be turned back off. */
+export function getChunkMaterial(
+  state: ChunkMaterialState,
+  spec?: ChunkFaceSpec,
+  tint?: string | null,
+): THREE.Material {
   if (!spec) {
     if (!state.material) state.material = checkerMaterial();
-    return state.material;
+    if (!tint) return state.material;
+    const key = `\u0000${tint}`;
+    const hit = state.materials.get(key);
+    if (hit) return hit;
+    const tinted = checkerMaterial();
+    tinted.color = new THREE.Color(tint);
+    state.materials.set(key, tinted);
+    return tinted;
   }
-  const hit = state.materials.get(spec.key);
+  const key = tint ? `${spec.key}\u0000${tint}` : spec.key;
+  const hit = state.materials.get(key);
   if (hit) return hit;
   const made =
     spec.texture !== null
-      ? new THREE.MeshLambertMaterial({ map: textureFrom(spec.texture) })
-      : new THREE.MeshLambertMaterial({ color: new THREE.Color(spec.color ?? "#ffffff") });
-  state.materials.set(spec.key, made);
+      ? new THREE.MeshLambertMaterial({ map: textureFrom(spec.texture), color: new THREE.Color(tint ?? "#ffffff") })
+      : new THREE.MeshLambertMaterial({
+          color: new THREE.Color(spec.color ?? "#ffffff").multiply(new THREE.Color(tint ?? "#ffffff")),
+        });
+  state.materials.set(key, made);
   return made;
 }
 

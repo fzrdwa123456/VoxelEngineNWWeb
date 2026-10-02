@@ -574,7 +574,19 @@ where it is:
     (it is correct wherever the player can actually reach, because the fine ring owns that). That is why no
     edit is ever routed into a far key — the two rings' keys cannot even collide (`"<step>:cx,cy,cz"`).
   THE RINGS TILE: the fine ring is an EVEN span of columns (coarse columns [-r, r] = fine [-2r, 2r+1]) so it
-  meets the far ring with no gap and no overlap; the gate enumerates both sets and asserts it.
+  meets the far ring with no gap and no overlap; the gate enumerates both sets and asserts it. **AND IT MUST BE
+  ANCHORED** (P1.94 — measured bug): the window is built around `fineBase(policy, playerColumn)`, i.e. the
+  player's column rounded down to the COARSE grid, not around the player's own column. Anchored on the raw
+  column, every ODD column left one fine column owned by neither ring — a 32-block-wide, full-depth column
+  with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through — and one owned by
+  both. `fineBase(null, pc) === pc`, so the no-LOD path is untouched, and the gate tiles every parity.
+* **`G` IS THE LOD VIEW (P1.94).** In a world, `G` tints every chunk mesh by its TIER: the fine ring in
+  `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a textured block keeps its
+  texture and takes the hue). It is handled by `chunk-stream` itself — that system owns the meshes and their
+  materials, and a retint is a material swap per entry (`toggleLodTint`), as cheap as the reload's restyle. The
+  key arrives through the same `KEY_EVENTS` log every other global chord uses (its own `KeyEdgeReader` cursor;
+  `player.input` still owns the DOM listeners), `G` is bound to nothing else, and the tint is part of the
+  material CACHE key, so the untinted materials stay cached and the view toggles off for free.
   MEASURED (this machine, P1.92 for comparison): the fine ring alone is 1568 chunks / 324 materialised /
   241k faces / 35 MB; the far ring adds 1408 chunks / 296 materialised / 245k faces / 35 MB at 0.83 ms per
   chunk, taking the visible world from ~256 to ~512 blocks for 486k faces and 70 MB in total — i.e. **twice

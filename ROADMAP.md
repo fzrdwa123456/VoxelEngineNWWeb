@@ -2539,6 +2539,41 @@ Still outstanding:
     coarse one above it; a sampled chunk really does build geometry) and the two constructor-shape assertions
   - docs: AGENTS (the world state, the two-ring bullet, the known gaps), ROADMAP (the stage table, §3.6, this
     entry), TESTING (what an LOD ring looks like and where its boundary is)
+- **P1.94 — the LOD's two follow-ups: the EMPTY COLUMN is fixed, and `G` shows you the tiers.** `DONE`, by
+  request («先弄好lod的空列，侧面空洞先不理然后添加按钮g让我看见lod层级颜色»).
+  * **THE EMPTY COLUMN (a real, player-visible bug of P1.93).** The fine window was built around the player's
+    OWN chunk column while the far ring's inner hole is a whole number of COARSE columns — two sets that agree
+    only when the player's column is EVEN. On an odd column the rings were shifted by one: one fine column was
+    drawn by BOTH rings (two meshes in the same place, z-fighting) and one by NEITHER. The missing one is not a
+    cosmetic seam: it is a 32-block-wide, full-depth column with no geometry at all, whose neighbours' walls are
+    culled (their planes read the world, which has terrain there), so the player looks straight through the
+    ground. Measured on the old code, per player column: even → 0 twice / 0 never; odd → 1 twice / 1 never, on
+    every odd column tested (1, 3, 7, 101).
+    THE FIX is `fineBase(policy, pc)` (`data/world/lod.ts`): the window is anchored to the coarse grid
+    (`floor(pc/step)*step`), which is the only base at which the two rings tile. `step()` compares and stores
+    the anchored column, and `prime`/`needsWarmUp` anchor too — a warm-up asked about a different column set
+    than the one it will build would answer "already decided" for a cold window. With no LOD it is the
+    identity, so the single-window path is byte-for-byte unchanged.
+    VERIFIED on the REAL STREAM (not a re-derivation): with the player on columns 0/1/2/3/7, the stream's own
+    `wantedKeys` + `farKeys` cover the same 900 columns with 0 drawn twice and 0 drawn never; the gate now
+    tiles EVERY parity (0, 1, 2, 3, 7, 8, 100, 101, 251, 252) — its old assertion built both sets in absolute
+    coordinates, which coincides with the player-relative frame only at column 0, which is exactly why it
+    passed while the bug shipped.
+  * **`G` — THE LOD VIEW.** Pressing G tints every chunk mesh by its tier (`LOD_TIER_TINT`: the fine ring green,
+    the far ring blue), so "which part of the world is coarse" is something you can SEE. The tint MULTIPLIES the
+    material (a textured block keeps its texture and takes the hue) and is part of the material cache key, so a
+    tinted world holds one extra material per (look, tier) and the untinted ones stay cached — the view toggles
+    off for free. Handled by `chunk-stream` itself: it owns the meshes and their materials, and a retint is one
+    material swap per entry, which is exactly the reload's restyle (no geometry is touched). The key arrives
+    through the same `KEY_EVENTS` log the other global chords use, with its own `KeyEdgeReader` cursor; G is
+    bound to nothing else; a held key (repeat) and the key release are ignored.
+  NOT FIXED, BY REQUEST: the far ring's outward rim still has no walls (a coarse chunk culls its outer faces
+  against terrain that is not drawn there — the documented "edge of the world", now at ~512 blocks), and the
+  ring boundary is still a visible LEDGE (the conservative max), not a stitched seam.
+  VERIFIED: `tsc` 0; `check:ecs` 77/77 (the parity tiling loop, the conservativeness test, and a behavioural
+  `G` test driving a real stream with a recording factory: plain → tinted per tier → unchanged by a repeat or a
+  key release → plain again); the real-stream tiling probe above. Not changed: the mesher, the ring policy
+  numbers, the streaming budgets, and the far ring's procedural nature.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

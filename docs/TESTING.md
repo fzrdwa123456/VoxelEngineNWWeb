@@ -79,6 +79,17 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   the geometry of the world, not a streaming bug.
   A far chunk is PROCEDURAL: dig a hole at ~400 blocks out, then walk 400 blocks away and look back — the hole
   is NOT there (the edit is only in the fine world). Digging anywhere you can actually reach is correct.
+→ **`G` — THE LOD VIEW (P1.94)**: press G in a world and every chunk mesh is tinted by its TIER — the fine ring
+  green (`LOD_TIER_TINT[0]`), the far ring blue (`[1]`). Fly up and the boundary between the two colours is
+  exactly where the coarse terrain starts (~448 blocks). Press G again and the real textures come back. It must
+  NOT toggle on a held key (a repeat is one press) or on the key release, and it must survive walking (the
+  colours follow the chunks, since they are a material, not a one-off paint).
+→ **THE RINGS MUST TILE WHILE YOU WALK (P1.94 — this was a real bug)**: walk/sprint in ONE direction and keep
+  watching the junction between the two colours. There must never be a 32-block-wide slot of sky through the
+  ground, and never a strip that shimmers (two meshes in the same place). The old bug appeared only when the
+  player's chunk column was ODD, i.e. it came and went as you walked; the window is anchored to the coarse grid
+  now, so it must hold on EVERY column. If a slot ever appears, it is the anchoring (`fineBase` in
+  `data/world/lod.ts`, used by `step`/`prime`/`needsWarmUp`), not the mesher.
 → fly far in one direction for ~30 s (the world is a TORUS of 1024 blocks: you come back to where you
 started) and confirm the terrain you arrive at matches where you began — the noise is periodic on that same
 lap, so the wrap must NOT show a cliff (it may show a single wrong block at the seam line: the ghost meshes

@@ -639,6 +639,8 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   const cache = P.createChunkMeshCache({ add() {}, remove() {} });
   cacheWorld.insertResource(P.CHUNK_MESHES, cache);
   cacheWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  // The stream reads the key-edge log for the `G` LOD view (P1.94), so every world it is built on needs it.
+  cacheWorld.insertResource(KEY_EVENTS, createKeyEventLog());
 
   const applied = [];   // faces applied through a geometry (the WORKER path)
   const rebuilt = [];   // sync rebuilds (the main-thread path)
@@ -743,6 +745,7 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   const cache2 = P.createChunkMeshCache({ add() {}, remove() {} });
   world2.insertResource(P.CHUNK_MESHES, cache2);
   world2.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  world2.insertResource(KEY_EVENTS, createKeyEventLog());
   const inFlight2 = [];   // requested, not yet DELIVERED (a real worker's round trip)
   const arrived2 = [];    // delivered: what the next `take()` hands the lane
   const staleApplied = [];  // apply() calls: a mesh refilled from a worker's result
@@ -1036,35 +1039,52 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   const { FALLBACK_PALETTE } = load("data/world/palette.js");
   const policy = L.DEFAULT_LOD;
 
-  // 1. THE RINGS TILE THE VIEW.
-  const owner = new Map();
-  let overlaps = 0;
-  const claim = (x, z, who) => {
-    const k = `${x},${z}`;
-    if (owner.has(k)) overlaps++;
-    owner.set(k, who);
-  };
-  for (let x = -40; x <= 40; x++) {
-    for (let z = -40; z <= 40; z++) if (L.isFineColumn(policy, x, z)) claim(x, z, "fine");
-  }
-  for (let cx = -20; cx <= 20; cx++) {
-    for (let cz = -20; cz <= 20; cz++) {
-      if (!L.isFarColumn(policy, cx, cz)) continue;
-      for (let dx = 0; dx < policy.step; dx++) {
-        for (let dz = 0; dz < policy.step; dz++) {
-          claim(cx * policy.step + dx, cz * policy.step + dz, "far");
+  // 1. THE RINGS TILE THE VIEW — FOR EVERY PLAYER COLUMN, not just an aligned one (P1.94 — measured bug).
+  //    The fine ring must be built around `fineBase(playerColumn)`, because it is a whole number of COARSE
+  //    columns while the far ring's inner hole is a whole number of coarse columns too. Built around the RAW
+  //    column, every ODD column left one fine column owned by NEITHER ring — a 32-block-wide, full-depth
+  //    column with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through —
+  //    and one owned by BOTH (two meshes in the same place, z-fighting). This loop is that regression test.
+  const tile = (raw) => {
+    const base = L.fineBase(policy, raw);
+    const owner = new Map();
+    let overlaps = 0;
+    const claim = (x, z) => {
+      const k = `${x},${z}`;
+      if (owner.has(k)) overlaps++;
+      owner.set(k, 1);
+    };
+    // The stream's own sets: fine = base + [-2r, 2r+1]; far = the coarse annulus around floor(base/step),
+    // expanded by `step` — exactly what `wantedKeys`/`farKeys` build.
+    for (let dx = -2 * policy.fineRadius; dx <= 2 * policy.fineRadius + 1; dx++) {
+      for (let dz = -2 * policy.fineRadius; dz <= 2 * policy.fineRadius + 1; dz++) claim(base + dx, base + dz);
+    }
+    const cc = base / policy.step;
+    for (let cx = -policy.farRadius; cx <= policy.farRadius; cx++) {
+      for (let cz = -policy.farRadius; cz <= policy.farRadius; cz++) {
+        if (!L.isFarColumn(policy, cx, cz)) continue;
+        for (let dx = 0; dx < policy.step; dx++) {
+          for (let dz = 0; dz < policy.step; dz++) {
+            claim((cc + cx) * policy.step + dx, (cc + cz) * policy.step + dz);
+          }
         }
       }
     }
+    const reach = 2 * policy.farRadius;
+    let gaps = 0;
+    for (let x = -reach; x <= reach + 1; x++) {
+      for (let z = -reach; z <= reach + 1; z++) if (!owner.has(`${base + x},${base + z}`)) gaps++;
+    }
+    return { gaps, overlaps, size: owner.size, square: (2 * reach + 2) ** 2 };
+  };
+  for (const raw of [0, 1, 2, 3, 7, 8, 100, 101, 251, 252]) {
+    const t = tile(raw);
+    equal(t.gaps, 0, `player column ${raw}: no column is drawn by NEITHER ring`);
+    equal(t.overlaps, 0, `player column ${raw}: none is drawn by BOTH rings`);
+    equal(t.size, t.square, `player column ${raw}: the union is exactly the square the far radius promises`);
   }
-  equal(overlaps, 0, "no column is drawn by BOTH rings");
-  const reach = 2 * policy.farRadius;
-  let gaps = 0;
-  for (let x = -reach; x <= reach + 1; x++) {
-    for (let z = -reach; z <= reach + 1; z++) if (!owner.has(`${x},${z}`)) gaps++;
-  }
-  equal(gaps, 0, "…and none is drawn by NEITHER (an odd fine span would leave a one-column hole ring)");
-  equal(owner.size, (2 * reach + 2) ** 2, "the union is exactly the square the far radius promises");
+  equal(L.fineBase(null, 7), 7, "with no LOD the alignment is the identity (the single-window path is untouched)");
+  equal(L.fineBase(policy, 7), 6, "…and with LOD an odd column rounds DOWN to the coarse grid");
 
   // 2. THE COARSE VOXEL CONTAINS THE FINE ONES, pointwise: wherever a fine block is solid, the coarse voxel
   //    that covers it is solid too. That is the property (not "the top of the column") which makes a crack
@@ -1115,6 +1135,56 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   assert(faces > 0 && materialised > 0, "and the sampled chunks do produce geometry to draw");
   equal(L.isFarColumn(policy, 0, 0), false, "the far ring never covers a column the fine ring owns");
   equal(L.isFarColumn(policy, policy.farRadius + 1, 0), false, "…nor anything past its radius");
+
+  // 3. THE `G` LOD VIEW (P1.94): every mesh is tinted by its TIER, and pressing G again puts the look back.
+  //    Driven on a real stream over a real world with a RECORDING factory, so this asserts the whole path:
+  //    the key edge → the toggle → the material re-resolve → what each mesh ends up holding.
+  assert(L.tierTint(1) !== L.tierTint(2), "each tier has its own colour");
+  assert(L.LOD_TIER_TINT.length >= 2 && /^#[0-9a-f]{6}$/i.test(L.tierTint(1)), "…as hex, one per tier");
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const { VOXEL, LOCAL_PLAYER, KEY_EVENTS, createKeyEventLog, publishKeyEdge } = load("data/globals/resources.js");
+  const P = loadPresentation();
+  const viewWorld = new World();
+  const viewVoxel = new VoxelWorld();
+  viewWorld.insertResource(VOXEL, viewVoxel);
+  viewWorld.insertResource(LOCAL_PLAYER, localPlayer);
+  const viewCache = P.createChunkMeshCache({ add() {}, remove() {} });
+  viewWorld.insertResource(P.CHUNK_MESHES, viewCache);
+  viewWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  const edges = createKeyEventLog();
+  viewWorld.insertResource(KEY_EVENTS, edges);
+  const recording = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [{ key: "view-look", texture: null, color: null }],
+      apply: () => 5,
+      rebuild: () => 5,
+      restyle: () => 1,
+      dispose() {},
+    }),
+    // The one thing this factory owes the assertion: it is ASKED for a tint, per mesh.
+    getMaterial: (_state, _spec, tint) => ({ tint: tint ?? null }),
+  };
+  const view = new ChunkStreamSystem(viewWorld, recording, null, policy);
+  view.step();
+  // A mesh with GROUPS holds an ARRAY of materials (one per look), so read the tint through both shapes.
+  const tintOf = (m) => (Array.isArray(m) ? (m[0]?.tint ?? null) : (m?.tint ?? null));
+  const tierOf = () => [...viewCache.meshes.values()].map((e) => `${e.step}:${tintOf(e.mesh.material)}`);
+  assert(tierOf().length > 0, "the stream built meshes to tint");
+  equal(tierOf().filter((t) => !t.endsWith(":null")).length, 0, "with the view OFF every mesh takes the plain look");
+  publishKeyEdge(edges, { code: "KeyG", down: true, repeat: false });
+  view.step();
+  const tinted = tierOf();
+  assert(tinted.some((t) => t === `1:${L.tierTint(1)}`), "G tints the FINE ring with the tier-1 colour");
+  assert(tinted.every((t) => !t.endsWith(":null")), "…and every mesh in the window, not just one");
+  // A repeat must not flip it (a held key is one press) and a keyUP must not either.
+  publishKeyEdge(edges, { code: "KeyG", down: true, repeat: true });
+  publishKeyEdge(edges, { code: "KeyG", down: false, repeat: false });
+  view.step();
+  assert(tierOf().every((t) => t === `1:${L.tierTint(1)}` || t === `2:${L.tierTint(2)}`), "a repeat/keyup does not toggle");
+  publishKeyEdge(edges, { code: "KeyG", down: true, repeat: false });
+  view.step();
+  equal(tierOf().filter((t) => !t.endsWith(":null")).length, 0, "pressing it again puts the plain look back");
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {
@@ -1145,6 +1215,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // The shared chunk material is a RESOURCE too, so it is inserted here �?a stub with a null material,
   // which is never reached because this world is all AIR and builds no mesh at all.
   streamWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  streamWorld.insertResource(KEY_EVENTS, createKeyEventLog());
   const stream = new ChunkStreamSystem(streamWorld);
 
   assert(stream.needsWarmUp(1, 3), "a window that has never been built needs warming");
@@ -3806,8 +3877,10 @@ check("the LAST module-level state is a resource too (icons, material, counters,
     "the composition root inserts it");
   const meshSrc = stripComments(readSource("src/host/browser/chunkmesh.ts"));
   equal(countOf(meshSrc, /^(?:let|var) sharedMaterial\b/gm), 0, "the material is not module state");
-  assert(/getChunkMaterial\(state: ChunkMaterialState, spec\?: ChunkFaceSpec\)/.test(meshSrc),
-    "(P1.46) and the look it is for");
+  assert(
+    /getChunkMaterial\(\s*state: ChunkMaterialState,\s*spec\?: ChunkFaceSpec,\s*tint\?: string \| null,?\s*\)/.test(meshSrc),
+    "(P1.46) and the look it is for — plus the LOD VIEW's tier tint (P1.94), which is part of the cache key",
+  );
   assert(/materials: Map<string, THREE\.Material>/.test(readSource("src/data/globals/gfx.ts")),
     "the per-look material cache is a FIELD of that resource, never module state");
   assert(/ChunkFaceSpec/.test(meshSrc),

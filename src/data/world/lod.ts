@@ -66,6 +66,34 @@ export function isFarColumn(policy: LodPolicy, cx: number, cz: number): boolean 
   return reach <= policy.farRadius && reach > policy.fineRadius;
 }
 
+/** THE FINE RING'S ALIGNMENT (P1.94 — measured bug). The fine window must be built around a COARSE-ALIGNED
+ *  column, not around the player's own one.
+ *
+ *  WHY: the fine ring is a whole number of COARSE columns on each side of its base (offsets [-2r, 2r+1]), and
+ *  the far ring's inner hole is a whole number of coarse columns around `floor(pc/step)`. Those two agree
+ *  only when the base column IS `floor(pc/step)*step` — i.e. only for an EVEN `pc` with step 2. Built around
+ *  the player's raw column, every ODD column produced exactly: one fine column owned by BOTH rings
+ *  (two meshes in the same place, z-fighting) and one owned by NEITHER — a 32-block-wide, full-depth column
+ *  with no geometry at all, whose neighbours' walls are culled (their planes read the world, which does have
+ *  terrain there), so you look straight through the ground. The gate asserts the tiling for every parity.
+ *
+ *  `fineBase(null, pc) === pc`, so a world with no LOD is untouched. */
+export function fineBase(policy: LodPolicy | null, pc: number): number {
+  if (policy === null) return pc;
+  return Math.floor(pc / policy.step) * policy.step;
+}
+
+/** THE DEBUG VIEW'S TIER COLOURS (P1.94): `G` tints every chunk mesh by the tier it belongs to, so "which
+ *  part of the world is coarse" is something you can see instead of infer. Index = the tier (the entry's
+ *  `step`, 1 = the fine ring, 2 = the far ring); a colour MULTIPLIES the material, so a textured block keeps
+ *  its texture and takes the hue. Deliberately not theme tokens: these tint 3D materials, not UI. */
+export const LOD_TIER_TINT: readonly string[] = ["#7dffb0", "#6aa9ff"];
+
+/** The tint for one tier (an unknown tier gets the brightest debug colour rather than nothing). */
+export function tierTint(step: number): string {
+  return LOD_TIER_TINT[step - 1] ?? "#ff5ad0";
+}
+
 /** Wrap a block coordinate into the torus: the height field is periodic over one lap (see terrain.ts), and
  *  the far ring's border cells reach one super voxel OUTSIDE the chunk, which is negative at the origin. */
 function wrapBlock(v: number): number {
