@@ -2,7 +2,8 @@ import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, paceFrame, pacingTargetHz, refreshHzFromMilliHz, type InputDiagnostics } from "../data/globals/resources";
-import { SetFpsCap, SetVsync, ShowToast } from "../data/globals/commands";
+import { createFadeOptions, FADE_OPTIONS, type FadeOptions } from "../data/globals/resources";
+import { SetFadeOption, SetFpsCap, SetVsync, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
@@ -237,7 +238,7 @@ logDebug(
  *  label/slider is only refreshed when its panel opens, so the file and the screen then disagree until the next
  *  launch. That is what `justSet` is for: the two settings the frame pacing owns (both are read by the loop
  *  every frame, so both must go through the barrier). */
-const saveSettings = (justSet: { cap?: number; vsync?: boolean } = {}): void => {
+const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolean; fadeChunks?: boolean } = {}): void => {
     // Read-modify-write merge, avoids clobbering other settings (windowMode etc.)
   const s = readSettings();
   s.language = getLang();
@@ -246,6 +247,10 @@ const saveSettings = (justSet: { cap?: number; vsync?: boolean } = {}): void => 
   s.windowMode = getWindowMode();
   s.keybinds = getBindsAll();
   s.diagLog = isDiagLogEnabled();
+  // The two appearance fades travel with every save for the same reason the packs do: the value in force is
+  // the one the render lane is reading, so a save must never write something else (P2.01).
+  s.fadeLod = justSet.fadeLod ?? fadeOptions.lod;
+  s.fadeChunks = justSet.fadeChunks ?? fadeOptions.chunks;
   s.fpsCap = justSet.cap ?? world.resource(FPS_CAP).cap;
   // The vertical-sync switch is a setting like the rest now (P1.86): it used to live in its own
   // `config/vsync.json`, which no settings check ever validated, and it only took effect at the next launch.
@@ -343,6 +348,12 @@ const frameCap = createFrameCap(
   shellInfo().displayRefreshMilliHz,
 );
 world.insertResource(FPS_CAP, frameCap);
+// The APPEARANCE FADES, per ring (P2.01): the far ring's (on by default — its own outer edge has nothing
+// behind it) and the fine ring's (off by default — the P2.00 reserve means a real chunk is replaced by
+// geometry that is already there, and no reference implementation fades its real chunks at that boundary).
+// A resource, because `chunk-stream` reads it every step; the settings panel sends SetFadeOption to change it.
+const fadeOptions = createFadeOptions(readSettings().fadeLod, readSettings().fadeChunks);
+world.insertResource(FADE_OPTIONS, fadeOptions);
 /** Does any modal surface own the mouse right now? */
 const uiOpen = (): boolean => isModalUi(uiModal);
 /** A MENU is open (not counting the inventory, which the inventory key must still be able to toggle) */
@@ -867,6 +878,21 @@ const onSetVsync = (on: boolean): void => {
   world.commands.send(ShowToast, { key: on ? "toast.vsyncOn" : "toast.vsyncOff" });
 };
 
+/** The appearance fades, per ring (P2.01): "does the far ring fade in/out" and "does the fine ring". Both are
+ *  read by `chunk-stream` every step, so the change goes through the COMMAND (a UI callback may not assign a
+ *  resource the tick reads) and the settings file is written here — the value is HANDED to the save, never read
+ *  back before the barrier has applied it. */
+const onSetFade = (which: "lod" | "chunks", on: boolean): void => {
+  world.commands.send(SetFadeOption, { which, on });
+  // HANDED the value, exactly like the cap and vsync: the command applies at the next barrier, so reading the
+  // resource here would persist the state the user just left (measured on both of those).
+  saveSettings(which === "lod" ? { fadeLod: on } : { fadeChunks: on });
+  logDebug(
+    `FADE ${which === "lod" ? "lod (far ring)" : "chunks (real chunks)"} ${on ? "on" : "off"}` +
+      `${which === "chunks" && !on ? " — the reserve covers the swap, so the seam stays invisible" : ""}`,
+  );
+};
+
 /** The "Diagnostic log" switch in the settings panel: it only controls whether the **diagnostic probe
  *  lines** reach the disk (see the prefix filter in platform/shell.ts::logDebug), touches no game state
  *  and needs no restart. On by default. */
@@ -940,6 +966,8 @@ const menu = createPauseMenu(world, {
   isVsyncOn: () => frameCap.vsync,
   onToggleDiagLog,
   isDiagLogEnabled: () => isDiagLogEnabled(),
+  onSetFade,
+  isFadeOn: (which: "lod" | "chunks") => (which === "lod" ? fadeOptions.lod : fadeOptions.chunks),
   getFpsCap: () => frameCap.cap,
   getWindowMode: () => getWindowMode(),
   onSetWindowMode,
@@ -1013,6 +1041,8 @@ const mainMenu = createMainMenu(world, {
   onSetVsync,
   isDiagLogEnabled,
   onToggleDiagLog,
+  onSetFade,
+  isFadeOn: (which: "lod" | "chunks") => (which === "lod" ? fadeOptions.lod : fadeOptions.chunks),
   getWindowMode,
   onSetWindowMode,
   onSetPacks,

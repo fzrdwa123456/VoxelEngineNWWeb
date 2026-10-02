@@ -93,6 +93,12 @@ export interface SettingsCallbacks {
    *  and is on by default. */
   isDiagLogEnabled: () => boolean;
   onToggleDiagLog: (on: boolean) => boolean;
+  /** THE APPEARANCE FADES, per ring (P2.01): `lod` is the far ring (a chunk appearing at the far boundary has
+   *  nothing behind it, so its fade covers a real pop — ON by default) and `chunks` is the fine ring (the
+   *  P2.00 reserve means it is always replaced by geometry that is already there — OFF by default). READ from
+   *  the world's resource (the render lane reads the same object every step) and SET through a command. */
+  isFadeOn: (which: "lod" | "chunks") => boolean;
+  onSetFade: (which: "lod" | "chunks", on: boolean) => void;
   getWindowMode: () => WindowMode;
   onSetWindowMode: (mode: WindowMode) => void;
   /** THE SELECTION: the resource packs that are enabled (P1.49ae) — the chain is built from this list, so one
@@ -344,6 +350,26 @@ export function buildSettingsPanel(
       setUiText(world, diagBtn, diagLog ? "settings.on" : "settings.off");
     }
   });
+
+  // --- The APPEARANCE FADES (P2.01), one row per ring: the far ring (LOD) and the fine ring (real chunks).
+  //     They used to be one effect (P1.98/P1.99) and they are not the same question any more: the far ring's
+  //     fade covers a real pop at its own outer edge, while a real chunk is now always replaced by the P2.00
+  //     reserve — so its fade is a look, and off by default. Same shape as the two rows above: the name on the
+  //     left, a two-state button on the right, and the SWITCH's own state in local `let`s that only move when
+  //     the change was accepted (so the label can never disagree with the world). ---
+  const addFadeRow = (which: "lod" | "chunks", labelKey: string, hintKey: string, action: string): void => {
+    const ctl = spawnPanel(world, spawnRow(labelKey), "settings.rowCtl");
+    spawnLabel(world, ctl, "settings.rowMeta", hintKey);
+    let on = opts.isFadeOn(which);
+    const btn = spawnButton(world, ctl, "settings.rowBtn", action, "", on ? "settings.on" : "settings.off");
+    onUiAction(actions, action, () => {
+      on = !on;
+      opts.onSetFade(which, on);
+      setUiText(world, btn, on ? "settings.on" : "settings.off");
+    });
+  };
+  addFadeRow("lod", "settings.fadeLod", "settings.fadeLodHint", `${id}.fadeLod`);
+  addFadeRow("chunks", "settings.fadeChunks", "settings.fadeChunksHint", `${id}.fadeChunks`);
 
   // --- Language & fonts: a SECTION now (the nav selects it) ---
 
@@ -683,6 +709,8 @@ export class Menu {
       onSetVsync: cb.onSetVsync,
       isDiagLogEnabled: cb.isDiagLogEnabled,
       onToggleDiagLog: cb.onToggleDiagLog,
+      isFadeOn: cb.isFadeOn,
+      onSetFade: cb.onSetFade,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,
   onSetPacks: cb.onSetPacks,

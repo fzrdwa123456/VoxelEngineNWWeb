@@ -265,6 +265,9 @@ const {
   createPickerState,
   createToastState,
   createUiModalState,
+  // …and the per-ring appearance fades (P2.01), which every stream a test builds has to insert.
+  createFadeOptions,
+  FADE_OPTIONS,
   LOADING_STATE,
   INPUT_STATE,
   isMenuUi,
@@ -277,7 +280,7 @@ const {
   UI_MODAL,
   VOXEL,
 } = load("data/globals/resources.js");
-const { SetLoadingStage, ShowToast } = load("data/globals/commands.js");
+const { SetFadeOption, SetLoadingStage, ShowToast } = load("data/globals/commands.js");
 // The four PLAYER commands moved to the plugin that owns the components they write (P1.18b): `core/` no
 // longer imports `plugins/`, and the gate loads each from the module that declares it.
 const { SelectSlot, SetMode, SwapSlots, Teleport } = load("plugins/player/commands.js");
@@ -673,6 +676,8 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   const cache = P.createChunkMeshCache({ add() {}, remove() {} });
   cacheWorld.insertResource(P.CHUNK_MESHES, cache);
   cacheWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  // The stream reads the per-ring fade settings every step (P2.01), so every world it is built on needs them.
+  cacheWorld.insertResource(FADE_OPTIONS, createFadeOptions());
   // The stream reads the key-edge log for the `G` LOD view (P1.94), so every world it is built on needs it.
   cacheWorld.insertResource(KEY_EVENTS, createKeyEventLog());
 
@@ -779,6 +784,7 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   const cache2 = P.createChunkMeshCache({ add() {}, remove() {} });
   world2.insertResource(P.CHUNK_MESHES, cache2);
   world2.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  world2.insertResource(FADE_OPTIONS, createFadeOptions());
   world2.insertResource(KEY_EVENTS, createKeyEventLog());
   const inFlight2 = [];   // requested, not yet DELIVERED (a real worker's round trip)
   const arrived2 = [];    // delivered: what the next `take()` hands the lane
@@ -1235,6 +1241,9 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   const viewCache = P.createChunkMeshCache({ add() {}, remove() {} });
   viewWorld.insertResource(P.CHUNK_MESHES, viewCache);
   viewWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  // BOTH tiers fade, so this group keeps driving the fade MECHANISM (P1.98/P1.99) whatever the shipped default
+  // is; the defaults themselves are asserted in the P2.01 group below.
+  viewWorld.insertResource(FADE_OPTIONS, createFadeOptions(true, true));
   const edges = createKeyEventLog();
   viewWorld.insertResource(KEY_EVENTS, edges);
   let materialGen = 0;
@@ -1379,6 +1388,8 @@ check("a chunk that APPEARS fades in, one that LEAVES fades out (P1.98/P1.99) - 
   const fadeCache = P.createChunkMeshCache({ add() {}, remove: (mesh) => leftScene.push(mesh) });
   fadeWorld.insertResource(P.CHUNK_MESHES, fadeCache);
   fadeWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  // Both tiers ON: this group is about the fade mechanics (P1.98/P1.99), not about the shipped defaults.
+  fadeWorld.insertResource(FADE_OPTIONS, createFadeOptions(true, true));
   const fadeEdges = createKeyEventLog();
   fadeWorld.insertResource(KEY_EVENTS, fadeEdges);
   let fadeGen = 0;
@@ -1628,6 +1639,7 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
   const reserveCache = P.createChunkMeshCache({ add() {}, remove() {} });
   reserveWorld.insertResource(P.CHUNK_MESHES, reserveCache);
   reserveWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  reserveWorld.insertResource(FADE_OPTIONS, createFadeOptions());
   reserveWorld.insertResource(KEY_EVENTS, createKeyEventLog());
   let gen = 0;
   const reserveFactory = {
@@ -1740,6 +1752,120 @@ check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam 
   }
 });
 
+check("the appearance fades are a per-ring SETTING (P2.01): LOD fades, real chunks do not", () => {
+  // The fades stopped being one effect the moment P2.00 landed: the far ring's own outer edge still has nothing
+  // behind it (a fade covers a real pop there), while a real chunk is now always replaced by the RESERVE — so
+  // its fade is a look, and the look belongs in the settings panel. All three reference implementations studied
+  // for P2.00 (Voxy, Cubyz, Distant Horizons) fade only the coarse tier and cancel the fine one's fade outright.
+  const L = load("data/world/lod.js");
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const { VoxelWorld } = load("data/world/world.js");
+  const P = loadPresentation();
+
+  // 1. THE DEFAULTS, and the file's own rule (absent or unusable = the sane default): the far ring's fade is ON
+  //    unless the file says `false`, the fine ring's is OFF unless the file says `true`.
+  const dflt = createFadeOptions();
+  assert(dflt.lod === true && dflt.chunks === false, "the shipped defaults are lod ON / real chunks OFF");
+  for (const junk of [undefined, null, "yes", 1, 0, {}, [], NaN]) {
+    const o = createFadeOptions(junk, junk);
+    assert(o.lod === true, `an unusable lod value means ON (${String(junk)})`);
+    assert(o.chunks === false, `an unusable chunks value means OFF (${String(junk)})`);
+  }
+  const literal = createFadeOptions(false, true);
+  assert(literal.lod === false && literal.chunks === true, "…and a real false/true is taken literally");
+
+  // 2. THE COMMAND writes the resource, one ring at a time, and only at the BARRIER (a UI callback may not
+  //    assign state the tick reads — the same rule the frame cap and vsync follow).
+  const plain = new World();
+  const options = createFadeOptions(true, false);
+  plain.insertResource(FADE_OPTIONS, options);
+  plain.start(); // the barrier lives behind start() — the panel's click rides the ui lane
+  plain.commands.send(SetFadeOption, { which: "chunks", on: true });
+  equal(options.chunks, false, "nothing changes before the barrier");
+  plain.renderUi(); // the barrier + the ui lane: the command applies here
+  equal(options.chunks, true, "the command turns the real-chunk fade on");
+  equal(options.lod, true, "…and leaves the other ring alone");
+  plain.commands.send(SetFadeOption, { which: "lod", on: false });
+  plain.renderUi();
+  equal(options.lod, false, "the LOD fade can be turned off on its own");
+
+  // 3. THE STREAM OBEYS THEM, per tier, live: the fine chunks must appear on the SHARED material (no fade) and
+  //    the far chunks must still fade, and each can be flipped through the command while it runs.
+  const world = new World();
+  const voxel = new VoxelWorld();
+  world.insertResource(VOXEL, voxel);
+  world.insertResource(LOCAL_PLAYER, localPlayer);
+  const cache = P.createChunkMeshCache({ add() {}, remove() {} });
+  world.insertResource(P.CHUNK_MESHES, cache);
+  world.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  world.insertResource(KEY_EVENTS, createKeyEventLog());
+  const settings = createFadeOptions(); // the SHIPPED defaults
+  world.insertResource(FADE_OPTIONS, settings);
+  world.start();
+  let gen = 0;
+  const factory = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [],
+      apply: () => 5,
+      rebuild: () => 5,
+      restyle: () => 1,
+      dispose() {},
+    }),
+    getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++gen }),
+  };
+  // A tiny policy (5×5 coarse columns): the settings are about which tier fades, not about ring geometry.
+  const stream = new ChunkStreamSystem(world, factory, null, { step: 2, fineRadius: 1, farRadius: 2, farBuildInner: 0 });
+  const materialOf = (e) => (Array.isArray(e.mesh.material) ? e.mesh.material[0] : e.mesh.material);
+  const freshOf = (step, since) =>
+    [...cache.meshes.entries()].filter(([key, e]) => e.step === step && !since.has(key)).map(([, e]) => e);
+  const keysNow = () => new Set(cache.meshes.keys());
+
+  stream.step();
+  const afterFirst = keysNow();
+  const fineFirst = freshOf(1, new Set());
+  const farFirst = freshOf(2, new Set());
+  assert(fineFirst.length > 0 && farFirst.length > 0, "the first step built both tiers");
+  equal(
+    fineFirst.filter((e) => materialOf(e).shared !== true).length,
+    0,
+    "with the setting OFF a real chunk appears on the SHARED material — no fade at all",
+  );
+  equal(
+    farFirst.filter((e) => materialOf(e).shared !== false).length,
+    0,
+    "…while the LOD ring (setting ON) still gets its own copy to fade with",
+  );
+
+  // …and the settings really are LIVE: flip the real-chunk fade on and the LOD fade off through the command, and
+  // the chunks that appear from then on are the OTHER WAY ROUND.
+  world.commands.send(SetFadeOption, { which: "chunks", on: true });
+  world.commands.send(SetFadeOption, { which: "lod", on: false });
+  world.renderUi();
+  equal(settings.chunks, true, "the real-chunk fade is on now");
+  equal(settings.lod, false, "…and the LOD fade is off");
+  let fineAfter = [];
+  let farAfter = [];
+  for (let i = 0; i < 60 && (fineAfter.length === 0 || farAfter.length === 0); i++) {
+    const before = keysNow();
+    stream.step();
+    fineAfter = fineAfter.concat(freshOf(1, before));
+    farAfter = farAfter.concat(freshOf(2, before));
+  }
+  assert(fineAfter.length > 0, `more real chunks appeared (${fineAfter.length})`);
+  equal(
+    fineAfter.filter((e) => materialOf(e).shared === false).length,
+    fineAfter.length,
+    "with the setting ON a real chunk fades in like any other",
+  );
+  assert(farAfter.length > 0, `more far chunks appeared (${farAfter.length})`);
+  equal(
+    farAfter.filter((e) => materialOf(e).shared !== true).length,
+    0,
+    "…and with the LOD fade OFF a far chunk appears on the shared material",
+  );
+});
+
 check("the chunk stream can say whether a window still needs warming", () => {
   // The world-entry screen is only honest if it covers real work, and a RE-entry into a window that is
   // still built has none: `needsWarmUp` is what keeps that from being a one-frame flash of the screen.
@@ -1768,6 +1894,7 @@ check("the chunk stream can say whether a window still needs warming", () => {
   // The shared chunk material is a RESOURCE too, so it is inserted here �?a stub with a null material,
   // which is never reached because this world is all AIR and builds no mesh at all.
   streamWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  streamWorld.insertResource(FADE_OPTIONS, createFadeOptions());
   streamWorld.insertResource(KEY_EVENTS, createKeyEventLog());
   const stream = new ChunkStreamSystem(streamWorld);
 
@@ -3892,6 +4019,37 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   // STATE on the right (`settings.on` / `settings.off`), so THOSE are the keys that must be translated.
   assert(/settings\.diagLog/.test(menu) && /settings\.on/.test(menu) && /settings\.off/.test(menu),
     "the shared settings panel renders it as a two-state toggle");
+  // THE PER-RING FADE ROWS (P2.01): both are ROWS with the same two-state shape, and their values travel the
+  // same path as the cap/vsync — loaded by the root into a resource, changed through a COMMAND, and persisted by
+  // HANDING the new value to the save (reading the resource back would write the state the user just left, which
+  // is the measured bug both of those already carry a comment about).
+  const startup = stripComments(readSource("src/boot/drivers/startup.ts"));
+  for (const which of ["lod", "chunks"]) {
+    assert(new RegExp(`settings\\.fade${which === "lod" ? "Lod" : "Chunks"}`).test(menu),
+      `the settings panel has a row for the ${which} fade`);
+    assert(new RegExp(`\\$\\{id\\}\\.fade${which === "lod" ? "Lod" : "Chunks"}`).test(menu),
+      `…with its own action id (${which})`);
+  }
+  assert(
+    /const fadeOptions = createFadeOptions\(readSettings\(\)\.fadeLod, readSettings\(\)\.fadeChunks\);/.test(main) &&
+      /world\.insertResource\(FADE_OPTIONS, fadeOptions\)/.test(main),
+    "the composition root loads both from the settings file into the resource the render lane reads",
+  );
+  assert(
+    /world\.commands\.send\(SetFadeOption, \{ which, on \}\)/.test(main) &&
+      /saveSettings\(which === "lod" \? \{ fadeLod: on \} : \{ fadeChunks: on \}\)/.test(main),
+    "a click goes through the COMMAND and HANDS the value to the save (never reads it back)",
+  );
+  assert(
+    /s\.fadeLod = justSet\.fadeLod \?\? fadeOptions\.lod;/.test(main) &&
+      /s\.fadeChunks = justSet\.fadeChunks \?\? fadeOptions\.chunks;/.test(main),
+    "…and both are written with every other setting",
+  );
+  assert(
+    /fadeLod: deps\.world\.resource\(FADE_OPTIONS\)\.lod,/.test(startup) &&
+      /fadeChunks: deps\.world\.resource\(FADE_OPTIONS\)\.chunks,/.test(startup),
+    "the boot settings check carries them in its schema (or the engine's own setting would read as unknown)",
+  );
   // The labels have to exist in every shipped dictionary, or a row would show the raw key.
   for (const lang of ["zh", "en", "ja"]) {
     const dict = JSON.parse(
@@ -3902,6 +4060,10 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
     );
     for (const key of [
       "settings.diagLog",
+      "settings.fadeLod",
+      "settings.fadeChunks",
+      "settings.fadeLodHint",
+      "settings.fadeChunksHint",
       "settings.vsync",
       "settings.on",
       "settings.off",

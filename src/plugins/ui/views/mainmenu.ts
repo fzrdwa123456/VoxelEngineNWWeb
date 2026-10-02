@@ -86,6 +86,8 @@ export class MainMenu {
       onSetVsync: cb.onSetVsync,
       isDiagLogEnabled: cb.isDiagLogEnabled,
       onToggleDiagLog: cb.onToggleDiagLog,
+      isFadeOn: cb.isFadeOn,
+      onSetFade: cb.onSetFade,
       getWindowMode: cb.getWindowMode,
       onSetWindowMode: cb.onSetWindowMode,
   onSetPacks: cb.onSetPacks,

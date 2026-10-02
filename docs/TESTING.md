@@ -116,6 +116,22 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       into the transparent pass for 0.26 s, so the frame time must not visibly jump (it is bounded by
       `FADE_OUT_MAX`, past which the rest are removed at once); a teleport-sized unload (entering a world) must
       NOT hold thousands of meshes alive — that is what the cap is for.
+→ **THE TWO FADE SWITCHES IN THE SETTINGS (P2.01)**: pause (ESC) → 设置, and look at the two rows under 垂直同步 —
+  **LOD 淡入淡出** (far ring) and **真实区块淡入淡出** (real chunks). Expected out of the box: LOD = 已开启,
+  真实区块 = 已关闭. Check each of the four combinations by walking/flying across a chunk boundary with `G` on
+  (the tier tint makes the junction obvious):
+  (a) **LOD on**: a chunk appearing at the FAR ring's own outer edge fades in instead of popping;
+  (b) **LOD off**: that far chunk pops in (and nothing else changes — the seam must still never show sky, the
+      P2.00 reserve is what covers it);
+  (c) **真实区块 on**: a real chunk appearing at the fine ring's edge fades in (a soft dissolve over the coarse
+      surface behind it);
+  (d) **真实区块 off** (the default): a real chunk appears at once — crisper, and still no flash of sky, which is
+      the whole point: the reserve, not the fade, is what closes the seam.
+  Both switches apply IMMEDIATELY (no restart) and are written to `config/settings.json` as `fadeLod` /
+  `fadeChunks` — flip one, relaunch, and the panel must show the same state. `J` still switches BOTH off for the
+  session without touching the file (a held key or the key release must not toggle it). A hand-edited
+  `"fadeLod": "yes"` must load as ON and `"fadeChunks": "yes"` as OFF (only a real `true` turns the fine ring's
+  fade on), and the boot line must not report either as an unknown setting.
 → **THE RING SEAM MUST NEVER SHOW SKY (P2.00)**: this is the check the last three rounds were about. Walk (and
   then fly) across a chunk boundary while watching the junction where the fine ring meets the far one — with `G`
   on it is the line between the two colours. There must be NO frame in which you can see the sky through the

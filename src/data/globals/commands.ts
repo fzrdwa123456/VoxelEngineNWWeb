@@ -12,7 +12,7 @@
 // WHAT IS NOT HERE: everything ENTITY-shaped. The four player commands (`SetMode`, `Teleport`, `SelectSlot`,
 // `SwapSlots`) are in `plugins/player/commands.ts` (P1.18b), because they write a plugin's own components.
 import { defineCommand } from "../../core/world";
-import { LOADING_STATE, FPS_CAP, PACK_RELOAD, sanitizeFrameCap, TOAST, TOAST_MS } from "./resources";
+import { LOADING_STATE, FADE_OPTIONS, FPS_CAP, PACK_RELOAD, sanitizeFrameCap, TOAST, TOAST_MS } from "./resources";
 import { hotPlugLabel } from "./hotplug";
 import { HOT_PLUG, hotInstall, hotUninstall } from "../../core/plugin/hotplug";
 /** Show a toast: `key` is an i18n key unless `raw` is set ("cap set to 60" cannot be a key — see
@@ -53,6 +53,18 @@ export const SetVsync = defineCommand<{ vsync: boolean }>(
   "setVsync",
   (world, { vsync }) => {
     world.resource(FPS_CAP).vsync = vsync === true;
+  },
+);
+
+/** The appearance fades, per ring (P2.01): which of the two tiers fades in/out when its chunks come and go.
+ *  A COMMAND for the same reason as the cap and vsync — `chunk-stream` reads the resource every step, so a UI
+ *  callback may not assign it. The settings FILE is written by the caller (config is not world state). */
+export const SetFadeOption = defineCommand<{ which: "lod" | "chunks"; on: boolean }>(
+  "setFadeOption",
+  (world, { which, on }) => {
+    const fades = world.resource(FADE_OPTIONS);
+    if (which === "lod") fades.lod = on === true;
+    else fades.chunks = on === true;
   },
 );
 

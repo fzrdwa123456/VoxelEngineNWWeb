@@ -579,6 +579,33 @@ export function canControl(devices: InputState, ui: UiModalState): boolean {
   return devices.locked && !isModalUi(ui);
 }
 
+// ===== The APPEARANCE FADES, as a setting (P2.01) =====
+// A chunk that APPEARS fades in and one that LEAVES fades out (P1.98/P1.99). Since P2.00 that is no longer
+// needed to hide the seam — the far ring keeps a READY RESERVE under the fine ring, so a fine chunk is
+// replaced by geometry that is already there — which makes the fades a LOOK, and a look belongs in the
+// settings panel. The two rings are told apart because they are not the same question:
+//   * the FAR ring (LOD, step > 1) still has an edge with nothing behind it (its own outer boundary), so a
+//     fade there is covering a real pop. ON by default.
+//   * the FINE ring (real chunks, step 1) is always backed by the reserve now, and every reference
+//     implementation studied for P2.00 (Voxy, Cubyz, Distant Horizons) deliberately does NOT fade its real
+//     chunks at that boundary — Voxy and DH cancel the per-chunk fade outright. OFF by default.
+// The values are read by `chunk-stream` every step, so they live in a RESOURCE (see the note above): a UI
+// callback may not assign one, so the panel sends `SetFadeOption`. The `J` key remains a SESSION-ONLY master
+// switch over both (it never touches the file) — handy for A/B while playing.
+export interface FadeOptions {
+  /** The far ring (LOD) fades in when it appears and out when it leaves */
+  lod: boolean;
+  /** The fine ring (real chunks) fades in when it appears and out when it leaves */
+  chunks: boolean;
+}
+export const FADE_OPTIONS = defineResource<FadeOptions>("fadeOptions");
+
+/** Sanitising factory: the file is hand-editable, so anything but a real `false` means "on" for the LOD
+ *  fade (the same rule `vsync` uses) and only a real `true` turns the fine ring's fade on. */
+export function createFadeOptions(lod: unknown = true, chunks: unknown = false): FadeOptions {
+  return { lod: lod !== false, chunks: chunks === true };
+}
+
 // ===== Configuration resources: the settings that are read ON THE TICK =====
 // Configuration is not GAME state — nothing simulates it and no entity owns it — but part of it is read
 // on the tick, which is what makes it world state: `movement`, `interaction` and `input` ask the bind

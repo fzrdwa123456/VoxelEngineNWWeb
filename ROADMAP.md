@@ -2761,6 +2761,34 @@ Still outstanding:
   STILL POSSIBLE, NOT DONE (by request: one thing at a time): the DISTANCE DITHER fade (Cubyz-style, only the
   coarse tier, in a fragment stage) would retire the appearance fades entirely, and the fine ring could then
   stop fading in — which is what all three references do at this boundary.
+- **P2.01 — the two fades become a per-ring SETTING in the settings panel.** `DONE`, by request («先在设置添加lod
+  淡入谈出选项，和真实区块淡出淡入选项其他先不管»).
+  WHY THEY ARE TWO QUESTIONS NOW: P1.98/P1.99 faded a chunk in when it appeared and out when it left, and P2.00
+  made that unnecessary for the seam — the far ring keeps a READY RESERVE under the fine ring, so a real chunk is
+  always replaced by geometry that is already there (the user's own finding: with the fades off the real chunks do
+  not flash at all). What is left is a LOOK, and the two rings do not share it: the far ring's own outer edge
+  still has nothing behind it, so its fade covers a real pop; the fine ring's fade is pure preference. All three
+  reference implementations studied for P2.00 agree — Voxy cancels Sodium's per-chunk fade, Distant Horizons
+  disables Minecraft's (`chunkSectionFadeInTime = 0`), Cubyz fades only its LOD geometry — so the shipped
+  defaults are **LOD fade ON, real-chunk fade OFF**.
+  HOW IT IS WIRED (the shape the frame cap and vsync already had): the values live in the `FADE_OPTIONS` resource
+  (`data/globals/resources.ts`, `createFadeOptions` sanitising the file with the same "absent or unusable means
+  the sane default" rule), the composition root loads them from `settings.json` and inserts the resource, the two
+  settings rows change them through the `SetFadeOption` COMMAND (a UI callback may not assign a resource the tick
+  reads), the save is HANDED the new value, and the boot settings check carries both in its `inForce` schema.
+  `chunk-stream`'s `fadeOn(step)` is the whole reader: `step > 1` asks the LOD option, `step === 1` the chunk one,
+  and the `J` key stays a session-only master switch over both (it never writes the file). The reserve's
+  readiness rule (P2.00) needed no change: with the fine fade off there is simply no fine fade to wait for.
+  THE ROWS are two-state toggles next to the diagnostic log's, with hints that say what each one means — the
+  real-chunk hint names the reason it can safely be off ("the reserve covers the swap").
+  VERIFIED: `tsc` 0; `check:ecs` **80/80** with a new group: the defaults and the sanitising rule (a sweep of
+  unusable values), the `SetFadeOption` command applying at the BARRIER and touching one ring at a time, and a
+  real stream driven through both flips — with the shipped defaults a NEW real chunk holds the SHARED material
+  (no fade) while a new far chunk gets its own copy, and after `SetFadeOption` turns the chunk fade on and the LOD
+  one off the next chunks that appear are the other way round. MUTATION-TESTED: making `fadeOn` ignore the
+  options fails "with the setting OFF a real chunk appears on the SHARED material". The settings group also
+  asserts the source shape (the command + the handed save + the `inForce` schema) and that all four new i18n keys
+  exist in zh/en/ja.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

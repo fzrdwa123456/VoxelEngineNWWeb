@@ -676,7 +676,16 @@ where it is:
     `build`/`buildFar`), or the same chunk would be in the scene twice for the rest of the fade.
   * **`J` TURNS BOTH OFF** and ends every fade in flight at once (`finishAllFades`): the arriving ones reach full
     opacity now, the leaving ones are taken down now. Ending them at the switch is not cosmetic: with the effect
-    off nothing would ever finish a fade, so a chunk caught mid-fade would stay translucent for ever.
+    off nothing would ever finish a fade, so a chunk caught mid-fade would stay translucent for ever. `J` is
+    SESSION-ONLY and overrides both rings; the PERSISTED choice is the two settings rows below.
+  * **THE PERSISTED CHOICE IS PER RING (P2.01): `settings.fadeLod` and `settings.fadeChunks`.** Since the reserve
+    (P2.00) the two rings are not the same question: the far ring's own outer edge still has nothing behind it
+    (its fade covers a real pop — ON by default), while a real chunk is always replaced by geometry that is
+    already there (its fade is a look — OFF by default, and Voxy/DH cancel the per-chunk fade outright while
+    Cubyz fades only its LOD tier). The values live in the `FADE_OPTIONS` RESOURCE because `chunk-stream` reads
+    them every step, the panel changes them through the `SetFadeOption` COMMAND, and the save is HANDED the new
+    value (reading the resource back would write the state the user just left) — the same shape as the frame cap
+    and vsync.
   The gate drives all of it on a real stream (0 opacity on the first step → no progress with a zero delta → half
   the opacity at half the time → the shared material back, copies freed, at `FADE_IN_MS` → an edit cutting a
   fade short without the chunk going translucent again → a window move with `J` off giving opaque chunks at once

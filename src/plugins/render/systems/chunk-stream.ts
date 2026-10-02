@@ -28,7 +28,7 @@ import {
 } from "../../../data/world/world";
 import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
-import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
+import { FADE_OPTIONS, LOCAL_PLAYER, VOXEL, type FadeOptions } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
 import { buildLodMeshInput, fineBase, isFarBuildColumn, isFarColumn, isFineCoveredColumn, tierTint, type LodPolicy } from "../../../data/world/lod";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
@@ -187,8 +187,11 @@ export class ChunkStreamSystem {
   private readonly fading: Array<{ key: string; entry: ChunkMeshEntry; clones: THREE.Material[]; elapsed: number; out: boolean }> =
     [];
   /** `J` switches the fade off (P1.98) — for A/B comparing "pop" against "fade", and for a machine where the
-   *  blending costs something. */
+   *  blending costs something. SESSION-ONLY: it is the master switch over both tiers and never writes the
+   *  settings file (the `lod`/`chunks` options in the settings panel are the persisted choice — P2.01). */
   private fadeEnabled = true;
+  /** The persisted per-tier fade choice, read every step (a RESOURCE, because the tick reads it — P2.01). */
+  private readonly fadeOptions: FadeOptions;
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
   private readonly voxel: VoxelWorld;
@@ -239,6 +242,8 @@ export class ChunkStreamSystem {
     this.voxel = world.resource(VOXEL);
     this.cache = world.resource(CHUNK_MESHES);
     this.material = world.resource(CHUNK_MATERIAL);
+    // The per-tier fade choice (P2.01): a resource, because this system reads it every step.
+    this.fadeOptions = world.resource(FADE_OPTIONS);
     const offsets: Array<[number, number]> = [];
     if (this.lod === null) {
       for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
@@ -887,7 +892,7 @@ export class ChunkStreamSystem {
    *  the chunk keeps occluding itself correctly (depth-tested), so a fading chunk never shows its own back
    *  faces — the only thing it blends with is what is already drawn behind it. */
   private beginFade(key: string, entry: ChunkMeshEntry): void {
-    if (!this.fadeEnabled) return;
+    if (!this.fadeOn(entry.step)) return;
     this.pushFade(key, entry, false);
   }
 
@@ -901,11 +906,22 @@ export class ChunkStreamSystem {
    *  (see `unloadOutside`): the chunk is no longer wanted, so nothing may treat it as loaded, while its pixels
    *  are still on screen for the length of the fade. `removeMesh` is the other half of the bargain. */
   private beginFadeOut(key: string, entry: ChunkMeshEntry): boolean {
-    if (!this.fadeEnabled) return false;
+    if (!this.fadeOn(entry.step)) return false;
     let leaving = 0;
     for (const fade of this.fading) if (fade.out) leaving++;
     if (leaving >= FADE_OUT_MAX) return false;
     return this.pushFade(key, entry, true);
+  }
+
+  /** Does THIS tier fade right now? Two independent answers (P2.01), and the settings panel owns both:
+   *    * the `lod`/`chunks` options are the PERSISTED choice — the fine ring's fade is off by default, because
+   *      the reserve (P2.00) means a fine chunk is replaced by geometry that is already there, and none of the
+   *      reference implementations fades its real chunks at that boundary;
+   *    * `fadeEnabled` is the `J` key's SESSION-ONLY master switch (it never writes the file).
+   *  A tier's fade is on only when both say so. */
+  private fadeOn(step: number): boolean {
+    if (!this.fadeEnabled) return false;
+    return step > 1 ? this.fadeOptions.lod : this.fadeOptions.chunks;
   }
 
   /** The shared half of both directions: the per-chunk copies, `transparent`, and the fade entry. */
