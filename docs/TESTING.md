@@ -91,6 +91,18 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   toggle it, and it must compose with `G`: press both and you get a tier-COLORED wireframe — the combination to
   use when checking the LOD's shape. Also worth a look while it is on: a dug block's hole must show its own
   faces (P1.91) and the ring seam must show no missing triangles (P1.95).
+→ **`J` — THE APPEARANCE FADE (P1.98)**: walk or sprint forward and watch the chunks that stream in at the edge
+  of the view: each one must come in INVISIBLE and reach full opacity over ~0.2 s (about 13 frames) instead of
+  popping. The far ring is where it matters most — a far chunk covers 64×64 blocks, so without the fade the
+  coarse terrain visibly snaps into place as you turn; with it, it fades in. Three things must also hold:
+  (a) DIG a block while its chunk is still fading in (dig at the edge of the view, right where a chunk just
+      appeared): the hole must be visible IMMEDIATELY — an edit never fades, or the block you just broke would
+      stay invisible for another 0.2 s (this is the P1.18i rule);
+  (b) press `J`: every chunk currently fading must come to FULL opacity AT ONCE (not freeze half-transparent),
+      and chunks that appear afterwards must show up instantly with no fade at all;
+  (c) press `J` again: the fade is back. It must be a real switch in both directions.
+  It must also compose: `G` + `J` gives tier-coloured chunks fading in, and `H` + `J` gives a wireframe fading
+  in (with `H` on, a fade is very visible as the lines brightening).
 → **A PACK SWITCH MUST RESTYLE BOTH RINGS (P1.97 — this was a real bug)**: stand somewhere the far ring is on
   screen (fly up ~200 blocks, or just look at the horizon), open Settings → Resource packs and toggle a pack
   that changes BLOCK LOOKS (in the sample install, disabling the mod drops the block textures to the engine's

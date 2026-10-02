@@ -600,15 +600,16 @@ where it is:
   column, every ODD column left one fine column owned by neither ring — a 32-block-wide, full-depth column
   with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through — and one owned by
   both. `fineBase(null, pc) === pc`, so the no-LOD path is untouched, and the gate tiles every parity.
-* **`G` AND `H` ARE THE DEBUG VIEWS (P1.94/P1.96).** In a world, `G` tints every chunk mesh by its TIER: the
-  fine ring in `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a textured block
-  keeps its texture and takes the hue), and `H` switches every chunk mesh to three.js's TRIANGLE WIREFRAME (the
-  mesher emits triangles, so what you see is the mesh's real triangle edges, not the block grid). Both are
-  handled by `chunk-stream` itself — that system owns the meshes and their materials, and a toggle is one
-  material swap per entry (`refreshMaterials`), as cheap as the reload's restyle. The keys arrive through the
-  same `KEY_EVENTS` log every other global chord uses (its own `KeyEdgeReader` cursor, ONE drain for both;
-  `player.input` still owns the DOM listeners), neither key is bound to anything else, and a held key (repeat)
-  or the key release is ignored.
+* **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** In a world, `G` tints every chunk mesh by its
+  TIER: the fine ring in `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a
+  textured block keeps its texture and takes the hue), `H` switches every chunk mesh to three.js's TRIANGLE
+  WIREFRAME (the mesher emits triangles, so what you see is the mesh's real triangle edges, not the block grid),
+  and `J` switches the APPEARANCE FADE off and on (see the next bullet). All three are handled by `chunk-stream`
+  itself — that system owns the meshes and their materials, and a toggle is one material swap per entry
+  (`refreshMaterials`), as cheap as the reload's restyle. The keys arrive through the same `KEY_EVENTS` log every
+  other global chord uses (its own `KeyEdgeReader` cursor, ONE drain for all three; `player.input` still owns the
+  DOM listeners), none of the three is bound to anything else, and a held key (repeat) or the key release is
+  ignored.
   TWO PROPERTIES WORTH KEEPING: the tint is part of the material CACHE key, so a tinted world holds one extra
   material per (look, tier) and the untinted materials stay cached; and the WIREFRAME flag is applied on EVERY
   material resolution (`debugged`) rather than only on the key press, so a pack reload — which drops that cache
@@ -620,6 +621,32 @@ where it is:
   the view distance for LESS geometry than the single flat-radius-8 window (629k faces / 91 MB)**. The warm-up
   still builds only the fine ring (the entry time is unchanged); the far ring streams in over the first ~3 s
   of play.
+* **A CHUNK THAT APPEARS FADES IN (P1.98 — `FADE_IN_MS` = 220 ms, `J` switches it off).** The reported complaint
+  was «区块加载就闪» — a chunk that streams in popped at full opacity, which reads as a flash (worst on the far
+  ring, whose chunks cover 64×64 blocks). A chunk that appears is now drawn with its OWN COPY of the material
+  (`transparent`, opacity 0 → 1) and the SHARED material goes back on the mesh (the copies disposed) when the
+  fade ends. Four things are load-bearing:
+  * **THE COPY IS WHAT MAKES IT POSSIBLE AT ALL.** A chunk's materials are shared per (look, tier), so a
+    per-chunk opacity needs a clone; `beginFade` makes the copies from the very resolution `materialsFor` just
+    returned, so a `G` tint or an `H` wireframe comes along with them. `depthWrite` stays ON: the chunk keeps
+    occluding itself correctly (depth-tested), so a fading chunk never shows its own back faces — the only thing
+    it blends with is what is already drawn behind it.
+  * **IT IS DRIVEN BY THE LANE'S DELTA, NOT BY WALL-CLOCK TIME** (`step(deltaMs = 1000/60)`, the plugin passing
+    `ctx.dt * 1000`), which is what makes the fade frame-rate independent and what lets the gate finish one with
+    a single big `step`.
+  * **AN EDIT NEVER FADES (P1.18i).** `beginFade` is called from `build`, `buildFar` and `applyResult` — the
+    FIRST appearance of a chunk — and never from `rebuild`, because the block the player just dug is the one
+    thing they are watching. A fade already in flight when that chunk is edited is DROPPED by the guard at the
+    top of `advanceFades` (a mesh that no longer holds its own copies); that guard is also what frees it, which
+    is why no other path (edit, restyle, pack reload) has to remember to end a fade.
+  * **`J` TURNS IT OFF** and ends every fade in flight at once (`finishAllFades`) — with it off, a chunk that
+    appears is drawn with the shared material immediately, at full opacity. Ending them at the switch is not
+    cosmetic: with the effect off nothing would ever finish a fade, so a chunk caught mid-fade would stay
+    translucent for ever.
+  The gate drives all of it on a real stream (0 opacity on the first step → no progress with a zero delta → half
+  the opacity at half the time → the shared material back, copies freed, at `FADE_IN_MS` → an edit cutting a
+  fade short without the chunk going translucent again → a window move with `J` off giving opaque chunks at once
+  and with `J` on giving invisible ones again).
 
 ## Iron rules (breaking any of these = silent bugs)
 

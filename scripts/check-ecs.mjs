@@ -170,6 +170,40 @@ const near = (actual, expected, eps, message) => {
     throw new Error(`${message ?? "value"}: expected ~${expected} (+/-${eps}), got ${actual}`);
   }
 };
+/** Every material a fake `dispose()` was called on — which is how "the fade freed its copies" is observable. */
+const fakeDisposed = [];
+/** The chunk material a TEST factory hands out. It has to behave like a three.js material for the paths that
+ *  touch one: the debug views set `wireframe` (+`needsUpdate`) and the appearance fade (P1.98) needs a real
+ *  `clone()`/`dispose()` pair, because a per-chunk opacity cannot be shared. */
+const fakeChunkMaterial = (extra = {}) => {
+  const material = {
+    // The DEFAULTS come first and the caller's overrides after them: three.js's own `clone()` copies the
+    // flags in force, so a fake that flattened a passed `wireframe: true` back to false would make the fade's
+    // copy look un-debugged and fail the H assertion against CORRECT engine code (measured).
+    wireframe: false,
+    transparent: false,
+    opacity: 1,
+    needsUpdate: false,
+    // `shared` marks a material the CACHE handed out. It is what tells a chunk's own fade COPY (a clone, a
+    // material of its own) from the shared one the world is drawn with — and a real clone is NOT the cache's
+    // instance, so the copy clears it.
+    shared: false,
+    ...extra,
+    // A real clone COPIES the flags in force, which is what lets a fade copy inherit a tint/wireframe.
+    clone: () =>
+      fakeChunkMaterial({
+        ...extra,
+        wireframe: material.wireframe,
+        transparent: material.transparent,
+        opacity: material.opacity,
+        shared: false,
+      }),
+    dispose() {
+      fakeDisposed.push(material);
+    },
+  };
+  return material;
+};
 
 // ===== compile =====
 console.log("=== check-ecs: compile the ECS half -> " + OUT + " ===");
@@ -668,7 +702,7 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
       },
       dispose: () => {},
     }),
-    getMaterial: () => ({}),
+    getMaterial: () => fakeChunkMaterial(),
   };
   // The pool stands in for the Workers: it runs the REAL pure mesher on the input the lane gathered, and hands
   // the result back on the NEXT `take()` — which is exactly how a worker reply arrives (a later frame).
@@ -758,7 +792,7 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
       restyle: () => 1,
       dispose: () => {},
     }),
-    getMaterial: () => ({}),
+    getMaterial: () => fakeChunkMaterial(),
   };
   const pool2 = {
     workers: 1,
@@ -1215,7 +1249,7 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
     }),
     // The one thing this factory owes the assertion: it is ASKED for a tint, per mesh — and every resolution is
     // stamped, so "was this mesh re-resolved after the chain change" is observable (P1.97).
-    getMaterial: (_state, _spec, tint) => ({ tint: tint ?? null, gen: ++materialGen }),
+    getMaterial: (_state, _spec, tint) => fakeChunkMaterial({ tint: tint ?? null, gen: ++materialGen }),
   };
   const view = new ChunkStreamSystem(viewWorld, recording, null, policy);
   view.step();
@@ -1252,7 +1286,14 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   const materials = [...viewCache.meshes.values()].flatMap((e) =>
     Array.isArray(e.mesh.material) ? e.mesh.material : [e.mesh.material],
   );
-  assert(materials.every((m) => m.needsUpdate === true), "…and asks three.js to rebuild those materials");
+  // ONLY A MATERIAL THAT WAS ALREADY COMPILED NEEDS THE RECOMPILE FLAG. A chunk built in THIS VERY STEP (an
+  // appearance fade, P1.98) holds a freshly CLONED material that three.js has never compiled — and the real
+  // `Material.copy` does not carry `needsUpdate` either — so it is compiled with `wireframe` already in force.
+  // A fade copy is exactly the material `beginFade` marked `transparent`, so the flag is asked of the SHARED
+  // ones; without it in `debugged`, the reused materials stay stale and this still fails.
+  const rebuilt = materials.filter((m) => m.transparent !== true);
+  assert(rebuilt.length > 0, "the step left shared materials to recompile");
+  assert(rebuilt.every((m) => m.needsUpdate === true), "…and asks three.js to rebuild those materials");
   // A repeat and the key release are ignored, exactly like G.
   publishKeyEdge(edges, { code: "KeyH", down: true, repeat: true });
   publishKeyEdge(edges, { code: "KeyH", down: false, repeat: false });
@@ -1295,6 +1336,148 @@ check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the 
   assert(gens(2).every((g, i) => g !== farBefore[i]), "EVERY far mesh was re-resolved");
   assert(gens(1).every((g, i) => g !== fineBefore[i]), "…and every fine one too");
   equal(view.restylePending, 0, "…and both queues are empty afterwards");
+});
+
+check("a chunk that APPEARS fades in (P1.98) - an EDIT never does, and J turns it off", () => {
+  // The reported complaint: a chunk that streams in POPPED at full opacity, which reads as a flash. The fix is
+  // a per-chunk appearance fade — the chunk draws with its OWN copy of the material, starting at 0 opacity and
+  // ramped by the LANE's delta, and the shared material is put back (copies freed) when it ends. What the gate
+  // must hold to:
+  //   * a chunk that appears starts INVISIBLE and ramps over FADE_IN_MS — driven by the frame delta, NOT by
+  //     wall-clock time (a `step(0)` must not move it), which is also what makes it frame-rate independent;
+  //   * an EDIT stays instant: `rebuild` never starts a fade, even for a chunk that is mid-fade (P1.18i);
+  //   * the copies do not leak (every one is disposed when its fade ends);
+  //   * `J` turns the effect off, ends what is in flight at once, and a chunk that appears afterwards is drawn
+  //     with the shared material immediately.
+  const L = load("data/world/lod.js");
+  const { ChunkStreamSystem, FADE_IN_MS } = load("plugins/render/systems/chunk-stream.js");
+  const { AIR, CHUNK_SIZE } = load("data/world/chunk.js");
+  const { VoxelWorld } = load("data/world/world.js");
+  const P = loadPresentation();
+  const fadeWorld = new World();
+  const fadeVoxel = new VoxelWorld();
+  fadeWorld.insertResource(VOXEL, fadeVoxel);
+  // The player HANDLE from the world above: component storage lives on the DEFINITION, so one process supports
+  // one World (ROADMAP §3.9) and a second `spawnPlayer` is refused. The stream only reads the row, and this
+  // group puts the position back before it ends.
+  fadeWorld.insertResource(LOCAL_PLAYER, localPlayer);
+  const positionRow = entityIndex(localPlayer);
+  const startX = C.POSITION.x[positionRow];
+  const fadeCache = P.createChunkMeshCache({ add() {}, remove() {} });
+  fadeWorld.insertResource(P.CHUNK_MESHES, fadeCache);
+  fadeWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  const fadeEdges = createKeyEventLog();
+  fadeWorld.insertResource(KEY_EVENTS, fadeEdges);
+  let fadeGen = 0;
+  const fadeFactory = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      // ONE look (`specs: []`): the mesh then holds a single material, and the assertions read it directly.
+      specs: [],
+      apply: () => 5,
+      rebuild: () => 5,
+      restyle: () => 1,
+      dispose() {},
+    }),
+    // `shared: true` is what the material CACHE hands out; a fade copy is a clone, and the fake's clone clears
+    // the mark (a real clone is not the cached instance either).
+    getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++fadeGen }),
+  };
+  const fadeStream = new ChunkStreamSystem(fadeWorld, fadeFactory, null, L.DEFAULT_LOD);
+  const entries = () => [...fadeCache.meshes.values()];
+  const materialOf = (e) => (Array.isArray(e.mesh.material) ? e.mesh.material[0] : e.mesh.material);
+  const faded = () => entries().filter((e) => materialOf(e).shared === false);
+
+  fadeStream.step();
+  const first = entries();
+  assert(first.length > 0, "the first step built meshes to fade");
+  const copies = first.map(materialOf);
+  equal(copies.filter((m) => m.shared !== false).length, 0, "every chunk that just APPEARED draws with its OWN copy of the material");
+  equal(
+    copies.filter((m) => m.transparent === true && m.opacity === 0).length,
+    copies.length,
+    "…starting fully invisible, not popping in",
+  );
+
+  // The DELTA is what ramps it (so a 30fps and a 60fps frame reach the same opacity after the same ms)…
+  fadeStream.step(0);
+  equal(copies.filter((m) => m.opacity === 0).length, copies.length, "a step with no time in it does not move the fade");
+  fadeStream.step(FADE_IN_MS / 2);
+  assert(copies.every((m) => Math.abs(m.opacity - 0.5) < 1e-6), "half the time is half the opacity");
+  fadeStream.step(FADE_IN_MS);
+  // Read the meshes AGAIN: a finished fade does not edit its copies, it puts the SHARED material back on the
+  // mesh and frees them — so the copies above are now dead objects and the entries are what changed.
+  const finished = first.map(materialOf);
+  assert(
+    finished.every((m) => m.shared === true && m.transparent === false && m.opacity === 1),
+    "…and at FADE_IN_MS the SHARED material is back, at full opacity",
+  );
+  assert(copies.every((m) => fakeDisposed.includes(m)), "…and every copy the fade made was freed");
+
+  // AN EDIT IS INSTANT, EVEN MID-FADE (P1.18i). The chunk the player is watching must change NOW: `rebuild`
+  // resolves the shared material (and the fade in flight is dropped) instead of restarting a fade, which would
+  // leave the block they just dug invisible for another FADE_IN_MS.
+  const victim = entries().find((e) => e.step === 1 && e.cy >= 0 && materialOf(e).shared === false);
+  assert(victim !== undefined, "a chunk is mid-fade to edit");
+  const victimCopy = materialOf(victim);
+  const bx = victim.cx * CHUNK_SIZE + 1;
+  const by = victim.cy * CHUNK_SIZE + 1;
+  const bz = victim.cz * CHUNK_SIZE + 1;
+  assert(by < WORLD_MAX_Y, "the target block is inside the world's Y range");
+  equal(fadeVoxel.setBlock(bx, by, bz, AIR), true, "the gate edits a block inside the chunk that is mid-fade");
+  fadeStream.step();
+  assert(
+    materialOf(victim).shared === true && materialOf(victim).transparent === false,
+    "an EDIT is instant: the chunk comes back on the SHARED material instead of fading again",
+  );
+  // The cut-short fade is dropped by the NEXT step's guard — that is the design: `advanceFades` notices a mesh
+  // that no longer holds its copies and ends that fade, so no other path (edit, restyle, pack reload) has to
+  // remember to end one. The copy is off screen in the meantime (the mesh already holds the shared material).
+  fadeStream.step();
+  assert(fakeDisposed.includes(victimCopy), "…and the cut-short fade freed its copy");
+  assert(materialOf(victim).shared === true, "…without the edited chunk ever going translucent again");
+
+  // J OFF (P1.98): the switch ends every fade in flight at once, or the chunks that are mid-fade would stay
+  // translucent for ever — with the effect off nothing would ever finish them.
+  for (let i = 0; i < 400 && fadeStream.pendingCount() > 0; i++) fadeStream.step(0);
+  assert(faded().length > 0, "the window filled up with chunks that are mid-fade");
+  publishKeyEdge(fadeEdges, { code: "KeyJ", down: true, repeat: false });
+  fadeStream.step();
+  equal(faded().length, 0, "J OFF ends every fade at once: every chunk is on the shared material");
+  assert(entries().every((e) => materialOf(e).opacity === 1), "…at full opacity");
+
+  // …and a chunk that APPEARS with the fade off is drawn at once: moving the window must build new chunks that
+  // never go translucent (the effect is what the key switches, not the building).
+  const beforeMove = new Set(fadeCache.meshes.keys());
+  C.POSITION.x[positionRow] += 10 * CHUNK_SIZE;
+  fadeStream.step();
+  const appearedOff = [...fadeCache.meshes.keys()].filter((k) => !beforeMove.has(k));
+  assert(appearedOff.length > 0, `moving the window built new chunks (${appearedOff.length})`);
+  equal(
+    appearedOff.filter((k) => materialOf(fadeCache.meshes.get(k)).shared !== true).length,
+    0,
+    "with the fade OFF a chunk that appears is drawn with the shared material immediately",
+  );
+
+  // J ON again: the same move must now make the new chunks fade, so the key really is the switch and not a
+  // one-way door.
+  publishKeyEdge(fadeEdges, { code: "KeyJ", down: true, repeat: false });
+  fadeStream.step();
+  const beforeMove2 = new Set(fadeCache.meshes.keys());
+  C.POSITION.x[positionRow] += 10 * CHUNK_SIZE;
+  fadeStream.step();
+  const appearedOn = [...fadeCache.meshes.keys()].filter((k) => !beforeMove2.has(k));
+  assert(appearedOn.length > 0, `moving again built new chunks (${appearedOn.length})`);
+  const freshCopies = appearedOn.map((k) => materialOf(fadeCache.meshes.get(k)));
+  equal(freshCopies.filter((m) => m.shared !== false).length, 0, "with the fade back ON the new chunks hold their own copies");
+  equal(
+    freshCopies.filter((m) => m.transparent === true && m.opacity === 0).length,
+    freshCopies.length,
+    "…and start invisible, exactly like the first fill did",
+  );
+  // Put the shared player back where this group found it: the row belongs to the world the whole gate runs on.
+  C.POSITION.x[positionRow] = startX;
+  C.PREV_POSITION.x[positionRow] = startX;
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {

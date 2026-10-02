@@ -79,7 +79,9 @@ export function createRenderPlugin(w: RenderWiring) {
   name: "chunk.stream",
   stage: "render",
   ...CHUNK_STREAM_ACCESS,
-  run: () => s.chunkStream.step(),
+  // The lane's delta goes in: the appearance fade (P1.98) is advanced by the DRAWN frame interval, so it is the
+  // same fraction of a second whatever the frame rate is (`ctx.dt` is the render lane's delta, in seconds).
+  run: (ctx) => s.chunkStream.step(ctx.dt * 1000),
     });
     api.system({
   // The block target wireframe: it reads the TARGET_HIT component `player.interaction` wrote in the fixed

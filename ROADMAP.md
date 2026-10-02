@@ -2639,6 +2639,44 @@ Still outstanding:
   VERIFIED: `tsc` 0; `check:ecs` 77/77; live: F7's reload line now counts the far ring as well
   (`<n> chunk(s) stale, <n> restyled behind the screen`), and the far terrain takes the new chain's look without
   being rebuilt.
+- **P1.98 — a chunk that APPEARS fades in, and an edit never does (`J` switches the effect off).** `DONE`, by
+  request («区块加载就闪是不是要弄淡入什么的效果比较好» — after first asking how Distant Horizons and Cubyz do it,
+  «E:\distant-horizons-3.3.4你看看他的加载效果…进入世界是从lod开始逐渐改改精度的»).
+  THE COMPLAINT: a chunk that streams in pops at full opacity — a flash, and the worst case is the far ring,
+  where one chunk covers 64×64 blocks.
+  HOW THE TWO REFERENCE PROJECTS DO IT, and what was taken from each: **Distant Horizons** fades the LOD ring
+  with a **DITHER** (`ditherDhFade`, `uDitherDhRendering`, over the last 0.5×–0.9× of the far clip) and
+  deliberately keeps Minecraft's own chunk fade OFF so that vanilla chunks never flash at the DH border;
+  **Cubyz** fades the last 32 blocks before `lodDistance` in the fragment shader (`passDitherTest`) and keeps a
+  separate face range per coarser neighbour. Both therefore fade by DISTANCE, in the shader, and both fade the
+  coarse tier only. This engine's window is small enough that the seam is worth hiding case by case instead:
+  the fade here is **per chunk, on its FIRST appearance, in both rings, with no shader at all** — a plain
+  material `opacity` ramp, which is what the flat `MeshLambertMaterial` pipeline can do without a custom node.
+  THE MECHANISM: `FADE_IN_MS = 220` (~13 frames at 60 fps: long enough to read as a fade, short enough that a
+  walking player never sees a translucent wall). A chunk's materials are shared per (look, tier) — that sharing
+  is what makes `G`/`H` and a pack reload cheap — so a per-chunk opacity needs a **per-chunk COPY**:
+  `beginFade` clones the resolution `materialsFor` just returned (so a tier tint or the wireframe comes along),
+  sets `transparent = true, opacity = 0`, swaps them in and pushes a fade entry; `advanceFades` ramps them by
+  the **LANE'S DELTA** (frame-rate independent, and testable: one big `step` finishes a fade), and at
+  `>= FADE_IN_MS` `dropFade` puts the SHARED material back and **disposes** the copies. `depthWrite` stays ON:
+  the chunk keeps occluding itself, so a fading chunk never shows its own back faces.
+  WHERE IT IS CALLED, and the one place it must NOT be: `build`, `buildFar` and `applyResult`-fresh — the three
+  ways a chunk gets a mesh — and **never `rebuild`**, because the block the player just dug is the one thing
+  they are watching (P1.18i: an edit must be instant). A fade in flight when that chunk is edited is dropped by
+  `advanceFades`' guard (the mesh no longer holds its copies), which is also what frees it — so no other path
+  (edit, restyle, pack reload) needs a call.
+  `J` IS THE SWITCH, a third debug key beside `G` (tier tint) and `H` (wireframe), handled in the same drain,
+  and turning it OFF calls `finishAllFades`: with the effect off nothing would ever finish a fade, so a chunk
+  caught mid-fade would stay translucent for ever.
+  VERIFIED: `tsc` 0; `check:ecs` **78/78** with a new group driving the whole thing on a real stream (0 opacity
+  on the first appearance → a `step(0)` does not move it → half the time is half the opacity → at `FADE_IN_MS`
+  the shared material is back and every copy was disposed → an edit inside a chunk that is mid-fade puts the
+  SHARED material back instead of restarting a fade → with `J` off, and after moving the window, the new chunks
+  are opaque at once → with `J` on again the new chunks start invisible). BOTH NEW RULES WERE MUTATION-TESTED:
+  adding `beginFade` to `rebuild` fails the edit assertion, and replacing the lane delta with a fixed
+  `1000/60` fails the "no time, no progress" one.
+  NOT CHANGED, BY REQUEST: nothing else — no shader, no fog, no distance-based fade, and the far ring's build
+  cost is untouched (the fade is one clone and one material swap per chunk).
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
