@@ -6,23 +6,24 @@
 //         renderer, not by teleporting the player: rendering/chunkstream.ts draws each chunk
 //         at the representation NEAREST the player (see nearestWrap). The player's own
 //         position is NEVER wrapped, so there is no discontinuity to see.
-//   Y   : BOUNDED, and split in two. [WORLD_MIN_Y, TERRAIN_TOP_Y) is generated TERRAIN (solid in
-//         the default flat world) and [TERRAIN_TOP_Y, WORLD_MAX_Y) is generated AIR — the BUILD
-//         SPACE. Both are real writable chunks, which is what lets you place blocks above the
-//         surface. Below WORLD_MIN_Y everything is treated as BEDROCK (solid, so the floor can
-//         never be punched through and the underside needs no faces); at/above WORLD_MAX_Y
-//         everything reads as air but is NOT writable.
+//   Y   : BOUNDED. The whole range is generated: a NOISE height field (data/world/terrain.ts) lays
+//         grass/dirt/stone down and everything above the ground is air you may build in. Below
+//         WORLD_MIN_Y everything is treated as BEDROCK (solid, so the floor can never be punched through
+//         and the underside needs no faces); at/above WORLD_MAX_Y everything reads as air but is NOT writable.
 //
-// GENERATION is a LAYER CAKE, and it is still the ONE place that decides what the ground is: grass on the
-// surface, a few layers of dirt under it, stone below that (the palette in data/world/palette.ts names the
-// ids). Every value is a palette index, so the mesher draws each layer with its own texture; an install whose
-// packs define no `dirt` simply gets the engine checker for that layer. Deep chunks stay UNIFORM (one value,
-// no array allocated), which is what keeps a tall build range cheap.
+// GENERATION is a NOISE HEIGHT FIELD, and it is still the ONE place that decides what the ground is: for
+// every column, terrain.ts answers the first air layer, and this file writes grass on top of it, a few layers
+// of dirt under that, stone below (the palette in data/world/palette.ts names the ids). Every value is a
+// palette index, so the mesher draws each layer with its own texture; an install whose packs define no `dirt`
+// simply gets the engine checker for that layer. The field is bounded, so chunks entirely above or entirely
+// below the terrain are filled UNIFORMLY (one value, no array allocated) — that is what keeps a tall build
+// range cheap even though the surface is no longer flat.
 //
 // READS DO NOT GENERATE. getBlock() on a chunk that was never ensured returns AIR. Callers that
 // need a populated neighbourhood (the mesher) must ensure it first — chunkstream.ts does that.
-import { AIR, CHUNK_SIZE, Chunk, SOLID } from "./chunk";
+import { AIR, CHUNK_SIZE, Chunk, SOLID, voxelIndex } from "./chunk";
 import { FALLBACK_PALETTE, idIn, valueIn } from "./palette";
+import { TERRAIN_BASE_Y, TERRAIN_MAX_Y, TERRAIN_MIN_Y, terrainHeight } from "./terrain";
 
 /** Torus period along X/Z, in chunks: 32 * 32 = 1024 blocks before the world repeats */
 export const WORLD_CHUNKS_X = 32;
@@ -37,11 +38,12 @@ export const CHUNK_Y_COUNT = 8;
 export const WORLD_MIN_Y = MIN_CHUNK_Y * CHUNK_SIZE;
 /** End of the writable volume (at/above this = sky, readable but not writable) */
 export const WORLD_MAX_Y = (MIN_CHUNK_Y + CHUNK_Y_COUNT) * CHUNK_SIZE;
-/** Flat generator surface: the FIRST AIR LAYER. Solid below, air above. Deliberately a chunk
- *  boundary so every chunk of the default world is uniformly filled. */
-export const TERRAIN_TOP_Y = 128;
-/** Where a body stands, and therefore the spawn height (feet) */
-export const WORLD_SURFACE_Y = TERRAIN_TOP_Y;
+/** The noise field's BASE level — where the ground rolls around. It used to be the flat world's exact
+ *  surface height, so the name survives: a COLUMN's surface is `terrainHeight(x, z)`, not this. */
+export const TERRAIN_TOP_Y = TERRAIN_BASE_Y;
+/** Where a body stands in a flat world, and the level the spawn point is measured from. The real spawn Y is
+ *  read from the generated column (`topSolidY`) — see boot/drivers/world-entry.ts. */
+export const WORLD_SURFACE_Y = TERRAIN_BASE_Y;
 
 /** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. */
 const SURFACE_LAYERS = 4;
@@ -66,33 +68,86 @@ export function nearestWrap(c: number, pc: number, period: number): number {
   return c + Math.round((pc - c) / period) * period;
 }
 
-/** THE generator. Flat, single-block — replace this when real terrain lands.
- *  Everything strictly below TERRAIN_TOP_Y is SOLID, everything at/above it is AIR. Because
- *  TERRAIN_TOP_Y sits on a chunk boundary the default world is made only of uniform chunks,
- *  which allocate nothing until edited. */
+/** The generator's height grid for ONE chunk's columns (32x32, indexed [lz * CHUNK_SIZE + lx]). A module-level
+ *  buffer because generation is MAIN-THREAD-ONLY — the mesh pool's workers are handed an input, they never
+ *  touch the world — and because one 2 KB buffer beats 1024 numbers of garbage per chunk on the spawn window's
+ *  ~800 in-band chunks. */
+const heightGrid = new Int16Array(CHUNK_SIZE * CHUNK_SIZE);
+
+/** THE generator: the noise height field, filled as grass over dirt over stone.
+ *
+ *  WHAT IT GUARANTEES (every one of these is a thing the rest of the engine relies on):
+ *   * a column is SOLID from the ground floor up to `terrainHeight(x, z) - 1` and AIR above it — no holes,
+ *     no floating islands, so collision and the mesher agree with what is drawn;
+ *   * the height is a pure function of the wrapped chunk coordinates, so it is identical across chunks, across
+ *     frames and across runs, and exactly periodic on the torus (see terrain.ts);
+ *   * a chunk the field cannot reach is filled UNIFORMLY, which keeps it allocation-free: above TERRAIN_MAX_Y
+ *     it is all air, and a chunk whose whole range sits below the dirt band is all stone. A chunk that lands
+ *     in the band but happens to contain no surface (every column either above or below it) is returned to
+ *     the uniform form too, after the grid has been computed.
+ *
+ *  Order matters in the band: the array is materialised ONCE, ZERO-FILLED (air), and then each column is
+ *  written from the chunk's floor up to its surface — so the write is exactly the solid voxels of the chunk
+ *  and the sky above the ground is never touched. (Writing only the dirt band and pre-filling the rest with
+ *  stone is the shape this had for one revision, and it left a ceiling of stone over the whole world.) */
 function generateChunk(chunk: Chunk, palette: readonly string[]): void {
   const bottom = chunk.cy * CHUNK_SIZE;
   const top = bottom + CHUNK_SIZE;
-  // The layer values in the palette IN FORCE. An install that names none of them falls back to 1 ? the first
-  // block of any palette ? rather than to 0, because 0 is AIR and a generator that writes air leaves a hole.
+  // The layer values in the palette IN FORCE. An install that names none of them falls back to 1 — the first
+  // block of any palette — rather than to 0, because 0 is AIR and a generator that writes air leaves a hole.
   const stone = valueIn(palette, "stone") || 1;
   const dirt = valueIn(palette, "dirt") || stone;
   const grass = valueIn(palette, "grass") || dirt;
-  if (bottom >= TERRAIN_TOP_Y) {
-    chunk.fill(AIR); // entirely build space
+  if (bottom >= TERRAIN_MAX_Y) {
+    chunk.fill(AIR); // entirely above the field: build space
     return;
   }
-  if (top <= TERRAIN_TOP_Y - SURFACE_LAYERS) {
-    chunk.fill(stone); // entirely deep ground: ONE value, so this chunk allocates nothing
+  if (top <= TERRAIN_MIN_Y - SURFACE_LAYERS) {
+    chunk.fill(stone); // entirely below the surface band: ONE value, so this chunk allocates nothing
     return;
   }
-  // The surface band: grass on top, dirt under it, stone below. Only chunks in this band materialise.
-  for (let ly = 0; ly < CHUNK_SIZE; ly++) {
-    const y = bottom + ly;
-    if (y >= TERRAIN_TOP_Y) continue; // above the surface is air
-    const value = y === TERRAIN_TOP_Y - 1 ? grass : y >= TERRAIN_TOP_Y - SURFACE_LAYERS ? dirt : stone;
-    for (let lz = 0; lz < CHUNK_SIZE; lz++) {
-      for (let lx = 0; lx < CHUNK_SIZE; lx++) chunk.set(lx, ly, lz, value);
+
+  const gx0 = chunk.cx * CHUNK_SIZE;
+  const gz0 = chunk.cz * CHUNK_SIZE;
+  let lowest = TERRAIN_MAX_Y + 1;
+  let highest = TERRAIN_MIN_Y - 1;
+  for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+    for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+      const h = terrainHeight(gx0 + lx, gz0 + lz);
+      heightGrid[lz * CHUNK_SIZE + lx] = h;
+      if (h < lowest) lowest = h;
+      if (h > highest) highest = h;
+    }
+  }
+  // The band is 64 blocks tall and a chunk is 32, so a chunk can be IN the band and still contain no surface.
+  // Both cases go back to the zero-allocation uniform form instead of materialising 32 KB of one value.
+  // The two tests are DIFFERENT extremes, and getting them the wrong way round is a real bug: "no column
+  // reaches into this chunk" is about the HIGHEST surface (`highest - 1 < bottom`), while "every column's
+  // dirt band is above this chunk" is about the LOWEST (`lowest - SURFACE_LAYERS >= top`). A surface landing
+  // exactly on a chunk's first layer is the case that catches a swap — the grass is written by the chunk that
+  // OWNS it, so a chunk that bails out as "all air" leaves the layer below showing dirt.
+  if (highest - 1 < bottom) {
+    chunk.fill(AIR); // every column's surface is above this chunk
+    return;
+  }
+  if (lowest - SURFACE_LAYERS >= top) {
+    chunk.fill(stone); // every column's dirt band is above this chunk
+    return;
+  }
+
+  const blocks = chunk.materialise();
+  for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+    for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+      const h = heightGrid[lz * CHUNK_SIZE + lx]; // FIRST AIR LAYER of this column
+      const solidTop = h - 1; // its topmost solid block
+      const yTop = solidTop < top - 1 ? solidTop : top - 1; // …clipped to this chunk
+      if (yTop < bottom) continue; // the column is all air in this chunk
+      const dirtFrom = h - SURFACE_LAYERS; // the first dirt layer (may sit above this chunk)
+      for (let y = bottom; y <= yTop; y++) {
+        // ONE write per solid voxel, from the chunk's floor up to the surface: stone, then the dirt band, and
+        // grass on the very top. Nothing above `yTop` is touched — the array came back zero-filled (AIR).
+        blocks[voxelIndex(lx, y - bottom, lz)] = y >= dirtFrom ? (y === solidTop ? grass : dirt) : stone;
+      }
     }
   }
 }

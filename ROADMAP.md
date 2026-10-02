@@ -49,9 +49,9 @@ voxel world** and nothing else in it yet.
 | The UI's **behaviour** is scheduled too, not just its data: the F3+F4 picker (`ui.picker`, driven by key EDGES the device layer publishes), the HUD toast (`ui.toast`, a wall-clock deadline in a resource, armed by the `ShowToast` command), the key bind panels + drag gesture (`ui.keybind`, panels derived every frame, gesture state in `KEYBIND_GESTURE`) and the modal navigation (`ui.navigation`) — the old `ui/gamemode.ts` class is gone, and the ESC if-chain that lived in `main.ts` is gone with it | `src/plugins/ui/systems/picker.ts`, `toast.ts`, `keybind.ts`, `navigation.ts` |
 | One-command build with a greppable verdict | `scripts/build-all.mjs` (`RESULT: OK / INCOMPLETE / FAILED`) |
 
-**What it is NOT:** the terrain generator is a FLAT layered fill (grass/dirt/stone by height, no heightmap,
-biomes or ores), there is no saving, there are no entities besides the player, and there is no
-planet/sphere/space anything. (There IS more than one block type since P1.46/P1.47: a voxel value is a
+**What it is NOT:** the terrain is a NOISE HEIGHT FIELD and nothing more (no biomes, ores, caves, water,
+trees or structures — see §3.1), there is no saving, there are no entities besides the player, and there is
+no planet/sphere/space anything. (There IS more than one block type since P1.46/P1.47: a voxel value is a
 palette index derived from the block registry, so a pack's blocks place and draw.)
 
 ---
@@ -64,7 +64,7 @@ orientation assumptions the next one depends on.
 | Stage | Status | What | Entry point / note |
 |---|---|---|---|
 | **P0 ground** | `DONE` | flat world, chunks, collision, edit | `generateChunk()` in `src/data/world/world.ts` |
-| **P1 terrain** | `TODO` | replace the uniform fill with a real (noise) generator | **`generateChunk()` is the ONLY place that knows what a block is.** Everything else asks `isSolid()`. Start here. |
+| **P1 terrain** | `DONE (P1.92)` | height field in `data/world/terrain.ts` (value noise, 4 octaves, torus-periodic) + the layered fill in `generateChunk()`; biomes/ores/caves/trees/water are still TODO — see §3.1 | **`generateChunk()` is the ONLY place that knows what a block is, and `terrainHeight()` the only place that knows how high the ground is.** |
 | **P2 floating origin** | `TODO` | split coordinates into `int cell + float local`, render camera-relative, update by **delta only** | Must land **before** anything writes absolute world coordinates. The absolute-position writes are now funneled into ONE place — the `Teleport` command (`src/plugins/player/commands.ts`) — which is exactly where the cell/local split goes. Reference technique: [big_space](https://docs.rs/big_space/0.6.0/i686-unknown-linux-gnu/big_space/) |
 | **P3 radial gravity** | `TODO` | `ORIENTATION.up` = local surface normal instead of the constant `(0,1,0)` | ⚠️ **Known blocker**: `src/plugins/player/systems/controller.ts` sums view deltas and applies them once per tick **because** `up` is constant. With a changing `up`, "sum then apply" ≠ "apply each". That optimisation must change in the same commit. |
 | **P4 sphere + LOD** | `TODO` | cube-sphere quadtree; near = real voxels, far = heightmap | Do the sphere **after** P3; do LOD after the sphere looks right without it. |
@@ -79,9 +79,18 @@ or building a sphere before there is any terrain to put on it.
 # 3. GAPS in what already exists
 
 ## 3.1 Terrain and content
-- **GAP** `generateChunk()` (`src/data/world/world.ts`) fills each chunk with ONE value. No heightmap,
-  no biomes, no ores, no caves. `TERRAIN_TOP_Y = 128` is a constant, not a function of x/z.
-- **GAP** There is no decoration/population pass (trees, structures) and no place to hook one.
+- **DONE (P1.92)** The heightmap exists: `data/world/terrain.ts` is a value-noise height field (4 octaves,
+  one seed, exactly periodic on the 1024-block torus lap) and `generateChunk()` fills every column with
+  grass over a 3-layer dirt band over stone. Measured: 2312-chunk spawn window generated in ~172 ms, 465
+  chunks materialised (14.5 MB), heights 107..145 around a base of 128.
+- **GAP** Everything a height field does not give you: no BIOMES (one grass/dirt/stone column everywhere), no
+  ORES, no CAVES, no WATER (there is no water block), no TREES/structures, and no second noise layer — the
+  field is one fBm, not a set of region parameters. A new landform is a term in `terrainHeight`; a new layer
+  is a branch in `generateChunk`.
+- **GAP** There is no decoration/population pass (trees, structures) and no place to hook one. The natural
+  shape (Minecraft's and Luanti's): generate the height/terrain, then run a per-chunk decoration pass that
+  may write into a NEIGHBOUR's blocks — which needs a write path that can reach across a chunk boundary
+  cleanly (today `setBlock` marks the owner and its border neighbours dirty, which is the right hook).
 
 ## 3.2 Blocks
 - **GAP** Exactly one block type (`SOLID = 1` in `src/data/world/chunk.ts`). Placement always writes
@@ -2434,6 +2443,46 @@ Still outstanding:
   VERIFIED: `tsc` 0 errors; `check:ecs` 75/75 (three new behavioural assertions plus the predicate ones, each
   confirmed to fail against the old code); and a real block-breaking run at a chunk border with the F3 panel
   up. Not changed: the P1.90 pacing decisions, the launch arguments, and the mesher's output format.
+- **P1.92 — the world has TERRAIN: a noise height field, and it is a torus-periodic one.** `DONE`, by request
+  («现在立刻开始弄个噪声生成地形让我开始测试»). The flat layer cake is gone. The generator's shape is
+  unchanged in the only way that matters — `generateChunk()` is still the ONE place that decides what a block
+  is — but "which y is the surface" moved into a new pure module, `data/world/terrain.ts`:
+  `terrainHeight(x, z)` answers the FIRST AIR LAYER of a column, and the generator writes grass over a
+  3-layer dirt band over stone from the chunk's floor up to it.
+  THE DESIGN DECISIONS, and what each one is protecting:
+  * **PURE AND STATELESS.** No clock, no `Math.random`, no cache, no dependence on generation order: two
+    chunks generated at different times (or in different worlds) must agree about the blocks they share, or
+    the mesher draws a wall inside the ground and collision disagrees with the picture. The gate builds TWO
+    independent worlds and compares a chunk block for block.
+  * **EXACTLY PERIODIC ON THE TORUS.** X/Z wraps every `WORLD_CHUNKS_X * CHUNK_SIZE` = 1024 blocks, and the
+    renderer draws the far side of the lap next to the near side, so an un-wrapped noise would put a cliff at
+    the seam. Every octave's lattice index is taken modulo the cells in one lap and every cell size divides
+    the period (128/64/32 over a 1024-block lap), which makes `terrainHeight(x) === terrainHeight(x + 1024)`
+    ANALYTIC rather than approximate. `terrain.ts` duplicates the period instead of importing `world.ts`
+    (which imports it) and the gate asserts the two numbers are equal.
+  * **BOUNDED, SO THE FAST PATHS SURVIVE.** The field is clamped into
+    `TERRAIN_MIN_Y..TERRAIN_MAX_Y` (96..160 around a base of 128), which is what lets the generator fill a
+    chunk UNIFORMLY — and therefore ALLOCATION-FREE — when it is entirely above or below the terrain. Measured
+    on the spawn window: 465 of 2312 chunks materialise (14.5 MB), the rest are one value with no array.
+  * **THE SPAWN BECAME A QUESTION.** `WORLD_SURFACE_Y` is a LEVEL now, not the ground: the world-entry driver
+    asks the generated column (`topSolidY(x, z, WORLD_MAX_Y - 1)`) and teleports the player onto it, on BOTH
+    entry paths (behind the loading screen and into an already-warm world). The ceiling argument matters —
+    `topSolidY` scans DOWNWARDS, so asking from the old spawn height would answer "inside the hill".
+  TWO BUGS IT FOUND IN ITSELF, both caught by the gate's invariants rather than by eye, and both worth
+  remembering because the shape of the generator makes them easy to repeat:
+  * the "no column reaches into this chunk, so it is all air" test used the MINIMUM height where it needed the
+    MAXIMUM: a surface landing exactly on a chunk's first layer lost its grass (the chunk that owned that
+    layer bailed out as air, leaving the layer below showing dirt). The two early returns are about OPPOSITE
+    extremes — `highest - 1 < bottom` is all-air, `lowest - SURFACE_LAYERS >= top` is all-stone;
+  * writing ONLY the dirt band into a `materialise(stone)`-prefilled array left a ceiling of stone over the
+    whole world. The array is materialised ZERO-FILLED (air) and each column is written from the floor up, so
+    the sky is never touched.
+  VERIFIED: `tsc` 0; `check:ecs` 76/76 (the new group asserts periodicity over a lap, determinism across two
+  worlds, no hole under a surface and nothing floating above it, the layer order, the declared bounds, and
+  that the uniform fast paths still hold); measured 484 sampled columns with zero structural violations, and
+  a 2312-chunk window generated in 172 ms. Not changed: the block palette, the mesher, the streaming budget,
+  the torus rendering (ghost meshes at the seam are still missing — see the known gaps), and the inert
+  superflat/noise choice in the main menu, which still logs the mode and discards it.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

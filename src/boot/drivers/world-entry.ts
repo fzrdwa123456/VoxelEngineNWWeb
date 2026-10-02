@@ -3,7 +3,10 @@
 // warm-up -> screen down -> mode "game" -> capture), and the root now only supplies what it owns - the
 // loop state, the menus, the pointer lock, the window queries and the spawn point.
 import { RENDER_HANDLES } from "../../data/globals/render-handles";
+import { VOXEL } from "../../data/globals/resources";
 import { Teleport } from "../../plugins/player/commands";
+import { HUMANOID_BODY } from "../../plugins/player/components";
+import { WORLD_MAX_Y } from "../../data/world/world";
 import type { LoopState } from "../../data/globals/resources";
 import { SetLoadingStage } from "../../data/globals/commands";
 import type { Entity, World } from "../../core/world";
@@ -57,6 +60,25 @@ const enterWorld = async (mode: string): Promise<void> => {
   deps.world.commands.send(Teleport, { entity: deps.player, x: deps.spawn.x, y: deps.spawn.y, z: deps.spawn.z });
   deps.log(`MAINMENU entering singleplayer (world type: ${mode === "noise" ? "noise" : "superflat"})`);
 
+  // **THE GROUND IS A NOISE FIELD, SO THE SPAWN Y IS A QUESTION, NOT A CONSTANT (P1.92).** The root knows
+  // the spawn COLUMN and the LEVEL the surface rolls around; where the ground actually is has to be asked of
+  // the generated world — and asked with `WORLD_MAX_Y` as the ceiling, because `topSolidY` scans DOWNWARDS
+  // and a ceiling below the local hill would answer "inside the mountain". Reads do not generate (see
+  // world.ts), so this runs AFTER `prime`/on an already-warm window, and it is sent as a command so the
+  // barrier applies it exactly like the entry Teleport above.
+  const snapToSurface = (): void => {
+    const surface = deps.world
+      .resource(VOXEL)
+      .topSolidY(Math.floor(deps.spawn.x), Math.floor(deps.spawn.z), WORLD_MAX_Y - 1);
+    if (surface === null) return; // an all-air column: the root's Y is as good as any
+    deps.world.commands.send(Teleport, {
+      entity: deps.player,
+      x: deps.spawn.x,
+      y: surface + HUMANOID_BODY.eyeHeight,
+      z: deps.spawn.z,
+    });
+  };
+
   if (deps.world.resource(RENDER_HANDLES).chunkStream.needsWarmUp(deps.spawn.x, deps.spawn.z)) {
     // ACTIVATE the screen: the same trap as the startup's first stage — the root is spawned hidden and
     // `ui.loading` paints nothing while LOADING_STATE.active is false (which the END of boot() left it as).
@@ -77,7 +99,10 @@ const enterWorld = async (mode: string): Promise<void> => {
         progress: 0.15,
         key: "world.terrain",
         // Generate (no meshing) the spawn window: collision needs real blocks on the very first tick.
-        run: () => deps.world.resource(RENDER_HANDLES).chunkStream.prime(deps.spawn.x, deps.spawn.z),
+        run: () => {
+          deps.world.resource(RENDER_HANDLES).chunkStream.prime(deps.spawn.x, deps.spawn.z);
+          snapToSurface(); // …and the ground is where the field says it is (see above)
+        },
       },
       {
         progress: 0.2,
@@ -94,6 +119,7 @@ const enterWorld = async (mode: string): Promise<void> => {
     deps.log(`WORLD ready at ${(performance.now() - entryStart).toFixed(0)}ms`);
   } else {
     // Nothing to build: the world is already on screen behind the menu, so it comes back at once.
+    snapToSurface(); // the window is warm, so the surface is already answerable
     deps.world.renderUi(); // the barrier applies the Teleport before the first game frame reads it
     deps.log("WORLD already warm, entering without a screen");
   }

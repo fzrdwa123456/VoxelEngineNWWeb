@@ -28,16 +28,20 @@ The code is organized as a **microkernel + plugins** tree (`core/` mechanism, `p
 zero allocation on the hot path, structure changes only at a barrier). Both are written out in
 `docs/ARCHITECTURE.md`, and the two sections right after the directory map below are the short version.
 
-**Current world state: a flat, EDITABLE voxel world exists; real terrain does not.** `src/data/world/`
-is a chunk system (32³ chunks) whose generator fills every chunk with the engine's built-in
-magenta/black checker block. `plugins/player/systems/collision.ts` resolves the player AABB against it (you
-land, walk, jump) and `plugins/player/systems/interaction.ts` breaks and places blocks with the mouse.
-Topology is deliberate: **X/Z is a TORUS** (`WORLD_CHUNKS_X/Z`), and **Y is bounded but split in
-two** — `[WORLD_MIN_Y, TERRAIN_TOP_Y)` is ground, `[TERRAIN_TOP_Y, WORLD_MAX_Y)` is writable
-BUILD SPACE, and below WORLD_MIN_Y everything is bedrock. There is no stone/grass/biome content
-and only ONE block type, and the planet/LOD systems are still gone. `generateChunk()` in
-`data/world/world.ts` is the ONE place to replace when real terrain arrives — nothing else in the
-engine knows what a block "is".
+**Current world state: a NOISE-TERRAIN, EDITABLE voxel world exists (P1.92).** `src/data/world/`
+is a chunk system (32³ chunks) generated from a height field: `data/world/terrain.ts` answers the first air
+layer of every column (value noise, 4 octaves, exactly periodic on the torus), and `generateChunk()` in
+`data/world/world.ts` writes grass over a dirt band over stone into that column. `plugins/player/systems/
+collision.ts` resolves the player AABB against it (you land, walk, jump, and climb hills) and
+`plugins/player/systems/interaction.ts` breaks and places blocks with the mouse.
+Topology is unchanged and deliberate: **X/Z is a TORUS** (`WORLD_CHUNKS_X/Z` = 1024 blocks, so the noise is
+periodic on the same lap) and **Y is bounded** (`[WORLD_MIN_Y, WORLD_MAX_Y)` = 256 blocks); below
+WORLD_MIN_Y everything is bedrock, and the ground occupies roughly `TERRAIN_MIN_Y..TERRAIN_MAX_Y`
+(96..160) with air and build space above it. There are no biomes, ores, caves, trees or water yet, and the
+planet/LOD systems are still gone. `generateChunk()` is still the ONE place that decides what the ground
+is — `terrain.ts` is the ONE place that decides how HIGH it is — and nothing else in the engine knows what a
+block "is". The spawn Y is read from the generated column (`topSolidY`) by the world-entry driver, because a
+height field makes "where does the player stand" a question.
 
 ## Directory map — what goes where
 
@@ -88,8 +92,12 @@ src/
 │   ├── assets/              read once from the pack chain, then never written: theme.ts (UI_THEME +
 │   │                        recipeStyle), i18n.ts (I18N_STRINGS + t()), blockregistry.ts
 │   │                        (BLOCK_REGISTRY), textures.ts (the pack chain), background.ts (MENU_BG_KIND)
-│   └── world/               the voxel data: chunk.ts, world.ts, mesh.ts (the PURE mesher: bytes in,
-│                            typed arrays out — the function the workers run AND the main thread's fallback)
+│   └── world/               the voxel data: chunk.ts (32³ storage; a uniform chunk allocates nothing),
+│                            world.ts (the chunk map, the torus, the generator), terrain.ts (THE height
+│                            field: pure value noise, exactly periodic on the torus — the ONE place that
+│                            decides how high the ground is), palette.ts (value -> block id),
+│                            mesh.ts (the PURE mesher: bytes in, typed arrays out — the function the
+│                            workers run AND the main thread's fallback)
 ├── shared/                types and pure helpers with no state: math/raycast.ts (the voxel DDA)
 ├── boot/                  the composition root: main.ts creates the World, reads the plugin MANIFEST,
 │                            installs the plugins into the registry and registers the systems from what
@@ -977,26 +985,30 @@ When work lands, move the entry here and delete it there.
 
 ## Known gaps (do not "fix" without asking)
 
-- The voxel world is FLAT and has no terrain: `generateChunk()` (data/world/world.ts) fills each chunk by
-  HEIGHT alone — a few layers of grass/dirt over stone below `TERRAIN_TOP_Y`, air above — so there is no
-  heightmap, no biomes and no ores. Everything else about block content WORKS: a voxel value is a palette
+- The voxel world HAS noise terrain now (P1.92) and the terrain is the ONE thing that is still thin: the
+  height field (`data/world/terrain.ts`) is a single fBm with one seed, so there are no BIOMES, no ORES, no
+  CAVES, no water and no trees/structures, and a `data/world/world.ts` column is grass over a 3-layer dirt
+  band over stone everywhere. Everything else about block content WORKS: a voxel value is a palette
   index derived from the block registry (P1.46/P1.47), placement writes the palette value of the block in
   hand, and the mesher resolves each (value, face kind) through the block definition — texture, else flat
-  colour, else the engine's checker. A mod's block therefore places AND draws. What is missing is only the
-  GENERATOR (and face kinds beyond top/bottom/side).
+  colour, else the engine's checker. A mod's block therefore places AND draws. What is missing is the
+  DECORATION/generation variety (and face kinds beyond top/bottom/side), not the plumbing: a new layer is a
+  branch inside `generateChunk` plus a value in the palette, and a new landform is a term in `terrainHeight`.
 - Chunk data is never evicted: the map can hold up to WORLD_CHUNKS_X * WORLD_CHUNKS_Z *
   CHUNK_Y_COUNT = 32 * 32 * 8 = 8192 chunks. A uniform chunk allocates NO array at all (see
-  data/world/chunk.ts), so real memory is only the chunks a player actually edited — but raising the
-  period, or making generation non-uniform, needs eviction first.
+  data/world/chunk.ts) and the terrain is BOUNDED, so only the chunks the surface actually crosses
+  materialise — measured on the spawn window: 465 of 2312 chunks, 14.5 MB — but raising the period, or
+  giving the field a bigger amplitude, needs eviction first.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
   world. Raise RENDER_RADIUS_CHUNKS (plugins/render/systems/chunk-stream.ts) to push it out, or reintroduce a
   `scene.fog` — those two values were previously tuned as a pair.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
   `VoxelWorld.topSolidY()`, used by plugins/render/systems/diagnostics.ts and the F3 panel.
-- The torus is drawn by placing each chunk at its nearest representation, which is perfectly
-  seamless while the world is uniform. Real terrain will need ghost meshes near the seam (or a
-  much larger WORLD_CHUNKS period), otherwise the wrap will visibly snap.
+- The torus is drawn by placing each chunk at its nearest representation. The TERRAIN is periodic on that
+  same lap (`terrain.ts` wraps every octave's lattice), so the seam has no cliff in the data — but a chunk
+  that straddles the seam still needs its ghost mesh, and there is none: the wrap can therefore show a
+  one-block mismatch (and no faces culled across the lap) until ghost meshes land.
 - Inert remnants of the removed engine — dead code and stale comments, NOT bugs; do not
   "restore" or "fix" them: the main menu's world-type panel (`mainmenu.ts` gen panel plus the
   i18n keys main.genTitle/genSuperflat/genNoise; main.ts's `onStartSingle` logs `mode` and then

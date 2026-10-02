@@ -55,10 +55,20 @@ and the hotbar's slots must not respond to a click. F3 must do nothing there, an
 the mode picker — check the same at the pause menu, where F3 MUST still work (a world is running). Then
 enter a world and confirm all of it comes back: crosshair, hotbar, F3 panel, F3+F4 picker. Coming back
 to the main menu with the F3 panel or the picker open must take them down, not leave them on screen.
-enter the game → you land on the flat voxel surface at WORLD_SURFACE_Y and can walk and jump
-(if you fall forever instead, the entry's warm-up did not run — check `enterWorld`/`chunkStream.prime`
-in `debug.log`)
-→ nothing streams in: the spawn window was meshed before the screen came down → fly (double-tap Space) down into
+enter the game → you land ON THE TERRAIN, not at a fixed height: the ground is a noise height field now
+(P1.92), so the spawn Y is read from the column you spawn in (`topSolidY` in `boot/drivers/world-entry.ts`
+— if you spawn INSIDE a hill, or fall forever, that driver or `data/world/terrain.ts` is the place to look;
+`debug.log`'s `PHYS … top=` line says what the surface under you is) and you can walk and jump
+→ LOOK AROUND: rolling hills, grass on top, dirt under it, stone in the cut faces, no cliff at the horizon
+and NO HOLES you can see the sky through. Fly up (double-tap Space) ~60 blocks and look down: the terrain
+must be continuous across the whole streamed window, including the chunk borders (a line of missing faces or
+a step exactly every 32 blocks would be a generator bug at a chunk seam, not a rendering one)
+→ dig down a few blocks in a hillside: the cut face must show grass, then dirt, then stone
+→ fly far in one direction for ~30 s (the world is a TORUS of 1024 blocks: you come back to where you
+started) and confirm the terrain you arrive at matches where you began — the noise is periodic on that same
+lap, so the wrap must NOT show a cliff (it may show a single wrong block at the seam line: the ghost meshes
+at the lap are still missing, see the known gaps) → nothing streams in: the spawn window was meshed before
+the screen came down → fly (double-tap Space) down into
 the ground and confirm you STOP rather than pass through → Shift ×25 sprint → look past the
 zenith: pitch CLAMPS at ±89.4° in EVERY mode (no wrap) → F3 shows a real `top` and the loaded
 chunk count → aim at a block: the white outline follows the crosshair → LEFT-click breaks it and

@@ -70,4 +70,17 @@ export class Chunk {
     this.blocks = null;
     this.uniform = value;
   }
+
+  /** THE GENERATOR'S BULK PATH: materialise the array and hand it over for DIRECT writes, so a terrain fill
+   *  is one typed-array write per voxel instead of a `set()` call per voxel. The array comes back ZERO-FILLED
+   *  (AIR) — a `Uint8Array` is — which is what a height field wants: the solid part is written per column and
+   *  everything above the ground is already air. (A chunk that is uniform gets `fill()` instead, so it never
+   *  allocates at all; that is the case the shape of a world mostly is.)
+   *  Only for a chunk nothing has written yet — `ensureChunk` generates a chunk exactly once, before any edit
+   *  can reach it — and the caller OWNS the result: `set()` stays the general path for a chunk that may
+   *  already be materialised. */
+  materialise(): Uint8Array {
+    if (this.blocks === null) this.blocks = new Uint8Array(CHUNK_VOLUME);
+    return this.blocks;
+  }
 }

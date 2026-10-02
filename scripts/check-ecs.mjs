@@ -247,7 +247,7 @@ const { SetLoadingStage, ShowToast } = load("data/globals/commands.js");
 // The four PLAYER commands moved to the plugin that owns the components they write (P1.18b): `core/` no
 // longer imports `plugins/`, and the gate loads each from the module that declares it.
 const { SelectSlot, SetMode, SwapSlots, Teleport } = load("plugins/player/commands.js");
-const { TERRAIN_TOP_Y, VoxelWorld } = load("data/world/world.js");
+const { TERRAIN_TOP_Y, VoxelWorld, WORLD_CHUNKS_X, WORLD_MAX_Y } = load("data/world/world.js");
 
 // ===== 1. core: handles, storage, queries =====
 console.log("\n--- entities, component storage and queries ---");
@@ -552,7 +552,11 @@ check("a non-player entity lands, and PREV_POSITION tracks it", () => {
   ticks(400);
   const motion = physics.get(npc, C.MOTION);
   equal(motion.onGround, true, "gravity, collision and onGround all worked for an NPC");
-  near(C.POSITION.y[index], TERRAIN_TOP_Y + 1.6, 0.01, "landing height (collision leaves SKIN clearance)");
+  // The ground is a NOISE FIELD now (P1.92), so the landing height is ASKED of the generated column rather
+  // than assumed to be the base level: `topSolidY` is the same query the collision sweep agreed with.
+  const surface = rawVoxel.topSolidY(5, 5, WORLD_MAX_Y - 1);
+  assert(surface !== null, "the column the NPC falls down has ground in it at all");
+  near(C.POSITION.y[index], surface + 1.6, 0.01, "landing height (collision leaves SKIN clearance)");
   assert(
     Math.abs(C.PREV_POSITION.y[index] - 200) > 50,
     "PREV_POSITION must have left the spawn height —the bug was that only the local player's row was written",
@@ -930,6 +934,93 @@ check("a block broken at a chunk border re-meshes the RIGHT face of its ±Z neig
       /planes\[plane \* PLANE_BYTES \+ a \* S \+ b\]/.test(meshSrc),
     "the mesher READS the Z planes with the layout the gatherer WRITES (a * S + b)",
   );
+});
+
+check("the terrain is a NOISE FIELD: one field everywhere, torus-periodic, solid from the floor up (P1.92)", () => {
+  // The world used to be a flat layer cake; it is a height FIELD now, and everything downstream reads it
+  // through `isSolid()`/`topSolidY` (the mesher's face culling, collision, the spawn). What must hold is
+  // therefore not "these numbers" but the PROPERTIES the flat generator got for free:
+  //   * the same field in every world and at every moment (a chunk generated later must agree with the one
+  //     already drawn beside it, or the seam is a wall);
+  //   * EXACTLY periodic on the torus (the renderer draws the far side next to the near side, so an
+  //     un-wrapped noise would put a cliff at the lap);
+  //   * a column solid from the ground floor to its surface and air above it — no holes, nothing floating.
+  const T = load("data/world/terrain.js");
+  const { AIR, CHUNK_SIZE, CHUNK_VOLUME } = load("data/world/chunk.js");
+  const { FALLBACK_PALETTE } = load("data/world/palette.js");
+
+  equal(T.TERRAIN_PERIOD, WORLD_CHUNKS_X * CHUNK_SIZE,
+    "the noise's lap IS the torus period (terrain.ts duplicates the number — this is what keeps them equal)");
+  equal(TERRAIN_TOP_Y, T.TERRAIN_BASE_Y, "the old flat surface height is the field's BASE level");
+
+  // 1. ONE FIELD, EXACTLY PERIODIC, INSIDE ITS DECLARED BOUNDS.
+  let wraps = 0;
+  let lowest = T.TERRAIN_MAX_Y + 1;
+  let highest = T.TERRAIN_MIN_Y - 1;
+  for (let i = 0; i < 512; i++) {
+    const x = (i * 37) % T.TERRAIN_PERIOD;
+    const z = (i * 91) % T.TERRAIN_PERIOD;
+    const h = T.terrainHeight(x, z);
+    if (h === T.terrainHeight(x + T.TERRAIN_PERIOD, z) && h === T.terrainHeight(x, z + T.TERRAIN_PERIOD)) wraps++;
+    if (h < lowest) lowest = h;
+    if (h > highest) highest = h;
+    assert(
+      h >= T.TERRAIN_MIN_Y && h <= T.TERRAIN_MAX_Y,
+      `height ${h} stays inside the bounds the generator's uniform fast paths are built on`,
+    );
+  }
+  equal(wraps, 512, "a lap in X and a lap in Z land on the SAME column");
+  assert(highest - lowest >= 20, `the field is not flat: sampled range ${lowest}..${highest} over one lap`);
+
+  // 2. THE SAME FIELD IN EVERY WORLD, block for block.
+  const a = new VoxelWorld();
+  const b = new VoxelWorld();
+  const ca = a.ensureChunk(0, 3, 0);
+  const cb = b.ensureChunk(0, 3, 0);
+  let same = 0;
+  for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+    for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+        if (ca.get(lx, ly, lz) === cb.get(lx, ly, lz)) same++;
+      }
+    }
+  }
+  equal(same, CHUNK_VOLUME, "two independently built worlds generate an identical chunk");
+
+  // 3. A COLUMN IS SOLID FROM THE GROUND FLOOR TO ITS SURFACE, AND AIR ABOVE IT. (Reads do not generate, so
+  //    every sampled column's chunks are ensured first — exactly what the chunk stream does for the player.)
+  const ensureColumn = (w, x, z) => {
+    for (let cy = 0; cy < 8; cy++) w.ensureChunk(Math.floor(x / CHUNK_SIZE), cy, Math.floor(z / CHUNK_SIZE));
+  };
+  const grass = FALLBACK_PALETTE.indexOf("grass") + 1;
+  const dirt = FALLBACK_PALETTE.indexOf("dirt") + 1;
+  const stone = FALLBACK_PALETTE.indexOf("stone") + 1;
+  const columns = [[0, 0], [5, 5], [31, 17], [64, 64], [127, 300], [333, 777], [900, 100], [1023, 1023]];
+  for (const [x, z] of columns) {
+    ensureColumn(a, x, z);
+    const surface = a.topSolidY(x, z, WORLD_MAX_Y - 1);
+    assert(surface !== null, `column ${x},${z} has ground at all`);
+    for (let y = 0; y < surface; y++) {
+      assert(a.isSolid(x, y, z), `column ${x},${z} is solid at y=${y} — no hole under the surface`);
+    }
+    for (let y = surface; y < WORLD_MAX_Y; y++) {
+      assert(!a.isSolid(x, y, z), `column ${x},${z} is air at y=${y} — nothing floating above the surface`);
+    }
+    equal(a.getBlock(x, surface - 1, z), grass, `column ${x},${z}: grass on top`);
+    equal(a.getBlock(x, surface - 2, z), dirt, `column ${x},${z}: dirt under the grass`);
+    equal(a.getBlock(x, surface - 5, z), stone, `column ${x},${z}: stone below the dirt band`);
+  }
+
+  // 4. THE UNIFORM FAST PATHS SURVIVE THE FIELD: `isUniform` is what the mesher skips and what keeps a tall
+  //    world cheap, and a bounded field is what lets a chunk be filled with ONE value at all.
+  const deep = a.ensureChunk(0, 0, 0);
+  const sky = a.ensureChunk(0, 7, 0);
+  const band = a.ensureChunk(0, 3, 0);
+  equal(deep.isUniform, true, "a chunk below the surface band is uniform…");
+  equal(deep.uniformValue, stone, "…and it is stone");
+  equal(sky.isUniform, true, "a chunk above the field is uniform…");
+  equal(sky.uniformValue, AIR, "…and it is air");
+  equal(band.isUniform, false, "a chunk the surface crosses materialises (it really does have blocks to draw)");
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {
@@ -4350,7 +4441,9 @@ check("the snapshot/controller pair commutes (real systems, both registration or
   const a = trace(forward, TICKS, YAW);
   const b = trace(swapped, TICKS, YAW);
   equal(b.join("|"), a.join("|"), "the same tick-by-tick trajectory in either batch order");
-  near(C.POSITION.y[index], TERRAIN_TOP_Y + 1.6, 0.01, "the replayed run really landed");
+  const replaySurface = rawVoxel.topSolidY(5, 5, WORLD_MAX_Y - 1);
+  assert(replaySurface !== null, "the replayed run had ground to land on");
+  near(C.POSITION.y[index], replaySurface + 1.6, 0.01, "the replayed run really landed");
   assert(
     trace(forward, TICKS, 0).join("|") !== a.join("|"),
     "a yawed run must differ from a straight one, or the test proves nothing",
