@@ -9,7 +9,7 @@ import { getUIScaleMode } from "../../data/globals/uiscale";
 import { getFontId } from "../../data/globals/fonts";
 import { getBindsAll } from "../../plugins/input/keybinds";
 import { getEnabledPacks } from "../../data/assets/textures";
-import { FADE_OPTIONS, FPS_CAP, type LoopState } from "../../data/globals/resources";
+import { FADE_OPTIONS, FPS_CAP, WORLD_SIZE, type LoopState } from "../../data/globals/resources";
 import { CANVAS_HOST } from "../../data/globals/gfx";
 import { BOOT_FLOW } from "../../data/globals/boot";
 import { SetLoadingStage } from "../../data/globals/commands";
@@ -64,6 +64,8 @@ export function createStartupDriver(deps: StartupDeps): () => Promise<void> {
     // knows, or the next launch would report the engine's own setting as "unknown".
     fadeLod: deps.world.resource(FADE_OPTIONS).lod,
     fadeChunks: deps.world.resource(FADE_OPTIONS).chunks,
+    // …and the world size (P2.02): one number, in chunks per side.
+    worldXZ: deps.world.resource(WORLD_SIZE).chunksX,
     enabledPacks: getEnabledPacks(),
   };
   const checked = readSettingsChecked();

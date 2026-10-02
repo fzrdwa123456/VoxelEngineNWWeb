@@ -132,6 +132,23 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   session without touching the file (a held key or the key release must not toggle it). A hand-edited
   `"fadeLod": "yes"` must load as ON and `"fadeChunks": "yes"` as OFF (only a real `true` turns the fine ring's
   fade on), and the boot line must not report either as an unknown setting.
+→ **THE WORLD'S XZ SIZE (P2.02)**: 单人模式 → the world-type panel now has a **世界大小 (XZ 一圈)** section under
+  the two world types: four preset buttons (1024 / 2048 / 4096 / 8192) and a slider for anything between 1024 and
+  8192 blocks (in 512-block steps), with the chosen lap shown next to it. What to check:
+  (a) clicking a preset moves the slider and the number (one value, two ways to say it — and the slider is bound
+      to the value in force, so it can never show a size the world will not get);
+  (b) the choice takes effect on the NEXT world entry, not immediately: `debug.log` shows
+      `WORLD size 64x64 chunks (2048 blocks around) — the voxel map and every mesh were reset for the new lap`
+      and the loading screen comes up again (the old world cannot be kept — a chunk is identified by a WRAPPED
+      coordinate, so every stored chunk and mesh belongs to the old lap);
+  (c) entering a world of the SAME size must NOT show that line and must not re-warm (a re-entry stays instant);
+  (d) the size survives a restart (`config/settings.json` → `worldXZ`, in chunks), and a hand-edited
+      `"worldXZ": 1` loads as 32 (clamped) while `"worldXZ": 50` loads as 48 (snapped onto the legal 512-block
+      grid) — the panel must show the value in force, not the file's;
+  (e) **the world really got bigger**: with a big lap, walk (Shift ×25 sprint) ONE direction for a while — you
+      must NOT come back to where you started as quickly as on the default world. The terrain looks the same
+      locally either way: only the LAP changed, and that is the point (it is what lets more LOD tiers fit before
+      the world repeats).
 → **THE RING SEAM MUST NEVER SHOW SKY (P2.00)**: this is the check the last three rounds were about. Walk (and
   then fly) across a chunk boundary while watching the junction where the fine ring meets the far one — with `G`
   on it is the line between the two colours. There must be NO frame in which you can see the sky through the

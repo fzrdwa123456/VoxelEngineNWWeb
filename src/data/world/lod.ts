@@ -27,7 +27,7 @@
 // this module must not lose, and the gate asserts it against the real generator.
 import { AIR, CHUNK_SIZE } from "./chunk";
 import type { ChunkMeshInput } from "./mesh";
-import { TERRAIN_MAX_Y, TERRAIN_MIN_Y, TERRAIN_PERIOD, terrainHeight } from "./terrain";
+import { TERRAIN_MAX_Y, TERRAIN_MIN_Y, terrainHeight, terrainPeriod } from "./terrain";
 import { SURFACE_LAYERS, terrainLayerValue } from "./world";
 
 /** Where the six neighbour planes live in `ChunkMeshInput.planes` — the gatherer's order (see mesh.ts). */
@@ -125,10 +125,13 @@ export function tierTint(step: number): string {
   return LOD_TIER_TINT[step - 1] ?? "#ff5ad0";
 }
 
-/** Wrap a block coordinate into the torus: the height field is periodic over one lap (see terrain.ts), and
- *  the far ring's border cells reach one super voxel OUTSIDE the chunk, which is negative at the origin. */
+/** Wrap a block coordinate into the torus: the height field is periodic over one lap (see terrain.ts, and
+ *  `data/world/size.ts` — the lap is the world-size setting now, so this reads the value IN FORCE rather than
+ *  a constant), and the far ring's border cells reach one super voxel OUTSIDE the chunk, which is negative at
+ *  the origin. */
 function wrapBlock(v: number): number {
-  return ((v % TERRAIN_PERIOD) + TERRAIN_PERIOD) % TERRAIN_PERIOD;
+  const period = terrainPeriod();
+  return ((v % period) + period) % period;
 }
 
 /** The sampled grid of the LAST column asked for — a ONE-ENTRY MEMO, and the difference between a far ring

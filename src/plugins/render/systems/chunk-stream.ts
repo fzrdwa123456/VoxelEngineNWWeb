@@ -19,11 +19,11 @@ import { CHUNK_SIZE } from "../../../data/world/chunk";
 import {
   CHUNK_Y_COUNT,
   MIN_CHUNK_Y,
-  WORLD_CHUNKS_X,
-  WORLD_CHUNKS_Z,
   nearestWrap,
   wrapChunkX,
   wrapChunkZ,
+  worldChunksX,
+  worldChunksZ,
   type VoxelWorld,
 } from "../../../data/world/world";
 import { POSITION } from "../../player/components";
@@ -548,6 +548,31 @@ export class ChunkStreamSystem {
     this.beginFade(key, fresh); // a chunk that APPEARED fades in (P1.98)
   }
 
+  /** THE WORLD SIZE CHANGED (P2.02): drop every mesh, every "decided" answer and the window bookkeeping.
+   *
+   *  Called by the world-entry driver, before the new world is primed, and only when the size actually moved.
+   *  It is the render half of `VoxelWorld.reset`: a mesh belongs to the OLD lap (its key is a wrapped identity,
+   *  its geometry was generated from the old period), so nothing here may survive — the next `step()` decides
+   *  the whole window again and the warm-up rebuilds it behind the loading screen.
+   *
+   *  `wanted = null` is what makes `needsWarmUp` answer "yes, there is work": the driver asks it BEFORE it
+   *  builds, so this is also what puts the loading screen up for the new world instead of showing the old
+   *  terrain for a frame. */
+  resetForNewWorld(): void {
+    for (const entry of this.cache.meshes.values()) {
+      this.cache.group.remove(entry.mesh);
+      entry.geom.dispose();
+    }
+    this.cache.meshes.clear();
+    this.cache.empty.clear();
+    this.cache.inFlight.clear();
+    for (const fade of this.fading) for (const clone of fade.clones) clone.dispose();
+    this.fading.length = 0;
+    this.farStale.clear();
+    this.wanted = null;
+    this.farWanted = null;
+  }
+
   /** Hand one chunk to a worker. False = the pool is saturated (or there is none): the caller stops asking
    *  this frame and comes back to that chunk later. */
   private requestMesh(key: string): boolean {
@@ -702,7 +727,7 @@ export class ChunkStreamSystem {
     const out = new Set<string>();
     if (this.lod === null) return out;
     const step = this.lod.step;
-    const period = WORLD_CHUNKS_X / step; // the torus in COARSE columns
+    const period = worldChunksX() / step; // the torus in COARSE columns (the lap is the world-size setting)
     const ccx = Math.floor(pcx / step);
     const ccz = Math.floor(pcz / step);
     const wrap = (v: number): number => ((v % period) + period) % period;
@@ -1021,8 +1046,8 @@ export class ChunkStreamSystem {
     const step = entry.step;
     const pcx = step === 1 ? this.lastPcx : Math.floor(this.lastPcx / step);
     const pcz = step === 1 ? this.lastPcz : Math.floor(this.lastPcz / step);
-    const rx = nearestWrap(entry.cx, pcx, WORLD_CHUNKS_X / step);
-    const rz = nearestWrap(entry.cz, pcz, WORLD_CHUNKS_Z / step);
+    const rx = nearestWrap(entry.cx, pcx, worldChunksX() / step);
+    const rz = nearestWrap(entry.cz, pcz, worldChunksZ() / step);
     entry.mesh.position.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
     entry.mesh.scale.set(step, 1, step);
     entry.mesh.updateMatrix();
@@ -1042,7 +1067,7 @@ export class ChunkStreamSystem {
   private refreshFarVisibility(): void {
     if (this.lod === null) return;
     const step = this.lod.step;
-    const period = WORLD_CHUNKS_X / step;
+    const period = worldChunksX() / step;
     const ccx = Math.floor(this.lastPcx / step);
     const ccz = Math.floor(this.lastPcz / step);
     // The columns with a FINE chunk mid-fade, computed in ONE pass over the fades: a translucent fine chunk must

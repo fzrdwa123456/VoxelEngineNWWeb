@@ -80,6 +80,8 @@
   "main.genTitle": "选择世界类型",
   "main.genSuperflat": "超平坦世界",
   "main.genNoise": "噪声世界",
+  "main.xzTitle": "世界大小 (XZ 一圈)",
+  "main.xzHint": "(越大越晚重复; LOD 最多只能看到一圈的一半 — 下次进入世界生效)",
   "inv.title": "背包 (点击格子放入选中物品栏槽)",
   "gamemode.title": "游戏模式",
   "mode.walk": "生存模式",

@@ -80,6 +80,8 @@
   "main.genTitle": "Select World Type",
   "main.genSuperflat": "Superflat World",
   "main.genNoise": "Noise World",
+  "main.xzTitle": "World size (XZ lap)",
+  "main.xzHint": "(bigger repeats later; an LOD ring can only reach half of it — applies on the next entry)",
   "inv.title": "Inventory (click a slot to swap with the selected hotbar slot)",
   "gamemode.title": "Game Mode",
   "mode.walk": "Survival Mode",

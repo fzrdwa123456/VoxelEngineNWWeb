@@ -39,3 +39,8 @@ export function onUiSource(sources: Map<string, UiSource>, id: string, get: UiSo
 /** The frame cap's source. Both settings panels' sliders BIND to this instead of holding their own copy,
  *  which is what stopped them from drifting away from the value in force. */
 export const SOURCE_FPS_CAP = "fpsCap";
+
+/** The WORLD SIZE's source (P2.02), in CHUNKS per side — the domain the world-type panel's slider is given, so
+ *  the binding needs no mapping. The preset buttons write the same value through a command, and the slider
+ *  follows it: the value in force is the only owner, exactly like the frame cap. */
+export const SOURCE_WORLD_SIZE = "worldSizeChunks";

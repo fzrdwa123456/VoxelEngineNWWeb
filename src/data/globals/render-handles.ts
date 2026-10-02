@@ -28,6 +28,10 @@ export interface RenderHandles {
     /** How much look work is queued in total — the world's stale chunks PLUS the far ring (P1.97). The reload
      *  bar counts it, so it has to see both. */
     readonly restylePending: number;
+    /** The world SIZE changed (P2.02): drop every mesh and every "decided" answer, so the next step rebuilds
+     *  the whole window for the new lap. Called by the world-entry driver, before it primes, and only when the
+     *  size actually moved. */
+    resetForNewWorld(): void;
   };
   /** The MENU frame drives this too (`menuFrame`): the background own step, once per ui frame. */
   readonly menuBackground: { step(): void };

@@ -284,7 +284,21 @@ const { SetFadeOption, SetLoadingStage, ShowToast } = load("data/globals/command
 // The four PLAYER commands moved to the plugin that owns the components they write (P1.18b): `core/` no
 // longer imports `plugins/`, and the gate loads each from the module that declares it.
 const { SelectSlot, SetMode, SwapSlots, Teleport } = load("plugins/player/commands.js");
-const { TERRAIN_TOP_Y, VoxelWorld, WORLD_CHUNKS_X, WORLD_MAX_Y } = load("data/world/world.js");
+const { TERRAIN_TOP_Y, VoxelWorld, WORLD_MAX_Y } = load("data/world/world.js");
+// The torus period is the WORLD SIZE in force now (P2.02 — `data/world/size.ts`), not a constant: everything that
+// used to read `WORLD_CHUNKS_X` asks these instead.
+const {
+  worldChunksX,
+  worldChunksZ,
+  worldPeriodBlocks,
+  setWorldChunks,
+  sanitizeWorldChunks,
+  WORLD_CHUNKS_MIN,
+  WORLD_CHUNKS_MAX,
+  WORLD_CHUNKS_STEP,
+  WORLD_SIZE_PRESETS,
+  worldSizeFitsLod,
+} = load("data/world/size.js");
 
 // ===== 1. core: handles, storage, queries =====
 console.log("\n--- entities, component storage and queries ---");
@@ -993,8 +1007,8 @@ check("the terrain is a NOISE FIELD: one field everywhere, torus-periodic, solid
   const { AIR, CHUNK_SIZE, CHUNK_VOLUME } = load("data/world/chunk.js");
   const { FALLBACK_PALETTE } = load("data/world/palette.js");
 
-  equal(T.TERRAIN_PERIOD, WORLD_CHUNKS_X * CHUNK_SIZE,
-    "the noise's lap IS the torus period (terrain.ts duplicates the number — this is what keeps them equal)");
+  equal(T.terrainPeriod(), worldChunksX() * CHUNK_SIZE,
+    "the noise's lap IS the torus period in force (both read data/world/size.ts — P2.02)");
   equal(TERRAIN_TOP_Y, T.TERRAIN_BASE_Y, "the old flat surface height is the field's BASE level");
 
   // 1. ONE FIELD, EXACTLY PERIODIC, INSIDE ITS DECLARED BOUNDS.
@@ -1002,10 +1016,11 @@ check("the terrain is a NOISE FIELD: one field everywhere, torus-periodic, solid
   let lowest = T.TERRAIN_MAX_Y + 1;
   let highest = T.TERRAIN_MIN_Y - 1;
   for (let i = 0; i < 512; i++) {
-    const x = (i * 37) % T.TERRAIN_PERIOD;
-    const z = (i * 91) % T.TERRAIN_PERIOD;
+    const lap = T.terrainPeriod();
+    const x = (i * 37) % lap;
+    const z = (i * 91) % lap;
     const h = T.terrainHeight(x, z);
-    if (h === T.terrainHeight(x + T.TERRAIN_PERIOD, z) && h === T.terrainHeight(x, z + T.TERRAIN_PERIOD)) wraps++;
+    if (h === T.terrainHeight(x + lap, z) && h === T.terrainHeight(x, z + lap)) wraps++;
     if (h < lowest) lowest = h;
     if (h > highest) highest = h;
     assert(
@@ -1864,6 +1879,166 @@ check("the appearance fades are a per-ring SETTING (P2.01): LOD fades, real chun
     0,
     "…and with the LOD fade OFF a far chunk appears on the shared material",
   );
+});
+
+check("the world's XZ LAP is a setting (P2.02): the noise, the torus and the rings all follow it", () => {
+  // The lap was a hard-coded 32 chunks = 1024 blocks. It is a CHOICE now because it is the number that decides how
+  // far a distance LOD may reach: a ring at radius R is unambiguous only while `R < lap/2`, or its far edge starts
+  // showing the terrain that is closer the other way round (`worldSizeFitsLod`). Five or six tiers — what a
+  // "planet-like" world wants — need 8192/16384 blocks, so the lap has to move for them.
+  // Raw `fs` for the source assertions: `readSource`/`stripComments` are declared further down the file, so they
+  // are in their TDZ here.
+  const readSrc = (rel) => require("node:fs").readFileSync(path.join(ROOT, rel), "utf8");
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const T = load("data/world/terrain.js");
+  const L = load("data/world/lod.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+
+  // 1. THE LEGAL DOMAIN, as data: clamp, snap onto the step, and an unusable value means the default lap.
+  equal(sanitizeWorldChunks(undefined), WORLD_CHUNKS_MIN, "an unusable size is the smallest legal lap");
+  equal(sanitizeWorldChunks(NaN), WORLD_CHUNKS_MIN, "…and so is NaN");
+  equal(sanitizeWorldChunks(1), WORLD_CHUNKS_MIN, "a tiny size is CLAMPED up (the two rings need room)");
+  equal(sanitizeWorldChunks(99999), WORLD_CHUNKS_MAX, "…and a huge one clamped down");
+  equal(sanitizeWorldChunks(33), WORLD_CHUNKS_MIN, "a value off the grid SNAPS onto it (33 rounds down to 32)");
+  equal(sanitizeWorldChunks(48), 48, "…and a legal multiple of the step is taken as it is");
+  equal(sanitizeWorldChunks(50), 48, "…rounding to the NEAREST legal value");
+  for (const preset of WORLD_SIZE_PRESETS) {
+    equal(sanitizeWorldChunks(preset), preset, `the preset ${preset} is a legal size`);
+    equal(preset % WORLD_CHUNKS_STEP, 0, "…on the grid every legal size shares");
+  }
+  // THE RINGS MUST STILL FIT: the shipped far ring reaches ±7 coarse columns = ±448 blocks, so the half-lap of
+  // the smallest legal world (512 blocks) is just enough — asserted, not hoped for.
+  assert(
+    worldSizeFitsLod(WORLD_CHUNKS_MIN, L.DEFAULT_LOD.step, L.DEFAULT_LOD.farRadius),
+    "the smallest legal lap still fits the shipped far ring inside its half",
+  );
+  assert(
+    !worldSizeFitsLod(WORLD_CHUNKS_MIN, L.DEFAULT_LOD.step, 32),
+    "…and the rule really refuses a ring that would reach past the half-lap",
+  );
+
+  // 2. THE FIELD FOLLOWS THE LAP, AND THE LAP REALLY MOVES. This is the load-bearing one: the noise's lattice
+  //    index is taken modulo the lap, so EVERY octave's cell size must divide it (the coarsest is 512 blocks —
+  //    which is why a legal size is a multiple of 16 chunks). A size off that grid puts a cliff at the seam:
+  //    invisible in code, obvious in game.
+  const before = { x: worldChunksX(), z: worldChunksZ() };
+  try {
+    equal(setWorldChunks(64), true, "setting a new size reports that it CHANGED");
+    equal(worldChunksX(), 64, "…and the period in force is the new one");
+    equal(worldPeriodBlocks(), 2048, "…which is 2048 blocks around");
+    equal(T.terrainPeriod(), 2048, "the noise's lap follows the world (one number, two readers)");
+    let wrapped = 0;
+    let differs = 0;
+    for (let i = 0; i < 256; i++) {
+      const x = (i * 53) % 2048;
+      const z = (i * 97) % 2048;
+      const h = T.terrainHeight(x, z);
+      if (h === T.terrainHeight(x + 2048, z) && h === T.terrainHeight(x, z + 2048)) wrapped++;
+      // …and the field is NOT periodic over the OLD lap any more: a "size change" that did not really move would
+      // leave the world exactly as it was, which is the failure nobody would notice by eye.
+      if (h !== T.terrainHeight((x + 1024) % 2048, z)) differs++;
+    }
+    equal(wrapped, 256, "the field is exactly periodic over the NEW lap");
+    assert(differs > 0, `…and no longer over the old one (${differs} of 256 columns differ)`);
+    // The wrap is a REAL torus at the new size too, and `VoxelWorld.reset` (what the entry driver calls) really
+    // throws the old world away: a chunk key is a WRAPPED identity, so "column 5" is a different place in a
+    // different lap and keeping it would pepper the new world with the old one's blocks.
+    const voxel = new VoxelWorld();
+    voxel.ensureChunk(63, 4, 0);
+    assert(voxel.getChunk(63, 4, 0) !== null, "the chunk is there before the reset");
+    equal(
+      voxel.getBlock(63 * CHUNK_SIZE, 100, 0),
+      voxel.getBlock(-CHUNK_SIZE, 100, 0),
+      "block (-32, ·, 0) IS block (2016, ·, 0) on a 64-chunk lap",
+    );
+    voxel.reset();
+    equal(voxel.getChunk(63, 4, 0), null, "…and gone after it (the old world cannot leak into the new one)");
+  } finally {
+    setWorldChunks(before.x, before.z); // EVERY later group assumes the default lap
+  }
+  equal(worldChunksX(), 32, "the lap is back to the default for the rest of the gate");
+  equal(setWorldChunks(32, 32), false, "…and setting the size it already has reports NO change (a free re-entry)");
+
+  // 3. THE RENDER HALF: a size change throws every mesh and every "decided" answer away, or the new world would
+  //    be drawn with the old lap's geometry. Driven on a real stream — and `pendingCount` must see work again
+  //    afterwards, because that is what puts the loading screen up for the new world instead of showing stale
+  //    terrain for a frame.
+  const P = loadPresentation();
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const world = new World();
+  world.insertResource(VOXEL, new VoxelWorld());
+  world.insertResource(LOCAL_PLAYER, localPlayer);
+  const cache = P.createChunkMeshCache({ add() {}, remove() {} });
+  world.insertResource(P.CHUNK_MESHES, cache);
+  world.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  world.insertResource(FADE_OPTIONS, createFadeOptions());
+  world.insertResource(KEY_EVENTS, createKeyEventLog());
+  // A fake mesher that always produces faces: the real one answers 0 for a uniform chunk, and this section is
+  // about the cache being emptied, not about what the terrain happens to be there.
+  let gen = 0;
+  const factory = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [],
+      apply: () => 5,
+      rebuild: () => 5,
+      restyle: () => 1,
+      dispose() {},
+    }),
+    getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++gen }),
+  };
+  const stream = new ChunkStreamSystem(world, factory);
+  stream.step();
+  assert(cache.meshes.size > 0, `the stream built meshes (${cache.meshes.size})`);
+  stream.resetForNewWorld();
+  equal(cache.meshes.size, 0, "a world-size change leaves no mesh behind");
+  equal(stream.pendingCount() > 0, true, "…and the window counts as WORK again, so the entry shows its screen");
+
+  // 4. THE WIRING, as source text (the shape the fades and the diagnostic log are checked with): the entry
+  //    APPLIES the size before it asks anything, and the value travels root -> resource -> command -> file.
+  const entry = strip(readSrc("src/boot/drivers/world-entry.ts"));
+  assert(
+    /if \(setWorldChunks\(wanted\.chunksX, wanted\.chunksZ\)\)/.test(entry) &&
+      /resource\(VOXEL\)\.reset\(\)/.test(entry) &&
+      /chunkStream\.resetForNewWorld\(\)/.test(entry),
+    "the world entry sets the lap and resets the voxel map AND the meshes when it changed",
+  );
+  assert(
+    entry.indexOf("setWorldChunks(") < entry.indexOf("needsWarmUp("),
+    "…BEFORE it asks whether the window needs warming (the answer must be yes for a new lap)",
+  );
+  const mainSrc = strip(readSrc("src/boot/main.ts"));
+  assert(
+    /const worldSize: WorldSizeState = createWorldSize\(readSettings\(\)\.worldXZ\);/.test(mainSrc) &&
+      /world\.insertResource\(WORLD_SIZE, worldSize\)/.test(mainSrc),
+    "the composition root loads the lap from the settings file into the resource the driver reads",
+  );
+  assert(
+    /world\.commands\.send\(SetWorldSize, \{ chunksX: chunks \}\)/.test(mainSrc) &&
+      /saveSettings\(\{ worldXZ: chunks \}\)/.test(mainSrc) &&
+      /s\.worldXZ = justSet\.worldXZ \?\? worldSize\.chunksX;/.test(mainSrc),
+    "a choice goes through the COMMAND, is HANDED to the save, and is persisted",
+  );
+  assert(
+    /worldXZ: deps\.world\.resource\(WORLD_SIZE\)\.chunksX,/.test(strip(readSrc("src/boot/drivers/startup.ts"))),
+    "the boot settings check carries it in its schema",
+  );
+  const genView = strip(readSrc("src/plugins/ui/views/mainmenu.ts"));
+  assert(
+    /main\.genSize\.\$\{preset\}/.test(genView) && /SOURCE_WORLD_SIZE/.test(genView),
+    "the world-type panel offers the presets AND a slider bound to the value in force",
+  );
+  for (const lang of ["zh", "en", "ja"]) {
+    const dict = JSON.parse(
+      require("node:fs").readFileSync(
+        path.join(ROOT, "packs", "VoxelEngineNWWebrp", "assets", "voxel", "lang", `${lang}.json`),
+        "utf8",
+      ),
+    );
+    for (const key of ["main.xzTitle", "main.xzHint"]) {
+      assert(typeof dict[key] === "string" && dict[key].length > 0, `${key} is translated (${lang})`);
+    }
+  }
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {

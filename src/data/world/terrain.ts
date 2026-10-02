@@ -11,22 +11,29 @@
 // dependency on the chunk being generated. The same (x, z) answers identically for ever — the gate asserts it
 // on two independently built worlds.
 //
-// TORUS-PERIODIC BY CONSTRUCTION (this is the part that is easy to get wrong). X/Z is a torus of
-// WORLD_CHUNKS_X * CHUNK_SIZE = 1024 blocks (see world.ts), so block (0, z) and block (1024, z) are THE SAME
-// PLACE. A height field sampled from a plain (unwrapped) hash would put a cliff there: the renderer draws the
-// far side of the torus next to the near side (`nearestWrap`), so the seam is visible, not theoretical. The
-// lattice index of every noise octave is therefore taken MODULO the number of cells in one lap, which makes
-// the field exactly periodic — `terrainHeight(x) === terrainHeight(x + TERRAIN_PERIOD)` holds analytically,
-// not approximately. Every octave's cell size must DIVIDE the period for that to work, which is why they are
-// powers of two (the gate asserts both facts).
+// TORUS-PERIODIC BY CONSTRUCTION (this is the part that is easy to get wrong). X/Z is a torus whose lap is
+// `terrainPeriod()` blocks (P2.02: it used to be a hard-coded 1024 and is now the world-size setting — see
+// data/world/size.ts), so block (0, z) and block (lap, z) are THE SAME PLACE. A height field sampled from a
+// plain (unwrapped) hash would put a cliff there: the renderer draws the far side of the torus next to the near
+// side (`nearestWrap`), so the seam is visible, not theoretical. The lattice index of every noise octave is
+// therefore taken MODULO the number of cells in one lap, which makes the field exactly periodic —
+// `terrainHeight(x) === terrainHeight(x + lap)` holds analytically, not approximately. Every octave's cell size
+// must DIVIDE the lap for that to work, which is why they are powers of two and why a legal world size is a
+// multiple of 512 blocks (size.ts: the coarsest octave is 512 blocks); the gate asserts both facts — including
+// for a non-default size.
 //
 // COST. One height per 32x32 column grid per chunk in the surface band, and the band is bounded
 // (TERRAIN_MIN_Y..TERRAIN_MAX_Y), so a chunk above or below it is filled UNIFORMLY and this module is never
 // called for it — that is what keeps a tall build range cheap (see generateChunk's fast paths).
-/** The noise's lattice period in BLOCKS: one lap of the torus. MUST stay equal to
- *  `WORLD_CHUNKS_X * CHUNK_SIZE` — it is duplicated here rather than imported so this module does not
- *  import world.ts (which imports THIS one); `check:ecs` asserts the two are equal. */
-export const TERRAIN_PERIOD = 1024;
+import { worldPeriodBlocks } from "./size";
+
+/** The noise's lattice period in BLOCKS: one lap of the torus. It IS the world's period now (P2.02), read from
+ *  `data/world/size.ts` — the one number both this module and world.ts agree on, without either importing the
+ *  other (`world.ts` imports THIS one). `check:ecs` asserts the field is periodic over exactly this lap for
+ *  every legal world size, and that every octave's cell size divides it. */
+export function terrainPeriod(): number {
+  return worldPeriodBlocks();
+}
 
 /** The seed. A constant, so a world is reproducible; change it and the whole torus is a different world. */
 export const TERRAIN_SEED = 1337;
@@ -74,11 +81,11 @@ function smooth(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** 2D value noise at `cell` blocks per lattice step, periodic over `TERRAIN_PERIOD` blocks.
+/** 2D value noise at `cell` blocks per lattice step, periodic over `terrainPeriod()` blocks.
  *  `x`/`z` are world block coordinates and must be non-negative (they always are: chunk coordinates are
- *  wrapped into [0, WORLD_CHUNKS_X) before use, so a column is 0..1023). */
+ *  wrapped into [0, the lap) before use). */
 function noise2(x: number, z: number, cell: number, seed: number): number {
-  const cells = TERRAIN_PERIOD / cell; // whole number: `cell` divides the period (see OCTAVES)
+  const cells = terrainPeriod() / cell; // whole number: `cell` divides the lap (see OCTAVES and size.ts)
   const fx = x / cell;
   const fz = z / cell;
   const ix = Math.floor(fx);

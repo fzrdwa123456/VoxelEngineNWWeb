@@ -2789,6 +2789,47 @@ Still outstanding:
   options fails "with the setting OFF a real chunk appears on the SHARED material". The settings group also
   asserts the source shape (the command + the handed save + the `inForce` schema) and that all four new i18n keys
   exist in zh/en/ja.
+- **P2.02 — the world's XZ lap is a SETTING: a custom size for the noise world, applied on entry.** `DONE`, by
+  request («先给噪声世界弄个自定义xz范围的» —「进世界时生效」+「预设几个档位顺便加上自定义xz」).
+  WHY IT IS THE FIRST STEP TOWARDS MORE LOD TIERS: the lap is the number that bounds a distance LOD. A ring at
+  radius R is unambiguous only while `R < lap/2`; past that its far edge starts showing the terrain that is closer
+  the other way round, i.e. the same hill appears twice on screen. The old hard-coded 32 chunks (1024 blocks)
+  therefore caps this engine at TWO tiers (the far ring reaches ±480 blocks) — the five or six a planet-like world
+  wants need 8192/16384 blocks, which is what the presets offer.
+  WHAT MOVED: the period used to be `WORLD_CHUNKS_X/Z` constants in `data/world/world.ts`, duplicated in
+  `terrain.ts` as `TERRAIN_PERIOD` with a gate assertion keeping them equal. It now lives in a leaf module
+  `data/world/size.ts` that BOTH import (`world.ts` imports `terrain.ts`, so a value in either could not be shared
+  without a cycle): `worldChunksX/Z()`, `worldPeriodBlocks()`, `setWorldChunks()`, `sanitizeWorldChunks()`,
+  `worldSizeFitsLod()`. Every reader asks it — `wrapChunkX/Z`, `terrainPeriod()` (the noise MUST repeat exactly on
+  the lap, so the lattice wrap is modulo the lap in force), the LOD sampler's `wrapBlock`, and the chunk stream's
+  `nearestWrap`/`farKeys` periods.
+  A LEGAL SIZE IS A MULTIPLE OF 16 CHUNKS (512 blocks), for two independent reasons: the terrain's coarsest octave
+  is 512 blocks per lattice cell and every octave has to divide the lap, and the LOD rings are powers of two, so
+  the wrap must land on a column grid both can align to. So "custom" is a custom multiple of 16: the panel offers
+  the presets 1024/2048/4096/8192 blocks as buttons AND a slider (32..256 chunks, step 16) bound to the value in
+  force, and the domain is declared ONCE (`size.ts`) so the panel, the command and the entry cannot disagree.
+  APPLIED ON ENTRY, NO RESTART (the user's choice): `enterWorld` starts by reading `WORLD_SIZE`, and when
+  `setWorldChunks` reports the lap actually moved it resets the voxel map (`VoxelWorld.reset`) and every mesh
+  (`chunkStream.resetForNewWorld`) — a chunk key is a WRAPPED identity and a mesh belongs to the old lap, so
+  nothing may survive. That drop is also what makes `needsWarmUp` answer "yes", so the loading screen comes up and
+  the whole window is rebuilt for the new world. Entering a world of the SAME size does nothing at all, so a
+  re-entry stays as free as it was.
+  THE CHOICE IS A SETTING: a `WORLD_SIZE` resource the driver reads, changed by the `SetWorldSize` command from the
+  world-type panel (so a UI callback never assigns state the tick reads), written to `settings.json` as `worldXZ`
+  with the value HANDED to the save, and carried in the boot check's `inForce` schema.
+  VERIFIED: `tsc` 0; `check:ecs` **81/81** with a new group: the legal domain (clamping, snapping, presets, and
+  `worldSizeFitsLod` accepting the shipped ring and refusing one that would reach past the half-lap); a REAL size
+  change to 64 chunks — the period in force, the noise's lap, exact periodicity over the NEW lap and the loss of
+  periodicity over the OLD one (a "change" that did not really move would leave the world as it was), a real torus
+  wrap at the new size, and `VoxelWorld.reset` throwing the old world away — then the default is restored in a
+  `finally` because every later group assumes it; the render half on a real stream (`resetForNewWorld` leaves no
+  mesh and makes the window count as work again); and the wiring as source text (the entry applies it BEFORE it
+  asks `needsWarmUp`, the command + handed save + `inForce` schema, the presets and the bound slider, and the two
+  new i18n keys in zh/en/ja). MUTATION-TESTED: making `terrainPeriod()` a constant fails "the noise's lap follows
+  the world".
+  NOT DONE, AND THE NEXT STEP TOWARDS 5–6 TIERS: the ring ladder itself (a third, fourth… tier with its own
+  radius, each finer tier's coverage becoming the next one's reserve), plus CHUNK EVICTION — a bigger lap makes the
+  never-evicted chunk map (ROADMAP §3.2) matter more, because it grows with exploration rather than with the lap.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

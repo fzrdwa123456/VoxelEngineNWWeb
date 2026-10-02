@@ -24,10 +24,13 @@
 import { AIR, CHUNK_SIZE, Chunk, SOLID, voxelIndex } from "./chunk";
 import { FALLBACK_PALETTE, idIn, valueIn } from "./palette";
 import { TERRAIN_BASE_Y, TERRAIN_MAX_Y, TERRAIN_MIN_Y, terrainHeight } from "./terrain";
+import { worldChunksX, worldChunksZ } from "./size";
 
-/** Torus period along X/Z, in chunks: 32 * 32 = 1024 blocks before the world repeats */
-export const WORLD_CHUNKS_X = 32;
-export const WORLD_CHUNKS_Z = 32;
+/** THE TORUS PERIOD IS A CHOICE NOW (P2.02) and lives in `data/world/size.ts`: 32 chunks = 1024 blocks by
+ *  default, and the world-entry driver sets it from the world-size setting before it builds a world. Everything
+ *  here reads it through `worldChunksX/Z()` — a hard-coded 32 would silently disagree with the noise's period
+ *  the moment the setting moved (the terrain field MUST repeat exactly on the lap, see terrain.ts). */
+export { DEFAULT_WORLD_CHUNKS, WORLD_CHUNKS_MAX, WORLD_CHUNKS_MIN, setWorldChunks, worldChunksX, worldChunksZ } from "./size";
 /** Bounded vertical extent: chunk Y in [MIN_CHUNK_Y, MIN_CHUNK_Y + CHUNK_Y_COUNT).
  *  8 chunks = 256 blocks: 128 of ground plus 128 of build space above it. Air chunks are
  *  uniformly filled and therefore allocation-free (see chunk.ts), so the extra height is cheap. */
@@ -68,12 +71,15 @@ function localOf(block: number): number {
   return ((block % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
 }
 
-/** Chunk coordinate -> chunk coordinate on the torus (negative-safe) */
+/** Chunk coordinate -> chunk coordinate on the torus (negative-safe). The period is the one in force
+ *  (data/world/size.ts), so a bigger world simply wraps later. */
 export function wrapChunkX(cx: number): number {
-  return ((cx % WORLD_CHUNKS_X) + WORLD_CHUNKS_X) % WORLD_CHUNKS_X;
+  const n = worldChunksX();
+  return ((cx % n) + n) % n;
 }
 export function wrapChunkZ(cz: number): number {
-  return ((cz % WORLD_CHUNKS_Z) + WORLD_CHUNKS_Z) % WORLD_CHUNKS_Z;
+  const n = worldChunksZ();
+  return ((cz % n) + n) % n;
 }
 
 /** The representation of wrapped chunk coordinate `c` that lies closest to `pc`.
@@ -167,7 +173,10 @@ function generateChunk(chunk: Chunk, palette: readonly string[]): void {
 }
 
 export class VoxelWorld {
-  /** Wrapped chunk key -> chunk. Bounded: at most WORLD_CHUNKS_X * WORLD_CHUNKS_Z * CHUNK_Y_COUNT */
+  /** Wrapped chunk key -> chunk. Bounded by the period in force: at most `worldChunksX() * worldChunksZ() *
+   *  CHUNK_Y_COUNT` (8192 keys at the default 32×32 lap). Uniform chunks allocate no array, so the map holds
+   *  an entry per chunk that was ever ensured and the real memory is the chunks a player edited — which is also
+   *  why a BIGGER lap makes the missing eviction (ROADMAP §3.2) matter more: the map grows with exploration. */
   private readonly chunks = new Map<string, Chunk>();
   /** Chunk identities whose MESH is stale because a block was written (see setBlock).
    *  The render layer drains this with takeDirty(); the voxel layer never touches meshes. */
@@ -183,6 +192,19 @@ export class VoxelWorld {
    *  registry ids in right after it builds them (P1.47), so every block an install ships is both placeable and
    *  drawable. Until that call (a gate test, a world without the content plugin) it is FALLBACK_PALETTE. */
   private palette: readonly string[] = FALLBACK_PALETTE;
+
+  /** THE WORLD SIZE CHANGED (P2.02): throw away every chunk and both stale queues.
+   *
+   *  A chunk key is a WRAPPED identity, so the moment the period moves, every stored chunk means something else
+   *  ("column 5" is a different place in a 64-chunk lap than in a 32-chunk one) — keeping them would leave the
+   *  new world peppered with the old one's blocks. The render side has to drop its meshes in the same breath
+   *  (`chunk-stream.resetForNewWorld`), and the caller is the world-entry driver, BEFORE anything is generated
+   *  or streamed for the new world. */
+  reset(): void {
+    this.chunks.clear();
+    this.dirty.clear();
+    this.stale.clear();
+  }
 
   /** Install the palette in force, REPLACING it. Boot-only now: the pack reload uses `mergePalette`, because
    *  a replacement is exactly what re-points every existing voxel at another block. */

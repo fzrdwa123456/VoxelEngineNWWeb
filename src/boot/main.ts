@@ -2,8 +2,8 @@ import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, paceFrame, pacingTargetHz, refreshHzFromMilliHz, type InputDiagnostics } from "../data/globals/resources";
-import { createFadeOptions, FADE_OPTIONS, type FadeOptions } from "../data/globals/resources";
-import { SetFadeOption, SetFpsCap, SetVsync, ShowToast } from "../data/globals/commands";
+import { createFadeOptions, createWorldSize, FADE_OPTIONS, WORLD_SIZE, type WorldSizeState } from "../data/globals/resources";
+import { SetFadeOption, SetFpsCap, SetVsync, SetWorldSize, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
@@ -238,7 +238,7 @@ logDebug(
  *  label/slider is only refreshed when its panel opens, so the file and the screen then disagree until the next
  *  launch. That is what `justSet` is for: the two settings the frame pacing owns (both are read by the loop
  *  every frame, so both must go through the barrier). */
-const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolean; fadeChunks?: boolean } = {}): void => {
+const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolean; fadeChunks?: boolean; worldXZ?: number } = {}): void => {
     // Read-modify-write merge, avoids clobbering other settings (windowMode etc.)
   const s = readSettings();
   s.language = getLang();
@@ -251,6 +251,8 @@ const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolea
   // the one the render lane is reading, so a save must never write something else (P2.01).
   s.fadeLod = justSet.fadeLod ?? fadeOptions.lod;
   s.fadeChunks = justSet.fadeChunks ?? fadeOptions.chunks;
+  // …and the world size (P2.02): the value in force, handed in when it arrives through a command.
+  s.worldXZ = justSet.worldXZ ?? worldSize.chunksX;
   s.fpsCap = justSet.cap ?? world.resource(FPS_CAP).cap;
   // The vertical-sync switch is a setting like the rest now (P1.86): it used to live in its own
   // `config/vsync.json`, which no settings check ever validated, and it only took effect at the next launch.
@@ -354,6 +356,12 @@ world.insertResource(FPS_CAP, frameCap);
 // A resource, because `chunk-stream` reads it every step; the settings panel sends SetFadeOption to change it.
 const fadeOptions = createFadeOptions(readSettings().fadeLod, readSettings().fadeChunks);
 world.insertResource(FADE_OPTIONS, fadeOptions);
+// THE WORLD SIZE (P2.02): the lap the noise, the torus and the LOD rings share. A resource, because the
+// world-entry driver reads it to decide whether the lap has to change before it builds a world; the world-type
+// panel changes it through `SetWorldSize`. ONE number in the file (`worldXZ`, in chunks) for both axes, so a
+// hand-edited file cannot ask for a rectangular world the UI has no way to show.
+const worldSize: WorldSizeState = createWorldSize(readSettings().worldXZ);
+world.insertResource(WORLD_SIZE, worldSize);
 /** Does any modal surface own the mouse right now? */
 const uiOpen = (): boolean => isModalUi(uiModal);
 /** A MENU is open (not counting the inventory, which the inventory key must still be able to toggle) */
@@ -893,6 +901,20 @@ const onSetFade = (which: "lod" | "chunks", on: boolean): void => {
   );
 };
 
+/** THE WORLD SIZE (P2.02): chosen in the world-type panel, applied by the world-entry driver on the NEXT entry
+ *  (no restart) — the lap cannot change under a world that is already streaming, so this only stores the choice
+ *  and the entry does the reset when it builds. Same shape as the fades: the command writes the resource the
+ *  driver reads, and the file is written here with the value HANDED in (never read back before the barrier). */
+const onSetWorldSize = (chunks: number): void => {
+  world.commands.send(SetWorldSize, { chunksX: chunks });
+  saveSettings({ worldXZ: chunks });
+  const blocks = createWorldSize(chunks).chunksX * 32;
+  logDebug(
+    `WORLD SIZE set to ${chunks} chunks (${blocks} blocks around) — applies on the next world entry ` +
+      `(the half-lap is what an LOD ring may reach: ${blocks / 2} blocks)`,
+  );
+};
+
 /** The "Diagnostic log" switch in the settings panel: it only controls whether the **diagnostic probe
  *  lines** reach the disk (see the prefix filter in platform/shell.ts::logDebug), touches no game state
  *  and needs no restart. On by default. */
@@ -1043,11 +1065,12 @@ const mainMenu = createMainMenu(world, {
   onToggleDiagLog,
   onSetFade,
   isFadeOn: (which: "lod" | "chunks") => (which === "lod" ? fadeOptions.lod : fadeOptions.chunks),
+  getWorldSize: () => worldSize.chunksX,
+  onSetWorldSize,
   getWindowMode,
   onSetWindowMode,
   onSetPacks,
 });
-
 // ===== ui.navigation's widget trees (the plugin reads them through the box) =====
 // The state machine is in the schedule from boot; these are the handles it paints. They are published into
 // `uiTrees`, the box the UI plugin was handed at construction — the menus are built HERE because their

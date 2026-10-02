@@ -12,7 +12,7 @@
 // WHAT IS NOT HERE: everything ENTITY-shaped. The four player commands (`SetMode`, `Teleport`, `SelectSlot`,
 // `SwapSlots`) are in `plugins/player/commands.ts` (P1.18b), because they write a plugin's own components.
 import { defineCommand } from "../../core/world";
-import { LOADING_STATE, FADE_OPTIONS, FPS_CAP, PACK_RELOAD, sanitizeFrameCap, TOAST, TOAST_MS } from "./resources";
+import { LOADING_STATE, createWorldSize, FADE_OPTIONS, FPS_CAP, PACK_RELOAD, WORLD_SIZE, sanitizeFrameCap, TOAST, TOAST_MS } from "./resources";
 import { hotPlugLabel } from "./hotplug";
 import { HOT_PLUG, hotInstall, hotUninstall } from "../../core/plugin/hotplug";
 /** Show a toast: `key` is an i18n key unless `raw` is set ("cap set to 60" cannot be a key — see
@@ -65,6 +65,22 @@ export const SetFadeOption = defineCommand<{ which: "lod" | "chunks"; on: boolea
     const fades = world.resource(FADE_OPTIONS);
     if (which === "lod") fades.lod = on === true;
     else fades.chunks = on === true;
+  },
+);
+
+/** THE WORLD SIZE (P2.02): the lap the noise, the torus and the LOD rings all read. A COMMAND for the same
+ *  reason as the fades — the world-entry driver reads the resource to decide whether the lap has to change
+ *  before it builds a world, so a UI callback may not assign it. The value is SANITISED here (clamped and
+ *  snapped onto the legal grid), so the panel and the entry can never disagree about what a legal size is.
+ *
+ *  Applying it is NOT part of the command: the entry does that (set the period, reset the voxel map and the
+ *  meshes) because it is the only place that knows nothing is streaming yet. */
+export const SetWorldSize = defineCommand<{ chunksX: number; chunksZ?: number }>(
+  "setWorldSize",
+  (world, { chunksX, chunksZ }) => {
+    const size = createWorldSize(chunksX, chunksZ ?? chunksX);
+    world.resource(WORLD_SIZE).chunksX = size.chunksX;
+    world.resource(WORLD_SIZE).chunksZ = size.chunksZ;
   },
 );
 

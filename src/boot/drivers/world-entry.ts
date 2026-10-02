@@ -3,7 +3,8 @@
 // warm-up -> screen down -> mode "game" -> capture), and the root now only supplies what it owns - the
 // loop state, the menus, the pointer lock, the window queries and the spawn point.
 import { RENDER_HANDLES } from "../../data/globals/render-handles";
-import { VOXEL } from "../../data/globals/resources";
+import { VOXEL, WORLD_SIZE } from "../../data/globals/resources";
+import { setWorldChunks, worldPeriodBlocks } from "../../data/world/size";
 import { Teleport } from "../../plugins/player/commands";
 import { HUMANOID_BODY } from "../../plugins/player/components";
 import { WORLD_MAX_Y } from "../../data/world/world";
@@ -49,6 +50,24 @@ export function createWorldEntry(deps: WorldEntryDeps): (mode: string) => Promis
  *  A RE-entry into a window that is still built skips the screen entirely (see `needsWarmUp`). */
 const enterWorld = async (mode: string): Promise<void> => {
   const entryStart = performance.now();
+  // ===== THE WORLD SIZE FIRST, AND BEFORE ANYTHING IS ASKED (P2.02) =====
+  // The lap is the world-size setting, and changing it invalidates EVERY chunk and EVERY mesh (a key is a
+  // wrapped identity, so "column 5" means a different place in a different lap). So: set the period, throw the
+  // voxel map and the mesh cache away, and only then let the entry ask `needsWarmUp` — which now answers "yes,
+  // there is work" (the wanted set was dropped), so the loading screen comes up and the whole window is rebuilt
+  // for the new world. Entering a world of the SAME size does none of this (`setWorldChunks` answers whether
+  // anything moved), which is what keeps a re-entry free.
+  {
+    const wanted = deps.world.resource(WORLD_SIZE);
+    if (setWorldChunks(wanted.chunksX, wanted.chunksZ)) {
+      deps.world.resource(VOXEL).reset();
+      deps.world.resource(RENDER_HANDLES).chunkStream.resetForNewWorld();
+      deps.log(
+        `WORLD size ${wanted.chunksX}x${wanted.chunksZ} chunks (${worldPeriodBlocks()} blocks around) ` +
+          "— the voxel map and every mesh were reset for the new lap",
+      );
+    }
+  }
   // The entry watches the window for fiddling of its own (P1.62e): a drag during the loading is remembered
   // and makes this entry start on the pause menu instead of capturing behind the user's back.
   deps.loop.geometryDuringLoad = false;

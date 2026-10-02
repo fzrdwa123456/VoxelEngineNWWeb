@@ -80,6 +80,8 @@
   "main.genTitle": "ワールドタイプを選択",
   "main.genSuperflat": "スーパーフラット",
   "main.genNoise": "ノイズワールド",
+  "main.xzTitle": "ワールドの大きさ (XZ 一周)",
+  "main.xzHint": "(大きいほど繰り返しが遠い。LOD は一周の半分まで — 次の入場で反映)",
   "inv.title": "インベントリ (スロットをクリックで選択中のホットバースロットと交換)",
   "gamemode.title": "ゲームモード",
   "mode.walk": "サバイバルモード",

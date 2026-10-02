@@ -9,6 +9,7 @@
 
 import { defineResource, type Entity, type Resource } from "../../core/world";
 import type { VoxelWorld } from "../world/world";
+import { DEFAULT_WORLD_CHUNKS, sanitizeWorldChunks } from "../world/size";
 
 /** The local player's entity. Kept as a resource so "the player" is greppable data rather than a
  *  constructor argument hard-wired into five systems. */
@@ -604,6 +605,26 @@ export const FADE_OPTIONS = defineResource<FadeOptions>("fadeOptions");
  *  fade (the same rule `vsync` uses) and only a real `true` turns the fine ring's fade on. */
 export function createFadeOptions(lod: unknown = true, chunks: unknown = false): FadeOptions {
   return { lod: lod !== false, chunks: chunks === true };
+}
+
+// ===== The WORLD SIZE (P2.02) =====
+// How far you can walk before the world repeats, in CHUNKS per side (see data/world/size.ts for why it is a
+// choice at all: it is what bounds how far a distance LOD may reach before the lap shows the same terrain
+// twice). A RESOURCE rather than a plain setting, because the world-entry driver reads the value IN FORCE to
+// decide whether the lap has to change before it builds anything; the panel changes it through `SetWorldSize`,
+// and the file is written by the caller (config is not world state).
+export interface WorldSizeState {
+  /** The lap along X, in chunks (a legal multiple of `WORLD_CHUNKS_STEP`) */
+  chunksX: number;
+  /** The lap along Z, in chunks */
+  chunksZ: number;
+}
+export const WORLD_SIZE = defineResource<WorldSizeState>("worldSize");
+
+/** Sanitising factory, the same rule every config value follows: an unusable file value becomes the default
+ *  lap, and a legal one is snapped into the domain. */
+export function createWorldSize(chunksX: unknown = DEFAULT_WORLD_CHUNKS, chunksZ: unknown = chunksX): WorldSizeState {
+  return { chunksX: sanitizeWorldChunks(chunksX), chunksZ: sanitizeWorldChunks(chunksZ) };
 }
 
 // ===== Configuration resources: the settings that are read ON THE TICK =====

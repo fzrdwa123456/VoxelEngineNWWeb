@@ -617,6 +617,27 @@ where it is:
     border"). None of them fades a chunk in or out at that boundary. The reserve is invisible, so it costs no
     draw calls; it costs the far budget the extra build (one coarse ring at the fine window's edge, ~24 columns
     at the shipped shape) and it is built AFTER the drawn ring, so entering a world looks exactly as before.
+* **THE TORUS LAP IS A SETTING (P2.02 — `data/world/size.ts`).** X/Z wraps, and how far you walk before the world
+  repeats was a hard-coded 32 chunks = 1024 blocks. It is a choice now, because it is the number that bounds a
+  distance LOD: a ring at radius R is unambiguous only while `R < lap/2` — past that its far edge starts showing
+  the terrain that is closer the OTHER way round (the same hill twice on screen). 1024 blocks therefore caps this
+  engine at two tiers (448 blocks), while the five or six tiers a "planet-like" world wants need 8192/16384. So:
+  * the value lives in `size.ts` — a leaf module `world.ts` and `terrain.ts` both import (`world.ts` imports
+    `terrain.ts`, so a value in either could not be shared without a cycle) — and EVERY reader asks it:
+    `wrapChunkX/Z`, `terrainPeriod()` (the field must repeat exactly on the lap or the seam is a cliff), the LOD
+    sampler's `wrapBlock` and the chunk stream's `nearestWrap`. A hard-coded 32 anywhere would silently disagree.
+  * **A LEGAL SIZE IS A MULTIPLE OF 16 CHUNKS (512 blocks)**, and that is not arbitrary: the terrain's coarsest
+    noise octave is 512 blocks per lattice cell and every octave must DIVIDE the lap, and the LOD rings are powers
+    of two so the wrap has to land on a column grid both can align to. `sanitizeWorldChunks` clamps into
+    `[32, 256]` and snaps onto that grid; `worldSizeFitsLod` is the rule that refuses a size too small for the
+    rings in force.
+  * **IT IS APPLIED BY THE WORLD-ENTRY DRIVER, AND IT RESETS EVERYTHING**: `setWorldChunks` (which answers whether
+    anything moved), then `VoxelWorld.reset()` and `chunkStream.resetForNewWorld()` — a chunk key is a WRAPPED
+    identity and a mesh belongs to the old lap, so nothing may survive. `wanted = null` is what makes
+    `needsWarmUp` answer "yes" so the loading screen comes up for the new world instead of showing stale terrain.
+    Entering a world of the same size does none of it (a re-entry stays free). The CHOICE is a resource
+    (`WORLD_SIZE`) the driver reads, changed by the `SetWorldSize` command from the world-type panel (presets +
+    a slider bound to the value in force), and persisted as `worldXZ`.
 * **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** In a world, `G` tints every chunk mesh by its
   TIER: the fine ring in `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a
   textured block keeps its texture and takes the hue), `H` switches every chunk mesh to three.js's TRIANGLE

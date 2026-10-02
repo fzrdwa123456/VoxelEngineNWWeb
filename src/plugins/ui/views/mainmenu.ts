@@ -22,7 +22,16 @@ import type { Entity, World } from "../../../core/world";
 import { UI_MODAL } from "../../../data/globals/resources";
 import { stepBackSettings } from "../systems/navigation";
 import { onUiAction, UI_ACTIONS } from "../../../data/globals/actions";
-import { setUiImage, spawnButton, spawnLabel, spawnPanel, UI_LOOK } from "../components";
+import { onUiSource, SOURCE_WORLD_SIZE, UI_SOURCES } from "../../../data/globals/sources";
+import { setUiImage, setUiText, spawnButton, spawnLabel, spawnPanel, spawnSlider, UI_LOOK } from "../components";
+import { CHUNK_SIZE } from "../../../data/world/chunk";
+import {
+  sanitizeWorldChunks,
+  WORLD_CHUNKS_MAX,
+  WORLD_CHUNKS_MIN,
+  WORLD_CHUNKS_STEP,
+  WORLD_SIZE_PRESETS,
+} from "../../../data/world/size";
 
 /** World type (main-menu singleplayer choice; world generation removed, only the selection semantics remain) */
 type WorldGenMode = "superflat" | "noise";
@@ -31,6 +40,10 @@ export interface MainMenuCallbacks extends SettingsCallbacks {
   onStartSingle: (mode: WorldGenMode) => void;
   onMultiplayer: () => void;
   onExit: () => void;
+  /** THE WORLD SIZE (P2.02): the lap, in chunks per side. Read from the value in force (the world-entry driver
+   *  is the only thing that APPLIES it) and set through a command. */
+  getWorldSize: () => number;
+  onSetWorldSize: (chunks: number) => void;
 }
 
 export class MainMenu {
@@ -72,6 +85,62 @@ export class MainMenu {
     spawnLabel(world, this.genPanel, "menu.subTitle", "main.genTitle");
     spawnButton(world, this.genPanel, "menu.btn", "main.gen", "superflat", "main.genSuperflat");
     spawnButton(world, this.genPanel, "menu.btn", "main.gen", "noise", "main.genNoise");
+    // ===== THE WORLD's XZ SIZE (P2.02) =====
+    // How far you walk before the world repeats. It matters because the lap is what an LOD ring is allowed to
+    // reach (a ring at radius R needs `R < lap/2`, or the far edge shows the same terrain twice — see
+    // data/world/size.ts), so a world meant to carry five or six tiers wants a bigger lap. TWO WAYS TO SAY IT,
+    // one value: the preset buttons (the tiers the LOD ladder wants) and a slider for anything else, and the
+    // slider is BOUND to the value in force (UI_BIND) so a preset click moves it and the label can never
+    // disagree with the world the next entry will build. The change applies on the NEXT world entry — the lap
+    // cannot move under a world that is already streaming (the entry resets the voxel map and every mesh).
+    spawnLabel(world, this.genPanel, "menu.subTitle", "main.xzTitle");
+    spawnLabel(world, this.genPanel, "settings.rowMeta", "main.xzHint");
+    const sizeRow = spawnPanel(world, this.genPanel, "settings.btnRow");
+    for (const preset of WORLD_SIZE_PRESETS) {
+      // An EMPTY key still OWNS UI_TEXT, and the number is then written RAW: "1024" is a size, not a sentence a
+      // dictionary could hold (the same call the FPS cap's value label makes).
+      const btn = spawnButton(world, sizeRow, "settings.btn", `main.genSize.${preset}`, "", "");
+      setUiText(world, btn, `${preset * CHUNK_SIZE}`, true);
+      onUiAction(actions, `main.genSize.${preset}`, () => {
+        cb.onSetWorldSize(preset);
+        renderSize(preset); // HANDED the value: it arrives in the world through a command (next barrier)
+      });
+    }
+    // The slider shares the settings panel's row recipe ON PURPOSE: `settings.range` starts invisible and is
+    // revealed by hovering a `settings.optRow` (theme.ts), so putting it in anything else would leave the
+    // "custom" half of this control permanently invisible.
+    const sizeCtl = spawnPanel(world, this.genPanel, "settings.optRow");
+    spawnSlider(
+      world,
+      sizeCtl,
+      "settings.range",
+      "main.genSize",
+      "",
+      {
+        min: WORLD_CHUNKS_MIN,
+        max: WORLD_CHUNKS_MAX,
+        step: WORLD_CHUNKS_STEP,
+        initial: cb.getWorldSize(),
+      },
+      SOURCE_WORLD_SIZE, // BOUND: the slider IS the value in force, presets included
+    );
+    onUiSource(world.resource(UI_SOURCES), SOURCE_WORLD_SIZE, cb.getWorldSize);
+    const sizeValue = spawnLabel(world, sizeCtl, "settings.value", "", { raw: true });
+    /** The size, as the player sees it: the LAP in blocks, both axes. `raw: true` — "2048 × 2048 格" is surface
+     *  formatting, not a dictionary entry (the same call the FPS cap's label makes about "unlimited"). The value
+     *  is HANDED in wherever a click produced it and sanitised with the SAME rule the command applies, so the
+     *  label cannot show a size the world will not get (`snapToRange`'s rule for the cap: one declaration). */
+    const renderSize = (chunks: number): void => {
+      const n = sanitizeWorldChunks(chunks);
+      setUiText(world, sizeValue, `${n * CHUNK_SIZE} × ${n * CHUNK_SIZE} 格`, true);
+    };
+    renderSize(cb.getWorldSize()); // the value in force at wiring (the panel is built once)
+    onUiAction(actions, "main.genSize", (value) => {
+      // The element reports a STRING; the command sanitises it, so a value the grid cannot express can never
+      // reach the world.
+      cb.onSetWorldSize(Number(value));
+      renderSize(Number(value));
+    });
     spawnButton(world, this.genPanel, "menu.btn", "main.genBack", "", "menu.back");
     onUiAction(actions, "main.gen", (mode) => cb.onStartSingle(mode as WorldGenMode));
     onUiAction(actions, "main.genBack", () => this.showGen(false));
