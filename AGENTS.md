@@ -600,6 +600,23 @@ where it is:
   column, every ODD column left one fine column owned by neither ring — a 32-block-wide, full-depth column
   with no geometry whose neighbours' walls are culled, i.e. a hole you look straight through — and one owned by
   both. `fineBase(null, pc) === pc`, so the no-LOD path is untouched, and the gate tiles every parity.
+  * **THE DRAWN RING IS NOT THE BUILT RING (P2.00 — the seam).** Tiling is what makes the two rings meet, and
+    it is also what made the seam POP: a column leaving the fine ring was a BRAND NEW far column, so there was
+    nothing behind the fine mesh while the far budget caught up — a flash of sky, and the appearance fades
+    (P1.98/P1.99) only shortened it. `unloadOutside`… the fix is the READY RESERVE: the far ring BUILDS every
+    coarse chunk within `farRadius` (including the ones the fine ring covers — that is `farBuildInner`, 0 in
+    `DEFAULT_LOD`) but DRAWS a covered one only while the fine chunks of its column are not all there yet
+    (`refreshFarVisibility`, which also waits for their fade to END — a translucent fine chunk over nothing is
+    the sky showing through it). Walking, the trailing column's coarse chunk was built long before (it spent the
+    whole width of the fine ring in the reserve) and is drawn in the same step the fine chunks leave; the
+    leading column keeps its coarse chunk up until the fine ones that replace it are opaque. **This is the shape
+    all three reference implementations have**: Voxy mips every section up four levels and only draws the level
+    its children do not cover, Cubyz draws a parent node until all 8 of its children are meshed, Distant
+    Horizons keeps the LOD image under the vanilla one and blends the two by DISTANCE in a post-process pass
+    (and disables MC's own per-chunk fade-in, "to prevent vanilla chunks from flashing on the Distant Horizons
+    border"). None of them fades a chunk in or out at that boundary. The reserve is invisible, so it costs no
+    draw calls; it costs the far budget the extra build (one coarse ring at the fine window's edge, ~24 columns
+    at the shipped shape) and it is built AFTER the drawn ring, so entering a world looks exactly as before.
 * **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** In a world, `G` tints every chunk mesh by its
   TIER: the fine ring in `LOD_TIER_TINT[0]`, the far ring in `[1]` (a colour MULTIPLIES the material, so a
   textured block keeps its texture and takes the hue), `H` switches every chunk mesh to three.js's TRIANGLE

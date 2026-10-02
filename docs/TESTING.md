@@ -116,6 +116,16 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       into the transparent pass for 0.26 s, so the frame time must not visibly jump (it is bounded by
       `FADE_OUT_MAX`, past which the rest are removed at once); a teleport-sized unload (entering a world) must
       NOT hold thousands of meshes alive — that is what the cap is for.
+→ **THE RING SEAM MUST NEVER SHOW SKY (P2.00)**: this is the check the last three rounds were about. Walk (and
+  then fly) across a chunk boundary while watching the junction where the fine ring meets the far one — with `G`
+  on it is the line between the two colours. There must be NO frame in which you can see the sky through the
+  ground there, and no half-transparent "glass" patch: the far ring now builds the coarse chunks UNDER the fine
+  ring and only draws them when the fine chunks that cover them are missing, so the swap is instantaneous in
+  both directions. Watch it in both directions (walk forwards, then backwards) and at speed (fly), because a
+  fast move is when the coarse chunk used to arrive too late. What you SHOULD see is only a small change of
+  detail at that line (the coarse surface can stand a block high — that is the conservative rule of P1.93, not a
+  bug). Also check `F3`: the reserve is invisible and costs no draw calls, so the frame time across a boundary
+  must not jump (the far budget does the extra building) and `区块`/memory must not keep growing as you walk.
 → **A PACK SWITCH MUST RESTYLE BOTH RINGS (P1.97 — this was a real bug)**: stand somewhere the far ring is on
   screen (fly up ~200 blocks, or just look at the horizon), open Settings → Resource packs and toggle a pack
   that changes BLOCK LOOKS (in the sample install, disabling the mod drops the block textures to the engine's

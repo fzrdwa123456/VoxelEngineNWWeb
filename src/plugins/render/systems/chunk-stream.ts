@@ -30,7 +30,7 @@ import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
-import { buildLodMeshInput, fineBase, isFarColumn, tierTint, type LodPolicy } from "../../../data/world/lod";
+import { buildLodMeshInput, fineBase, isFarBuildColumn, isFarColumn, isFineCoveredColumn, tierTint, type LodPolicy } from "../../../data/world/lod";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
@@ -153,6 +153,9 @@ export class ChunkStreamSystem {
   private readonly offsets: ReadonlyArray<readonly [number, number]>;
   /** The FAR RING's column offsets, in COARSE chunk units, near-first (empty when LOD is off) */
   private readonly farOffsets: ReadonlyArray<readonly [number, number]>;
+  /** The READY RESERVE (P2.00): the coarse columns the FINE ring covers, built (so the handover at the ring
+   *  boundary never has to wait for a coarse chunk) and left invisible while the fine chunks are there. */
+  private readonly farReserveOffsets: ReadonlyArray<readonly [number, number]>;
   /** The palette values the far ring writes, resolved once: a coarse chunk is procedural, so it is handed the
    *  layer values instead of asking the world for them (see data/world/lod.ts). */
   private readonly layers: { readonly stone: number; readonly dirt: number; readonly grass: number };
@@ -257,16 +260,28 @@ export class ChunkStreamSystem {
     this.offsets = offsets;
 
     const far: Array<[number, number]> = [];
+    const reserve: Array<[number, number]> = [];
     if (this.lod !== null) {
       const reach = this.lod.farRadius;
       for (let cx = -reach; cx <= reach; cx++) {
         for (let cz = -reach; cz <= reach; cz++) {
           if (isFarColumn(this.lod, cx, cz)) far.push([cx, cz]);
+          // …and the READY RESERVE (P2.00): the coarse chunks the fine ring COVERS. They are built like any
+          // other far chunk and stay INVISIBLE until the fine chunks that cover them are gone (see
+          // `refreshFarVisibility`), which is what makes the handover at the ring boundary a swap instead of a
+          // hole. They are built AFTER the drawn ring (`farKeys` iterates this second) so entering a world
+          // looks exactly as it did — by the time a column's coarse chunk is needed it has been in the reserve
+          // for the whole width of the fine window.
+          else if (isFarBuildColumn(this.lod, cx, cz)) reserve.push([cx, cz]);
         }
       }
-      far.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
+      const nearFirst = (a: readonly [number, number], b: readonly [number, number]) =>
+        Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1]));
+      far.sort(nearFirst);
+      reserve.sort(nearFirst);
     }
     this.farOffsets = far;
+    this.farReserveOffsets = reserve;
 
     // The layer values in the palette IN FORCE, read once (the palette only changes at boot and on a reload).
     const stone = this.voxel.valueOf("stone") || 1;
@@ -454,6 +469,13 @@ export class ChunkStreamSystem {
     if (moved) {
       for (const entry of this.cache.meshes.values()) this.place(entry);
     }
+
+    // …and decide which of the coarse chunks under the fine ring are needed THIS frame (P2.00). Last, because it
+    // reads the state the whole step produced: the window (which columns the fine ring owns now), whether the
+    // fine chunks of a covered column are all there (the build loops above may have finished them) and whether
+    // any of them is still fading (a fade is a translucent chunk — the reserve must stay visible under it, or
+    // the player would look through the fading fine mesh at the sky).
+    this.refreshFarVisibility();
   }
 
   /** Apply what the workers finished. The IN-FLIGHT SET IS THE VALIDITY TOKEN: a key that is no longer in it
@@ -665,7 +687,12 @@ export class ChunkStreamSystem {
    *  keys (`takeDirty`, `markDirty`) are fine keys in fine units — an edit must never be able to name a coarse
    *  entry, because a coarse chunk is procedural and has nothing to rebuild (see lod.ts).
    *
-   *  Empty when LOD is off, which is what keeps the single-window path byte-for-byte what it was. */
+   *  Empty when LOD is off, which is what keeps the single-window path byte-for-byte what it was.
+   *
+   *  THE DRAWN RING COMES FIRST, THEN THE RESERVE (P2.00). Both are in the same set and the build budget walks
+   *  it in order, so a world entry still fills the ring the player can SEE first (the reserve is invisible and
+   *  is only needed once the window starts to move — and a column spends the whole width of the fine ring in
+   *  the reserve before it is needed). */
   private farKeys(pcx: number, pcz: number): Set<string> {
     const out = new Set<string>();
     if (this.lod === null) return out;
@@ -674,11 +701,13 @@ export class ChunkStreamSystem {
     const ccx = Math.floor(pcx / step);
     const ccz = Math.floor(pcz / step);
     const wrap = (v: number): number => ((v % period) + period) % period;
-    for (const [dx, dz] of this.farOffsets) {
-      const cx = wrap(ccx + dx);
-      const cz = wrap(ccz + dz);
-      for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y; cy--) {
-        out.add(`${step}:${cx},${cy},${cz}`);
+    for (const offsets of [this.farOffsets, this.farReserveOffsets]) {
+      for (const [dx, dz] of offsets) {
+        const cx = wrap(ccx + dx);
+        const cz = wrap(ccz + dz);
+        for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y; cy--) {
+          out.add(`${step}:${cx},${cy},${cz}`);
+        }
       }
     }
     return out;
@@ -981,5 +1010,69 @@ export class ChunkStreamSystem {
     entry.mesh.position.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
     entry.mesh.scale.set(step, 1, step);
     entry.mesh.updateMatrix();
+  }
+
+  /** WHICH COARSE CHUNKS ARE DRAWN (P2.00). A coarse chunk the fine ring covers is the READY RESERVE: it is
+   *  drawn only while the fine chunks of its column are not all there yet, and hidden the moment they are.
+   *
+   *  The swap is what removes the seam flash. Walking, the fine ring's trailing column leaves and its coarse
+   *  chunk — built long before, while it was still hidden — is drawn in the SAME frame; the reverse at the
+   *  leading edge is a coarse chunk staying up a little longer, until the fine chunks that replace it are
+   *  built AND opaque. Both directions keep terrain on screen the whole time, which is the property three
+   *  reference implementations get from nesting their levels (see `isFarBuildColumn`).
+   *
+   *  Cheap enough to run every frame: only the covered columns need the test (a column outside the fine ring is
+   *  always drawn), and the answer is memoised per column, so one column costs 4 × `CHUNK_Y_COUNT` lookups. */
+  private refreshFarVisibility(): void {
+    if (this.lod === null) return;
+    const step = this.lod.step;
+    const period = WORLD_CHUNKS_X / step;
+    const ccx = Math.floor(this.lastPcx / step);
+    const ccz = Math.floor(this.lastPcz / step);
+    // The columns with a FINE chunk mid-fade, computed in ONE pass over the fades: a translucent fine chunk must
+    // not be uncovered, or the player looks through it at the sky.
+    const fadingColumns = new Set<string>();
+    for (const fade of this.fading) {
+      if (fade.out || fade.key.includes(":")) continue;
+      const parts = fade.key.split(",");
+      const fx = wrapChunkX(Math.floor(Number(parts[0]) / step));
+      const fz = wrapChunkZ(Math.floor(Number(parts[2]) / step));
+      fadingColumns.add(`${fx},${fz}`);
+    }
+    const decided = new Map<string, boolean>();
+    for (const entry of this.cache.meshes.values()) {
+      if (entry.step <= 1) continue;
+      const rx = nearestWrap(entry.cx, ccx, period);
+      const rz = nearestWrap(entry.cz, ccz, period);
+      if (!isFineCoveredColumn(this.lod, rx - ccx, rz - ccz)) {
+        entry.mesh.visible = true;
+        continue;
+      }
+      const memoKey = `${rx},${rz}`;
+      let ready = decided.get(memoKey);
+      if (ready === undefined) {
+        ready = !fadingColumns.has(memoKey) && this.fineColumnDecided(rx, rz);
+        decided.set(memoKey, ready);
+      }
+      entry.mesh.visible = !ready;    }
+  }
+
+  /** Are the fine chunks of this COARSE column all DECIDED — built, or known to be empty (the cache's own
+   *  contract, and an empty chunk never becomes a mesh later)? `false` means the column has a hole in it, so the
+   *  coarse chunk that covers it must stay on screen. */
+  private fineColumnDecided(ccx: number, ccz: number): boolean {
+    const step = this.lod!.step;
+    for (let dx = 0; dx < step; dx++) {
+      for (let dz = 0; dz < step; dz++) {
+        const cx = wrapChunkX(ccx * step + dx);
+        const cz = wrapChunkZ(ccz * step + dz);
+        for (let cy = MIN_CHUNK_Y; cy < MIN_CHUNK_Y + CHUNK_Y_COUNT; cy++) {
+          const key = `${cx},${cy},${cz}`;
+          if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
+          return false;
+        }
+      }
+    }
+    return true;
   }
 }

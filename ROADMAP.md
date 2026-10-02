@@ -2714,6 +2714,53 @@ Still outstanding:
   into this window shows no screen" (measured) — the moves are now undone in a `finally`.
   NOT CHANGED, BY REQUEST: nothing else — an edit still never fades (P1.18i), and the fine ring still fades in
   (P1.98: its own edge pops the same way; the alternative is recorded in the P1.98 note).
+- **P2.00 — the seam at the fine ring's edge: the far ring now keeps a READY RESERVE under it.** `DONE`, by
+  request («弄好让我试试看», after «E:\voxy-263你看看这个怎么实现的lod据说这个比较聪明告诉我» and the two rounds
+  before it that read DH and Cubyz).
+  THE MEASURED COMPLAINT: with the appearance fades in place the sky at the fine ring's edge still FLASHED —
+  the user's own diagnosis was exact («真实区块天空只会闪一下因为淡入淡化变快了而已»): the fades only shortened
+  the hole. It was structural. The rings TILE (P1.93: the far ring owns exactly what the fine ring does not), so
+  the moment the window moved, a column that left the fine ring was a BRAND NEW far column: no coarse mesh
+  existed for it, and until the far budget reached it there was nothing behind the fine mesh at all.
+  HOW THE THREE REFERENCES DO IT (all three were read for this):
+  * **Voxy** (`E:\voxy-263`) is a 3D mipmap of the real voxels: `WorldSection` is 32³ at a level, `MAX_LOD_LAYER`
+    = 4, and `WorldUpdater.insertUpdate` mips every ingested chunk up through all of them (`Mipper.mip` takes the
+    MOST OPAQUE of the 8 children, leaves forced opaque, ties to the upper corner). The renderer walks a node
+    tree on the GPU (`lod/hierarchical/traversal_dev.comp`): a node with children descends instead of drawing
+    itself, and a node whose own mesh is missing requests it and DESCENDS meanwhile. The coarse level therefore
+    always COVERS the fine one — the seam is a swap of which level is drawn, never a hole. Their only fade is at
+    the very edge of the render distance (last 10%), and Sodium's per-chunk fade-in is CANCELLED
+    (`MixinRenderRegionManager.voxy$cancelFade` → `-999999`).
+  * **Cubyz** draws a parent node until all 8 of its children are meshed (`mesh_storage.zig`: rendered unless
+    `finishedMeshingHigherResolution == 0xff`), re-meshes the boundary faces per coarser neighbour
+    (`chunk_meshing.zig` `// lod border:`, mapping its own coordinates with `>> 1`), and fades ONLY the LOD
+    geometry by distance with a 32-block dithered discard (`chunk_fragment.frag`, `opaqueInLod != 0`).
+  * **Distant Horizons** renders vanilla and LODs into two depth-buffered images and blends them by distance in
+    a full-screen pass (`vanilla_fade`: 1.5×–1.9× the LOD near clip), and DISABLES Minecraft's own per-chunk
+    fade-in — "to prevent vanilla chunks from flashing on the Distant Horizons border" (3.3.4 even ships that as
+    `disableVanillaChunkFadeIn()`).
+  THE FIX HERE, the smallest version of that idea: `isFarBuildColumn` (data/world/lod.ts) is the BUILD set — every
+  coarse column within `farRadius`, with `farBuildInner` (0 by default) as the knob — while `isFarColumn` stays
+  the DRAWN set. `chunk-stream` builds both (`farReserveOffsets` after `farOffsets`, so entering a world fills
+  the visible ring first) and `refreshFarVisibility` decides per frame which coarse chunks are needed: a column
+  the fine ring covers keeps its coarse chunk hidden as soon as the fine chunks of that column are all DECIDED
+  and none of them is still fading — otherwise it stays up. Walking, the trailing column's coarse chunk is drawn
+  in the same step its fine chunks leave; the leading column keeps its coarse chunk until the fine chunks that
+  replace it are opaque. The reserve is invisible (no draw calls) and is only ever built once per column; it
+  costs the far budget one extra coarse ring (~24 columns at the shipped shape) and ~6 MB of meshes.
+  VERIFIED: `tsc` 0; `check:ecs` **79/79** with a new group on a real stream and a tiny policy: the drawn set is
+  still a tiling subset of the build set; with the window warm every covered coarse chunk is invisible and every
+  drawn one is visible; moving one coarse column, the leaving column's coarse meshes were ALREADY built (they
+  were the reserve) and are drawn in that same step; the column the fine ring claims stays drawn until its fine
+  chunks are built AND opaque, then hides. MUTATION-TESTED both ways: removing the reserve from the build set
+  fails "the reserve really covers coarse columns", and hiding a covered column regardless of its fine chunks
+  fails "it is STILL DRAWN while its fine chunks are not built yet".
+  ALSO FIXED: `scripts/check-ecs.mjs` was corrupted by a PowerShell `Set-Content` round trip (its UTF-8 `…`
+  characters became `\uFFFD?`, breaking a string literal) and was restored from the commit, then re-edited with
+  the file tools only. Do not write source files with PowerShell here.
+  STILL POSSIBLE, NOT DONE (by request: one thing at a time): the DISTANCE DITHER fade (Cubyz-style, only the
+  coarse tier, in a fragment stage) would retire the appearance fades entirely, and the fine ring could then
+  stop fading in — which is what all three references do at this boundary.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

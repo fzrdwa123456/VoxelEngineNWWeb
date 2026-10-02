@@ -1573,6 +1573,173 @@ check("a chunk that APPEARS fades in, one that LEAVES fades out (P1.98/P1.99) - 
   }
 });
 
+check("the far ring keeps a READY RESERVE under the fine ring (P2.00): the seam is a swap, never a hole", () => {
+  // THE MEASURED COMPLAINT this exists for: at the fine ring's edge the sky FLASHED as the window moved. The two
+  // rings TILE (the far ring owns exactly what the fine ring does not), so a column leaving the fine ring was a
+  // brand new far column: it had no coarse mesh at all, and there was nothing behind the fine mesh while the far
+  // budget caught up. The appearance fades only shortened that hole (P1.98/P1.99 — the user's own verdict:
+  // the sky still flashed, just for less time).
+  //
+  // How the reference implementations avoid it (see lod.ts `isFarBuildColumn`): the coarse level is always
+  // THERE, covering the fine one, and the renderer only chooses which level to draw — Voxy mips every section up
+  // four levels and descends rather than leaving a gap, Cubyz draws a parent node until all 8 of its children
+  // are meshed, DH keeps the LOD image under the vanilla one and blends the two by distance. This engine's
+  // version of that is the smallest one that works: the far ring BUILDS the coarse chunks under the fine ring
+  // and DRAWS them only while the fine chunks that cover them are not all there yet. The gate must hold to:
+  //   * the DRAWN ring is unchanged (it still tiles with the fine ring) and the build set is a superset of it;
+  //   * with the window warm, every coarse chunk under the fine ring is INVISIBLE, and every drawn one visible;
+  //   * moving the window, the column that leaves the fine ring ALREADY has its coarse mesh (it was the reserve)
+  //     and is VISIBLE in the same step — no frame with nothing behind the fine mesh;
+  //   * the column that enters the fine ring keeps its coarse chunk up until the fine chunks that replace it are
+  //     built AND opaque, and only then hides.
+  const L = load("data/world/lod.js");
+  // A TINY policy: the mechanism is geometry and bookkeeping, and the shipped ring is ~1800 coarse meshes.
+  const policy = { step: 2, fineRadius: 1, farRadius: 3, farBuildInner: 0 };
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+  const { VoxelWorld, nearestWrap } = load("data/world/world.js");
+  const P = loadPresentation();
+
+  // 1. THE SETS, as data (no stream needed): the drawn ring is exactly the coarse columns the fine ring does not
+  //    cover, every drawn column is BUILT, and the reserve covers the fine ring itself.
+  let built = 0;
+  let reserved = 0;
+  for (let cx = -policy.farRadius; cx <= policy.farRadius; cx++) {
+    for (let cz = -policy.farRadius; cz <= policy.farRadius; cz++) {
+      const drawn = L.isFarColumn(policy, cx, cz);
+      const covered = L.isFineCoveredColumn(policy, cx, cz);
+      assert(!(drawn && covered), "a coarse column is never both DRAWN and covered by the fine ring (the tiling)");
+      if (L.isFarBuildColumn(policy, cx, cz)) {
+        built++;
+        if (covered) reserved++;
+      }
+      if (drawn) assert(L.isFarBuildColumn(policy, cx, cz), "every DRAWN coarse column is in the build set");
+    }
+  }
+  assert(reserved > 0, `the reserve really covers coarse columns the fine ring owns (${reserved})`);
+  assert(built > reserved, "…and the build set is a superset of the drawn ring, not all of it");
+
+  const reserveWorld = new World();
+  const reserveVoxel = new VoxelWorld();
+  reserveWorld.insertResource(VOXEL, reserveVoxel);
+  reserveWorld.insertResource(LOCAL_PLAYER, localPlayer);
+  const positionRow = entityIndex(localPlayer);
+  const startX = C.POSITION.x[positionRow];
+  const reserveCache = P.createChunkMeshCache({ add() {}, remove() {} });
+  reserveWorld.insertResource(P.CHUNK_MESHES, reserveCache);
+  reserveWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  reserveWorld.insertResource(KEY_EVENTS, createKeyEventLog());
+  let gen = 0;
+  const reserveFactory = {
+    createGeometry: () => ({
+      geometry: { dispose() {}, morphAttributes: {} },
+      specs: [],
+      apply: () => 5,
+      rebuild: () => 5,
+      restyle: () => 1,
+      dispose() {},
+    }),
+    getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++gen }),
+  };
+  const stream = new ChunkStreamSystem(reserveWorld, reserveFactory, null, policy);
+  // COARSE entries only (a key with the step prefix): the fine meshes live in the same cache and are always
+  // drawn, so comparing THEIR columns against the COARSE player column means nothing.
+  const coarse = () => [...reserveCache.meshes.entries()].filter(([key]) => key.includes(":"));
+  const period = 32 / policy.step; // the torus in coarse columns
+  /** Where a coarse entry sits relative to the player's coarse column — the same nearest-copy arithmetic the
+   *  system uses (`nearestWrap`), because a key is a WRAPPED column and comparing it raw is meaningless. */
+  const reachOf = (e, ccx, ccz) => [
+    nearestWrap(e.cx, ccx, period) - ccx,
+    nearestWrap(e.cz, ccz, period) - ccz,
+  ];
+
+  try {
+    // 2. FILL EVERYTHING: the fine window first (what a world entry does), then the whole build set, which now
+    //    includes the reserve the fine ring covers.
+    for (let i = 0; i < 400 && stream.pendingCount() > 0; i++) stream.step(1000);
+    // The LAST built chunks are still mid-fade when that loop exits (a chunk built in step N finishes in N+1),
+    // and the reserve stays visible under a translucent fine chunk — so let those fades finish first.
+    stream.step(1000);
+    stream.step(1000);
+    const farPending = () => {
+      let n = 0;
+      for (const key of stream.farWanted) if (!reserveCache.meshes.has(key) && !reserveCache.empty.has(key)) n++;
+      return n;
+    };
+    for (let i = 0; i < 2000 && farPending() > 0; i++) stream.step(0);
+    equal(farPending(), 0, "the whole far build set is built (the drawn ring AND the reserve)");
+    equal(stream.pendingCount(), 0, "…and the fine window is decided");
+
+    // 3. WITH THE FINE RING THERE, THE RESERVE IS INVISIBLE — the state a player stands in. The coarse chunk
+    //    under them exists but must not be drawn: it is a conservative 2×2-block surface that would show
+    //    through the real chunks.
+    const ccx = Math.floor(stream.lastPcx / policy.step);
+    const ccz = Math.floor(stream.lastPcz / policy.step);
+    const inWindow = coarse().filter(([, e]) => {
+      const [dx, dz] = reachOf(e, ccx, ccz);
+      return Math.max(Math.abs(dx), Math.abs(dz)) <= policy.fineRadius;
+    });
+    assert(inWindow.length > 0, `the reserve really has meshes in the cache (${inWindow.length})`);
+    equal(inWindow.filter(([, e]) => e.mesh.visible).length, 0, "…and NONE of them is drawn while the fine chunks are there");
+    const drawnBefore = coarse().filter(([, e]) => {
+      const [dx, dz] = reachOf(e, ccx, ccz);
+      return Math.max(Math.abs(dx), Math.abs(dz)) > policy.fineRadius;
+    });
+    assert(drawnBefore.length > 0, `the drawn ring has meshes (${drawnBefore.length})`);
+    equal(drawnBefore.filter(([, e]) => !e.mesh.visible).length, 0, "…while everything outside the fine ring is drawn");
+
+    // 4. THE HANDOVER (the bug itself): move the window ONE COARSE COLUMN and look at the column that leaves the
+    //    fine ring. Its coarse mesh must ALREADY exist — it was the reserve, so this move asked for nothing new —
+    //    and it must be VISIBLE in that same step: that is what "no frame with nothing behind the fine mesh"
+    //    means, and it is the whole point of the reserve.
+    const beforeMove = new Set(reserveCache.meshes.keys());
+    const leavingEntries = coarse().filter(([, e]) => {
+      const [dx, dz] = reachOf(e, ccx, ccz);
+      return dx === -policy.fineRadius && Math.abs(dz) <= policy.fineRadius;
+    });
+    assert(leavingEntries.length > 0, `the trailing column had coarse meshes (${leavingEntries.length})`);
+    for (const [key, e] of leavingEntries) {
+      assert(beforeMove.has(key), "…and they were the RESERVE: built before this move asked for anything");
+      assert(e.mesh.visible === false, "…invisible while the fine ring was still there");
+    }
+    C.POSITION.x[positionRow] += policy.step * CHUNK_SIZE; // one coarse column
+    stream.step(0);
+    const ccxAfter = Math.floor(stream.lastPcx / policy.step);
+    equal(ccxAfter, ccx + 1, "the window really moved one coarse column");
+    equal(
+      leavingEntries.filter(([, e]) => !e.mesh.visible).length,
+      0,
+      "the leaving column is DRAWN in the same step it left the fine ring (no sky, nothing was built for it)",
+    );
+
+    // 5. AND THE OTHER DIRECTION: the column the fine ring just claimed keeps its coarse chunk on screen until the
+    //    fine chunks that replace it are built — and opaque, because a translucent fine chunk over nothing is the
+    //    sky showing through it — and only then is it hidden.
+    const enteredEntries = coarse().filter(([, e]) => {
+      const [dx, dz] = reachOf(e, ccxAfter, ccz);
+      return dx === policy.fineRadius && Math.abs(dz) <= policy.fineRadius;
+    });
+    assert(enteredEntries.length > 0, `the column the fine ring claimed has coarse meshes (${enteredEntries.length})`);
+    equal(
+      enteredEntries.filter(([, e]) => !e.mesh.visible).length,
+      0,
+      "…and it is STILL DRAWN while its fine chunks are not built yet",
+    );
+    for (let i = 0; i < 400 && stream.pendingCount() > 0; i++) stream.step(1000);
+    stream.step(1000); // the swap waits for OPAQUE, not just present: let the last built chunks' fades finish
+    stream.step(1000);
+    equal(stream.pendingCount(), 0, "the fine chunks that replace it are all built");
+    equal(
+      enteredEntries.filter(([, e]) => e.mesh.visible).length,
+      0,
+      "…and the coarse chunk is hidden only now, once the fine ones are there AND opaque",
+    );
+  } finally {
+    C.POSITION.x[positionRow] = startX;
+    C.PREV_POSITION.x[positionRow] = startX;
+  }
+});
+
 check("the chunk stream can say whether a window still needs warming", () => {
   // The world-entry screen is only honest if it covers real work, and a RE-entry into a window that is
   // still built has none: `needsWarmUp` is what keeps that from being a one-frame flash of the screen.

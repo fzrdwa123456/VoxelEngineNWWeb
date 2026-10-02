@@ -41,11 +41,17 @@ export interface LodPolicy {
   readonly fineRadius: number;
   /** Radius of the FAR ring, in coarse columns, measured from the player's coarse column */
   readonly farRadius: number;
+  /** How far IN the far ring's BUILD set reaches (coarse columns). `0` = the far ring builds every coarse chunk
+   *  within `farRadius`, including the ones under the fine ring — the READY RESERVE (`farReserveOffsets`), which
+   *  it does not DRAW. That reserve is what closes the seam: a fine chunk that leaves the window always has
+   *  coarse geometry that was built while it was still hidden, so the handover is a swap and never a hole.
+   *  Raising this shrinks the reserve (less work, less memory) at the cost of that guarantee. */
+  readonly farBuildInner: number;
 }
 
 /** The shipped shape: 2× coarse, a 14×14 fine ring (448 blocks) and a far ring out to coarse ±7, i.e. fine
  *  columns ±15 = 480 blocks — just inside the 1024-block torus lap, so the world does not visibly repeat. */
-export const DEFAULT_LOD: LodPolicy = { step: 2, fineRadius: 3, farRadius: 7 };
+export const DEFAULT_LOD: LodPolicy = { step: 2, fineRadius: 3, farRadius: 7, farBuildInner: 0 };
 
 /** The vertical is NOT decimated (a coarse chunk is still 32 blocks tall): the terrain is a 96..160 band in a
  *  256-block world, so a second coarse axis would buy little geometry and cost the Y alignment that makes a
@@ -64,6 +70,31 @@ export function isFineColumn(policy: LodPolicy, cx: number, cz: number): boolean
 export function isFarColumn(policy: LodPolicy, cx: number, cz: number): boolean {
   const reach = Math.max(Math.abs(cx), Math.abs(cz));
   return reach <= policy.farRadius && reach > policy.fineRadius;
+}
+
+/** Is the COARSE chunk column (cx, cz) in the far ring's BUILD set? That is the DRAWN ring plus the READY
+ *  RESERVE — the coarse chunks under the fine ring (`farBuildInner` = 0 builds all of them), which exist so a
+ *  fine chunk that leaves always has coarse geometry already behind it.
+ *
+ *  WHY THE RESERVE (P2.00 — how Voxy/Cubyz/DH avoid the seam. «E:\voxy-263你看看这个怎么实现的lod»). The two
+ *  rings TILE: the far ring owns everything the fine ring does not, so the moment the window moves, a column
+ *  that leaves the fine ring is a NEW far column — it had no coarse mesh at all, and until the far budget
+ *  reached it there was nothing behind the fine mesh but sky. Fading the fine chunk out only shortens that
+ *  hole (measured: the sky still flashed). Both reference projects keep the coarse level COVERING the fine one
+ *  — Voxy mips every section up through 4 levels and only DRAWS the level a node's children do not already
+ *  cover; Cubyz draws a parent node until all 8 of its children are meshed; DH keeps the LOD image and blends
+ *  it under the vanilla one. The reserve is the same idea at the smallest scale that works here: coarse
+ *  geometry that is present, hidden while the fine chunks are there, and visible the moment they are not. */
+export function isFarBuildColumn(policy: LodPolicy, cx: number, cz: number): boolean {
+  const reach = Math.max(Math.abs(cx), Math.abs(cz));
+  return reach <= policy.farRadius && reach >= policy.farBuildInner;
+}
+
+/** Is this coarse column one the fine ring COVERS? Such a column's coarse chunk is the reserve: drawn only
+ *  while the fine chunks that cover it are not all there yet. The fine ring is a whole number of coarse
+ *  columns on every side (see `fineBase`), so a coarse chunk is never half covered. */
+export function isFineCoveredColumn(policy: LodPolicy, cx: number, cz: number): boolean {
+  return Math.max(Math.abs(cx), Math.abs(cz)) <= policy.fineRadius;
 }
 
 /** THE FINE RING'S ALIGNMENT (P1.94 — measured bug). The fine window must be built around a COARSE-ALIGNED
