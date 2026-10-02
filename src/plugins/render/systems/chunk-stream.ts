@@ -29,7 +29,8 @@ import {
 import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { LOCAL_PLAYER, VOXEL } from "../../../data/globals/resources";
-import { gatherChunkMeshInput, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
+import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
+import { buildLodMeshInput, isFarColumn, type LodPolicy } from "../../../data/world/lod";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
 /** Declared access. Reads the player's position and writes the block world plus the GPU meshes —
@@ -46,6 +47,15 @@ export const RENDER_RADIUS_CHUNKS = 8;
 /** Meshes built per frame, so the initial fill spreads over frames instead of stalling.
  *  Air chunks bail out immediately, so a high value mostly costs cheap early-outs. */
 const MESH_BUDGET_PER_FRAME = 24;
+/** FAR-RING build budget per frame (P1.93), in COST UNITS rather than chunks, because the two kinds of far
+ *  chunk cost 10× different amounts (measured: 0.33 ms for a uniform one — the sampler plus the mesher's
+ *  shell early-out — against 3.0 ms for one that produces a mesh). A uniform chunk costs 1 unit, a
+ *  materialised one `LOD_MESH_COST` units, so the frame is capped at roughly 6 ms either way: 18 uniform
+ *  chunks, or 2 of the expensive ones, or a mix. The whole far ring is ~1.1 s of work, so it fills in as the
+ *  player looks around instead of during the loading screen. */
+const LOD_BUDGET_PER_FRAME = 18;
+/** What a far chunk that produces geometry counts against that budget (see above). */
+const LOD_MESH_COST = 9;
 /** Looks re-resolved per frame after a PACK RELOAD (P1.18i). MUCH higher than the meshing budget because the
  *  work is not comparable: a re-mesh reads a 32^3 neighbourhood and rewrites every vertex buffer, while a
  *  restyle is one lookup per material group in a chunk that is already built. It is still budgeted, so the
@@ -123,6 +133,11 @@ export class ChunkStreamSystem {
   private readonly material: ChunkMaterialState;
   /** Column offsets ordered near-first, so the ground under the player appears first */
   private readonly offsets: ReadonlyArray<readonly [number, number]>;
+  /** The FAR RING's column offsets, in COARSE chunk units, near-first (empty when LOD is off) */
+  private readonly farOffsets: ReadonlyArray<readonly [number, number]>;
+  /** The palette values the far ring writes, resolved once: a coarse chunk is procedural, so it is handed the
+   *  layer values instead of asking the world for them (see data/world/lod.ts). */
+  private readonly layers: { readonly stone: number; readonly dirt: number; readonly grass: number };
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
   private readonly voxel: VoxelWorld;
@@ -148,6 +163,13 @@ export class ChunkStreamSystem {
   private set lastPcz(v: number) {
     this.cache.lastPcz = v;
   }
+  /** The far ring's wanted keys (P1.93). null when LOD is off, which is the single-fine-window shape. */
+  private get farWanted(): Set<string> | null {
+    return this.cache.farKeys;
+  }
+  private set farWanted(v: Set<string> | null) {
+    this.cache.farKeys = v;
+  }
 
   constructor(
     private readonly world: World,
@@ -156,19 +178,52 @@ export class ChunkStreamSystem {
     /** The worker pool, when the platform has one (P1.18h). Absent = every mesh is built on this thread,
      *  which is exactly what the engine did before, and what the Node gate still does. */
     private readonly pool: MeshWorkerPool | null = null,
+    /** THE FAR RING (P1.93 — data/world/lod.ts): absent = the engine's original single FINE window, which is
+     *  the shape the worker/streaming tests drive. Present = the window becomes a fine ring plus a coarse ring
+     *  drawn from the same terrain at `step` fine chunks per coarse one. Injected like the pool is: "does this
+     *  install do LOD" is a capability of the composition, not something a system decides for itself. */
+    private readonly lod: LodPolicy | null = null,
   ) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
     this.cache = world.resource(CHUNK_MESHES);
     this.material = world.resource(CHUNK_MATERIAL);
     const offsets: Array<[number, number]> = [];
-    for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
-      for (let dz = -RENDER_RADIUS_CHUNKS; dz <= RENDER_RADIUS_CHUNKS; dz++) {
-        offsets.push([dx, dz]);
+    if (this.lod === null) {
+      for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
+        for (let dz = -RENDER_RADIUS_CHUNKS; dz <= RENDER_RADIUS_CHUNKS; dz++) {
+          offsets.push([dx, dz]);
+        }
+      }
+    } else {
+      // The FINE ring in coarse terms: coarse columns [-r, r] = fine columns [-2r, 2r+1] — an EVEN span, so
+      // it meets the far ring exactly (see lod.ts: an odd span would leave a column owned by neither).
+      const r = this.lod.fineRadius;
+      for (let dx = -2 * r; dx <= 2 * r + 1; dx++) {
+        for (let dz = -2 * r; dz <= 2 * r + 1; dz++) {
+          offsets.push([dx, dz]);
+        }
       }
     }
     offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
     this.offsets = offsets;
+
+    const far: Array<[number, number]> = [];
+    if (this.lod !== null) {
+      const reach = this.lod.farRadius;
+      for (let cx = -reach; cx <= reach; cx++) {
+        for (let cz = -reach; cz <= reach; cz++) {
+          if (isFarColumn(this.lod, cx, cz)) far.push([cx, cz]);
+        }
+      }
+      far.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
+    }
+    this.farOffsets = far;
+
+    // The layer values in the palette IN FORCE, read once (the palette only changes at boot and on a reload).
+    const stone = this.voxel.valueOf("stone") || 1;
+    const dirt = this.voxel.valueOf("dirt") || stone;
+    this.layers = { stone, dirt, grass: this.voxel.valueOf("grass") || dirt };
   }
 
   /** Generate (without meshing) every chunk in the window around a world position. Called once
@@ -253,6 +308,7 @@ export class ChunkStreamSystem {
 
     if (moved || this.wanted === null) {
       this.wanted = this.wantedKeys(pcx, pcz);
+      this.farWanted = this.farKeys(pcx, pcz);
       this.unloadOutside(this.wanted);
     }
 
@@ -286,6 +342,20 @@ export class ChunkStreamSystem {
       if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
       budget--;
       if (!this.queueBuild(key)) break;
+    }
+
+    // THE FAR RING (P1.93): a separate budget, spent in COST UNITS (see LOD_BUDGET_PER_FRAME), and it NEVER
+    // goes to the pool — a coarse chunk is procedural (data/world/lod.ts samples the height field; the world
+    // is not read at all), so there is nothing to hand a worker and nothing to transfer back. It also costs
+    // the world NOTHING: no chunk is generated for it, so a far ring 3× the fine ring's width adds no voxel
+    // memory at all.
+    if (this.farWanted !== null) {
+      let far = LOD_BUDGET_PER_FRAME;
+      for (const key of this.farWanted) {
+        if (far <= 0) break;
+        if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
+        far -= this.buildFar(key);
+      }
     }
 
     if (moved) {
@@ -339,12 +409,14 @@ export class ChunkStreamSystem {
     const parts = key.split(",");
     const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
     mesh.matrixAutoUpdate = false;
+    // A POOL result is always a FINE chunk: the far ring is procedural and never goes to a worker.
     const fresh: ChunkMeshEntry = {
       mesh,
       geom,
       cx: Number(parts[0]),
       cy: Number(parts[1]),
       cz: Number(parts[2]),
+      step: 1,
     };
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, fresh);
@@ -457,9 +529,36 @@ export class ChunkStreamSystem {
     return out;
   }
 
+  /** THE FAR RING's wanted keys (P1.93), in COARSE chunk units, ordered near-first.
+   *
+   *  The key is `"<step>:<cx>,<cy>,<cz>"`: the prefix is what keeps a coarse identity from EVER being confused
+   *  with a fine one. That matters because both live in the same `meshes`/`empty` maps, while the world's dirty
+   *  keys (`takeDirty`, `markDirty`) are fine keys in fine units — an edit must never be able to name a coarse
+   *  entry, because a coarse chunk is procedural and has nothing to rebuild (see lod.ts).
+   *
+   *  Empty when LOD is off, which is what keeps the single-window path byte-for-byte what it was. */
+  private farKeys(pcx: number, pcz: number): Set<string> {
+    const out = new Set<string>();
+    if (this.lod === null) return out;
+    const step = this.lod.step;
+    const period = WORLD_CHUNKS_X / step; // the torus in COARSE columns
+    const ccx = Math.floor(pcx / step);
+    const ccz = Math.floor(pcz / step);
+    const wrap = (v: number): number => ((v % period) + period) % period;
+    for (const [dx, dz] of this.farOffsets) {
+      const cx = wrap(ccx + dx);
+      const cz = wrap(ccz + dz);
+      for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y; cy--) {
+        out.add(`${step}:${cx},${cy},${cz}`);
+      }
+    }
+    return out;
+  }
+
   private unloadOutside(wanted: Set<string>): void {
+    const far = this.farWanted;
     for (const [key, entry] of this.cache.meshes) {
-      if (wanted.has(key)) continue;
+      if (wanted.has(key) || (far !== null && far.has(key))) continue;
       this.cache.group.remove(entry.mesh);
       entry.geom.dispose();
       this.cache.meshes.delete(key);
@@ -502,6 +601,8 @@ export class ChunkStreamSystem {
     if (this.wanted?.has(key)) this.build(key);
   }
 
+  /** A FINE chunk's mesh, built on this thread. (Fine keys only: `rebuild`/`queueBuild`/`drain` all speak in
+   *  fine identities, while a far entry is `"<step>:cx,cy,cz"` and never reaches this path.) */
   private build(key: string): void {
     const parts = key.split(",");
     const cx = Number(parts[0]);
@@ -520,10 +621,50 @@ export class ChunkStreamSystem {
 
     const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
     mesh.matrixAutoUpdate = false;
-    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz };
+    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step: 1 };
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
+  }
+
+  /** A FAR-RING chunk's mesh (P1.93). Procedural and main-thread: `buildLodMeshInput` samples the height field
+   *  for the whole chunk plus its six planes, so this reads NO world chunk, allocates no voxel data and hands
+   *  nothing to a worker. The result is applied through the same geometry path a worker's result takes, so a
+   *  far mesh and a fine one are indistinguishable to the draw — the only difference is `step`, which the
+   *  placement turns into the mesh's scale.
+   *  Returns what the chunk cost the frame's far budget: `LOD_MESH_COST` when it produced geometry, 1 when it
+   *  was uniform (or produced no face), which is the 10× difference the budget is spent in. */
+  private buildFar(key: string): number {
+    if (this.lod === null) return 0;
+    const colon = key.indexOf(":");
+    const parts = key.slice(colon + 1).split(",");
+    const cx = Number(parts[0]);
+    const cy = Number(parts[1]);
+    const cz = Number(parts[2]);
+
+    const input = buildLodMeshInput(
+      this.lod,
+      cx,
+      cy,
+      cz,
+      this.layers.stone,
+      this.layers.dirt,
+      this.layers.grass,
+    );
+    const result = meshChunk(input);
+    const geom = this.mesh.createGeometry();
+    if (geom.apply(this.voxel, result) === 0) {
+      geom.dispose();
+      this.cache.empty.add(key);
+      return 1;
+    }
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
+    mesh.matrixAutoUpdate = false;
+    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step: this.lod.step };
+    this.cache.group.add(mesh);
+    this.cache.meshes.set(key, entry);
+    this.place(entry);
+    return LOD_MESH_COST;
   }
 
   /** The materials this chunk needs, one per LOOK group (P1.46). No specs means the geometry was built with
@@ -534,11 +675,21 @@ export class ChunkStreamSystem {
     return geom.specs.map((spec) => this.mesh.getMaterial(this.material, spec));
   }
 
-  /** Geometry is chunk-local, so the mesh sits at the chunk origin of its nearest copy */
+  /** Geometry is chunk-local, so the mesh sits at the chunk origin of its nearest copy.
+   *
+   *  A FAR entry is placed in COARSE units — its `cx`/`cz` count `step` fine chunks each, its geometry's
+   *  super voxels are `step` blocks across — so the origin is scaled by `step` in X/Z AND the mesh gets
+   *  `scale = (step, 1, step)`. That one scale is what turns a 32×32 super-voxel face into a `32·step`-block
+   *  face; every normal stays axis-aligned, so nothing else has to know. Y is never decimated, so `cy` and the
+   *  vertical extent are the same units in both rings. */
   private place(entry: ChunkMeshEntry): void {
-    const rx = nearestWrap(entry.cx, this.lastPcx, WORLD_CHUNKS_X);
-    const rz = nearestWrap(entry.cz, this.lastPcz, WORLD_CHUNKS_Z);
-    entry.mesh.position.set(rx * CHUNK_SIZE, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE);
+    const step = entry.step;
+    const pcx = step === 1 ? this.lastPcx : Math.floor(this.lastPcx / step);
+    const pcz = step === 1 ? this.lastPcz : Math.floor(this.lastPcz / step);
+    const rx = nearestWrap(entry.cx, pcx, WORLD_CHUNKS_X / step);
+    const rz = nearestWrap(entry.cz, pcz, WORLD_CHUNKS_Z / step);
+    entry.mesh.position.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
+    entry.mesh.scale.set(step, 1, step);
     entry.mesh.updateMatrix();
   }
 }

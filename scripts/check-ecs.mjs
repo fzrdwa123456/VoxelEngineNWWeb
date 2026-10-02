@@ -830,8 +830,9 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   // further down the file), so it uses `fs` the way the chunk-stream group next door does.
   const read = (rel) => require("node:fs").readFileSync(path.join(ROOT, "src", rel), "utf8");
   const systems = read("plugins/render/index.ts");
-  assert(/new ChunkStreamSystem\(w\.world, w\.mesh, w\.pool \?\? null\)/.test(systems),
-    "the pool is the chunk stream's third dependency (absent = main thread, which the gate uses)");
+  assert(/w\.pool \?\? null,/.test(systems) && /w\.lod === undefined \? DEFAULT_LOD : w\.lod/.test(systems),
+    "the pool is the chunk stream's third dependency (absent = main thread, which the gate uses), and the FAR " +
+      "RING (P1.93) is the fourth — the plugin decides the shipped policy, the constructor's own default is off");
   const root = read("boot/main.ts");
   assert(/const meshPool: MeshWorkerPool = createMeshWorkerPool\(\{ log: logDebug \}\)/.test(root),
     "the composition root builds the pool, with the log sink worker failures are reported to");
@@ -1021,6 +1022,99 @@ check("the terrain is a NOISE FIELD: one field everywhere, torus-periodic, solid
   equal(sky.isUniform, true, "a chunk above the field is uniform…");
   equal(sky.uniformValue, AIR, "…and it is air");
   equal(band.isUniform, false, "a chunk the surface crosses materialises (it really does have blocks to draw)");
+});
+
+check("LOD: the far ring is coarse, never BELOW the fine surface, and meets the fine ring exactly (P1.93)", () => {
+  // The window is two rings now: an inner ring of real chunks and an outer one drawn from the same terrain at
+  // `step` fine chunks per coarse chunk. What must hold is (a) the two rings TILE the view — no column drawn
+  // twice, none drawn never — and (b) the coarse surface is never lower than the fine one, which is the single
+  // property that makes an LOD ring incapable of opening a crack. Both are asserted against the real generator.
+  const L = load("data/world/lod.js");
+  const { meshChunk } = load("data/world/mesh.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+  const { VoxelWorld, WORLD_MAX_Y } = load("data/world/world.js");
+  const { FALLBACK_PALETTE } = load("data/world/palette.js");
+  const policy = L.DEFAULT_LOD;
+
+  // 1. THE RINGS TILE THE VIEW.
+  const owner = new Map();
+  let overlaps = 0;
+  const claim = (x, z, who) => {
+    const k = `${x},${z}`;
+    if (owner.has(k)) overlaps++;
+    owner.set(k, who);
+  };
+  for (let x = -40; x <= 40; x++) {
+    for (let z = -40; z <= 40; z++) if (L.isFineColumn(policy, x, z)) claim(x, z, "fine");
+  }
+  for (let cx = -20; cx <= 20; cx++) {
+    for (let cz = -20; cz <= 20; cz++) {
+      if (!L.isFarColumn(policy, cx, cz)) continue;
+      for (let dx = 0; dx < policy.step; dx++) {
+        for (let dz = 0; dz < policy.step; dz++) {
+          claim(cx * policy.step + dx, cz * policy.step + dz, "far");
+        }
+      }
+    }
+  }
+  equal(overlaps, 0, "no column is drawn by BOTH rings");
+  const reach = 2 * policy.farRadius;
+  let gaps = 0;
+  for (let x = -reach; x <= reach + 1; x++) {
+    for (let z = -reach; z <= reach + 1; z++) if (!owner.has(`${x},${z}`)) gaps++;
+  }
+  equal(gaps, 0, "…and none is drawn by NEITHER (an odd fine span would leave a one-column hole ring)");
+  equal(owner.size, (2 * reach + 2) ** 2, "the union is exactly the square the far radius promises");
+
+  // 2. THE COARSE VOXEL CONTAINS THE FINE ONES, pointwise: wherever a fine block is solid, the coarse voxel
+  //    that covers it is solid too. That is the property (not "the top of the column") which makes a crack
+  //    impossible — a hole would need a solid fine block with an AIR coarse voxel over it.
+  const world = new VoxelWorld();
+  const stone = FALLBACK_PALETTE.indexOf("stone") + 1;
+  const dirt = FALLBACK_PALETTE.indexOf("dirt") + 1;
+  const grass = FALLBACK_PALETTE.indexOf("grass") + 1;
+  let inspected = 0;
+  let holes = 0;
+  let faces = 0;
+  let materialised = 0;
+  for (let cx = -policy.farRadius; cx <= policy.farRadius; cx += 3) {
+    for (let cz = policy.fineRadius + 1; cz <= policy.farRadius; cz += 3) {
+      if (!L.isFarColumn(policy, cx, cz)) continue;
+      for (let cy = 2; cy <= 5; cy++) {
+        const input = L.buildLodMeshInput(policy, cx, cy, cz, stone, dirt, grass);
+        const result = meshChunk(input);
+        faces += result.faces;
+        if (!input.uniform) materialised++;
+        const solidAt = (lx, ly, lz) =>
+          input.uniform
+            ? input.uniformValue !== 0
+            : input.blocks[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE] !== 0;
+        for (let lx = 0; lx < CHUNK_SIZE; lx += 7) {
+          for (let lz = 0; lz < CHUNK_SIZE; lz += 7) {
+            for (let dx = 0; dx < policy.step; dx++) {
+              for (let dz = 0; dz < policy.step; dz++) {
+                const fx = cx * policy.step * CHUNK_SIZE + lx * policy.step + dx;
+                const fz = cz * policy.step * CHUNK_SIZE + lz * policy.step + dz;
+                for (let cy2 = 2; cy2 <= 5; cy2++) {
+                  world.ensureChunk(Math.floor(fx / CHUNK_SIZE), cy2, Math.floor(fz / CHUNK_SIZE));
+                }
+                for (let ly = 0; ly < CHUNK_SIZE; ly += 3) {
+                  inspected++;
+                  if (!world.isSolid(fx, cy * CHUNK_SIZE + ly, fz)) continue;
+                  if (!solidAt(lx, ly, lz)) holes++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert(inspected > 100, `the sampler really was inspected (${inspected} fine voxels under coarse ones)`);
+  equal(holes, 0, "every SOLID fine voxel is solid in the coarse voxel above it — no crack is possible");
+  assert(faces > 0 && materialised > 0, "and the sampled chunks do produce geometry to draw");
+  equal(L.isFarColumn(policy, 0, 0), false, "the far ring never covers a column the fine ring owns");
+  equal(L.isFarColumn(policy, policy.farRadius + 1, 0), false, "…nor anything past its radius");
 });
 
 check("the chunk stream can say whether a window still needs warming", () => {
@@ -3381,10 +3475,10 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   ].join("\n");
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(w\.world\)/],
-    // The mesher and the WORKER POOL are platform capabilities injected by the root, not presentation objects
-    // (the pool creates Workers — a `host/` object a plugin may not import). Neither is a resource, which is
-    // what this check is about.
-    ["the chunk stream", /new ChunkStreamSystem\(w\.world, w\.mesh, w\.pool \?\? null\)/],
+    // The mesher, the WORKER POOL and the FAR RING's policy are capabilities injected by the root/plugin, not
+    // presentation objects (the pool creates Workers — a `host/` object a plugin may not import; the LOD policy
+    // is plain data). None of them is a resource, which is what this check is about.
+    ["the chunk stream", /new ChunkStreamSystem\(\s*w\.world,\s*w\.mesh,\s*w\.pool \?\? null,\s*w\.lod === undefined \? DEFAULT_LOD : w\.lod,?\s*\)/],
     ["the device layer", /new PlayerInputSystem\(w\.world, w\.log, w\.inWorld, w\.mouse\)/],
     ["the reconciler", /export function createRenderSystem\(\.\.\.args: ConstructorParameters/],
   ]) {

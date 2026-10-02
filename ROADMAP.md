@@ -67,7 +67,7 @@ orientation assumptions the next one depends on.
 | **P1 terrain** | `DONE (P1.92)` | height field in `data/world/terrain.ts` (value noise, 4 octaves, torus-periodic) + the layered fill in `generateChunk()`; biomes/ores/caves/trees/water are still TODO — see §3.1 | **`generateChunk()` is the ONLY place that knows what a block is, and `terrainHeight()` the only place that knows how high the ground is.** |
 | **P2 floating origin** | `TODO` | split coordinates into `int cell + float local`, render camera-relative, update by **delta only** | Must land **before** anything writes absolute world coordinates. The absolute-position writes are now funneled into ONE place — the `Teleport` command (`src/plugins/player/commands.ts`) — which is exactly where the cell/local split goes. Reference technique: [big_space](https://docs.rs/big_space/0.6.0/i686-unknown-linux-gnu/big_space/) |
 | **P3 radial gravity** | `TODO` | `ORIENTATION.up` = local surface normal instead of the constant `(0,1,0)` | ⚠️ **Known blocker**: `src/plugins/player/systems/controller.ts` sums view deltas and applies them once per tick **because** `up` is constant. With a changing `up`, "sum then apply" ≠ "apply each". That optimisation must change in the same commit. |
-| **P4 sphere + LOD** | `TODO` | cube-sphere quadtree; near = real voxels, far = heightmap | Do the sphere **after** P3; do LOD after the sphere looks right without it. |
+| **P4 sphere + LOD** | `TODO` | cube-sphere quadtree; near = real voxels, far = heightmap | Do the sphere **after** P3; do LOD after the sphere looks right without it. **The flat-world half of the far tier landed in P1.93** (`data/world/lod.ts`: a fine ring + a 2× conservative far ring sampled from the height field) — that is the mechanism the sphere's quadtree will reuse, on a curved grid. |
 | **P5 space layer** | `TODO` | several bodies, orbits, nested reference frames | Only possible once P2 exists. |
 | **P6 seamless** | `TODO` | atmosphere, LOD hand-off, ships | Last. |
 
@@ -131,16 +131,23 @@ or building a sphere before there is any terrain to put on it.
 - **GAP** No entity interaction (no targeting mobs), no "use item" action, no sneak-to-place-against.
 
 ## 3.6 Rendering
-- **DECISION** No `scene.fog`. Consequence: the rim of the streamed window
-  (`RENDER_RADIUS_CHUNKS = 8` → ~288 blocks) is visible as the edge of the world. Fix by raising
-  that radius, or by adding an atmosphere — not by silently re-adding fog.
-- **GAP** All chunk meshes live in a **flat** window around the player: no LOD, no frustum-aware
-  prioritisation (the build budget is spent near-first, which is a proxy for it).
+- **DECISION** No `scene.fog`. Consequence: the rim of the streamed window is visible as the edge of the
+  world — now at ~512 blocks instead of ~288 (the far ring, P1.93). Fix by raising
+  `DEFAULT_LOD.farRadius` (data/world/lod.ts; the torus lap is 1024 blocks, so coarse ±8 is the ceiling
+  before the world's own far side comes into view) or by adding an atmosphere — not by silently re-adding fog.
+- **PARTLY DONE (P1.93)** There IS a distance LOD: the window is a fine ring (~448 blocks, real 32³ chunks)
+  plus a far ring drawn from the same height field at 2×2 blocks per super voxel (~512 blocks). What is
+  still missing is the rest of the ladder: ONE far level only (no 4×/8× tier), no frustum-aware
+  prioritisation, no downsampling of Y, and the ring boundary is a visible ledge (the coarse surface is
+  conservatively the MAX height, so it can bulge a block or two where it meets the fine ring — no cracks,
+  but a step). Skirts/stitching and a second tier are the next steps.
 - **GAP** `logarithmicDepthBuffer` is not enabled. Camera `near = 0.1, far = 5000`; planet scale
   needs reversed-Z or logarithmic depth.
 - **GAP** Chunk GENERATION runs on the **main thread** (the fill is cheap — a uniform chunk allocates
   nothing — but it owns the world's `Map`). MESHING left this list in P1.18h (workers, `hardwareConcurrency
   - 1`) and a pack reload no longer re-meshes at all (P1.18i) — see §4 for the route and what is left of it.
+  The FAR RING's build is main-thread too (P1.93), but it is procedural — it samples the height field and
+  reads no world chunk — which is what makes it ~0.33–3 ms per chunk instead of a 4× gather.
 
 ## 3.7 UI
 - **GAP** The inventory's block selection has no observable effect in the world (§3.2). The stacks
@@ -2483,6 +2490,55 @@ Still outstanding:
   a 2312-chunk window generated in 172 ms. Not changed: the block palette, the mesher, the streaming budget,
   the torus rendering (ghost meshes at the seam are still missing — see the known gaps), and the inert
   superflat/noise choice in the main menu, which still logs the mode and discards it.
+- **P1.93 — the world is streamed in TWO RINGS: a distance LOD, and it needs no new mesher.** `DONE`, by
+  request («先弄个lod给我看看»). The window was one flat ring of 32³ chunks (`RENDER_RADIUS_CHUNKS = 8`, ~288
+  blocks). It is a FINE ring of real chunks plus a FAR ring drawn from the same terrain at `step` (2) fine
+  chunks per coarse chunk: a far chunk is still a 32³ array — of 2×2×1 super voxels — and goes through the
+  SAME `meshChunk` with the same input contract. The placement scales the mesh by `(step, 1, step)`, which is
+  what turns a 32×32 super-voxel face into a 64×64 block face; **not one line of `mesh.ts` changed**, and
+  neither did the geometry, the materials or the slot groups.
+  THE THREE DECISIONS, each protecting something:
+  * **SAMPLED FROM THE HEIGHT FIELD, NOT DIGESTED FROM THE WORLD.** A far chunk calls `terrainHeight` over one
+    (S+2)² grid — no world reads, no `isSolid` lookups, no `ensureChunk`, so it costs the world ZERO voxel
+    memory and nothing to generate. Digesting four fine chunks would have been ~4× the gather that is already
+    the warm-up's dominant cost (measured 0.73–0.92 ms per fine chunk). A one-entry MEMO of the grid (a
+    column's 8 chunks stream back to back) removes 7/8 of the sampling: the whole far ring's sampler went from
+    2091 ms to ~450 ms.
+  * **CONSERVATIVE, SO CRACKS ARE IMPOSSIBLE.** Each super voxel takes the MAXIMUM height of the fine columns
+    it covers, so the coarse surface is never below the fine one. The gate asserts it POINTWISE against the
+    real generator (every solid fine voxel must be solid in the coarse voxel above it) — that is the property
+    that must not regress, and it caught a real bug on the first run.
+  * **THE RINGS TILE, AND THEIR KEYS CANNOT COLLIDE.** The fine ring covers coarse columns [-r, r] = fine
+    columns [-2r, 2r+1] — an EVEN span, so the rings meet with no gap and no overlap (an odd span leaves a
+    one-column hole ring: 32 blocks of sky between the rings). A far key is `"<step>:cx,cy,cz"` in COARSE
+    units, so an edit — every dirty key in the world is a fine key in fine units — can never name a far entry.
+  THE PRICE, stated in the code and here: a far chunk is PROCEDURAL. A block edited out there is not reflected
+  in it (it is correct wherever the player can reach, because the fine ring owns that). Warming the far ring
+  up would need a world-backed sampler, which is the version to write if that ever matters.
+  MEASURED on this machine (packaged build), against the P1.92 single window (2312 chunks / 465 materialised /
+  629,514 faces / 91.3 MB / `WORLD ready at 2023ms`):
+  * the fine ring alone: 1568 chunks / 324 materialised / 241k faces / 35 MB;
+  * the far ring adds: 1408 chunks / 296 materialised / 245k faces / 35 MB at **0.83 ms per chunk** (a uniform
+    far chunk 0.33 ms, one that builds a mesh 3.0 ms — hence a COST-WEIGHTED per-frame budget,
+    `LOD_BUDGET_PER_FRAME` units with a mesh costing `LOD_MESH_COST`, capping the far ring at ~6 ms of a frame);
+  * TOTAL: **486k faces and 70 MB for a world that reaches ~512 blocks instead of ~288** — i.e. twice the view
+    distance for LESS geometry than before, because the fine ring is smaller than the old flat window;
+  * `WORLD ready at 205ms` (the warm-up still builds only the fine ring), then the far ring streams in over the
+    first ~3 s with no stall (`FRAME n=61 avg=16.6ms max=17.7ms stalls=0` once it has landed), F3's GPU figure
+    2.21 ms from y=207 with the whole double-ring view on screen, and the terrain now fills the view well above
+    the horizon line a fine-only window ended at.
+  - `src/data/world/lod.ts` (new): the ring policy + the conservative sampler
+  - `src/data/world/world.ts`: the layer rule factored into `terrainLayerValue`, so the generator and the LOD
+    sampler cannot disagree about grass/dirt/stone
+  - `src/plugins/render/systems/chunk-stream.ts`: two wanted sets, far keys, `buildFar`, the weighted budget,
+    and `place` scaling a far mesh by its step
+  - `src/data/globals/gfx.ts`: `ChunkMeshEntry.step` + `ChunkMeshCache.farKeys`
+  - `src/plugins/render/index.ts`: the shipped policy (`DEFAULT_LOD`); the stream's own default stays "no LOD",
+    which is the shape the worker/streaming tests drive
+  - check-ecs: a new group (the rings tile with no gap and no overlap; every solid fine voxel is solid in the
+    coarse one above it; a sampled chunk really does build geometry) and the two constructor-shape assertions
+  - docs: AGENTS (the world state, the two-ring bullet, the known gaps), ROADMAP (the stage table, §3.6, this
+    entry), TESTING (what an LOD ring looks like and where its boundary is)
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

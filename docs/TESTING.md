@@ -64,6 +64,21 @@ and NO HOLES you can see the sky through. Fly up (double-tap Space) ~60 blocks a
 must be continuous across the whole streamed window, including the chunk borders (a line of missing faces or
 a step exactly every 32 blocks would be a generator bug at a chunk seam, not a rendering one)
 → dig down a few blocks in a hillside: the cut face must show grass, then dirt, then stone
+→ **THE FAR RING (P1.93)**: fly up to ~200 blocks and look out. Two things must be true and one must look
+  odd, by design: (a) the terrain reaches out to **~512 blocks** — from 200 up, the view is terrain well above
+  the horizon line a ~288-block window would have ended at (that line is where the old single window stopped);
+  (b) it fills in over the first ~3 s after entering (the loading screen only covers the fine ring, so the far
+  terrain appears while you watch — `FRAME` may show 20-30 ms frames for those seconds and then settles at
+  `n=61 avg=16.6 max≈17.7 stalls=0`); (c) the far terrain is **2× blockier** (one super voxel per 2×2 blocks:
+  the contour steps of the hills are twice as thick out there) and there is a **step/ledge where the rings
+  meet** (~448 blocks out). That ledge is the conservative-max choice, not a bug — it is what makes a crack
+  impossible — and nothing must show SKY through it.
+  Walk ~600 blocks (Shift ×25, or fly) away and the rings re-centre: the fine ring follows you, the far ring
+  drops what is behind and builds what is ahead (a second or two of fill-in). Fly past ~512 blocks from the
+  world's origin and the terrain you see is the world's OWN far side (the torus lap is 1024 blocks) — that is
+  the geometry of the world, not a streaming bug.
+  A far chunk is PROCEDURAL: dig a hole at ~400 blocks out, then walk 400 blocks away and look back — the hole
+  is NOT there (the edit is only in the fine world). Digging anywhere you can actually reach is correct.
 → fly far in one direction for ~30 s (the world is a TORUS of 1024 blocks: you come back to where you
 started) and confirm the terrain you arrive at matches where you began — the noise is periodic on that same
 lap, so the wrap must NOT show a cliff (it may show a single wrong block at the seam line: the ghost meshes

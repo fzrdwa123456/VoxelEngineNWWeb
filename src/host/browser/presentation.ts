@@ -26,6 +26,7 @@ export function createChunkMeshCache(group: THREE.Group): ChunkMeshCache {
     empty: new Set(),
     inFlight: new Set(),
     wantedKeys: null,
+    farKeys: null,
     lastPcx: Number.NaN,
     lastPcz: Number.NaN,
   };

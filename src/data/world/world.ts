@@ -45,8 +45,23 @@ export const TERRAIN_TOP_Y = TERRAIN_BASE_Y;
  *  read from the generated column (`topSolidY`) — see boot/drivers/world-entry.ts. */
 export const WORLD_SURFACE_Y = TERRAIN_BASE_Y;
 
-/** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. */
-const SURFACE_LAYERS = 4;
+/** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. Exported because the LOD
+ *  sampler (`data/world/lod.ts`) needs the same band when it decides a coarse chunk is uniformly stone. */
+export const SURFACE_LAYERS = 4;
+
+/** THE LAYER RULE, in ONE place: `h` is a column's FIRST AIR LAYER and `y` a block in it — grass on the
+ *  surface block, dirt under it, stone below. The generator and the LOD sampler (`data/world/lod.ts`) both
+ *  ask this, so a coarse chunk and the fine chunks it covers cannot disagree about what a layer is. */
+export function terrainLayerValue(
+  h: number,
+  y: number,
+  stone: number,
+  dirt: number,
+  grass: number,
+): number {
+  if (y < h - SURFACE_LAYERS) return stone;
+  return y === h - 1 ? grass : dirt;
+}
 
 /** Block coordinate -> local coordinate inside its chunk (negative-safe) */
 function localOf(block: number): number {
@@ -142,11 +157,10 @@ function generateChunk(chunk: Chunk, palette: readonly string[]): void {
       const solidTop = h - 1; // its topmost solid block
       const yTop = solidTop < top - 1 ? solidTop : top - 1; // …clipped to this chunk
       if (yTop < bottom) continue; // the column is all air in this chunk
-      const dirtFrom = h - SURFACE_LAYERS; // the first dirt layer (may sit above this chunk)
       for (let y = bottom; y <= yTop; y++) {
         // ONE write per solid voxel, from the chunk's floor up to the surface: stone, then the dirt band, and
         // grass on the very top. Nothing above `yTop` is touched — the array came back zero-filled (AIR).
-        blocks[voxelIndex(lx, y - bottom, lz)] = y >= dirtFrom ? (y === solidTop ? grass : dirt) : stone;
+        blocks[voxelIndex(lx, y - bottom, lz)] = terrainLayerValue(h, y, stone, dirt, grass);
       }
     }
   }

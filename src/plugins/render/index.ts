@@ -6,6 +6,9 @@ import type { World } from "../../core/world";
 import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { CameraViewSystem, CAMERA_VIEW_ACCESS } from "./systems/camera";
 import { ChunkStreamSystem, type ChunkMeshFactory, type MeshWorkerPool, CHUNK_STREAM_ACCESS } from "./systems/chunk-stream";
+// The far ring's POLICY is data (`data/world/lod.ts`), and the plugin is where the shipped choice is made: the
+// stream's own default is "no LOD" (the shape the tests drive), the game gets the ring.
+import { DEFAULT_LOD, type LodPolicy } from "../../data/world/lod";
 // The host builds the mesher (it is a `host/` object), so it needs the factory type: re-exported here rather
 // than reached for through `./systems/...`, which is this plugin own business.
 export type { ChunkMeshFactory, MeshWorkerPool };
@@ -31,12 +34,21 @@ export interface RenderWiring {
   /** The platform's meshing WORKER POOL (P1.18h), when it has one: absent = mesh on this thread, which is
    *  what the gate and a worker-less environment do. */
   readonly pool?: MeshWorkerPool | null;
+  /** THE FAR RING (P1.93). Omitted = the plugin's own default (`DEFAULT_LOD`): the shipped game draws a fine
+   *  ring plus a coarse one. `null` = the single fine window the engine had before, which is what a test that
+   *  wants the old window shape passes. */
+  readonly lod?: LodPolicy | null;
 }
 
 /** The render lane's systems, constructed here. */
 export function createRenderSystems(w: RenderWiring) {
   return {
-    chunkStream: new ChunkStreamSystem(w.world, w.mesh, w.pool ?? null),
+    chunkStream: new ChunkStreamSystem(
+      w.world,
+      w.mesh,
+      w.pool ?? null,
+      w.lod === undefined ? DEFAULT_LOD : w.lod,
+    ),
     cameraView: new CameraViewSystem(w.world),
     outline: new BlockOutlineSystem(w.world),
     menuBg: new MenuBackgroundSystem(w.world),

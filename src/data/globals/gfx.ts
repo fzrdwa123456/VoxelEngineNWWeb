@@ -58,6 +58,11 @@ export interface ChunkMeshEntry {
   readonly cx: number;
   readonly cy: number;
   readonly cz: number;
+  /** Fine chunks per horizontal axis for this entry (P1.93): 1 = a real 32³ chunk, 2 = a FAR-RING chunk whose
+   *  voxels are 2×2×1 super voxels. The mesh is scaled by `(step, 1, step)` on placement, which is what makes
+   *  one super-voxel face cover `step × step` blocks — and it is what tells a far entry's `cx`/`cz` apart from
+   *  a fine one's, since the two are in different units. */
+  readonly step: number;
 }
 
 /** The chunk-mesh CACHE: one mesh per visible chunk, keyed by wrapped chunk identity. It used to be
@@ -79,6 +84,9 @@ export interface ChunkMeshCache {
   /** The window's WANTED key set, rebuilt only when the player crosses a chunk boundary (null until the
    *  first build): "which chunks does this window want" is state of the cache, so it is readable here. */
   wantedKeys: Set<string> | null;
+  /** The FAR RING's wanted key set (P1.93), in COARSE chunk units, keyed `"<step>:cx,cy,cz"` so a coarse key
+   *  can never collide with a fine one. null when LOD is off (and before the first build). */
+  farKeys: Set<string> | null;
   /** The player column the wanted set was built for (NaN = never built) */
   lastPcx: number;
   lastPcz: number;

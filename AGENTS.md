@@ -28,12 +28,15 @@ The code is organized as a **microkernel + plugins** tree (`core/` mechanism, `p
 zero allocation on the hot path, structure changes only at a barrier). Both are written out in
 `docs/ARCHITECTURE.md`, and the two sections right after the directory map below are the short version.
 
-**Current world state: a NOISE-TERRAIN, EDITABLE voxel world exists (P1.92).** `src/data/world/`
-is a chunk system (32³ chunks) generated from a height field: `data/world/terrain.ts` answers the first air
-layer of every column (value noise, 4 octaves, exactly periodic on the torus), and `generateChunk()` in
-`data/world/world.ts` writes grass over a dirt band over stone into that column. `plugins/player/systems/
-collision.ts` resolves the player AABB against it (you land, walk, jump, and climb hills) and
-`plugins/player/systems/interaction.ts` breaks and places blocks with the mouse.
+**Current world state: a NOISE-TERRAIN, EDITABLE voxel world exists, streamed in TWO rings (P1.92/P1.93).**
+`src/data/world/` is a chunk system (32³ chunks) generated from a height field: `data/world/terrain.ts`
+answers the first air layer of every column (value noise, 4 octaves, exactly periodic on the torus), and
+`generateChunk()` in `data/world/world.ts` writes grass over a dirt band over stone into that column. The
+streamed window is a **FINE ring** of real chunks (14×14 columns, ~448 blocks) plus a **FAR ring** drawn from
+the same field at 2×2 blocks per super voxel (`data/world/lod.ts`), which reaches ~512 blocks — see the LOD
+bullet in the streaming section below. `plugins/player/systems/collision.ts` resolves the player AABB against
+the fine world (you land, walk, jump, climb hills) and `plugins/player/systems/interaction.ts` breaks and
+places blocks with the mouse.
 Topology is unchanged and deliberate: **X/Z is a TORUS** (`WORLD_CHUNKS_X/Z` = 1024 blocks, so the noise is
 periodic on the same lap) and **Y is bounded** (`[WORLD_MIN_Y, WORLD_MAX_Y)` = 256 blocks); below
 WORLD_MIN_Y everything is bedrock, and the ground occupies roughly `TERRAIN_MIN_Y..TERRAIN_MAX_Y`
@@ -95,7 +98,9 @@ src/
 │   └── world/               the voxel data: chunk.ts (32³ storage; a uniform chunk allocates nothing),
 │                            world.ts (the chunk map, the torus, the generator), terrain.ts (THE height
 │                            field: pure value noise, exactly periodic on the torus — the ONE place that
-│                            decides how high the ground is), palette.ts (value -> block id),
+│                            decides how high the ground is), lod.ts (THE FAR RING: samples that field at
+│                            2×2 per super voxel, conservative so a coarse chunk can never hole the fine
+│                            one, plus the ring policy), palette.ts (value -> block id),
 │                            mesh.ts (the PURE mesher: bytes in, typed arrays out — the function the
 │                            workers run AND the main thread's fallback)
 ├── shared/                types and pure helpers with no state: math/raycast.ts (the voxel DDA)
@@ -551,6 +556,31 @@ where it is:
   machine, and the app logs `RENDER meshing: N worker(s)` at boot; toggling a resource pack in a LOADED world
   logs `3016 chunk(s) stale, 3016 restyled behind the screen (looks only, no re-mesh)` with no game frame
   over ~20 ms and `stalls=0`.
+* **THE WINDOW IS TWO RINGS (P1.93 — `data/world/lod.ts`).** The inner ring is real 32³ chunks as before; the
+  outer ring is drawn from the SAME height field at `step` (2) fine chunks per coarse chunk, so a far chunk is
+  a 32³ array of 2×2×1 super voxels that goes through the very same `meshChunk` — the placement scales the mesh
+  by `(step, 1, step)` and nothing in `mesh.ts` changed. Three properties make it work, and each is a thing to
+  keep:
+  * **CONSERVATIVE**: every super voxel takes the MAXIMUM height of the fine columns it covers, so the coarse
+    surface is never below the fine one and a crack (a solid fine block with an air coarse voxel over it) is
+    impossible. The gate asserts exactly that, pointwise, against the real generator — it is the one property
+    that must not regress.
+  * **PROCEDURAL AND POOL-FREE**: a far chunk samples `terrainHeight` (one (S+2)² grid, memoised per column
+    because a column's 8 chunks stream back to back), so it reads NO world chunk, generates nothing into the
+    world's map, and never goes to a worker. Its cost is spent from a COST-WEIGHTED per-frame budget
+    (`LOD_BUDGET_PER_FRAME` units, a materialised chunk = `LOD_MESH_COST`), measured at 0.33 ms for a uniform
+    far chunk and 3.0 ms for one that builds a mesh.
+  * **ITS PRICE**: a far chunk is procedural, so a block edited out in the far ring is not reflected there
+    (it is correct wherever the player can actually reach, because the fine ring owns that). That is why no
+    edit is ever routed into a far key — the two rings' keys cannot even collide (`"<step>:cx,cy,cz"`).
+  THE RINGS TILE: the fine ring is an EVEN span of columns (coarse columns [-r, r] = fine [-2r, 2r+1]) so it
+  meets the far ring with no gap and no overlap; the gate enumerates both sets and asserts it.
+  MEASURED (this machine, P1.92 for comparison): the fine ring alone is 1568 chunks / 324 materialised /
+  241k faces / 35 MB; the far ring adds 1408 chunks / 296 materialised / 245k faces / 35 MB at 0.83 ms per
+  chunk, taking the visible world from ~256 to ~512 blocks for 486k faces and 70 MB in total — i.e. **twice
+  the view distance for LESS geometry than the single flat-radius-8 window (629k faces / 91 MB)**. The warm-up
+  still builds only the fine ring (the entry time is unchanged); the far ring streams in over the first ~3 s
+  of play.
 
 ## Iron rules (breaking any of these = silent bugs)
 
@@ -1000,8 +1030,9 @@ When work lands, move the entry here and delete it there.
   materialise — measured on the spawn window: 465 of 2312 chunks, 14.5 MB — but raising the period, or
   giving the field a bigger amplitude, needs eviction first.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
-  world. Raise RENDER_RADIUS_CHUNKS (plugins/render/systems/chunk-stream.ts) to push it out, or reintroduce a
-  `scene.fog` — those two values were previously tuned as a pair.
+  world — now at ~512 blocks instead of ~256 (the far ring, P1.93), which makes it more noticeable, not less.
+  Raise `DEFAULT_LOD.farRadius` (data/world/lod.ts) to push it out, or reintroduce a `scene.fog`. The torus lap
+  is 1024 blocks, so a far radius past coarse ±8 starts showing the world's own far side.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
   `VoxelWorld.topSolidY()`, used by plugins/render/systems/diagnostics.ts and the F3 panel.
