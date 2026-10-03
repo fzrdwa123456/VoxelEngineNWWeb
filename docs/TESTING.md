@@ -90,6 +90,18 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   again and the real textures come back. It must
   NOT toggle on a held key (a repeat is one press) or on the key release, and it must survive walking (the
   colours follow the chunks, since they are a material, not a one-off paint).
+  **NO REGION MAY STAY BLACK WHILE G IS ON** (a fixed bug: grey stone and the far ring's green were tinted by a
+  LINEAR multiply and went near-black). What must hold now:
+  (a) the stone faces (grey without G — hill cut faces, rung ledges, the far ring's deep layers) take the rung's
+      HUE at their own brightness: a dark but clearly COLOURED surface, never pure black;
+  (b) the far ring (which is stone/dirt/grass all the way out) takes the OUTERMOST rung's colour, and the band
+      colours must still meet at the rung boundaries with no black band between them;
+  (c) press G off: the far ring must read as **grey stone** (not green) outside the dirt band — that is the second
+      half of the same fix (its layer values are asked per build now, instead of a copy taken before the palette
+      existed);
+  (d) if a region still looks BLACK with G on: press `H` — triangles there mean a material problem, none means
+      nothing is drawn — and note whether it is black *without* G too (that would mean the checker, i.e. a block
+      value that names no block). Report the band colour it sits in and the distance.
 → **`K` — THE GPU SAMPLER PROBE (M0 of the GPU route)**: enter a world and press **K** (it is not a bind, like
   G/H/J). The probe re-samples the terrain field on the GPU with the same code path the LOD will use and compares
   every value against the CPU's own grid, then toasts a one-line summary and writes the detail to `debug.log`.

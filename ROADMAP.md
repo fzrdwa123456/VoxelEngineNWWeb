@@ -2567,6 +2567,21 @@ Still outstanding:
     material swap per entry, which is exactly the reload's restyle (no geometry is touched). The key arrives
     through the same `KEY_EVENTS` log the other global chords use, with its own `KeyEdgeReader` cursor; G is
     bound to nothing else; a held key (repeat) and the key release are ignored.
+    **FIXED LATER (M1 round) — `G` MADE SOME REGIONS BLACK, and the user found it for us** («我找到了是g键显示
+    颜色…部分区域颜色变成黑色，如果不显示颜色是正常的»; confirmed as "grey and green" without G, which named the
+    culprit exactly): a COLOUR-ONLY look was tinted with `base × tint`, and THREE multiplies in LINEAR space, so
+    two mid-dark colours give the PRODUCT of their luminances — grey stone (#8a8a8a ≈ 0.25 linear) and the far
+    ring's colour-only blocks landed at 0.03-0.25, i.e. near-black with the hue unreadable ("有时又不变色"). The
+    textured looks never had the problem (they set `color = tint` and multiply the texture). THE FIX is
+    `tintedLook` (host/browser/chunkmesh.ts): the rung colour's HUE and SATURATION at the BLOCK'S OWN LIGHTNESS,
+    so a tinted region says which rung it is at the brightness that block always had. The far ring made the same
+    bug look enormous because of a SECOND defect: it resolved its stone/dirt/grass values in the CONSTRUCTOR,
+    which runs BEFORE the content plugin numbers the palette from the pack chain (`RENDER meshing` 184 ms,
+    `PALETTE 7 block(s) numbered` 186 ms) — so it used `FALLBACK_PALETTE`, whose `stone` is 3, and the real
+    palette's 3 is `default` (a COLOUR-ONLY green). It asks per build now (`layerValues`), which is correct for
+    any block order a pack ships and removes the one path that could land on `missing` — the block whose look is
+    the engine's magenta/black checker, i.e. a large PURE BLACK patch. Both halves are pinned by the gate and by
+    the TESTING checklist.
   NOT FIXED, BY REQUEST: the far ring's outward rim still has no walls (a coarse chunk culls its outer faces
   against terrain that is not drawn there — the documented "edge of the world", now at ~512 blocks), and the
   ring boundary is still a visible LEDGE (the conservative max), not a stitched seam.

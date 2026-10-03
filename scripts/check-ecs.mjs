@@ -5243,6 +5243,26 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   assert(/resource\(CHUNK_MATERIAL\)/.test(stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"))),
     "chunk.stream resolves it");
 
+  // 2b. THE LOD VIEW'S TINT MUST NOT DARKEN A COLOUR-ONLY LOOK (the reported «按 G 之后部分区域变成黑色，有时又
+  //     不变色；不显示颜色就正常»). `base × tint` multiplies in LINEAR space, so two mid-dark colours give the
+  //      PRODUCT of their luminances — grey stone and the far ring's colour-only blocks went near-black instead
+  //      of taking a readable hue. The tint is applied as the rung colour's hue/saturation at the BLOCK's own
+  //      lightness, and the textured path (`color = tint`, which never had the problem) is untouched.
+  assert(/function tintedLook\(/.test(meshSrc) && /tintedLook\(spec\.color \?\? "#ffffff", tint\)/.test(meshSrc),
+    "a colour-only look takes the tint's HUE at its own brightness");
+  assert(!/multiply\(new THREE\.Color\(tint/.test(meshSrc),
+    "…and no `colour × tint` multiply is left (that is what turned stone and the far ring black under G)");
+
+  // 2c. …AND THE FAR RING ASKS FOR THE PALETTE'S LAYER VALUES PER BUILD. A copy taken in the CONSTRUCTOR is
+  //     taken before the content plugin has numbered the palette from the pack chain (`RENDER meshing` at 184 ms
+  //     in debug.log, `PALETTE 7 block(s) numbered` at 186 ms), so it came from FALLBACK_PALETTE: `stone` = 3,
+  //     which in the real palette is `default`. That drew the far ring's whole bulk with a colour-only block —
+  //     the region the LOD view then turned black — and a value naming no block draws the checker instead.
+  const streamMeshSrc = stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"));
+  assert(/private layerValues\(\)/.test(streamMeshSrc) && /const layers = this\.layerValues\(\);/.test(streamMeshSrc),
+    "the far ring asks for the layer values PER BUILD (a constructor-time copy predates the palette)");
+  assert(!/this\.layers\b/.test(streamMeshSrc), "…and keeps no cached copy of them");
+
   // 3. The raw-input TRANSPORT counters (arrival rhythm + queue backlog). They were module state in
   //    platform/rawinput.ts, which could not print them without importing a system.
   const rawSrc = stripComments(readSource("src/host/browser/rawinput.ts"));

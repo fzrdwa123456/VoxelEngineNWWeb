@@ -65,14 +65,37 @@ function textureFrom(url: string): THREE.Texture {
   return texture;
 }
 
+/** THE LOD VIEW'S TINT FOR A **COLOUR-ONLY** LOOK — and why it is not a plain multiply.
+ *
+ *  `G` says "which rung is this chunk" by tinting its material. A TEXTURED look simply takes the tint as its
+ *  `color`, so the texture keeps its own brightness and gains the hue — which is why grass and dirt tint
+ *  correctly. A colour-only look has no texture to carry the detail, so it used to be `block colour × tint`,
+ *  and THREE multiplies in LINEAR space: two mid-dark colours give the PRODUCT of their luminances (grey stone
+ *  `#8a8a8a` is ≈ 0.25 linear, a rung tint 0.1-1.0 per channel, so the result lands around 0.03-0.25 with the
+ *  hue barely readable). That is the reported bug («按 G 之后部分区域变成黑色，有时又不变色；不显示颜色就正常»), and
+ *  it is worst for the far ring, whose bulk is a colour-only look (see `layerValues` in chunk-stream.ts).
+ *
+ *  So the tint is applied as the rung colour's HUE and SATURATION at the BLOCK'S OWN LIGHTNESS: the region
+ *  still says which rung it is, at the brightness that block always had. `getHSL`/`setHSL` both default to the
+ *  working (linear) space, so the lightness is preserved rather than round-tripped through sRGB. */
+function tintedLook(base: string, tint: string): THREE.Color {
+  const colour = new THREE.Color(base);
+  const tintHsl = { h: 0, s: 0, l: 0 };
+  new THREE.Color(tint).getHSL(tintHsl);
+  const baseHsl = { h: 0, s: 0, l: 0 };
+  colour.getHSL(baseHsl);
+  return new THREE.Color().setHSL(tintHsl.h, tintHsl.s, baseHsl.l);
+}
+
 /** The material for one look. `spec` omitted = the engine's checker (the mesher's own fallback and what a
  *  caller with no groups gets). Cached per SPEC KEY in the CHUNK_MATERIAL resource: a GPU object belongs to
  *  the world, and one material per look is shared by every chunk that shows it.
  *
- *  `tint` is the LOD VIEW's colour for the mesh's tier (P1.94, the `G` key): it MULTIPLIES the material, so a
- *  textured look keeps its texture and takes the hue, and a colour-only look is multiplied by it. It is part of
- *  the cache key, so a tinted world holds one extra material per (look, tier) — not one per chunk — and the
- *  UNTINTED cache entries are untouched: the toggle can always be turned back off. */
+ *  `tint` is the LOD VIEW's colour for the mesh's tier (P1.94, the `G` key): a textured look keeps its texture
+ *  and takes the hue, and a colour-only look takes the hue at its own brightness (`tintedLook` — a plain
+ *  multiply turned those regions black). It is part of the cache key, so a tinted world holds one extra
+ *  material per (look, tier) — not one per chunk — and the UNTINTED cache entries are untouched: the toggle can
+ *  always be turned back off. */
 export function getChunkMaterial(
   state: ChunkMaterialState,
   spec?: ChunkFaceSpec,
@@ -96,7 +119,7 @@ export function getChunkMaterial(
     spec.texture !== null
       ? new THREE.MeshLambertMaterial({ map: textureFrom(spec.texture), color: new THREE.Color(tint ?? "#ffffff") })
       : new THREE.MeshLambertMaterial({
-          color: new THREE.Color(spec.color ?? "#ffffff").multiply(new THREE.Color(tint ?? "#ffffff")),
+          color: tint ? tintedLook(spec.color ?? "#ffffff", tint) : new THREE.Color(spec.color ?? "#ffffff"),
         });
   state.materials.set(key, made);
   return made;

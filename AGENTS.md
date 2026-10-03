@@ -659,8 +659,8 @@ where it is:
     (`WORLD_SIZE`) the driver reads, changed by the `SetWorldSize` command from the world-type panel (presets +
     a slider bound to the value in force), and persisted as `worldXZ`.
 * **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** In a world, `G` tints every chunk mesh by its
-  RUNG: `LOD_TIER_TINT` has one colour per rung the shipped ladder can have (six, indexed by the rung — a colour
-  MULTIPLIES the material, so a textured block keeps its texture and takes the hue), `H` switches every chunk
+  RUNG: `LOD_TIER_TINT` has one colour per rung the shipped ladder can have (six, indexed by the rung), `H`
+  switches every chunk
   mesh to three.js's TRIANGLE
   WIREFRAME (the mesher emits triangles, so what you see is the mesh's real triangle edges, not the block grid),
   and `J` switches the APPEARANCE FADE off and on (see the next bullet). All three are handled by `chunk-stream`
@@ -669,6 +669,19 @@ where it is:
   other global chord uses (its own `KeyEdgeReader` cursor, ONE drain for all three; `player.input` still owns the
   DOM listeners), none of the three is bound to anything else, and a held key (repeat) or the key release is
   ignored.
+  **HOW THE TINT IS APPLIED DIFFERS BY LOOK, and getting it wrong once made regions BLACK** (the report: «按 G
+  之后部分区域变成黑色，有时又不变色；不显示颜色就正常»). A TEXTURED look takes the rung colour as its `color`, so
+  the texture keeps its own brightness and gains the hue. A COLOUR-ONLY look has no texture to carry the detail,
+  and a plain `base × tint` multiplies in LINEAR space — two mid-dark colours give the PRODUCT of their
+  luminances (grey stone ≈ 0.25 × a rung tint 0.1-1.0 ⇒ 0.03-0.25, hue barely readable), i.e. a near-black
+  region. It now takes the rung colour's HUE and SATURATION at the BLOCK'S OWN LIGHTNESS (`tintedLook` in
+  `host/browser/chunkmesh.ts`), so the region still says which rung it is at the brightness that block always
+  had. The far ring made that bug look enormous for a second reason: it used to resolve its stone/dirt/grass
+  values in the CONSTRUCTOR, which runs before the content plugin has numbered the palette from the pack chain
+  (`RENDER meshing` at 184 ms, `PALETTE 7 block(s) numbered` at 186 ms) — so it used `FALLBACK_PALETTE`'s
+  numbering, where `stone` is 3 and the real palette's 3 is `default`. It asks per build now
+  (`layerValues` in chunk-stream.ts): correct for any block order a pack ships, and no value can land on
+  `missing`, whose look is the engine's magenta/black checker.
   TWO PROPERTIES WORTH KEEPING: the tint is part of the material CACHE key, so a tinted world holds one extra
   material per (look, tier) and the untinted materials stay cached; and the WIREFRAME flag is applied on EVERY
   material resolution (`debugged`) rather than only on the key press, so a pack reload — which drops that cache

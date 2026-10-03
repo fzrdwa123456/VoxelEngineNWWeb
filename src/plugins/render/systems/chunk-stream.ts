@@ -195,9 +195,6 @@ export class ChunkStreamSystem {
    *  window — an empty window answers "nothing to build", which would enter a world with no loading screen and
    *  no primed chunks (`prime` lives inside that branch). */
   private ladderCentre: readonly [number, number] | null = null;
-  /** The palette values the far ring writes, resolved once: a coarse chunk is procedural, so it is handed the
-   *  layer values instead of asking the world for them (see data/world/lod.ts). */
-  private readonly layers: { readonly stone: number; readonly dirt: number; readonly grass: number };
   /** The LOD VIEW (P1.94): `G` tints every mesh by its tier. Its own cursor into the key-edge log, like every
    *  other consumer of a global chord (ui.picker, ui.navigation) — the DOM listeners are `player.input`'s. */
   private readonly keys: KeyEdgeReader;
@@ -299,11 +296,24 @@ export class ChunkStreamSystem {
     this.offsets = offsets;
     this.tiers = [];
 
-    // The layer values in the palette IN FORCE, read once (the palette only changes at boot and on a reload).
+    this.keys = new KeyEdgeReader(world.resource(KEY_EVENTS));
+  }
+
+  /** THE LAYER VALUES THE FAR RING WRITES, asked EVERY TIME a coarse chunk is built — deliberately NOT cached in
+   *  the constructor, which is where this went wrong: the render plugin is CONSTRUCTED before the content plugin
+   *  has numbered the palette from the pack chain (`debug.log`: `RENDER meshing` at 184 ms, `PALETTE 7 block(s)
+   *  numbered` at 186 ms), so a value captured here came from `FALLBACK_PALETTE` — whose `stone` is 3, while in
+   *  the real palette 3 is `default` (a green, COLOUR-ONLY block). The far ring was therefore drawn with the
+   *  wrong look across its whole bulk, and under the LOD view's tint a colour-only look went black (see
+   *  `tintedLook` in host/browser/chunkmesh.ts) — the user's «部分区域变成黑色». A value that names NO block is
+   *  worse still: it draws the engine's magenta/black checker, i.e. a large pure-black patch.
+   *
+   *  The cost of asking is three `indexOf` calls over a handful of ids, per coarse chunk built — nothing next to
+   *  the mesh it feeds — and it is correct for every order a pack may ship, and after any reload. */
+  private layerValues(): { readonly stone: number; readonly dirt: number; readonly grass: number } {
     const stone = this.voxel.valueOf("stone") || 1;
     const dirt = this.voxel.valueOf("dirt") || stone;
-    this.layers = { stone, dirt, grass: this.voxel.valueOf("grass") || dirt };
-    this.keys = new KeyEdgeReader(world.resource(KEY_EVENTS));
+    return { stone, dirt, grass: this.voxel.valueOf("grass") || dirt };
   }
 
   /** Generate (without meshing) every chunk in the window around a world position. Called once
@@ -967,14 +977,18 @@ export class ChunkStreamSystem {
       if (grid === null) return FAR_NOT_READY;
     }
 
+    // …and the layer values IN THE PALETTE IN FORCE, asked here rather than cached at construction (see
+    // `layerValues`: the cache was taken before the palette existed, and the far ring's "stone" was a look of its
+    // own — a colour-only block, which the LOD view's tint then turned black).
+    const layers = this.layerValues();
     const input = buildLodMeshInput(
       step,
       cx,
       cy,
       cz,
-      this.layers.stone,
-      this.layers.dirt,
-      this.layers.grass,
+      layers.stone,
+      layers.dirt,
+      layers.grass,
       grid ?? undefined,
     );
     const result = meshChunk(input);
