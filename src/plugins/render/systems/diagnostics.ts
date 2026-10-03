@@ -216,10 +216,11 @@ export class DiagnosticsSystem {
       `XYZ: ${info.x.toFixed(2)} / ${info.y.toFixed(2)} / ${info.z.toFixed(2)}\n` +
       `${t("f3.chunks")}: ${info.chunks}\n` +
       // THE DRAW SIDE (M1b): what one frame costs the renderer, from the FRAME probe's own accounts (the root
-      // computes them from three's totals once a second — see the FRAME line) plus the LIVE attribute count, which
-      // moves with the scene's geometry count (~3 per chunk geometry). `calls` is the number that says whether the
-      // far LOD ring's thousands of chunk meshes are what the frame is paying for.
+      // samples three's counters every drawn frame and rebases them — see the FRAME line) plus the LIVE attribute
+      // count, which moves with the scene's geometry count (~3 per chunk geometry). `calls` is the number that
+      // says whether the far LOD ring's chunk meshes are what the frame is paying for.
       `${t("f3.draw")}: calls=${this.frameProbe.callsPerFrame.toFixed(0)} ` +
+      `max=${this.frameProbe.drawCallMax} ` +
       `tris=${(this.frameProbe.trisPerFrame / 1000).toFixed(0)}k ` +
       `attrs=${this.renderer.info.memory.attributes}\n` +
       (info.gpuMs !== null

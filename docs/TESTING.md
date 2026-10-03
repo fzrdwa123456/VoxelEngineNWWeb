@@ -160,17 +160,25 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       `renderer.log`. Report BOTH (the far ring would then be answering columns from the CPU, which is slow but
       correct, so a failure is not a crash).
 → **WHERE THE FRAME TIME NOW GOES (M1b)**: with the sampling on the GPU, the far ring's remaining cost is the
-  SCENE, so the once-a-second `FRAME` line and the F3 panel both carry three.js's own counters:
-  `calls=` (draw calls in ONE frame, averaged over the second), `tris=` (thousands of triangles per frame) and
-  `attrs=` (LIVE vertex-attribute count — about three per chunk geometry, so it tracks the mesh count). What to
-  look for:
-  (a) on the ground with the ring fully filled, `calls` is the number to watch — **if it is in the thousands, the
-      frame is draw-call bound**, and that (not the terrain field) is what the next milestone has to attack;
-  (b) press **F3** and fly up ~200 blocks: the F3 `绘制/Draw:` line must show the SAME `calls`/`tris` as the last
-      `FRAME` line (one account, two readers), and `attrs` must grow while the ring fills and then settle;
+  SCENE, so the once-a-second `FRAME` line and the F3 panel carry three.js's own counters. The line now prints
+  **two readings of the same counter on purpose** (`calls=` and `callsΔ=`) — `Renderer.info` documents `drawCalls`
+  as "of the current frame" while this engine calls no `info.reset()`, and reading it a second apart produced
+  roughly EQUAL values, which is what a per-frame counter does. So: `calls=` is the per-frame count under the
+  "per frame" reading, `callsΔ=` the same under the "accumulating" reading, and **whichever is in a sane range
+  (tens to a few thousand, stable) is the truth** — the other is degenerate (millions, or ~0). Also:
+  `callsMax=` (the window's worst frame), `tris=` (thousands of triangles per frame), `renders=` (the monotonic
+  `renderer.render(...)` count — it must grow by about `n` per window, which is how we know the readings happen)
+  and `attrs=` (LIVE vertex-attribute count — about three per chunk geometry, so it tracks the mesh count). What
+  to look for:
+  (a) **THE ONE THING TO REPORT**: a few `FRAME` lines (i) on the ground with the ring fully filled, (ii) flying
+      high with the whole ring visible, and (iii) one from a window with a `STALL`. Together with `attrs`, the
+      sane one of `calls=`/`callsΔ=` is what decides whether the next milestone is the far ring's mesh count or
+      something else — **if it is in the thousands, the frame is draw-call bound**;
+  (b) press **F3**: the `绘制/Draw:` line shows the same `calls`/`max`/`tris`/`attrs` as the last `FRAME` line
+      (one account, two readers), and `attrs` must grow while the ring fills and then settle;
   (c) the `STALL` lines' neighbours tell the story: a stall next to `calls=2000` is a draw/scene problem, a stall
       next to a `LODSAMPLE` line would be the sampler's (none was seen in the M1 run);
-  (d) `debug.log`'s world entry now reports the ladder AFTER the window is built, so
+  (d) `debug.log`'s world entry reports the ladder AFTER the window is built, so
       `WORLD LOD ladder: N rung(s) for this 512-chunk lap` is a REAL number (it used to print `0` on every entry
       into a resized world, which read as "LOD is off"). On a 512-chunk lap expect several rungs, up to 6.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its

@@ -230,14 +230,27 @@ export interface FrameProbeState {
   pxMax: number;
   pxSum: number;
   pxN: number;
-  /** THE DRAW SIDE, as three.js reports it (M1b). `drawCalls`/`triangles` are the raw TOTAL counters, read and
-   *  re-read once per FRAME line to get the window's delta; `callsPerFrame`/`trisPerFrame` are that delta divided
-   *  by the drawn frames, i.e. what ONE frame costs — the number that says whether the frame is draw-call bound
-   *  (the far LOD ring puts thousands of chunk meshes in the scene). They live here rather than in the root
-   *  because the F3 panel reads them too, and a second copy of a counter is how the two disagree. */
+  /** THE DRAW SIDE, as three.js reports it (M1b). `drawCalls`/`triangles` are the last RAW counter values seen,
+   *  sampled EVERY DRAWN FRAME (not once a second — the first version compared two readings a second apart and
+   *  printed impossible negative numbers).
+   *
+   *  TWO INTERPRETATIONS ARE ACCUMULATED ON PURPOSE, because the two readings disagree about what the counter IS
+   *  and the log can settle it in one run: `render.drawCalls` is documented as "of the current frame" while this
+   *  engine calls no `info.reset()`, and a 1-second delta in the field came out at ±200 for ~50 drawn frames —
+   *  i.e. the reading a second apart was roughly EQUAL, which is what a per-frame counter does.
+   *    * `drawCallRawSum / n`  → the per-frame count **if the counter is per frame** (the evidence);
+   *    * `drawCallDeltaSum / n` → the per-frame count **if it accumulates**, and ~0-30 if it does not.
+   *  Whichever lands in a sane range is the truth; the other is degenerate (millions vs ~nothing). One run
+   *  decides it and the line can then be simplified to the winner. */
   drawCalls: number;
+  drawCallDeltaSum: number;
+  drawCallRawSum: number;
+  drawCallMax: number;
   triangles: number;
+  triangleDeltaSum: number;
+  triangleRawSum: number;
   callsPerFrame: number;
+  callsPerFrameDelta: number;
   trisPerFrame: number;
 }
 
@@ -262,8 +275,14 @@ export function createFrameProbe(): FrameProbeState {
     pxSum: 0,
     pxN: 0,
     drawCalls: 0,
+    drawCallDeltaSum: 0,
+    drawCallRawSum: 0,
+    drawCallMax: 0,
     triangles: 0,
+    triangleDeltaSum: 0,
+    triangleRawSum: 0,
     callsPerFrame: 0,
+    callsPerFrameDelta: 0,
     trisPerFrame: 0,
   };
 }

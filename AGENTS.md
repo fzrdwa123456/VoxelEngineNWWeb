@@ -722,14 +722,18 @@ where it is:
   trips` line per window fill.
 * **THE DRAW SIDE IS MEASURED TOO (M1b).** With the sampling moved off the CPU the far ring's remaining cost is
   the SCENE: a 512-chunk lap holds ~880 columns, i.e. thousands of far chunk meshes, and the `FRAME` line (once a
-  second) and the F3 panel (`f3.draw`) both carry `calls=` (draw calls in ONE frame, averaged over the window),
-  `tris=` (thousands of triangles) and `attrs=` (the LIVE vertex-attribute count, ~3 per chunk geometry, so it
-  tracks the mesh count). They exist to answer "is this frame draw-call bound" with a number: a stall reported next
-  to `calls=2000` is a different problem from one next to `calls=300`, and the next milestone after M1 is chosen
-  that way. **THE PER-FRAME FIGURE IS A DELTA, and that is not an accident**: this engine pumps its own rAF chain
-  and never calls `renderer.setAnimationLoop`, which is the only thing that runs `info.reset()` — so three's
-  counters are TOTALS here, and a `reset()` of our own would be worse than useless (it zeroes the LIVE memory
-  counts, which nothing repopulates). One account lives in `FRAME_PROBE` and both readers read it.
+  second) and the F3 panel (`f3.draw`) both carry `calls=`/`callsΔ=` (see below), `callsMax=` (worst frame),
+  `tris=` (thousands of triangles), `renders=` (the monotonic `renderer.render(...)` count) and `attrs=` (the LIVE
+  vertex-attribute count, ~3 per chunk geometry, so it tracks the mesh count). They exist to answer "is this frame
+  draw-call bound" with a number: a stall reported next to `calls=2000` is a different problem from one next to
+  `calls=300`, and the next milestone after M1 is chosen that way. **THE PER-FRAME FIGURE IS SAMPLED EVERY DRAWN
+  FRAME AND PRINTED TWICE, which is not an accident**: this engine pumps its own rAF chain and never calls
+  `renderer.setAnimationLoop`, which is the only thing that runs `info.reset()` — yet reading `drawCalls` a second
+  apart gave roughly EQUAL values, i.e. what a per-frame counter does and not what an accumulating one does. So
+  `calls=` is the raw reading's average (the per-frame count under the per-frame reading) and `callsΔ=` the
+  rebased per-frame delta (the per-frame count under the accumulating reading); one of the two is degenerate
+  (millions, or ~0) and the other is the truth. A `reset()` of our own would be worse than useless — it zeroes the
+  LIVE memory counts, which nothing repopulates. One account lives in `FRAME_PROBE` and both readers read it.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

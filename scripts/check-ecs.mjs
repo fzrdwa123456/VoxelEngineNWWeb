@@ -7521,19 +7521,34 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
     "…and a not-ready chunk spends THAT budget instead of the mesh budget");
   assert(/return FAR_NOT_READY/.test(streamSrc), "…while `buildFar` answers the sentinel instead of building nothing at all");
 
-  // 6. THE DRAW-SIDE ACCOUNTS (M1b), which are what the NEXT milestone is chosen from. three's counters are
-  //    TOTALS in this engine: nothing calls `info.reset()`, because that only happens in `setAnimationLoop`'s own
-  //    loop and this engine pumps its own rAF chain — so the per-frame figure has to be a DELTA over the window
-  //    (and a per-frame `reset()` would be worse: it zeroes the LIVE memory counts, which nothing repopulates).
-  //    The FRAME line and the F3 panel must read the SAME account, or the log and the screen disagree.
+  // 6. THE DRAW-SIDE ACCOUNTS (M1b), which are what the NEXT milestone is chosen from. `Renderer.info` documents
+  //    its counters as "of the current frame", yet nothing in this engine calls `info.reset()` (that happens only
+  //    in `setAnimationLoop`'s own loop, and this engine pumps its own rAF chain) — and the first version, which
+  //    read them once a SECOND, printed impossible values (negative: a counter that only grows cannot shrink; two
+  //    readings a second apart came out roughly equal instead). Both interpretations are therefore accumulated
+  //    PER DRAWN FRAME and printed as `calls=` (the raw reading) and `callsΔ=` (the rebased delta), so ONE run
+  //    says which the counter is — the other lands in a degenerate range (millions vs ~nothing). The FRAME line
+  //    and the F3 panel must read the SAME account, and the monotonic render-pass count rides along as a sanity
+  //    reference.
   const mainSrc = stripComments(readSource("src/boot/main.ts"));
-  assert(/probe\.callsPerFrame = probe\.n > 0 \? \(info\.render\.drawCalls - probe\.drawCalls\) \/ probe\.n : 0/.test(mainSrc),
-    "the per-frame draw-call figure is a DELTA over the window (three's counters are totals here)");
+  assert(/const deltaCalls = rawDrawCalls >= probe\.drawCalls \? rawDrawCalls - probe\.drawCalls : rawDrawCalls;/.test(mainSrc) &&
+    /probe\.drawCallRawSum \+= rawDrawCalls;/.test(mainSrc) && /probe\.drawCallDeltaSum \+= deltaCalls;/.test(mainSrc),
+    "the draw-call figure is sampled PER FRAME, both as read and as a rebased delta");
+  assert(/probe\.callsPerFrame = probe\.drawCallRawSum \/ frames;/.test(mainSrc) &&
+    /probe\.callsPerFrameDelta = probe\.drawCallDeltaSum \/ frames;/.test(mainSrc),
+    "…and both are averaged over the DRAWN frames");
+  assert(/if \(rawDrawCalls > probe\.drawCallMax\) probe\.drawCallMax = rawDrawCalls;/.test(mainSrc),
+    "…keeping the window's worst frame");
   assert(!/info\.reset\(\)/.test(mainSrc),
     "…and nothing resets three's counters (a reset would zero the live memory counts for good)");
-  assert(/calls=\$\{probe\.callsPerFrame\.toFixed\(0\)\}/.test(mainSrc), "the FRAME line carries it");
+  assert(/calls=\$\{probe\.callsPerFrame\.toFixed\(0\)\} callsΔ=\$\{probe\.callsPerFrameDelta\.toFixed\(1\)\} /.test(mainSrc) &&
+    /callsMax=\$\{probe\.drawCallMax\}/.test(mainSrc),
+    "the FRAME line carries all three");
+  assert(/renders=\$\{info\.render\.calls\}/.test(mainSrc),
+    "…plus the monotonic render-pass count, which must grow by about `n` per window");
   const diagSrc = stripComments(readSource("src/plugins/render/systems/diagnostics.ts"));
-  assert(/this\.frameProbe\.callsPerFrame/.test(diagSrc) && /f3\.draw/.test(diagSrc),
+  assert(/this\.frameProbe\.callsPerFrame/.test(diagSrc) && /this\.frameProbe\.drawCallMax/.test(diagSrc) &&
+    /f3\.draw/.test(diagSrc),
     "…and the F3 panel reads the SAME account (one number, two readers)");
 });
 
