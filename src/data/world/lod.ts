@@ -315,6 +315,22 @@ function wrapBlock(v: number): number {
   return ((v % period) + period) % period;
 }
 
+/** ONE COARSE COLUMN'S SAMPLED HEIGHTS — the type every producer and consumer of them shares, so the GPU sampler
+ *  (M1) and the CPU one are interchangeable BY TYPE and not only by convention.
+ *
+ *  TWO GRIDS, and the difference is the P1.95 fix: `max` is the MAXIMUM height over the `step × step` fine columns
+ *  a super voxel covers (conservative — the coarse surface is never BELOW the fine one, so the BODY cannot leave a
+ *  crack), and `min` is the MINIMUM (cull-safe — a face is only culled when the WHOLE covered area is solid). They
+ *  are used for different things: the body and the ±Y planes take `max` (the vertical neighbour is always the same
+ *  level, so max is exact there), while the ±X/±Z planes take `min`, because the neighbour on those sides may be
+ *  the FINE ring, whose geometry is per BLOCK. Culling a 2×2-wide quad with `max` while the fine side is per block
+ *  deleted the wall wherever the terrain stepped inside the cell — a one-block hole you could see into (measured:
+ *  3 of 1024 cells on one wall, 2 of them showing the interior). */
+export interface LodSampledGrid {
+  readonly max: Int16Array;
+  readonly min: Int16Array;
+}
+
 /** The sampled grid of the LAST column asked for — a ONE-ENTRY MEMO, and the difference between a far ring
  *  that costs a frame and one that does not. A column's 8 chunks need the SAME grid, and the stream walks a
  *  column's chunks back to back (`farKeys` is near-first, top Y first), so this removes ~7/8 of the terrain
@@ -322,24 +338,15 @@ function wrapBlock(v: number): number {
  *  A cache of a DETERMINISTIC function of (cx, cz) cannot go stale — the field never changes — which is what
  *  makes module-level state safe here (the generator keeps its own scratch grid for the same reason). */
 let memoSampledKey = "";
-let memoSampled: { readonly max: Int16Array; readonly min: Int16Array } | null = null;
+let memoSampled: LodSampledGrid | null = null;
 
 /** The (S+2)² grids of sampled heights for one coarse column, plus one cell of border on every side, because
- *  the ±X/±Z planes ARE the solidity of the neighbouring coarse cells.
- *
- *  TWO GRIDS, and the difference is the P1.95 fix: `max` is the MAXIMUM height over the `step × step` fine
- *  columns a super voxel covers (conservative — the coarse surface is never BELOW the fine one, so the BODY
- *  cannot leave a crack), and `min` is the MINIMUM (cull-safe — a face is only culled when the WHOLE covered
- *  area is solid). They are used for different things: the body and the ±Y planes take `max` (the vertical
- *  neighbour is always the same level, so max is exact there), while the ±X/±Z planes take `min`, because the
- *  neighbour on those sides may be the FINE ring, whose geometry is per BLOCK. Culling a 2×2-wide quad with
- *  `max` while the fine side is per block deleted the wall wherever the terrain stepped inside the cell — a
- *  one-block hole you could see into (measured: 3 of 1024 cells on one wall, 2 of them showing the interior). */
+ *  the ±X/±Z planes ARE the solidity of the neighbouring coarse cells (see `LodSampledGrid` for the two grids). */
 function sampledGrid(
   step: number,
   cx: number,
   cz: number,
-): { readonly max: Int16Array; readonly min: Int16Array } {
+): LodSampledGrid {
   const key = `${step}:${cx},${cz}`;
   if (memoSampledKey === key && memoSampled !== null) return memoSampled;
   const S = CHUNK_SIZE;
@@ -383,13 +390,18 @@ export function lodSampleGrid(
   step: number,
   cx: number,
   cz: number,
-): { readonly max: Int16Array; readonly min: Int16Array } {
+): LodSampledGrid {
   return sampledGrid(step, cx, cz);
 }
 
 /** Build the mesh input for ONE coarse chunk of a rung: the whole 32³ array plus the six neighbour planes, all
  *  from a single sampled height grid. The layout is the fine gatherer's (the same `meshChunk` reads either).
- *  `step` is the RUNG's step (the caller has it in the key), so one function serves every rung. */
+ *  `step` is the RUNG's step (the caller has it in the key), so one function serves every rung.
+ *
+ *  `sampled` is the SAMPLER'S ANSWER when the caller already has one — the GPU sampler (M1, see
+ *  plugins/render/systems/lod-gpu-sampler.ts) hands in the grids it read back, so this function never touches the
+ *  field in that case. Absent = sample on this thread, which is what the engine did before M1 and what the Node
+ *  gate still does. */
 export function buildLodMeshInput(
   step: number,
   cx: number,
@@ -398,11 +410,12 @@ export function buildLodMeshInput(
   stone: number,
   dirt: number,
   grass: number,
+  sampled?: LodSampledGrid,
 ): ChunkMeshInput {
   const S = CHUNK_SIZE;
   const bottom = cy * S;
   const top = bottom + S;
-  const grid = sampledGrid(step, cx, cz);
+  const grid = sampled ?? sampledGrid(step, cx, cz);
   const W = S + 2;
   const cellAt = (i: number, j: number): number => grid.max[j * W + i];
   const cellFloor = (i: number, j: number): number => grid.min[j * W + i];

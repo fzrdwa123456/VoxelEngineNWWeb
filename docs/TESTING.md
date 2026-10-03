@@ -99,10 +99,10 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (b) **`LODPROBE` lines in `debug.log`**, one per rung, e.g.
       `LODPROBE step 32: 2 column(s), 4624 value(s), mismatch 0, maxΔ 0 — gpu 12.3ms for 2.37M threads (dispatch+2 readbacks), cpu reference 376ms`,
       then a `LODPROBE RESULT:` line carrying the verdict, the two totals and the field SAMPLES/S. **The layout is
-      the thing to watch now (M1a)**: the kernel is ONE THREAD PER SAMPLE with an atomic reduce per cell, so the
-      `…M threads` and the samples/s say whether the GPU is finally doing the work in parallel — the previous
-      cell-per-thread layout measured 4M samples/s, i.e. no better than the CPU. What is NOT in this number: the
-      CPU side of M1 (the mesher) and, in production, one dispatch+readback per rung;
+      the thing to watch**: the kernel is ONE THREAD PER SAMPLE with an atomic reduce per cell, so the `…M threads`
+      and the samples/s say whether the GPU is finally doing the work in parallel (M1a's run: 11.8M samples/s
+      against the CPU's 6.3M/s, round trips included — the `4M/s` older runs printed was a unit bug in this line).
+      What is NOT in this number: the CPU side (the mesher) and, in production, the per-batch dispatch+readback;
   (b2) **how to read the verdict**: differences of ONE block = `PRECISION` (f32 vs f64 rounding — tolerable, and
       the fix in M1 would be a +1 margin on the coarse max or a fround discipline); ANYTHING larger = `PORTING BUG`
       in the GPU field, and the `examples:` list says which rung, column and cell. **Watch the SHAPE of the
@@ -120,6 +120,33 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       TSL/WGSL problem). Report that line — it is the M0 answer too, just the other one.
   Nothing in the world changes: the probe owns no state. Do NOT look for a visual difference — the point is the
   two numbers.
+→ **M1 — THE FAR RING NOW SAMPLES ON THE GPU (no key to press; this is what the world does by itself)**: enter a
+  world on a lap that holds several rungs (世界大小 → 512 chunks for all six) and watch the far terrain fill in.
+  What changed versus before: the ~1 s stalls while the OUTER rungs filled are gone, and the whole ladder's heights
+  arrive in well under a second of GPU time instead of ~71 s of main-thread sampling. What to check:
+  (a) **`debug.log` must carry `LODSAMPLE on (M1): the far ring's height grids are sampled on the GPU …`** right
+      after the world entry (it appears the first time a game frame runs). If it instead says `LODSAMPLE off: this
+      backend has no compute (WebGL fallback)` or `…the renderer never initialised…`, the engine fell back to the
+      CPU sampler — the world still works (that is the point of the fallback), just slowly, and the line is the
+      answer to "why is it still stalling";
+  (b) **one `LODSAMPLE self-check step N: OK — 10 values identical` line per rung** (2, 4, 8, 16, 32 as the fill
+      reaches them). This is the sampler checking ITSELF against `terrainHeight` on the main thread. **Anything that
+      is not `OK` is a hard stop** — a wrong constant in the GPU field would put the far terrain at the wrong height
+      (a crack, P1.93), which is exactly what this line exists to catch before you see it: report the line;
+  (c) **one `LODSAMPLE window: N column(s) in M batch(es), …M samples, …ms of GPU round trips` line per window
+      fill** (i.e. per chunk column you cross). Sanity: the whole six-rung ladder is ~772 columns and ~292M samples,
+      so on the user's machine expect roughly `772 column(s) in ~40 batch(es), 292M samples` — if `ms of GPU round
+      trips` is a large fraction of a second per window, the fixed dispatch+readback cost is the thing to tune;
+  (d) **the far terrain must look EXACTLY as it did before** — same hills, same rung bands (press `G` to check the
+      six bands and that they still tile without gaps), NO sky showing through any seam, and a far chunk dug at
+      ~400 blocks out still forgets the edit when you walk away (a far chunk is procedural). Walk a few hundred
+      blocks and the ladder re-centres as before, with a second or two of fill-in;
+  (e) **`FRAME` must stop showing the ~1 s stalls** (`stalls=0`, and `max` in the tens of ms at worst). A single
+      larger frame when a new rung's kernel is compiled is expected (five kernels over the fill). If a stall of
+      hundreds of ms still appears every few seconds, the fallback path is being taken — check (a);
+  (f) if a batch fails: `LODSAMPLE batch FAILED: …` in `debug.log`, and the real WGSL/pipeline reason in
+      `renderer.log`. Report BOTH (the far ring would then be answering columns from the CPU, which is slow but
+      correct, so a failure is not a crash).
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

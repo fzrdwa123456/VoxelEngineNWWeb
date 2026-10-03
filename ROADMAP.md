@@ -2932,7 +2932,7 @@ Still outstanding:
   SHARED material; and the retired `chunks` switch provably cannot turn it back on), the settings-source
   assertions now require the single row, and the P2.00 reserve group passes again because the fine window is
   filled where it should be. Not verified live: the user tests the packaged build by hand.
-- **P2.06 — the LOD pipeline moves to the GPU (M0 + M1a DONE: the sampler probe).** By request («我觉得应该把lod仍进gpu才行
+- **P2.06 — the LOD pipeline moves to the GPU (M0 + M1 DONE: the far ring samples on the GPU).** By request («我觉得应该把lod仍进gpu才行
   现在是不是纯cpu计算» → «c吧毕竟cpu吃不消»).
   WHAT WAS MEASURED FIRST, because the decision rests on it (one column = 8 Y chunks, sampling included):
   step 2 → 1.76 ms, step 4 → 5.34 ms, step 8 → 19.2 ms, step 16 → 73.8 ms, **step 32 → 289.7 ms** — the cost is
@@ -2943,9 +2943,9 @@ Still outstanding:
   the outer rungs fill. The fine ring is not the problem: 2.28 ms per real chunk (0.11 generate + 0.72 gather +
   1.45 mesh) on the WORKERS.
   THE ROUTE (agreed, in four milestones): **M0** a probe that proves a GPU port of the field reproduces the CPU's
-  values; **M1** sampling on the GPU (one dispatch per rung, one ~0.7 MB async readback, CPU meshing unchanged);
-  **M2** the mesher in WGSL, validated against `meshChunk`; **M3** GPU geometry + indirect draw (draw calls from
-  thousands to ~6-12) with per-cell visibility kept, because the reserve (P2.00) and the fades need it.
+  values; **M1** sampling on the GPU (one dispatch per BATCH of columns, one packed async readback, CPU meshing
+  unchanged); **M2** the mesher in WGSL, validated against `meshChunk`; **M3** GPU geometry + indirect draw (draw
+  calls from thousands to ~6-12) with per-cell visibility kept, because the reserve (P2.00) and the fades need it.
   M0 AS LANDED: `plugins/render/systems/lod-gpu-probe.ts`, run by `K` in a world. It builds the field as TSL
   FROM `TERRAIN_NOISE` (the seed, the octaves, the region cell, the amplitudes — exported as data for exactly
   this reason), one GPU thread per (S+2)² grid cell, `step²` samples per cell, and compares every value against
@@ -2992,18 +2992,36 @@ Still outstanding:
      every buffer an atomic touches**, and it belongs on the NODE, not on the attribute.
   Both are recorded here because M1 (`StorageBufferAttribute` inputs feeding a WGSL mesher) will hit the same two
   traps.
-  **M1's OPEN DECISION, from the ±1 values the probe now reports**: a coarse max one block BELOW the CPU's is a
-  crack (P1.93), while one above it is a one-block ledge — so if the fixed probe still shows ±1 anywhere, M1 adds a
-  deterministic +1 to the GPU's max (or the CPU side moves to f32 semantics) instead of tolerating it.
+  **M1's OPEN DECISION, SETTLED BY M1a's RUN**: a coarse max one block BELOW the CPU's would be a crack (P1.93) and
+  one above it a one-block ledge — so a `+1` margin was the fallback plan. It is NOT needed: every rung came back
+  `maxΔ 0`, 67048 values identical, so the GPU's max is used as it is.
   VERIFIED: `tsc` 0; `check:ecs` **83/83**, with a new group pinning the probe's foundations (the reference
   accessor IS the production max/min grid, re-derived cell by cell; `TERRAIN_NOISE` carries the field's numbers
   and the octave cells divide the lap; the probe's noise reads that data and never retypes the seed; its declared
   access and its `K` edge). The schedule's render batch gained a member (`lod.gpu.probe`), and AGENTS/TESTING
   were updated with it. The GPU half itself is NOT gate-testable (Node has no WebGPU), which is why the probe
   reports at runtime — M1-M3 will need the same kind of runtime self-check.
-  NOT DONE: M1 proper (one dispatch per rung, one async readback, feeding the REAL streaming path) and M2-M3, and
-  the numbers they must beat are the ones above. M1a is the measurement that decides M1's shape: if its samples/s
-  is far above the CPU's, sampling moves to the GPU wholesale; if only the cheap rungs lose, M1 keeps 2/3 on the CPU.
+  NOT DONE: M2-M3, and the numbers they must beat are the ones above.
+  **M1 AS LANDED — the far ring's height grids are sampled on the GPU.** The measured M1a run settled the shape: all
+  five rungs agreed with the CPU EXACTLY (67048 of 67048 values, max |Δ| 0 on every one), so no +1 margin is needed
+  (P1.93's crack is impossible), and the per-rung GPU times were 80.5/58.3/72.0/66.0/63.5 ms for 0.04/0.15/0.59/
+  0.89/2.37M threads — i.e. ~58-60 ms of FIXED cost per dispatch+readback against a marginal rate around 400M
+  samples/s (step 32 costs 5.2 ms more than step 4 for 2.2M more samples). The first rung pays the pipeline build.
+  That is why M1 batches: `lod-gpu-sampler.ts` samples a RUN of same-step columns per dispatch with ONE readback of
+  one packed buffer (`max` half then `min` half), so the step stays a compile-time constant and each (step, period)
+  has ONE cached kernel, re-dispatched with only `count` changed. The stream asks it through `LodGridSource`
+  (`gridFor`), `buildLodMeshInput` takes the grids as an optional argument, and a column that has not landed yet is
+  `FAR_NOT_READY`: unbuilt, no far budget spent, retried next frame. Expected effect on the user's machine, from the
+  measured numbers: 71 s of MAIN-THREAD sampling (the ~1 s stalls while the outer rungs fill, 57 s of it rung 6)
+  becomes ~0.7-2 s of GPU work spread over batches, and the far ring's fill time is then bounded by the MESH budget
+  instead. Still open in M1's shape: whether the far budget should rise now that sampling is nearly free (the ring
+  currently fills at ~1-2 columns/frame regardless of how fast the heights arrive).
+  Verified: `tsc` 0; `check:ecs` **84/84** with a new group that drives the sampler with NO device (an uninitialised
+  renderer must WAIT, a renderer that never appears must hand the column to the CPU, and a grid source that never
+  answers must build NO far chunk while one that answers must build them), plus the two WGSL traps and the workgroup
+  arithmetic pinned as source. The GPU half is still not gate-testable: the sampler SELF-CHECKS five cells of the
+  first column of every rung against `terrainHeight` on the main thread (~1.3 ms at step 32) and logs the verdict,
+  which is the runtime half of that check.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

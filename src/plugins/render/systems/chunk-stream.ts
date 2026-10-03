@@ -30,7 +30,7 @@ import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { FADE_OPTIONS, LOCAL_PLAYER, VOXEL, type FadeOptions } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
-import { buildLodMeshInput, fineBase, inTierAnnulus, inTierHole, lodLadder, tierOfStep, tierTint, type LodPolicy, type LodTier } from "../../../data/world/lod";
+import { buildLodMeshInput, fineBase, inTierAnnulus, inTierHole, lodLadder, tierOfStep, tierTint, type LodPolicy, type LodSampledGrid, type LodTier } from "../../../data/world/lod";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
@@ -120,6 +120,28 @@ export interface MeshWorkerPool {
   readonly inFlight: number;
   readonly workers: number;
 }
+
+/** WHERE A FAR CHUNK'S HEIGHT GRID COMES FROM (M1 of the GPU route). The CPU path (`null`) samples on this thread
+ *  inside `buildLodMeshInput`; a GPU sampler (plugins/render/systems/lod-gpu-sampler.ts) answers from the batch it
+ *  read back, and the two are interchangeable because the shape is `LodSampledGrid` either way.
+ *
+ *  `gridFor` MUST NOT BLOCK and MUST NOT sample on this thread: `null` means "not ready yet", and the caller leaves
+ *  that chunk unbuilt for this frame — it stays in `farWanted`, so a later frame asks again. The sampler owns the
+ *  wait (and its own CPU fallback), because only it knows whether a batch is in flight or the backend has no
+ *  compute at all. Declared here, on the consumer's side, for the same reason `MeshWorkerPool` is: the
+ *  implementation is a GPU object this file may not import. */
+export interface LodGridSource {
+  gridFor(step: number, cx: number, cz: number): LodSampledGrid | null;
+}
+
+/** A FAR CHUNK THAT IS WAITING FOR ITS GRID (`buildFar`'s answer, and the reason it is a sentinel rather than 0):
+ *  it costs the frame's far budget NOTHING — no CPU was spent and no mesh was built — and the loop spends a small
+ *  WAIT budget on it instead (see `LOD_WAIT_PER_FRAME`). */
+const FAR_NOT_READY = -1;
+/** How many not-ready far chunks one frame may walk past (M1). A column's grid arrives one or two frames after it is
+ *  requested, so this only bites on the first frames of a window move, when the sampler has not answered for the
+ *  whole ring yet. It is a SCAN budget, not a work budget: a miss costs one map lookup. */
+const LOD_WAIT_PER_FRAME = 64;
 
 /** Default so a drive-by test — and the Node gate, which drives `prime`/`needsWarmUp` on a stub voxel —
  *  can construct this system without a GPU: a geometry that is never drawn and a material that never
@@ -254,6 +276,9 @@ export class ChunkStreamSystem {
      *  drawn from the same terrain at `step` fine chunks per coarse one. Injected like the pool is: "does this
      *  install do LOD" is a capability of the composition, not something a system decides for itself. */
     private readonly lod: LodPolicy | null = null,
+    /** WHERE THE FAR RING'S HEIGHT GRIDS COME FROM (M1 of the GPU route). Absent = sample on this thread, which is
+     *  what the engine did before M1 and what the Node gate still does; the shipped game passes the GPU sampler. */
+    private readonly sampler: LodGridSource | null = null,
   ) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
@@ -530,12 +555,20 @@ export class ChunkStreamSystem {
     // is not read at all), so there is nothing to hand a worker and nothing to transfer back. It also costs
     // the world NOTHING: no chunk is generated for it, so a far ring 3× the fine ring's width adds no voxel
     // memory at all.
+    //
+    // WITH THE GPU SAMPLER (M1) a column whose heights have not been read back yet answers `FAR_NOT_READY`: it
+    // costs no budget, does not count as progress, and is simply retried next frame (the key is still in
+    // `farWanted`). The WAIT budget bounds how many of those one frame walks past, so a sampler that is behind
+    // cannot turn the loop into a scan of the whole ring.
     if (this.farWanted !== null) {
       let far = LOD_BUDGET_PER_FRAME;
+      let waits = 0;
       for (const key of this.farWanted) {
-        if (far <= 0) break;
+        if (far <= 0 || waits >= LOD_WAIT_PER_FRAME) break;
         if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
-        far -= this.buildFar(key);
+        const cost = this.buildFar(key);
+        if (cost === FAR_NOT_READY) waits++;
+        else far -= cost;
       }
     }
 
@@ -903,14 +936,16 @@ export class ChunkStreamSystem {
     this.beginFade(key, entry); // a chunk that APPEARED fades in (P1.98)
   }
 
-  /** A COARSE chunk's mesh (P1.93/P2.03 — any rung of the ladder). Procedural and main-thread:
-   *  `buildLodMeshInput` samples the height field for the whole chunk plus its six planes, so this reads NO world
-   *  chunk, allocates no voxel data and hands nothing to a worker. The result is applied through the same
-   *  geometry path a worker's result takes, so a coarse mesh and a fine one are indistinguishable to the draw —
-   *  the only difference is `step` (read from the KEY, so one function serves every rung), which the placement
+  /** A COARSE chunk's mesh (P1.93/P2.03 — any rung of the ladder). Procedural: `buildLodMeshInput` needs the
+   *  column's sampled height grid and nothing else — it reads NO world chunk, allocates no voxel data and hands
+   *  nothing to a worker. The grid comes from the injected `LodGridSource` (the GPU sampler, M1) or, without one,
+   *  from `buildLodMeshInput`'s own CPU sampling (what the engine did before M1). The result is applied through the
+   *  same geometry path a worker's result takes, so a coarse mesh and a fine one are indistinguishable to the draw
+   *  — the only difference is `step` (read from the KEY, so one function serves every rung), which the placement
    *  turns into the mesh's scale and the material factory into the tier's tint.
-   *  Returns what the chunk cost the frame's far budget: `LOD_MESH_COST` when it produced geometry, 1 when it
-   *  was uniform (or produced no face), which is the 10× difference the budget is spent in. */
+   *  Returns what the chunk cost the frame's far budget: `LOD_MESH_COST` when it produced geometry, 1 when it was
+   *  uniform (or produced no face) — the 10× difference the budget is spent in — or `FAR_NOT_READY` when the GPU
+   *  has not answered for this column yet, in which case nothing was built and nothing was spent. */
   private buildFar(key: string): number {
     if (this.lod === null) return 0;
     const colon = key.indexOf(":");
@@ -922,6 +957,16 @@ export class ChunkStreamSystem {
 
     this.killDying(key); // a coarse chunk that came back while its ghost was still fading out (P1.99)
 
+    // THE HEIGHT GRID (M1). A `null` answer means the sampler has not read this column back yet: leave the chunk
+    // unbuilt and let the next frame ask again — building nothing is CORRECT here, and cheaper than the 290 ms a
+    // step-32 column costs on this thread. (The sampler answers from the CPU itself if it keeps missing a column,
+    // so this is a delay, never a hole: see lod-gpu-sampler.ts.)
+    let grid: LodSampledGrid | null = null;
+    if (this.sampler !== null) {
+      grid = this.sampler.gridFor(step, cx, cz);
+      if (grid === null) return FAR_NOT_READY;
+    }
+
     const input = buildLodMeshInput(
       step,
       cx,
@@ -930,6 +975,7 @@ export class ChunkStreamSystem {
       this.layers.stone,
       this.layers.dirt,
       this.layers.grass,
+      grid ?? undefined,
     );
     const result = meshChunk(input);
     const geom = this.mesh.createGeometry();

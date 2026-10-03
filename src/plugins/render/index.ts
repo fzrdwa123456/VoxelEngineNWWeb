@@ -17,6 +17,9 @@ import { BlockOutlineSystem, OUTLINE_ACCESS } from "./systems/outline";
 // M0 of the GPU route: the sampler probe (`K`), a debug tool that compares a GPU port of the terrain field
 // against the CPU reference. It changes no streaming state — it reports.
 import { LodGpuProbeSystem, LOD_PROBE_ACCESS } from "./systems/lod-gpu-probe";
+// M1 of the GPU route: the PRODUCTION sampler. The stream asks it for a far column's height grids; it answers from
+// a GPU batch (or from the CPU when the backend has no compute), so the far ring stops costing 71 s of main thread.
+import { LodGpuSamplerSystem, LOD_SAMPLE_ACCESS } from "./systems/lod-gpu-sampler";
 import { definePlugin } from "../../core/plugin/descriptor";
 import {
   BLOCK_OUTLINE,
@@ -48,17 +51,23 @@ export interface RenderWiring {
 
 /** The render lane's systems, constructed here. */
 export function createRenderSystems(w: RenderWiring) {
+  // M1: the sampler is built FIRST because the chunk stream takes it as its grid source (`LodGridSource`), and it
+  // has to exist before the stream can ask for a column. It resolves the renderer itself (iron rule 6), so the
+  // order here is about the dependency, not about the GPU.
+  const lodSampler = new LodGpuSamplerSystem(w.world, w.log ?? (() => {}));
   return {
     chunkStream: new ChunkStreamSystem(
       w.world,
       w.mesh,
       w.pool ?? null,
       w.lod === undefined ? DEFAULT_LOD : w.lod,
+      lodSampler.source,
     ),
     cameraView: new CameraViewSystem(w.world),
     outline: new BlockOutlineSystem(w.world),
     menuBg: new MenuBackgroundSystem(w.world),
     lodProbe: new LodGpuProbeSystem(w.world, w.log ?? (() => {})),
+    lodSampler,
   };
 }
 
@@ -99,6 +108,17 @@ export function createRenderPlugin(w: RenderWiring) {
   stage: "render",
   ...OUTLINE_ACCESS,
   run: () => s.outline.render(),
+    });
+    api.system({
+  // M1 of the GPU route: the production sampler. One pump per frame — it walks the stream's far key set (which it
+  // READS, so the schedule places it after `chunk.stream`, the system that publishes it) and fires one dispatch.
+  name: "lod.gpu.sample",
+  stage: "render",
+  ...LOD_SAMPLE_ACCESS,
+  // DECLARED, because the two share a target (`chunkMeshes`) and the conflict rule refuses to guess: the sampler's
+  // work list IS the key set the stream writes, so it must run AFTER it (registration order is not a dependency).
+  after: ["chunk.stream"],
+  run: () => s.lodSampler.step(),
     });
     api.system({
   // M0 of the GPU route: `K` starts the sampler probe. Registered AFTER the stream so the schedule's snapshot

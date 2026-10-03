@@ -27,17 +27,12 @@ import {
   add,
   atomicMax,
   atomicMin,
-  bitXor,
-  clamp,
   div,
   float,
-  floor,
   instanceIndex,
   mod,
   mul,
-  shiftRight,
   storage,
-  sub,
   uint,
 } from "three/tsl";
 import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
@@ -48,15 +43,8 @@ import { worldChunksX } from "../../../data/world/size";
 import { ShowToast } from "../../../data/globals/commands";
 import { RENDERER3D } from "../../../data/globals/gfx";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
+import { n, tslTerrainHeight, tslWrap, type U32Node } from "./lod-gpu-field";
 import type { SystemAccess, World } from "../../../core/world";
-
-/** The TSL node shapes this probe hands around. ERASED ON PURPOSE: TSL's typings are precise per overload, and a
- *  probe whose whole job is to reproduce the CPU's integer hash needs the RUNTIME contract (u32 wraps, f32
- *  maths), not a type-level one — every intermediate below is spelled out so the emitter cannot silently pick a
- *  float overload where the CPU takes a wrapping integer. What matters is asserted by the probe itself: the GPU
- *  result is compared against the CPU reference, value by value. */
-type U32Node = any;
-type F32Node = any;
 
 /** The probe touches the GPU and nothing the world models: it reads the renderer (the compute queue) and owns
  *  its own scratch buffers. Declared, so the schedule can place it — it also makes "who may use the GPU" a
@@ -66,8 +54,6 @@ export const LOD_PROBE_ACCESS: SystemAccess = {
   writesExternal: ["lodProbeBuffers"],
 };
 
-/** 2^32 as a reciprocal: the same constant the CPU hash uses (terrain.ts), so the [0,1) mapping matches. */
-const INV_U32 = 2.3283064365386963e-10;
 /** Which rungs to compare and how many columns of each: the whole point is the OUTER rungs, but the CPU reference
  *  is what the probe pays for, so a rung-32 column is worth two of them and a step-2 column is nearly free. */
 const COLUMNS_PER_STEP: ReadonlyArray<readonly [number, number]> = [
@@ -77,73 +63,6 @@ const COLUMNS_PER_STEP: ReadonlyArray<readonly [number, number]> = [
   [16, 3],
   [32, 2],
 ];
-
-/** ERASE a node's type: every builder call below goes through it, so the emitter cannot pick a float overload
- *  where the CPU takes a WRAPPING INTEGER. TSL's typings are precise per overload, and a probe whose whole job is
- *  to reproduce the CPU's integer hash needs the runtime contract (u32 wraps, f32 maths) rather than a type-level
- *  one — and the probe CHECKS that contract: its GPU result is compared against the CPU reference, value by
- *  value, so a wrong overload shows up as a mismatch rather than as a compile error. */
-const n = (v: unknown): any => v;
-
-/** ONE NOISE LOOKUP, as TSL. This is `noise2` from data/world/terrain.ts, with the same integer hash: u32
- *  arithmetic wraps identically in WGSL, so the hash is bit-exact, and only the float steps afterwards can
- *  disagree (which is the thing being measured). */
-function tslNoise(period: number, x: F32Node, z: F32Node, cell: number, seed: number): F32Node {
-  const cells: U32Node = uint(period / cell);
-  const fx = div(n(x), n(float(cell)));
-  const fz = div(n(z), n(float(cell)));
-  const ix = floor(n(fx));
-  const iz = floor(n(fz));
-  // smoothstep, as terrain.ts: t² (3 - 2t)
-  const t = (v: F32Node): F32Node => mul(n(mul(n(v), n(v))), n(sub(n(float(3)), n(mul(n(v), n(float(2)))))));
-  const tx = t(sub(n(fx), n(ix)));
-  const tz = t(sub(n(fz), n(iz)));
-  const x0: U32Node = mod(n(ix.toUint()), n(cells));
-  const z0: U32Node = mod(n(iz.toUint()), n(cells));
-  const one: U32Node = uint(1);
-  const x1: U32Node = mod(n(add(n(x0), n(one))), n(cells));
-  const z1: U32Node = mod(n(add(n(z0), n(one))), n(cells));
-  const hash = (hx: U32Node, hz: U32Node): F32Node => {
-    const ha: U32Node = mul(n(hx), n(uint(0x27d4eb2d)));
-    const hb: U32Node = mul(n(hz), n(uint(0x165667b1)));
-    const h1: U32Node = bitXor(n(bitXor(n(ha), n(hb))), n(uint(seed >>> 0)));
-    const h2: U32Node = mul(n(bitXor(n(h1), n(shiftRight(n(h1), n(uint(15)))))), n(uint(0x85ebca6b)));
-    const h3: U32Node = bitXor(n(h2), n(shiftRight(n(h2), n(uint(13)))));
-    return mul(n(h3.toFloat()), n(float(INV_U32)));
-  };
-  const a = hash(x0, z0);
-  const b = hash(x1, z0);
-  const c = hash(x0, z1);
-  const d = hash(x1, z1);
-  const top = add(n(a), n(mul(n(sub(n(b), n(a))), n(tx))));
-  const bottom = add(n(c), n(mul(n(sub(n(d), n(c))), n(tx))));
-  return add(n(top), n(mul(n(sub(n(bottom), n(top))), n(tz))));
-}
-
-/** The whole field as TSL: `terrainHeight(x, z)`, built from `TERRAIN_NOISE` so a change to the field cannot
- *  leave the GPU copy behind. */
-function tslTerrainHeight(period: number, x: F32Node, z: F32Node): F32Node {
-  const spec = TERRAIN_NOISE;
-  const region = mul(
-    n(sub(n(tslNoise(period, x, z, spec.regionCell, spec.seed)), n(float(0.5)))),
-    n(float(2 * spec.regionAmplitude)),
-  );
-  let sum: F32Node | null = null;
-  for (let i = 0; i < spec.octaves.length; i++) {
-    const octave = spec.octaves[i];
-    // THE HILL STACK'S OWN SEED, then one offset per octave: `terrainHeight` uses a different seed for the hills
-    // than for the region, and MISSING that offset is what the probe's first run caught (a field ~20 blocks off).
-    const term = mul(
-      n(tslNoise(period, x, z, octave[0], (spec.hillSeed + i * 0x9e3779b1) >>> 0)),
-      n(float(octave[1])),
-    );
-    sum = sum === null ? term : add(n(sum), n(term));
-  }
-  const hill = mul(n(sub(n(div(n(sum), n(float(spec.octaveWeight)))), n(float(0.5)))), n(float(2 * spec.hillAmplitude)));
-  // Math.round is round-half-UP; WGSL's round() is round-half-to-EVEN, so the CPU's rule is spelled out.
-  const y = floor(n(add(n(add(n(float(spec.baseY)), n(region))), n(add(n(hill), n(float(0.5)))))));
-  return clamp(n(y), n(float(spec.minY)), n(float(spec.maxY)));
-}
 
 /** One probe batch: `columns` coarse columns of `step`, laid out over the same (S+2)² grid the CPU builds. The
  *  columns are DERIVED from the column index (the same two lines the CPU side uses), so no extra buffer is
@@ -163,14 +82,16 @@ interface ProbeBatch {
  *  `[TERRAIN_NOISE.minY, TERRAIN_NOISE.maxY]`), so a grid of these proves the kernel never ran. */
 const UNSET_MIN = 4096;
 
-/** ONE THREAD PER SAMPLE (M1a — the shape M1 needs, measured before anything is built on it).
+/** ONE THREAD PER SAMPLE (M1a, now also the PRODUCTION layout — see lod-gpu-sampler.ts).
  *
  *  WHY THIS REPLACED THE CELL-PER-THREAD VERSION: that one gave each thread a whole grid cell with an inner loop
- *  of `step²` samples, so a step-32 batch was ~2300 threads — the device sat idle and the measured throughput
- *  (4M samples/s) was no better than the CPU's. Here every SAMPLE gets a thread: `columns × cells × step²` of
- *  them, millions for the outer rungs, and the per-cell max/min is combined with ATOMICS rather than by a serial
- *  loop (two `atomicMax`es per sample — one on the height, one on its complement, which is how a `min` is spelled
- *  when only max-atomics are needed).
+ *  of `step²` samples, so a step-32 batch was ~2300 threads — the device sat idle, and the batch took 605 ms where
+ *  this one takes 340 ms for the same four million samples. (The "4M samples/s" both runs printed was NOT a
+ *  measurement: the throughput formula clamped its divisor in the wrong unit, see the RESULT line's note. The honest
+ *  figures are ~11.8M/s here against the CPU's 6.3M/s, round trips included.) Here every SAMPLE gets a thread:
+ *  `columns × cells × step²` of them, millions for the outer rungs, and the per-cell max/min is combined with
+ *  ATOMICS rather than by a serial loop (two `atomicMax`es per sample — one on the height, one on its complement,
+ *  which is how a `min` is spelled when only max-atomics are needed).
  *
  *  u32 BUFFERS, because atomics need integers. The field ROUNDS to integers anyway, so nothing is lost, and the
  *  readback is compared against the CPU's Int16 grids exactly as before. */
@@ -212,8 +133,8 @@ function buildBatch(step: number, columns: number, lapCells: number, period: num
     const within: U32Node = n(s).toUint();
     const dz: U32Node = div(within, uint(step));
     const dx: U32Node = mod(within, uint(step));
-    const wrap = (v: any): any => mod(add(mod(v, float(period)), float(period)), float(period));
-    const t = tslTerrainHeight(period, wrap(add(bx, dx.toFloat())), wrap(add(bz, dz.toFloat())));
+    // The wrap is `lod.ts`'s `wrapBlock` (a torus in X/Z), shared with the production sampler — see lod-gpu-field.ts.
+    const t = tslTerrainHeight(period, tslWrap(add(bx, dx.toFloat()), period), tslWrap(add(bz, dz.toFloat()), period));
     const slot = add(mul(col, uint(cells)), cell);
     atomicMax(outMax.element(slot), uint(t));
     atomicMin(outMin.element(slot), uint(t));
@@ -337,14 +258,19 @@ export class LodGpuProbeSystem {
               ? `PRECISION — ${mismatched} of ${compared} values differ by 1 block (f32 vs f64 rounding)`
               : `PORTING BUG — ${mismatched} of ${compared} values differ, max |Δ| = ${maxDiff} (far more than f32 `
                 + `rounding can explain: fix the GPU field, not the precision)`;
-      const samplesPerSecond = samplesTotal / Math.max(1, gpuTotal / 1000);
+      // THE MILLISECONDS ARE CLAMPED, THEN CONVERTED — the other order is a silent lie: `gpuTotal / 1000` is in
+      // SECONDS, so `Math.max(1, gpuTotal / 1000)` pins the divisor to 1 for any total under 1000 ms (i.e. always),
+      // and every run then reports `samples ÷ 1 s` no matter how fast it was. That is where the "4M/s" in the M0
+      // and M1a reports came from (the sample count is the same 4.03M every time, so the number never moved), and
+      // it is why the honest figures are ~11.8M/s here against the CPU's 6.3M/s.
+      const samplesPerSecond = (samplesTotal / Math.max(1, gpuTotal)) * 1000;
       this.log(
         `LODPROBE RESULT: ${verdict}; gpu ${gpuTotal.toFixed(1)}ms vs cpu ${cpuTotal.toFixed(0)}ms ` +
           `(both for ${compared / 2} grid values); ${(samplesTotal / 1e6).toFixed(1)}M field samples at ` +
-          `${(samplesPerSecond / 1e6).toFixed(0)}M/s — M1a's layout: ONE THREAD PER SAMPLE with an atomic `
+          `${(samplesPerSecond / 1e6).toFixed(1)}M/s — M1a's layout: ONE THREAD PER SAMPLE with an atomic `
           + `reduce per cell. This is still only the SAMPLING half (the CPU mesher and the per-rung `
-          + `dispatch+readback round trip are not in it), so compare it against the CPU numbers above and against `
-          + `the 4M/s of the cell-per-thread version. examples: ${examples.join(" | ") || "(none)"}`,
+          + `dispatch+readback round trip are not in it), so compare it against the CPU numbers above. `
+          + `examples: ${examples.join(" | ") || "(none)"}`,
       );
       this.log(`LODPROBE done in ${(performance.now() - started).toFixed(0)}ms`);
       this.world.commands.send(ShowToast, {

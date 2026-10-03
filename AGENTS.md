@@ -405,7 +405,7 @@ resolved order — determinism over a fake thread. `world.scheduleReport()` prin
 
 ```
 SCHEDULE fixed: 6 systems, 5 batches, 1 parallel pair(s) [player.input | (motion.snapshot ~ player.controller) | player.movement | player.collision | player.interaction]
-SCHEDULE render: 6 systems, 2 batches, 10 parallel pair(s) [(diagnostics ~ cameraView.render ~ chunk.stream ~ block.outline ~ lod.gpu.probe) | renderer.draw]
+SCHEDULE render: 7 systems, 2 batches, 11 parallel pair(s) [(diagnostics ~ cameraView.render ~ chunk.stream ~ block.outline ~ lod.gpu.probe) | (lod.gpu.sample ~ renderer.draw)]
 SCHEDULE ui: 11 systems + 4 gap(s), 13 batches, 3 parallel pair(s) [(ui.pages ~ ui.hud ~ ui.bindings) | ui.loading | ui.slot.bag* | ui.inventory | ui.slot.debug* | ui.picker | ui.slot.toast* | ui.toast | ui.slot.keybind* | ui.keybind | ui.navigation | ui.delays | ui.widgets]
 ```
 
@@ -415,7 +415,9 @@ PESSIMISATION kept so the tick still drains first. `renderer.draw` must follow i
 (`cameraView.render` writes the camera, `chunk.stream` the meshes) — while `block.outline` joins the
 producers' batch because it touches neither: it reads the TARGET_HIT COMPONENT and writes a target of
 its own, so any position among them is correct — the mesh is only read by the draw at the end of the
-lane, by which point the batch is done. The
+lane, by which point the batch is done. `lod.gpu.sample` (M1) READS the far key set `chunk.stream` publishes (its
+work list), so the conflict rule forces it into the batch AFTER that one — and nothing orders it against the draw
+(it fills its own buffers, which the draw never reads), so the two share that batch in either order. The
 ui lane is a CHAIN because the conflict model is per COMPONENT, not per entity: the writers all touch
 UI_STATE/UI_TEXT on different widgets. The one REAL pair there is `ui.hud ~ ui.bindings`
 (UI_STATE vs UI_INPUT) — what a batch looks like when the components are genuinely disjoint.
@@ -678,11 +680,32 @@ where it is:
   the view distance for LESS geometry than the single flat-radius-8 window (629k faces / 91 MB)**. The warm-up
   still builds only the fine ring (the entry time is unchanged); the far ring streams in over the first ~3 s
   of play.
+* **M1 — THE FAR RING'S HEIGHT GRIDS ARE SAMPLED ON THE GPU (`plugins/render/systems/lod-gpu-sampler.ts`,
+  `lod-gpu-field.ts`).** The 71 s of main-thread sampling above is gone: the stream asks a `LodGridSource` for a
+  column's max/min grids (`buildLodMeshInput`'s new optional argument), the sampler answers from a GPU batch — one
+  dispatch and ONE readback per batch of same-step columns — and a column whose answer has not landed yet makes
+  `buildFar` return `FAR_NOT_READY`: the chunk stays unbuilt, costs no far budget, and is retried next frame (the
+  key is still in `farWanted`; `LOD_WAIT_PER_FRAME` bounds how many of those one frame walks past). The batch is a
+  RUN of same-step columns because that is what lets the step be a compile-time constant — ONE cached kernel per
+  (step, period), re-dispatched with only `count` changed, no per-batch pipeline. The output is ONE packed u32
+  buffer (`max` half, then `min` half at `PACKED_HALF`), RESET before each dispatch because the atomics accumulate
+  onto what is there, and `.toAtomic()` on it is mandatory (see the probe's M1a runs: without it WGSL refuses the
+  pipeline and the dispatch silently writes nothing). `BATCH_SAMPLES` is a THREAD cap first of all — 4M threads at
+  64 per workgroup is what keeps a dispatch inside `maxComputeWorkgroupsPerDimension` (65535) — and the gate
+  asserts that arithmetic. THREE FALLBACKS, all deliberate: no WebGPU backend (or the Node gate, which passes no
+  sampler at all) samples on this thread exactly as before; a column the sampler misses `MISS_LIMIT` times in a row
+  is answered on the CPU (a bounded stall beats a hole in the ring); and a renderer that never initialises gives up
+  after `ABSENT_LIMIT` frames instead of leaving the far ring waiting for ever. The sampler also SELF-CHECKS: five
+  cells of the first column of every rung are recomputed with `terrainHeight` on this thread (~1.3 ms even at
+  step 32) and compared with the readback, logged as `LODSAMPLE self-check step N: …`, so a wrong constant shows up
+  as a number rather than as a hole. The full value-by-value check is still `K`. `debug.log` carries
+  `LODSAMPLE first batch: …` and one `LODSAMPLE window: … column(s) in N batch(es), …M samples, …ms of GPU round
+  trips` line per window fill.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it
-  (measured; ROADMAP P2.06). `K`, in a world, runs the SAME field as a TSL compute kernel — one thread per grid
-  cell, `step²` samples each — compares every value against `lodSampleGrid` (the production CPU grid, which is
+  (measured; ROADMAP P2.06). `K`, in a world, runs the SAME field as a TSL compute kernel — one thread per SAMPLE,
+  `step²` per grid cell — compares every value against `lodSampleGrid` (the production CPU grid, which is
   why that accessor is exported) and logs one line per rung plus a verdict, with a toast for the summary. **It
   exists to answer ONE question before anything is moved to the GPU: can f32 reproduce the f64 field exactly?**
   A one-block disagreement is not cosmetic — the coarse surface may never sit BELOW the fine one (P1.93) — so the
@@ -694,13 +717,17 @@ where it is:
   shadowed the outer and every cell sampled only its DIAGONAL, `1/step` of the samples, which is why the error grew
   with the rung (max |Δ| 2/3/8 at step 8/16/32, reproduced on the CPU by modelling "diagonal only"). The kernel
   therefore uses ONE flat `Loop(step²)`; both seeds and every octave come from `TERRAIN_NOISE`, and the gate asserts
-  exactly that. It is a probe: it owns no component, changes no streaming state, and its own CPU reference is the slow
-  half (~1 s), so a stall while it runs is expected and logged. **Its layout is the point of M1a**: one thread per
+  exactly that — as does the field's own module (`lod-gpu-field.ts`), which the probe and the M1 sampler SHARE so
+  there is exactly one GPU copy of `terrainHeight` in the tree. It is a probe: it owns no component, changes no
+  streaming state, and its own CPU reference is the slow
+  half (~1 s), so a stall while it runs is expected and logged. **Its layout is the production one**: one thread per
   SAMPLE with an atomic reduce per cell (`columns × cells × step²` threads — 2.37M for a step-32 batch), because
-  the first version ran one thread per GRID CELL with an inner loop of `step²` samples, which left the device idle
-  and measured 4M samples/s — no better than the CPU, and 12× SLOWER at step 2 where the per-rung
-  dispatch+readback round trip dominates. It reports the thread count and samples/s so the next layout change can
-  be judged against it.
+  the first version ran one thread per GRID CELL with an inner loop of `step²` samples, which left the device idle:
+  605 ms for the batch set where the thread-per-sample kernel takes 340 ms, and it was 12× SLOWER than the CPU at
+  step 2, where the per-rung dispatch+readback round trip dominates. **Its `samples/s` figure was a BUG until M1** —
+  the formula clamped its divisor in the wrong unit (`gpuTotal / 1000` is SECONDS, so `Math.max(1, …)` pinned it to
+  1 for any total under 1000 ms and every run printed "4M/s" whatever it did); the honest numbers are ~11.8M/s
+  against the CPU's 6.3M/s, round trips included, and the line now says `M/s` to one decimal.
 * **A CHUNK THAT APPEARS FADES IN AND ONE THAT LEAVES FADES OUT (P1.98/P1.99 — `FADE_IN_MS` = 220 ms,
   `FADE_OUT_MS` = 260 ms, `J` switches both off).** The reported complaint was «区块加载就闪» — a chunk that
   streams in popped at full opacity, which reads as a flash (worst on the far ring, whose chunks cover 64×64

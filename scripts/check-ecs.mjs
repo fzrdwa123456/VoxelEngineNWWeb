@@ -889,6 +889,11 @@ check("chunk meshing runs on WORKERS: the lane queues, drains and applies it (P1
   assert(/w\.pool \?\? null,/.test(systems) && /w\.lod === undefined \? DEFAULT_LOD : w\.lod/.test(systems),
     "the pool is the chunk stream's third dependency (absent = main thread, which the gate uses), and the FAR " +
       "RING (P1.93) is the fourth — the plugin decides the shipped policy, the constructor's own default is off");
+  // …and the FIFTH is where the far ring's height grids come from (M1): the GPU sampler the plugin just built. It is
+  // handed in as `LodGridSource`, so the stream does not know what a GPU is (the gate's own stream gets none, i.e.
+  // the CPU sampler, which is what keeps every far-ring assertion in this file valid without a device).
+  assert(/lodSampler\.source,/.test(systems),
+    "the GPU sampler (M1) is the chunk stream's FIFTH dependency, injected as `LodGridSource`");
   const root = read("boot/main.ts");
   assert(/const meshPool: MeshWorkerPool = createMeshWorkerPool\(\{ log: logDebug \}\)/.test(root),
     "the composition root builds the pool, with the log sink worker failures are reported to");
@@ -3951,6 +3956,9 @@ function registrations() {
     // M0 of the GPU route: the sampler probe. It declares the renderer and its own buffers, so it needs no
     // component — but the table is how the gate PARSES a registration, so it has to be here either way.
     LOD_PROBE_ACCESS: load("plugins/render/systems/lod-gpu-probe.js").LOD_PROBE_ACCESS,
+    // M1: the PRODUCTION sampler. It reads the chunk cache (the far key set is its work list, which is also why the
+    // schedule must place it after `chunk.stream`) and writes its own buffers.
+    LOD_SAMPLE_ACCESS: load("plugins/render/systems/lod-gpu-sampler.js").LOD_SAMPLE_ACCESS,
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
@@ -4022,7 +4030,10 @@ check("the real schedule resolves into the batches the docs claim", () => {
     // `lod.gpu.probe` (M0 of the GPU route) joins them: it declares the renderer and its own scratch buffers —
     // no component, so it conflicts with nobody and the schedule keeps the batch together.
     ["diagnostics", "cameraView.render", "chunk.stream", "block.outline", "lod.gpu.probe"],
-    ["renderer.draw"],
+    // `lod.gpu.sample` (M1) READS the far key set `chunk.stream` writes, so the conflict rule puts it in the batch
+    // AFTER that one — and nothing orders it against the draw (it fills its own buffers, which the draw never reads),
+    // so the two share this batch and either order is correct.
+    ["lod.gpu.sample", "renderer.draw"],
   ];
   // The ui lane: every widget-data WRITER, then the reconciler that reads all of it. The writers are a
   // chain rather than a pair because the conflict model is per COMPONENT, not per entity —the
@@ -4889,10 +4900,11 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
   ].join("\n");
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(w\.world\)/],
-    // The mesher, the WORKER POOL and the FAR RING's policy are capabilities injected by the root/plugin, not
-    // presentation objects (the pool creates Workers — a `host/` object a plugin may not import; the LOD policy
-    // is plain data). None of them is a resource, which is what this check is about.
-    ["the chunk stream", /new ChunkStreamSystem\(\s*w\.world,\s*w\.mesh,\s*w\.pool \?\? null,\s*w\.lod === undefined \? DEFAULT_LOD : w\.lod,?\s*\)/],
+    // The mesher, the WORKER POOL, the FAR RING's policy and the GPU SAMPLER (M1) are capabilities injected by the
+    // root/plugin, not presentation objects (the pool creates Workers — a `host/` object a plugin may not import;
+    // the LOD policy is plain data; the sampler is the plugin's own system, handed in through `LodGridSource`).
+    // None of them is a resource, which is what this check is about.
+    ["the chunk stream", /new ChunkStreamSystem\(\s*w\.world,\s*w\.mesh,\s*w\.pool \?\? null,\s*w\.lod === undefined \? DEFAULT_LOD : w\.lod,\s*lodSampler\.source,?\s*\)/],
     ["the device layer", /new PlayerInputSystem\(w\.world, w\.log, w\.inWorld, w\.mouse\)/],
     ["the reconciler", /export function createRenderSystem\(\.\.\.args: ConstructorParameters/],
   ]) {
@@ -6136,7 +6148,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(contribute(load("plugins/input/index.js").inputPlugin).list(S.SLOT_RESOURCES).length, 2,
     "the input plugin owns the bind table and the rebind gesture");
   assert(/SLOT_RESOURCES/.test(stripComments(readSource("src/plugins/render/index.ts"))) &&
-    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 5,
+    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 6,
     "the render plugin owns the GPU resources");
   assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
@@ -6286,8 +6298,9 @@ check("the plugin system: extension points, the registry, the install and the ma
   // under its own id, so a manifest line that disables it removes exactly that system.
   equal(countOf(stripComments(readSource("src/plugins/ui-debug/index.ts")), /api\.system\(/g), 1,
     "…and the ui-debug plugin declares the F3/picker system itself");
-  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 5,
-    "…the render plugin declares its five systems (the camera, the stream, the outline, the probe, the draw)");
+  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 6,
+    "…the render plugin declares its six systems (the camera, the stream, the outline, the GPU sampler, the probe, " +
+      "the draw)");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
     "…the player plugin declares its six systems");
   equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,
@@ -7355,17 +7368,23 @@ check("the LOD sampler probe (M0): the GPU field is built from the CPU field's o
   }
   equal(T.terrainPeriod() % spec.regionCell, 0, "…and so does the region cell");
 
-  // 3. THE PROBE ITSELF, as source: its noise is built from that DATA (no second copy of the seed), it compares
-  //    against the production accessor, and it declares what it touches. `K` is not a bind, so it is free.
+  // 3. THE PROBE ITSELF, as source: it takes its field from the SHARED TSL module (no second copy of the seed), it
+  //    compares against the production accessor, and it declares what it touches. `K` is not a bind, so it is free.
+  //    The field lived in this file until M1 needed the same code for the production sampler; it is asserted where
+  //    it lives now, and the probe is asserted to IMPORT it rather than to contain it.
+  const field = readSource("src/plugins/render/systems/lod-gpu-field.ts");
+  const fieldCode = stripComments(field);
   const probe = readSource("src/plugins/render/systems/lod-gpu-probe.ts");
   const probeCode = stripComments(probe);
-  assert(/TERRAIN_NOISE/.test(probeCode) && !/\b1337\b/.test(probeCode),
+  assert(/TERRAIN_NOISE/.test(fieldCode) && !/\b1337\b/.test(fieldCode),
     "the GPU field is built from TERRAIN_NOISE — the seed is not typed out a second time");
-  assert(/lodSampleGrid\(/.test(probeCode), "…and it is compared against the production grid accessor");
-  assert(/TERRAIN_NOISE\.octaves/.test(probeCode) && /spec\.regionCell/.test(probeCode),
+  assert(/const spec = TERRAIN_NOISE/.test(fieldCode) && /spec\.octaves/.test(fieldCode) && /spec\.regionCell/.test(fieldCode),
     "…including the octave stack and the region cell");
-  assert(/spec\.hillSeed/.test(probeCode),
+  assert(/spec\.hillSeed/.test(fieldCode),
     "…and the HILL stack's own seed (the omission that cost the probe's first run a field 20 blocks off)");
+  assert(/from "\.\/lod-gpu-field"/.test(probeCode),
+    "the probe takes that field from the shared module instead of carrying its own copy");
+  assert(/lodSampleGrid\(/.test(probeCode), "…and it is compared against the production grid accessor");
   const probeAccess = load("plugins/render/systems/lod-gpu-probe.js").LOD_PROBE_ACCESS;
   assert(probeAccess.readsExternal.includes("renderer3d"), "the probe declares the renderer it computes on");
   assert(probeAccess.writesExternal.includes("lodProbeBuffers"), "…and the scratch buffers it owns");
@@ -7373,6 +7392,105 @@ check("the LOD sampler probe (M0): the GPU field is built from the CPU field's o
   const binds = stripComments(readSource("src/data/globals/binds.ts"));
   assert(!/KeyK/.test(binds), "K is not a gameplay bind, so the probe may take it");
   assert(/edge\.code === "KeyK"/.test(probeCode), "…and the probe really reads that edge");
+});
+
+check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather than sampling on this thread", () => {
+  // M1 moved the far ring's height grids onto the GPU. Three things about it can only be checked HERE, because the
+  // gate has no device: the WGSL traps it must not fall back into (asserted as source + as ARITHMETIC), the CPU
+  // fallback that keeps a device-less run working, and the STREAM's half of the contract — a column the sampler has
+  // not answered for is left UNBUILT (waited for), not sampled on this thread.
+  const sampleSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-sampler.ts"));
+  const streamSrc = stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"));
+
+  // 1. THE TWO TRAPS, both of which shipped a whole lost test round in M1a:
+  //    * a plain `storage(attr,"uint",n)` has NO `atomicMax` in WGSL (the pipeline does not compile and the dispatch
+  //      writes nothing, silently) — the accumulators must be declared `.toAtomic()`;
+  //    * the atomics accumulate onto whatever is already in the buffer, so the used prefix has to be RESET before
+  //      each dispatch or a batch answers with the maximum over the PREVIOUS batch's leftovers.
+  equal(countOf(sampleSrc, /\.toAtomic\(\)/g), 1, "the packed accumulators are declared ATOMIC");
+  assert(/packed\.fill\(0, 0, slots\)/.test(sampleSrc) && /packed\.fill\(UNSET_MIN, PACKED_HALF, PACKED_HALF \+ slots\)/.test(sampleSrc),
+    "…and both halves of the packed buffer are RESET before every dispatch");
+  // …and the min half is addressed as an OFFSET of the fixed half, which is what makes the packed readback and the
+  // kernel agree without a second buffer.
+  assert(/add\(slot, uint\(PACKED_HALF\)\)/.test(sampleSrc), "the min half lives at a compile-time offset");
+
+  // 2. THE WORKGROUP CEILING, as arithmetic: WebGPU's default `maxComputeWorkgroupsPerDimension` is 65535, and the
+  //    batch cap is a SAMPLES (= threads) cap, so a future tuning of it can silently produce a failed dispatch.
+  const sampleCap = Number(/const BATCH_SAMPLES = ([\d_]+)/.exec(sampleSrc)[1].replace(/_/g, ""));
+  assert(sampleCap > 0 && Math.ceil(sampleCap / 64) <= 65535,
+    `one batch stays inside maxComputeWorkgroupsPerDimension (${Math.ceil(sampleCap / 64)} of 65535 workgroups)`);
+  // The column cap bounds the readback (the packed buffer is a FIXED size, so a batch cannot exceed it).
+  const columnCap = Number(/const BATCH_COLUMNS = ([\d_]+)/.exec(sampleSrc)[1].replace(/_/g, ""));
+  assert(columnCap > 0 && sampleCap / columnCap >= 1156 * 4,
+    "…and a batch of the smallest rung's columns fits in it (the cap is not the binding one there)");
+
+  // 3. THE DECLARATION, as data: the sampler is sequenced by the schedule (it reads the far key set the stream
+  //    publishes) and it is the second system allowed on the compute queue.
+  const sampleAccess = load("plugins/render/systems/lod-gpu-sampler.js").LOD_SAMPLE_ACCESS;
+  assert(sampleAccess.readsExternal.includes("renderer3d"), "the sampler declares the renderer it computes on");
+  assert(sampleAccess.readsExternal.includes("chunkMeshes"),
+    "…and the chunk cache, whose far key set is its WORK LIST (which is what orders it after `chunk.stream`)");
+  assert(sampleAccess.writesExternal.includes("lodSampleBuffers"), "…and the buffers it owns");
+
+  // 4. THE DEVICE-LESS BEHAVIOUR, driven for real. `gridFor` must NOT sample on this thread while the backend is
+  //    merely UNKNOWN (the renderer is constructed during wiring and initialised behind the loading screen), and it
+  //    MUST answer from the CPU once there is no backend at all — a hole in the far ring is never an option.
+  const { LodGpuSampler } = load("plugins/render/systems/lod-gpu-sampler.js");
+  const { lodSampleGrid, DEFAULT_LOD } = load("data/world/lod.js");
+  const P = loadPresentation();
+  const sampleWorld = new World();
+  sampleWorld.insertResource(P.RENDERER3D, {}); // a renderer with no backend yet
+  sampleWorld.insertResource(P.CHUNK_MESHES, P.createChunkMeshCache({ add() {}, remove() {} }));
+  const sampleLines = [];
+  const sampler = new LodGpuSampler(sampleWorld, (line) => sampleLines.push(line));
+  equal(sampler.gridFor(2, 3, 4), null, "an uninitialised renderer makes the far ring WAIT (no CPU sampling yet)");
+  for (let i = 0; i < 601; i++) sampler.step();
+  const fallback = sampler.gridFor(2, 3, 4);
+  assert(fallback !== null, "…and a renderer that never appears hands the column to the CPU instead of losing it");
+  const reference = lodSampleGrid(2, 3, 4);
+  equal([...fallback.max].join(","), [...reference.max].join(","), "…with the CPU field's own max values");
+  equal([...fallback.min].join(","), [...reference.min].join(","), "…and its own min values");
+  assert(sampleLines.some((l) => /LODSAMPLE off/.test(l)), "…and it says which backend it gave up on");
+
+  // 5. THE STREAM'S HALF: with a source that never answers, NO far chunk is decided (the stream waits, which is what
+  //    keeps the 290 ms step-32 column off this thread); with a source that answers, far chunks ARE decided — the
+  //    same window, so the only difference is the sampler.
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const buildStream = (source) => {
+    const w = new World();
+    w.insertResource(VOXEL, {
+      ensureChunk() {},
+      getChunk: () => null,
+      isSolid: () => false,
+      takeDirty: () => [],
+      takeStale: () => [],
+      markAllStale: () => 0,
+    });
+    w.insertResource(LOCAL_PLAYER, localPlayer);
+    const cache = P.createChunkMeshCache({ add() {}, remove() {} });
+    w.insertResource(P.CHUNK_MESHES, cache);
+    w.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+    w.insertResource(FADE_OPTIONS, createFadeOptions());
+    w.insertResource(KEY_EVENTS, createKeyEventLog());
+    return { cache, stream: new ChunkStreamSystem(w, undefined, null, DEFAULT_LOD, source) };
+  };
+  const farDecided = (cache) =>
+    [...cache.empty, ...cache.meshes.keys()].filter((k) => /^\d+:/.test(k)).length;
+  const waiting = buildStream({ gridFor: () => null });
+  for (let i = 0; i < 30; i++) waiting.stream.step();
+  equal(farDecided(waiting.cache), 0, "a sampler that never answers builds NO far chunk (nothing is sampled here)");
+  // …and the same window WITH an answer: the far ring really is built from the source's grids (the mesher is the
+  // no-GPU stub, so a chunk that has geometry is recorded in `empty` — "decided", not "empty sky").
+  const answered = buildStream({ gridFor: (step, cx, cz) => lodSampleGrid(step, cx, cz) });
+  for (let i = 0; i < 30; i++) answered.stream.step();
+  assert(farDecided(answered.cache) > 0, "…and the same window DOES build far chunks once the source answers");
+  // The wait is bounded per frame, not per window: the cap is what keeps a behind-the-scenes sampler from turning
+  // the far loop into a scan of the whole ladder.
+  assert(/const LOD_WAIT_PER_FRAME = \d+/.test(streamSrc), "the far loop has a per-frame WAIT budget of its own");
+  assert(/cost === FAR_NOT_READY \? waits\+\+/.test(streamSrc.replace(/\s+/g, " ")) ||
+    /if \(cost === FAR_NOT_READY\) waits\+\+/.test(streamSrc),
+    "…and a not-ready chunk spends THAT budget instead of the mesh budget");
+  assert(/return FAR_NOT_READY/.test(streamSrc), "…while `buildFar` answers the sentinel instead of building nothing at all");
 });
 
 // ===== report =====
