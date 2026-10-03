@@ -2890,6 +2890,13 @@ Still outstanding:
   0.25 sits just under that limit, improves the distance precision 2.5× over the old 0.1, and more than pays for
   the 2.4× longer far plane. (If distant z-fighting ever shows up, the next step is `logarithmicDepthBuffer: true`
   — confirmed to exist in this three build's `WebGPURenderer` — which would let `near` go back to 0.1.)
+  **CORRECTION (same round, from the user's report): `near` is 0.1 again.** 0.25 was measured to let the player
+  see THROUGH the wall beside them: the limit is not the body's 0.3 half-width but where the FRUSTUM reaches that
+  wall, which is a depth of `0.3 / tan(halfFovH)` — ≈0.22 with a 16:9 window, less on a wider one — so a `near`
+  above it clips a sliver of wall at the LEFT/RIGHT screen edges (straight ahead and above/below were fine, which
+  is exactly what the report said: 「靠近方块左右两边好像可以透视」). `far` stays 12000: that is the half of
+  P2.04 the ladder actually needed, and the precision `near` 0.25 bought is the precision the engine always had.
+  If distance z-fighting ever shows up, `logarithmicDepthBuffer` is the answer, not a bigger `near`.
   THE FADE RULE (P2.04 proper): `fadeOn` was `step > 1 → fadeOptions.lod`, i.e. EVERY coarse rung faded. Only the
   OUTERMOST one should: every rung inside it is replaced by a cell the rung outside it was already holding in
   reserve, which is a swap between two meshes that are both on screen — a fade there only made the handover look

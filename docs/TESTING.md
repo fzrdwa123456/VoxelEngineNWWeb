@@ -146,10 +146,13 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (a) the outermost rung (up to 7168 blocks, corners ~10138) must be VISIBLE — no camera-attached cutoff;
   (b) turning in place must not move the world's edge (only the world's own rim stays put);
   (c) **watch the far terrain for Z-FIGHTING** (shimmering/moiré on distant coarse surfaces): the depth buffer has
-      to stretch over 12000 blocks, which is what `near = 0.25` pays for. A little shimmering right at the outer
-      rim is acceptable; heavy flickering means we should switch to `logarithmicDepthBuffer: true`;
-  (d) walk right up against a wall and put your face into it: the wall must NOT disappear (that is what `near` above
-      the 0.3-wide body would do — `near` is 0.25, just under it);
+      to stretch over 12000 blocks. A little shimmering right at the outer rim is acceptable; heavy flickering
+      means we should switch to `logarithmicDepthBuffer: true`;
+  (d) **walk right up against a wall and look around beside you**: the wall must NOT disappear — and in particular
+      the LEFT and RIGHT screen edges must not show a sliver you can see through (`near` 0.25 did that: the frustum
+      reaches a wall you are touching at a depth of ≈0.22, so anything above it clips a sliver of it at the sides
+      while straight ahead looks fine). `near` is 0.1 for this reason — if a see-through slit at the sides ever
+      comes back, that number, not the LOD, is the suspect;
   (e) `FRAME` in F3: drawing the outer rungs really costs something now (they used to be culled). If the frame time
       at a big world is bad, say so — the ladder can be capped at 5 rungs, or the world size lowered.
 → **THE WORLD'S XZ SIZE (P2.02) AND THE NUMBER OF LOD RUNGS (P2.03)**: 单人模式 → the world-type panel now has a

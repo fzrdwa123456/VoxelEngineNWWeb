@@ -295,11 +295,17 @@ scene.background = new THREE.Color(0x87ceeb);
 // further than `far` is built, paid for and never seen — which is exactly what the six-rung ladder did to
 // its own outermost rung while this was 5000 (rung 6 reaches 7168, rung 5 3584). `far` is 12000 now, i.e.
 // past the ladder's 7168-block reach (and its ~10138-block corner).
-// `near` is what the DEPTH BUFFER's precision hinges on, and it can NOT grow freely: the collision box is
-// `halfWidth` 0.3 wide, so a wall you press against is 0.3 blocks from the eye and a `near` above that would
-// clip it away (you would see through the wall at arm's length). 0.25 is just under that limit and improves
-// the distance precision 2.5× over the old 0.1, which more than pays for the 2.4× longer far plane.
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.25, 12000);
+// `near` is what the DEPTH BUFFER's precision hinges on, and it may NOT grow — the limit is NOT the 0.3
+// half-width of the body, it is where the FRUSTUM reaches a wall you are touching. That wall is 0.3 blocks
+// to the SIDE, so it only enters the picture at a depth of `0.3 / tan(halfFovH)` — ≈0.22 with a 16:9 window
+// and LESS the wider the window gets — and a `near` above that clips a sliver of wall at the LEFT and RIGHT
+// screen edges: you look THROUGH the wall standing beside you (measured: `near` 0.25 did exactly that, and it
+// is why this is 0.1 again). 0.1 is below every aspect this window can have, and the precision it gives up is
+// the precision the engine always had: the longer far plane costs far less than that would (the depth
+// resolution near the eye is dominated by `near`, while the (far-near)/far term barely moves). If distance
+// z-fighting ever shows up, the answer is `logarithmicDepthBuffer: true` — which this three build's WebGPU
+// backend supports — NOT a bigger `near`.
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 12000);
 camera.position.set(1, 2.6, 1);
 camera.lookAt(0, 0, 0);
 

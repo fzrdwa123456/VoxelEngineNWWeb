@@ -1194,9 +1194,12 @@ When work lands, move the entry here and delete it there.
   less. Two numbers decide how much of it you actually see: `DEFAULT_LOD.reach`/`tiers` (data/world/lod.ts), and
   **the camera's FAR PLANE** (`boot/main.ts`, 12000 blocks since P2.04) — everything past it is culled as a whole
   object, so a ladder that reaches further than `far` is built, paid for and never drawn (the six-rung ladder did
-  exactly that to its own outer rung while `far` was 5000). `near` can NOT grow freely to buy depth precision:
-  the collision box is `halfWidth` 0.3 wide, so a wall you press against is 0.3 from the eye. To push the rim out
-  further, raise `reach`/`tiers` AND `far` together, or reintroduce a `scene.fog`.
+  exactly that to its own outer rung while `far` was 5000). `near` may NOT be raised to buy depth precision, and
+  the limit is not the 0.3-wide body: a wall you are touching is 0.3 blocks to the SIDE, so the frustum only
+  reaches it at a depth of `0.3 / tan(halfFovH)` (≈0.22 at 16:9, less on a wider window) — a `near` above that
+  clips a sliver of wall at the left/right screen edges and you see through the wall beside you (measured at
+  0.25). It is 0.1; the answer to distance z-fighting is `logarithmicDepthBuffer`, not `near`. To push the rim
+  out further, raise `reach`/`tiers` AND `far` together, or reintroduce a `scene.fog`.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
   `VoxelWorld.topSolidY()`, used by plugins/render/systems/diagnostics.ts and the F3 panel.
