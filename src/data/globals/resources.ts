@@ -580,13 +580,15 @@ export function canControl(devices: InputState, ui: UiModalState): boolean {
   return devices.locked && !isModalUi(ui);
 }
 
-// ===== The APPEARANCE FADES, as a setting (P2.01) =====
+// ===== The APPEARANCE FADES, as a setting (P2.01/P2.04) =====
 // A chunk that APPEARS fades in and one that LEAVES fades out (P1.98/P1.99). Since P2.00 that is no longer
-// needed to hide the seam — the far ring keeps a READY RESERVE under the fine ring, so a fine chunk is
-// replaced by geometry that is already there — which makes the fades a LOOK, and a look belongs in the
-// settings panel. The two rings are told apart because they are not the same question:
-//   * the FAR ring (LOD, step > 1) still has an edge with nothing behind it (its own outer boundary), so a
-//     fade there is covering a real pop. ON by default.
+// needed to hide the seam — every rung keeps a READY RESERVE in its hole, so a cell is replaced by geometry
+// that is already there — which makes the fades a LOOK, and a look belongs in the settings panel. The two
+// options are told apart because they are not the same question:
+//   * the LOD ladder's OUTERMOST rung (P2.04 — it used to be EVERY coarse rung): only that one has an edge
+//     with nothing behind it (its own outer boundary), so a fade there is covering a real pop. Every rung
+//     inside it is swapped for a reserved cell that was already on screen, where a fade only looked mushy.
+//     ON by default.
 //   * the FINE ring (real chunks, step 1) is always backed by the reserve now, and every reference
 //     implementation studied for P2.00 (Voxy, Cubyz, Distant Horizons) deliberately does NOT fade its real
 //     chunks at that boundary — Voxy and DH cancel the per-chunk fade outright. OFF by default.
@@ -594,7 +596,7 @@ export function canControl(devices: InputState, ui: UiModalState): boolean {
 // callback may not assign one, so the panel sends `SetFadeOption`. The `J` key remains a SESSION-ONLY master
 // switch over both (it never touches the file) — handy for A/B while playing.
 export interface FadeOptions {
-  /** The far ring (LOD) fades in when it appears and out when it leaves */
+  /** The ladder's outermost rung (LOD) fades in when it appears and out when it leaves */
   lod: boolean;
   /** The fine ring (real chunks) fades in when it appears and out when it leaves */
   chunks: boolean;

@@ -286,11 +286,20 @@ const canvasHost = document.getElementById("app")!;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
 // No fog: the scene is deliberately unfogged so the whole streamed world stays visible. The
-// trade-off is that the rim of the chunk window (~(RENDER_RADIUS_CHUNKS+1)*32 = 288 blocks, see
-// ecs/systems/chunkstream.ts) is visible as the edge of the world — raise that radius to push it
-// further out. The main-menu panorama is a separate scene and is unaffected either way.
+// trade-off is that the rim of the LOD ladder (its outermost rung, up to 7168 blocks out — see
+// data/world/lod.ts) is visible as the edge of the world: it is the FAR PLANE below that decides how
+// much of it is drawn at all. The main-menu panorama is a separate scene and is unaffected either way.
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 5000);
+// THE CAMERA'S NEAR/FAR PLANES ARE PART OF THE LOD'S RANGE (P2.04). `far` is the back face of the view
+// frustum: anything beyond it is not drawn AND is culled away as a whole object, so a ladder that reaches
+// further than `far` is built, paid for and never seen — which is exactly what the six-rung ladder did to
+// its own outermost rung while this was 5000 (rung 6 reaches 7168, rung 5 3584). `far` is 12000 now, i.e.
+// past the ladder's 7168-block reach (and its ~10138-block corner).
+// `near` is what the DEPTH BUFFER's precision hinges on, and it can NOT grow freely: the collision box is
+// `halfWidth` 0.3 wide, so a wall you press against is 0.3 blocks from the eye and a `near` above that would
+// clip it away (you would see through the wall at arm's length). 0.25 is just under that limit and improves
+// the distance precision 2.5× over the old 0.1, which more than pays for the 2.4× longer far plane.
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.25, 12000);
 camera.position.set(1, 2.6, 1);
 camera.lookAt(0, 0, 0);
 
@@ -351,10 +360,12 @@ const frameCap = createFrameCap(
   shellInfo().displayRefreshMilliHz,
 );
 world.insertResource(FPS_CAP, frameCap);
-// The APPEARANCE FADES, per ring (P2.01): the far ring's (on by default — its own outer edge has nothing
-// behind it) and the fine ring's (off by default — the P2.00 reserve means a real chunk is replaced by
-// geometry that is already there, and no reference implementation fades its real chunks at that boundary).
-// A resource, because `chunk-stream` reads it every step; the settings panel sends SetFadeOption to change it.
+// The APPEARANCE FADES, per rung (P2.01/P2.04): the LOD ladder's OUTERMOST rung (on by default — its own
+// outer edge has nothing behind it) and the fine ring (off by default — the P2.00 reserve means a real chunk is
+// replaced by geometry that is already there, and no reference implementation fades its real chunks at that
+// boundary). The rungs BETWEEN them never fade: each is replaced by a cell the rung outside it held in reserve,
+// so there is nothing to soften. A resource, because `chunk-stream` reads it every step; the settings panel
+// sends SetFadeOption to change it.
 const fadeOptions = createFadeOptions(readSettings().fadeLod, readSettings().fadeChunks);
 world.insertResource(FADE_OPTIONS, fadeOptions);
 // THE WORLD SIZE (P2.02): the lap the noise, the torus and the LOD rings share. A resource, because the
@@ -887,18 +898,18 @@ const onSetVsync = (on: boolean): void => {
   world.commands.send(ShowToast, { key: on ? "toast.vsyncOn" : "toast.vsyncOff" });
 };
 
-/** The appearance fades, per ring (P2.01): "does the far ring fade in/out" and "does the fine ring". Both are
- *  read by `chunk-stream` every step, so the change goes through the COMMAND (a UI callback may not assign a
- *  resource the tick reads) and the settings file is written here — the value is HANDED to the save, never read
- *  back before the barrier has applied it. */
+/** The appearance fades, per rung (P2.01/P2.04): "does the ladder's OUTERMOST rung fade in/out" and "does the
+ *  fine ring". Both are read by `chunk-stream` every step, so the change goes through the COMMAND (a UI callback
+ *  may not assign a resource the tick reads) and the settings file is written here — the value is HANDED to the
+ *  save, never read back before the barrier has applied it. */
 const onSetFade = (which: "lod" | "chunks", on: boolean): void => {
   world.commands.send(SetFadeOption, { which, on });
   // HANDED the value, exactly like the cap and vsync: the command applies at the next barrier, so reading the
   // resource here would persist the state the user just left (measured on both of those).
   saveSettings(which === "lod" ? { fadeLod: on } : { fadeChunks: on });
   logDebug(
-    `FADE ${which === "lod" ? "lod (far ring)" : "chunks (real chunks)"} ${on ? "on" : "off"}` +
-      `${which === "chunks" && !on ? " — the reserve covers the swap, so the seam stays invisible" : ""}`,
+    `FADE ${which === "lod" ? "lod (outermost rung)" : "chunks (real chunks)"} ${on ? "on" : "off"}` +
+      `${on ? "" : " — the reserve covers the swap, so the seam stays invisible"}`,
   );
 };
 

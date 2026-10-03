@@ -1010,15 +1010,25 @@ export class ChunkStreamSystem {
     return this.pushFade(key, entry, true);
   }
 
-  /** Does THIS tier fade right now? Two independent answers (P2.01), and the settings panel owns both:
-   *    * the `lod`/`chunks` options are the PERSISTED choice — the fine ring's fade is off by default, because
-   *      the reserve (P2.00) means a fine chunk is replaced by geometry that is already there, and none of the
-   *      reference implementations fades its real chunks at that boundary;
+  /** Does THIS tier fade right now? Two independent answers (P2.01/P2.04), and the settings panel owns both:
+   *    * the `lod`/`chunks` options are the PERSISTED choice, and they answer for DIFFERENT rungs: `chunks` is
+   *      the fine ring (off by default — a fine chunk is replaced by geometry the reserve already holds), and
+   *      `lod` is the OUTERMOST coarse rung only;
    *    * `fadeEnabled` is the `J` key's SESSION-ONLY master switch (it never writes the file).
-   *  A tier's fade is on only when both say so. */
+   *  A tier's fade is on only when both say so.
+   *
+   *  WHY ONLY THE OUTERMOST RUNG FADES (P2.04 — the user's request, and the geometry agrees with it): every
+   *  rung inside the outermost is REPLACED by a cell the rung outside it has been holding in reserve
+   *  (`refreshFarVisibility`), so its arrival is a swap between two meshes that are both already there and
+   *  there is nothing to soften — a fade there only made the swap look mushy. The outermost rung is the one
+   *  whose own outer edge has NOTHING beyond it: a cell appearing there pops against the sky, and a cell
+   *  leaving there vanishes against it, so that one keeps the fade. On a world whose lap holds fewer rungs
+   *  (see `lodLadder`) it is simply that world's own outermost rung — `this.ladder` is the ladder in force. */
   private fadeOn(step: number): boolean {
     if (!this.fadeEnabled) return false;
-    return step > 1 ? this.fadeOptions.lod : this.fadeOptions.chunks;
+    if (step === 1) return this.fadeOptions.chunks;
+    const outer = this.ladder.length > 0 ? this.ladder[this.ladder.length - 1].step : 1;
+    return step === outer && this.fadeOptions.lod;
   }
 
   /** The shared half of both directions: the per-chunk copies, `transparent`, and the fade entry. */

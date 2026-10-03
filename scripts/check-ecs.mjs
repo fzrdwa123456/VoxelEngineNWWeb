@@ -1864,27 +1864,41 @@ check("the appearance fades are a per-ring SETTING (P2.01): LOD fades, real chun
     }),
     getMaterial: () => fakeChunkMaterial({ shared: true, gen: ++gen }),
   };
-  // A tiny ladder (two rungs of reach 2): the settings are about which tier fades, not about ring geometry.
-  const stream = new ChunkStreamSystem(world, factory, null, { tiers: 2, reach: 2 });
+  // A tiny ladder (THREE rungs of reach 2): the settings are about which rung fades, not about ring geometry —
+  // and three rungs is the smallest ladder where "the outermost" and "a rung inside it" are different rungs.
+  const stream = new ChunkStreamSystem(world, factory, null, { tiers: 3, reach: 2 });
   const materialOf = (e) => (Array.isArray(e.mesh.material) ? e.mesh.material[0] : e.mesh.material);
   const freshOf = (step, since) =>
     [...cache.meshes.entries()].filter(([key, e]) => e.step === step && !since.has(key)).map(([, e]) => e);
   const keysNow = () => new Set(cache.meshes.keys());
 
   stream.step();
-  const afterFirst = keysNow();
   const fineFirst = freshOf(1, new Set());
-  const farFirst = freshOf(2, new Set());
-  assert(fineFirst.length > 0 && farFirst.length > 0, "the first step built both tiers");
+  assert(fineFirst.length > 0, "the first step built the fine ring");
   equal(
     fineFirst.filter((e) => materialOf(e).shared !== true).length,
     0,
     "with the setting OFF a real chunk appears on the SHARED material — no fade at all",
   );
+  // BOTH coarse rungs, over as many steps as they need (the far budget is 2 chunks a frame, and the inner rung
+  // is built first): the OUTERMOST one takes a copy of its material to fade with, the one inside it does not —
+  // it is swapped for a cell that was already on screen (P2.04).
+  const coarse = { 2: [], 4: [] };
+  for (let i = 0; i < 80 && (coarse[2].length === 0 || coarse[4].length === 0); i++) {
+    const before = keysNow();
+    stream.step();
+    for (const step of [2, 4]) coarse[step] = coarse[step].concat(freshOf(step, before));
+  }
+  assert(coarse[2].length > 0 && coarse[4].length > 0, `both coarse rungs appeared (${coarse[2].length}/${coarse[4].length})`);
   equal(
-    farFirst.filter((e) => materialOf(e).shared !== false).length,
+    coarse[4].filter((e) => materialOf(e).shared !== false).length,
     0,
-    "…while the LOD ring (setting ON) still gets its own copy to fade with",
+    "…while the OUTERMOST rung (setting ON) gets its own copy to fade with",
+  );
+  equal(
+    coarse[2].filter((e) => materialOf(e).shared !== true).length,
+    0,
+    "…and a rung INSIDE it appears on the SHARED material: its arrival is a swap with the reserve",
   );
 
   // …and the settings really are LIVE: flip the real-chunk fade on and the LOD fade off through the command, and
@@ -1894,26 +1908,42 @@ check("the appearance fades are a per-ring SETTING (P2.01): LOD fades, real chun
   world.renderUi();
   equal(settings.chunks, true, "the real-chunk fade is on now");
   equal(settings.lod, false, "…and the LOD fade is off");
-  let fineAfter = [];
-  let farAfter = [];
-  for (let i = 0; i < 60 && (fineAfter.length === 0 || farAfter.length === 0); i++) {
-    const before = keysNow();
-    stream.step();
-    fineAfter = fineAfter.concat(freshOf(1, before));
-    farAfter = farAfter.concat(freshOf(2, before));
+  // The window is DRAINED by the loop above, so fresh chunks of either kind need a MOVE: walking a couple of
+  // chunks sideways retires a strip and brings a new one in — which is also exactly when the settings matter.
+  const row = entityIndex(localPlayer);
+  const startX = C.POSITION.x[row];
+  const startZ = C.POSITION.z[row];
+  C.POSITION.x[row] = startX + 64;
+  try {
+    let fineAfter = [];
+    let outerAfter = [];
+    for (let i = 0; i < 200 && (fineAfter.length === 0 || outerAfter.length === 0); i++) {
+      const before = keysNow();
+      stream.step();
+      // The material is read AT COLLECTION TIME: a fade lasts 220 ms and this loop keeps stepping until the
+      // OUTERMOST rung has produced a chunk too, by which point the first fine ones have finished fading and hold
+      // the shared material again — asserting later would fail on a correct engine.
+      fineAfter = fineAfter.concat(freshOf(1, before).map((e) => materialOf(e).shared));
+      outerAfter = outerAfter.concat(freshOf(4, before).map((e) => materialOf(e).shared));
+    }
+    assert(fineAfter.length > 0, `more real chunks appeared (${fineAfter.length})`);
+    equal(
+      fineAfter.filter((s) => s === false).length,
+      fineAfter.length,
+      "with the setting ON a real chunk fades in like any other",
+    );
+    assert(outerAfter.length > 0, `more outermost-rung chunks appeared (${outerAfter.length})`);
+    equal(
+      outerAfter.filter((s) => s !== true).length,
+      0,
+      "…and with the LOD fade OFF even the outermost rung appears on the shared material",
+    );
+  } finally {
+    C.POSITION.x[row] = startX;
+    C.POSITION.z[row] = startZ;
+    C.PREV_POSITION.x[row] = startX;
+    C.PREV_POSITION.z[row] = startZ;
   }
-  assert(fineAfter.length > 0, `more real chunks appeared (${fineAfter.length})`);
-  equal(
-    fineAfter.filter((e) => materialOf(e).shared === false).length,
-    fineAfter.length,
-    "with the setting ON a real chunk fades in like any other",
-  );
-  assert(farAfter.length > 0, `more far chunks appeared (${farAfter.length})`);
-  equal(
-    farAfter.filter((e) => materialOf(e).shared !== true).length,
-    0,
-    "…and with the LOD fade OFF a far chunk appears on the shared material",
-  );
 });
 
 check("the world's XZ LAP is a setting (P2.02): the noise, the torus and the rings all follow it", () => {

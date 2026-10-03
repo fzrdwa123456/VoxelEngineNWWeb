@@ -2877,6 +2877,31 @@ Still outstanding:
   the same step, and the cells it claims stay drawn until the finer chunks over them are built AND opaque).
   NOT DONE, AND THE NEXT STEPS: chunk eviction (a bigger lap and six rungs make the never-evicted chunk map matter
   more), and the outer rim (no fog yet, so 7168 blocks of world ends visibly).
+- **P2.04 — the camera's far plane is raised to fit the ladder, and only the OUTERMOST rung fades.** `DONE`, by
+  request («b试试…顺便改lod淡出淡入只有最外层的lod才有淡出淡入»).
+  WHY THE CAMERA HAD TO MOVE: P2.03's ladder reaches 7168 blocks (its corner ~10138) while the camera's far plane
+  was still `5000` — and a far plane is not a "draw distance hint": `three` culls an object whose bounding volume
+  is entirely outside the frustum, so the outermost rung was BUILT, paid for (CPU + GPU memory) and never drawn,
+  and the user saw the world end at ~5000 blocks with nothing but the flat sky behind it. `boot/main.ts` is
+  `new THREE.PerspectiveCamera(75, aspect, 0.25, 12000)` now.
+  WHY `near` IS 0.25 AND NOT 0.3–0.5: the DEPTH BUFFER's precision is dominated by `near`, and raising it is the
+  cheap way to pay for a longer far plane — but the collision box is `halfWidth` 0.3 (`HUMANOID_BODY`), i.e. a wall
+  you press against is 0.3 blocks from the eye, so anything above that clips the wall away at arm's length.
+  0.25 sits just under that limit, improves the distance precision 2.5× over the old 0.1, and more than pays for
+  the 2.4× longer far plane. (If distant z-fighting ever shows up, the next step is `logarithmicDepthBuffer: true`
+  — confirmed to exist in this three build's `WebGPURenderer` — which would let `near` go back to 0.1.)
+  THE FADE RULE (P2.04 proper): `fadeOn` was `step > 1 → fadeOptions.lod`, i.e. EVERY coarse rung faded. Only the
+  OUTERMOST one should: every rung inside it is replaced by a cell the rung outside it was already holding in
+  reserve, which is a swap between two meshes that are both on screen — a fade there only made the handover look
+  mushy — while the outermost rung's own outer edge has nothing beyond it, so a cell appearing or leaving there is
+  a REAL pop and keeps the fade. `fadeOn` now asks the ladder in force (`this.ladder`, rebuilt as the window
+  moves) which rung is outermost, so a world whose lap holds two rungs fades its own outer rung, and the settings
+  label/hint (zh/en/ja) say 「最外层 LOD 淡入淡出」.
+  VERIFIED: `tsc` 0; `check:ecs` **82/82**, with the P2.01 group widened from a two-rung to a three-rung ladder so
+  the assertion can tell "the outermost" from "a rung inside it": step 4 must take its own material copy to fade
+  with while step 2 must appear on the SHARED material, and after flipping both settings (and MOVING the window,
+  because the drain loop above leaves nothing new to build) the outermost rung appears shared with the fade off.
+  Deliberately NOT verified live this round: the user asked to test the packaged build by hand.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

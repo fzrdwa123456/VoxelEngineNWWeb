@@ -122,13 +122,18 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       into the transparent pass for 0.26 s, so the frame time must not visibly jump (it is bounded by
       `FADE_OUT_MAX`, past which the rest are removed at once); a teleport-sized unload (entering a world) must
       NOT hold thousands of meshes alive — that is what the cap is for.
-→ **THE TWO FADE SWITCHES IN THE SETTINGS (P2.01)**: pause (ESC) → 设置, and look at the two rows under 垂直同步 —
-  **LOD 淡入淡出** (far ring) and **真实区块淡入淡出** (real chunks). Expected out of the box: LOD = 已开启,
+→ **THE TWO FADE SWITCHES IN THE SETTINGS (P2.01/P2.04)**: pause (ESC) → 设置, and look at the two rows under
+  垂直同步 — **最外层 LOD 淡入淡出** and **真实区块淡入淡出**. Expected out of the box: LOD = 已开启,
   真实区块 = 已关闭. Check each of the four combinations by walking/flying across a chunk boundary with `G` on
-  (the tier tint makes the junction obvious):
-  (a) **LOD on**: a chunk appearing at the FAR ring's own outer edge fades in instead of popping;
-  (b) **LOD off**: that far chunk pops in (and nothing else changes — the seam must still never show sky, the
-      P2.00 reserve is what covers it);
+  (the rung colours make the junctions obvious):
+  (a) **LOD on**: a cell appearing at the OUTERMOST rung's own outer edge (the frontier of the whole ladder, where
+      there is nothing beyond it) fades in instead of popping; a cell leaving there fades out;
+  (a2) **and NOTHING IN BETWEEN**: the rungs inside the outermost must appear/disappear INSTANTLY — watch the
+      junction between two inner rungs while walking: no dissolve there, just a clean swap (the cell the outer rung
+      was holding in reserve takes over). A soft dissolve at an inner junction means the fade rule went back to
+      "every coarse rung" — the log's `FADE lod (outermost rung)` line is the setting's own name for it;
+  (b) **LOD off**: that outermost cell pops in and vanishes at once (and nothing else changes — the seams must
+      still never show sky, the P2.00 reserve is what covers them);
   (c) **真实区块 on**: a real chunk appearing at the fine ring's edge fades in (a soft dissolve over the coarse
       surface behind it);
   (d) **真实区块 off** (the default): a real chunk appears at once — crisper, and still no flash of sky, which is
@@ -138,6 +143,19 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   session without touching the file (a held key or the key release must not toggle it). A hand-edited
   `"fadeLod": "yes"` must load as ON and `"fadeChunks": "yes"` as OFF (only a real `true` turns the fine ring's
   fade on), and the boot line must not report either as an unknown setting.
+→ **THE WORLD MUST NOT END AT ~5000 BLOCKS (P2.04 — the camera's far plane)**: on a big world (16384 blocks), get
+  somewhere high (fly up) and look at the horizon. Before this round, everything past **5000 blocks** was culled by
+  the camera itself, so the 6th rung was built and never drawn, and the far terrain ended in a boundary that
+  **followed the camera** (turn around and it turns with you) with flat sky behind it. Now `far` is 12000, so:
+  (a) the outermost rung (up to 7168 blocks, corners ~10138) must be VISIBLE — no camera-attached cutoff;
+  (b) turning in place must not move the world's edge (only the world's own rim stays put);
+  (c) **watch the far terrain for Z-FIGHTING** (shimmering/moiré on distant coarse surfaces): the depth buffer has
+      to stretch over 12000 blocks, which is what `near = 0.25` pays for. A little shimmering right at the outer
+      rim is acceptable; heavy flickering means we should switch to `logarithmicDepthBuffer: true`;
+  (d) walk right up against a wall and put your face into it: the wall must NOT disappear (that is what `near` above
+      the 0.3-wide body would do — `near` is 0.25, just under it);
+  (e) `FRAME` in F3: drawing the outer rungs really costs something now (they used to be culled). If the frame time
+      at a big world is bad, say so — the ladder can be capped at 5 rungs, or the world size lowered.
 → **THE WORLD'S XZ SIZE (P2.02) AND THE NUMBER OF LOD RUNGS (P2.03)**: 单人模式 → the world-type panel now has a
   **世界大小 (XZ 一圈)** section under
   the two world types: five preset buttons (1024 / 2048 / 4096 / 8192 / 16384) and a slider for anything between

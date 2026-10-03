@@ -718,11 +718,15 @@ where it is:
     opacity now, the leaving ones are taken down now. Ending them at the switch is not cosmetic: with the effect
     off nothing would ever finish a fade, so a chunk caught mid-fade would stay translucent for ever. `J` is
     SESSION-ONLY and overrides both rings; the PERSISTED choice is the two settings rows below.
-  * **THE PERSISTED CHOICE IS PER RING (P2.01): `settings.fadeLod` and `settings.fadeChunks`.** Since the reserve
-    (P2.00) the two rings are not the same question: the far ring's own outer edge still has nothing behind it
-    (its fade covers a real pop — ON by default), while a real chunk is always replaced by geometry that is
+  * **THE PERSISTED CHOICE IS PER RUNG (P2.01/P2.04): `settings.fadeLod` and `settings.fadeChunks`.** Since the
+    reserve (P2.00) the two are not the same question: the ladder's OUTERMOST rung has an edge with nothing behind
+    it (its fade covers a real pop — ON by default), while a real chunk is always replaced by geometry that is
     already there (its fade is a look — OFF by default, and Voxy/DH cancel the per-chunk fade outright while
-    Cubyz fades only its LOD tier). The values live in the `FADE_OPTIONS` RESOURCE because `chunk-stream` reads
+    Cubyz fades only its LOD tier). **EVERY RUNG BETWEEN THEM NEVER FADES**: each of those is replaced by a cell
+    the rung outside it was already holding in reserve, so a fade there only made the swap look mushy — that is
+    the P2.04 change, and `fadeOn` asks the ladder in force (`this.ladder`, rebuilt as the window moves) which
+    rung is outermost, so a world whose lap holds fewer rungs fades its own outermost one. The values live in the
+    `FADE_OPTIONS` RESOURCE because `chunk-stream` reads
     them every step, the panel changes them through the `SetFadeOption` COMMAND, and the save is HANDED the new
     value (reading the resource back would write the state the user just left) — the same shape as the frame cap
     and vsync.
@@ -1184,9 +1188,12 @@ When work lands, move the entry here and delete it there.
   giving the field a bigger amplitude, needs eviction first.
 - The scene has NO fog, so the rim of the streamed chunk window is visible as the edge of the
   world — now at up to 7168 blocks instead of ~256 (the outer rung, P2.03), which makes it more noticeable, not
-  less. Raise `DEFAULT_LOD.reach` or `tiers` (data/world/lod.ts) to push it out, or reintroduce a `scene.fog` —
-  but a rung only exists on a world whose lap can hold it (`lodTierFits`), so a wider ladder needs the bigger
-  world-size preset too.
+  less. Two numbers decide how much of it you actually see: `DEFAULT_LOD.reach`/`tiers` (data/world/lod.ts), and
+  **the camera's FAR PLANE** (`boot/main.ts`, 12000 blocks since P2.04) — everything past it is culled as a whole
+  object, so a ladder that reaches further than `far` is built, paid for and never drawn (the six-rung ladder did
+  exactly that to its own outer rung while `far` was 5000). `near` can NOT grow freely to buy depth precision:
+  the collision box is `halfWidth` 0.3 wide, so a wall you press against is 0.3 from the eye. To push the rim out
+  further, raise `reach`/`tiers` AND `far` together, or reintroduce a `scene.fog`.
 - `input.ts` still carries `const top = NaN; // ... (was groundTop())` in its SPACE log. That is
   display-only and deliberately untouched (rule 3 territory); the real surface height is
   `VoxelWorld.topSolidY()`, used by plugins/render/systems/diagnostics.ts and the F3 panel.
