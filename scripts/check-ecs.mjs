@@ -3948,6 +3948,9 @@ function registrations() {
     DIAGNOSTICS_ACCESS: load("plugins/render/systems/diagnostics.js").DIAGNOSTICS_ACCESS,
     CAMERA_VIEW_ACCESS: load("plugins/render/systems/camera.js").CAMERA_VIEW_ACCESS,
     OUTLINE_ACCESS: load("plugins/render/systems/outline.js").OUTLINE_ACCESS,
+    // M0 of the GPU route: the sampler probe. It declares the renderer and its own buffers, so it needs no
+    // component — but the table is how the gate PARSES a registration, so it has to be here either way.
+    LOD_PROBE_ACCESS: load("plugins/render/systems/lod-gpu-probe.js").LOD_PROBE_ACCESS,
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
@@ -4016,7 +4019,9 @@ check("the real schedule resolves into the batches the docs claim", () => {
   // writes a target of its own (`blockOutline`), so any order among the four is correct �?and the draw,
   // which reads the scene they fill, stays in the batch after it.
   const expectedRender = [
-    ["diagnostics", "cameraView.render", "chunk.stream", "block.outline"],
+    // `lod.gpu.probe` (M0 of the GPU route) joins them: it declares the renderer and its own scratch buffers —
+    // no component, so it conflicts with nobody and the schedule keeps the batch together.
+    ["diagnostics", "cameraView.render", "chunk.stream", "block.outline", "lod.gpu.probe"],
     ["renderer.draw"],
   ];
   // The ui lane: every widget-data WRITER, then the reconciler that reads all of it. The writers are a
@@ -6131,7 +6136,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(contribute(load("plugins/input/index.js").inputPlugin).list(S.SLOT_RESOURCES).length, 2,
     "the input plugin owns the bind table and the rebind gesture");
   assert(/SLOT_RESOURCES/.test(stripComments(readSource("src/plugins/render/index.ts"))) &&
-    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 4,
+    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 5,
     "the render plugin owns the GPU resources");
   assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
@@ -6281,8 +6286,8 @@ check("the plugin system: extension points, the registry, the install and the ma
   // under its own id, so a manifest line that disables it removes exactly that system.
   equal(countOf(stripComments(readSource("src/plugins/ui-debug/index.ts")), /api\.system\(/g), 1,
     "…and the ui-debug plugin declares the F3/picker system itself");
-  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 4,
-    "…the render plugin declares its four systems");
+  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 5,
+    "…the render plugin declares its five systems (the camera, the stream, the outline, the probe, the draw)");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
     "…the player plugin declares its six systems");
   equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,
@@ -7282,6 +7287,87 @@ check("a PACK can add a language at RUNTIME: the picker's rows follow the chain 
   // that same call: a row that is not shown is not clickable, so an index can never point at a stale language.
   assert(/const lang = langShown\[Number\(value\)\];[\s\S]*?if \(lang !== undefined\) setLang\(lang\);/.test(menu),
     "…and an index with no language behind it is a no-op rather than a refusal to switch");
+});
+
+// ===== M0 of the GPU route: the LOD sampler probe =====
+console.log("\n--- the GPU sampler probe: the reference it compares against, and its drift guards ---");
+
+check("the LOD sampler probe (M0): the GPU field is built from the CPU field's own numbers", () => {
+  // The probe compares a GPU port of `terrainHeight` against `lodSampleGrid`. Nothing about that comparison can
+  // run here (the gate has no GPU), so what IS asserted is everything the comparison RESTS on:
+  //   * the REFERENCE is the production grid — re-derived here from `terrainHeight` and the same wrap, cell by
+  //     cell, so "the probe measured the real thing" is not an assumption;
+  //   * the field's numbers exist as DATA (`TERRAIN_NOISE`) and the GPU copy reads them, rather than typing the
+  //     seed and the octaves out a second time — the one way an f32 port can silently stop matching.
+  const L = load("data/world/lod.js");
+  const T = load("data/world/terrain.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+
+  equal(L.LOD_SAMPLE_GRID_W, CHUNK_SIZE + 2, "the grid the GPU threads cover is the CPU's (S+2)² one");
+
+  // 1. THE REFERENCE, re-derived. `lodSampleGrid` must be the max/min over the `step × step` fine columns of
+  //    each cell, with the cell edges one cell OUTSIDE the chunk (the border that culls the ±X/±Z planes).
+  const wrap = (v) => {
+    const p = T.terrainPeriod();
+    return ((v % p) + p) % p;
+  };
+  for (const [step, cx, cz] of [
+    [2, 3, 5],
+    [4, 7, 1],
+    [8, 0, 9],
+  ]) {
+    const grid = L.lodSampleGrid(step, cx, cz);
+    equal(grid.max.length, L.LOD_SAMPLE_GRID_W ** 2, `step ${step}: the grid is (S+2)²`);
+    let wrong = 0;
+    for (let j = 0; j < L.LOD_SAMPLE_GRID_W; j++) {
+      for (let i = 0; i < L.LOD_SAMPLE_GRID_W; i++) {
+        let hi = 0;
+        let lo = T.TERRAIN_MAX_Y;
+        const bx = cx * CHUNK_SIZE * step + (i - 1) * step;
+        const bz = cz * CHUNK_SIZE * step + (j - 1) * step;
+        for (let dz = 0; dz < step; dz++) {
+          for (let dx = 0; dx < step; dx++) {
+            const h = T.terrainHeight(wrap(bx + dx), wrap(bz + dz));
+            if (h > hi) hi = h;
+            if (h < lo) lo = h;
+          }
+        }
+        const k = j * L.LOD_SAMPLE_GRID_W + i;
+        if (grid.max[k] !== hi || grid.min[k] !== lo) wrong++;
+      }
+    }
+    equal(wrong, 0, `step ${step} at (${cx},${cz}): the reference IS the production max/min grid`);
+  }
+
+  // 2. THE FIELD AS DATA, and its bounds really come from the amplitudes (the generator's uniform fast paths
+  //    trust them, so a drift here would put solid blocks in a chunk the generator filled as air).
+  const spec = T.TERRAIN_NOISE;
+  equal(spec.regionCell, 512, "the region term's cell is DATA (it is what a legal world size is a multiple of)");
+  equal(spec.octaves.map((o) => o.join(":")).join(","), "128:1,64:0.5,32:0.25", "the octaves are DATA");
+  equal(spec.octaveWeight, spec.octaves.reduce((s, o) => s + o[1], 0), "…and their weights add up to the divisor");
+  equal(spec.maxY - spec.baseY, spec.regionAmplitude + spec.hillAmplitude, "the bounds follow the amplitudes");
+  equal(spec.minY, spec.baseY - spec.regionAmplitude - spec.hillAmplitude, "…on both sides");
+  for (const o of spec.octaves) {
+    equal(T.terrainPeriod() % o[0], 0, `octave cell ${o[0]} divides the lap (the periodic wrap needs it)`);
+  }
+  equal(T.terrainPeriod() % spec.regionCell, 0, "…and so does the region cell");
+
+  // 3. THE PROBE ITSELF, as source: its noise is built from that DATA (no second copy of the seed), it compares
+  //    against the production accessor, and it declares what it touches. `K` is not a bind, so it is free.
+  const probe = readSource("src/plugins/render/systems/lod-gpu-probe.ts");
+  const probeCode = stripComments(probe);
+  assert(/TERRAIN_NOISE/.test(probeCode) && !/\b1337\b/.test(probeCode),
+    "the GPU field is built from TERRAIN_NOISE — the seed is not typed out a second time");
+  assert(/lodSampleGrid\(/.test(probeCode), "…and it is compared against the production grid accessor");
+  assert(/TERRAIN_NOISE\.octaves/.test(probeCode) && /spec\.regionCell/.test(probeCode),
+    "…including the octave stack and the region cell");
+  const probeAccess = load("plugins/render/systems/lod-gpu-probe.js").LOD_PROBE_ACCESS;
+  assert(probeAccess.readsExternal.includes("renderer3d"), "the probe declares the renderer it computes on");
+  assert(probeAccess.writesExternal.includes("lodProbeBuffers"), "…and the scratch buffers it owns");
+  // The key it listens on: `K` is unbound in `binds.ts`, like the G/H/J debug views.
+  const binds = stripComments(readSource("src/data/globals/binds.ts"));
+  assert(!/KeyK/.test(binds), "K is not a gameplay bind, so the probe may take it");
+  assert(/edge\.code === "KeyK"/.test(probeCode), "…and the probe really reads that edge");
 });
 
 // ===== report =====

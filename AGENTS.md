@@ -405,7 +405,7 @@ resolved order — determinism over a fake thread. `world.scheduleReport()` prin
 
 ```
 SCHEDULE fixed: 6 systems, 5 batches, 1 parallel pair(s) [player.input | (motion.snapshot ~ player.controller) | player.movement | player.collision | player.interaction]
-SCHEDULE render: 5 systems, 2 batches, 6 parallel pair(s) [(cameraView.render ~ chunk.stream ~ block.outline ~ diagnostics) | renderer.draw]
+SCHEDULE render: 6 systems, 2 batches, 10 parallel pair(s) [(diagnostics ~ cameraView.render ~ chunk.stream ~ block.outline ~ lod.gpu.probe) | renderer.draw]
 SCHEDULE ui: 11 systems + 4 gap(s), 13 batches, 3 parallel pair(s) [(ui.pages ~ ui.hud ~ ui.bindings) | ui.loading | ui.slot.bag* | ui.inventory | ui.slot.debug* | ui.picker | ui.slot.toast* | ui.toast | ui.slot.keybind* | ui.keybind | ui.navigation | ui.delays | ui.widgets]
 ```
 
@@ -678,6 +678,18 @@ where it is:
   the view distance for LESS geometry than the single flat-radius-8 window (629k faces / 91 MB)**. The warm-up
   still builds only the fine ring (the entry time is unchanged); the far ring streams in over the first ~3 s
   of play.
+* **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
+  sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
+  columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it
+  (measured; ROADMAP P2.06). `K`, in a world, runs the SAME field as a TSL compute kernel — one thread per grid
+  cell, `step²` samples each — compares every value against `lodSampleGrid` (the production CPU grid, which is
+  why that accessor is exported) and logs one line per rung plus a verdict, with a toast for the summary. **It
+  exists to answer ONE question before anything is moved to the GPU: can f32 reproduce the f64 field exactly?**
+  A one-block disagreement is not cosmetic — the coarse surface may never sit BELOW the fine one (P1.93) — so the
+  probe reports the difference instead of asserting there is none. The kernel is built from `TERRAIN_NOISE`
+  (`data/world/terrain.ts`), never from a second copy of the seed and the octaves, and the gate asserts exactly
+  that. It is a probe: it owns no component, changes no streaming state, and its own CPU reference is the slow
+  half (~1 s), so a stall while it runs is expected and logged.
 * **A CHUNK THAT APPEARS FADES IN AND ONE THAT LEAVES FADES OUT (P1.98/P1.99 — `FADE_IN_MS` = 220 ms,
   `FADE_OUT_MS` = 260 ms, `J` switches both off).** The reported complaint was «区块加载就闪» — a chunk that
   streams in popped at full opacity, which reads as a flash (worst on the far ring, whose chunks cover 64×64

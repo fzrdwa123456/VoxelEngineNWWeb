@@ -370,6 +370,23 @@ function sampledGrid(
   return memoSampled;
 }
 
+/** The sampled grid is `(S+2)²`: the chunk's own cells plus ONE cell of border on every side, because the ±X/±Z
+ *  planes ARE the neighbour cells' heights (see `buildLodMeshInput`). Exported for the GPU probe, which has to
+ *  lay its threads out over the same grid. */
+export const LOD_SAMPLE_GRID_W = CHUNK_SIZE + 2;
+
+/** THE PROBE'S REFERENCE (M0 of the GPU route). The CPU's own max/min heights for one coarse column — the very
+ *  values `buildLodMeshInput` reads, not a copy of them — so a GPU sampler can be compared against the
+ *  PRODUCTION path. Beware the one-entry memo behind it: two different columns asked in a row each pay their own
+ *  sampling (that is the cost M1 will move to the GPU), and the returned arrays are reused by the next call. */
+export function lodSampleGrid(
+  step: number,
+  cx: number,
+  cz: number,
+): { readonly max: Int16Array; readonly min: Int16Array } {
+  return sampledGrid(step, cx, cz);
+}
+
 /** Build the mesh input for ONE coarse chunk of a rung: the whole 32³ array plus the six neighbour planes, all
  *  from a single sampled height grid. The layout is the fine gatherer's (the same `meshChunk` reads either).
  *  `step` is the RUNG's step (the caller has it in the key), so one function serves every rung. */

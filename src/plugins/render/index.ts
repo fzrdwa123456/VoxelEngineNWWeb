@@ -14,6 +14,9 @@ import { DEFAULT_LOD, type LodPolicy } from "../../data/world/lod";
 export type { ChunkMeshFactory, MeshWorkerPool };
 import { MenuBackgroundSystem } from "./systems/menu-background";
 import { BlockOutlineSystem, OUTLINE_ACCESS } from "./systems/outline";
+// M0 of the GPU route: the sampler probe (`K`), a debug tool that compares a GPU port of the terrain field
+// against the CPU reference. It changes no streaming state — it reports.
+import { LodGpuProbeSystem, LOD_PROBE_ACCESS } from "./systems/lod-gpu-probe";
 import { definePlugin } from "../../core/plugin/descriptor";
 import {
   BLOCK_OUTLINE,
@@ -38,6 +41,9 @@ export interface RenderWiring {
    *  ring plus a coarse one. `null` = the single fine window the engine had before, which is what a test that
    *  wants the old window shape passes. */
   readonly lod?: LodPolicy | null;
+  /** Where the LOD probe writes its report (`host/` owns the log file, so the root hands the sink in — the same
+   *  shape the boot drivers use). Absent = the probe still runs and reports through the toast only. */
+  readonly log?: (line: string) => void;
 }
 
 /** The render lane's systems, constructed here. */
@@ -52,6 +58,7 @@ export function createRenderSystems(w: RenderWiring) {
     cameraView: new CameraViewSystem(w.world),
     outline: new BlockOutlineSystem(w.world),
     menuBg: new MenuBackgroundSystem(w.world),
+    lodProbe: new LodGpuProbeSystem(w.world, w.log ?? (() => {})),
   };
 }
 
@@ -92,6 +99,15 @@ export function createRenderPlugin(w: RenderWiring) {
   stage: "render",
   ...OUTLINE_ACCESS,
   run: () => s.outline.render(),
+    });
+    api.system({
+  // M0 of the GPU route: `K` starts the sampler probe. Registered AFTER the stream so the schedule's snapshot
+  // of the render batch stays stable, and it shares no component with anything — it reads the renderer and
+  // writes its own buffers, so it lands beside the other producers.
+  name: "lod.gpu.probe",
+  stage: "render",
+  ...LOD_PROBE_ACCESS,
+  run: () => s.lodProbe.step(),
     });
     api.system({
   // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself

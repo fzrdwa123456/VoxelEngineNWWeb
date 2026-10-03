@@ -43,11 +43,14 @@ export const TERRAIN_BASE_Y = 128;
 
 /** How far the coarse "region" term moves a whole area up or down (blocks). */
 const REGION_AMPLITUDE = 12;
+/** The REGION term's lattice cell, in blocks: the coarsest thing in the field (a whole area rises or falls
+ *  together). It is the reason a legal world size is a multiple of 512 blocks (`data/world/size.ts`), and it is
+ *  part of `TERRAIN_NOISE` below because the GPU copy of the field needs it too. */
+const REGION_CELL = 512;
 /** How far the octave stack makes the ground roll around that level (blocks). */
 const HILL_AMPLITUDE = 20;
 
-/** Hard bounds of `terrainHeight`. The generator's uniform fast paths are built on these two numbers:
- *  a chunk starting at or above TERRAIN_MAX_Y is all air, a chunk ending at or below
+/** Hard bounds of `terrainHeight`. The generator's uniform fast paths are built on these two numbers: *  a chunk starting at or above TERRAIN_MAX_Y is all air, a chunk ending at or below
  *  TERRAIN_MIN_Y - SURFACE_LAYERS is all stone. Both are computed from the amplitudes above, so they
  *  cannot drift away from the field. */
 export const TERRAIN_MIN_Y = TERRAIN_BASE_Y - REGION_AMPLITUDE - HILL_AMPLITUDE;
@@ -62,6 +65,22 @@ const OCTAVES: readonly (readonly [number, number])[] = [
   [32, 0.25],
 ];
 const OCTAVE_WEIGHT = 1.75; // 1 + 0.5 + 0.25: what the weights add up to, so the result stays in [0, 1)
+
+/** THE FIELD, AS DATA (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`). A second implementation of
+ *  this function — the GPU sampler that the LOD's sampling cost needs — must be BUILT from these numbers rather
+ *  than typed out again, or the two drift and the coarse surface stops agreeing with the real chunks it has to
+ *  meet. The probe's TSL reads THIS object, and the gate asserts it is the only place those numbers come from. */
+export const TERRAIN_NOISE = {
+  seed: TERRAIN_SEED,
+  baseY: TERRAIN_BASE_Y,
+  regionAmplitude: REGION_AMPLITUDE,
+  hillAmplitude: HILL_AMPLITUDE,
+  octaveWeight: OCTAVE_WEIGHT,
+  octaves: OCTAVES,
+  regionCell: REGION_CELL,
+  minY: TERRAIN_MIN_Y,
+  maxY: TERRAIN_MAX_Y,
+} as const;
 
 /** 2^32 as a reciprocal: an integer hash's low 32 bits -> [0, 1) with one multiply. */
 const INV_U32 = 2.3283064365386963e-10;
@@ -121,7 +140,7 @@ function hills(x: number, z: number, seed: number): number {
  *  query `VoxelWorld.topSolidY` answers by scanning, so a chunk that is generated and a chunk that is
  *  read agree by construction. */
 export function terrainHeight(x: number, z: number): number {
-  const region = (noise2(x, z, 512, TERRAIN_SEED) - 0.5) * 2 * REGION_AMPLITUDE;
+  const region = (noise2(x, z, REGION_CELL, TERRAIN_SEED) - 0.5) * 2 * REGION_AMPLITUDE;
   const hill = (hills(x, z, TERRAIN_SEED + 0x51ed270b) - 0.5) * 2 * HILL_AMPLITUDE;
   const y = Math.round(TERRAIN_BASE_Y + region + hill);
   // The bounds are what the generator's fast paths trust, so they are ENFORCED here rather than hoped for:

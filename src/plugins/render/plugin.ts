@@ -23,7 +23,9 @@ export function createPlugin(host: PluginHost): DiscoveredPlugin {
   // documented pre-P1.18h behaviour (mesh on this thread). P1.18i: a pool can start non-empty and lose every
   // worker later, which the stream handles itself by asking `workers` again.
   const usable = pool && pool.workers > 0 ? pool : null;
-  const built = createRenderPlugin({ world: host.world, mesh, pool: usable });
+  // The probe's report goes to the same log the rest of the boot/plugin wiring writes to (`host.log` IS the
+  // log sink), so "where does the probe write" stays a wiring decision, like every other host service.
+  const built = createRenderPlugin({ world: host.world, mesh, pool: usable, log: host.log });
   host.log(
     `RENDER meshing: ${usable ? `${usable.workers} worker(s)` : `main thread only${pool ? " (no worker started)" : ""}`}`,
   );

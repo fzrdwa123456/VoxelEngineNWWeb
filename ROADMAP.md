@@ -2932,6 +2932,35 @@ Still outstanding:
   SHARED material; and the retired `chunks` switch provably cannot turn it back on), the settings-source
   assertions now require the single row, and the P2.00 reserve group passes again because the fine window is
   filled where it should be. Not verified live: the user tests the packaged build by hand.
+- **P2.06 — the LOD pipeline moves to the GPU (M0 DONE: the sampler probe).** By request («我觉得应该把lod仍进gpu才行
+  现在是不是纯cpu计算» → «c吧毕竟cpu吃不消»).
+  WHAT WAS MEASURED FIRST, because the decision rests on it (one column = 8 Y chunks, sampling included):
+  step 2 → 1.76 ms, step 4 → 5.34 ms, step 8 → 19.2 ms, step 16 → 73.8 ms, **step 32 → 289.7 ms** — the cost is
+  `∝ step²`, because a conservative max has to know every one of the `step × step` fine columns in the cell
+  (a rung-6 column is 1.18M `terrainHeight` calls). The six-rung ladder is 144+144+144+144+196 = 772 columns, i.e.
+  **~71 s of MAIN-THREAD CPU**, of which rung 6 is ~57 s — and because the far budget is charged per CHUNK
+  (uniform = 1 unit) while a whole column's 290 ms lands in one step, the player sees **~1 s frame stalls** while
+  the outer rungs fill. The fine ring is not the problem: 2.28 ms per real chunk (0.11 generate + 0.72 gather +
+  1.45 mesh) on the WORKERS.
+  THE ROUTE (agreed, in four milestones): **M0** a probe that proves a GPU port of the field reproduces the CPU's
+  values; **M1** sampling on the GPU (one dispatch per rung, one ~0.7 MB async readback, CPU meshing unchanged);
+  **M2** the mesher in WGSL, validated against `meshChunk`; **M3** GPU geometry + indirect draw (draw calls from
+  thousands to ~6-12) with per-cell visibility kept, because the reserve (P2.00) and the fades need it.
+  M0 AS LANDED: `plugins/render/systems/lod-gpu-probe.ts`, run by `K` in a world. It builds the field as TSL
+  FROM `TERRAIN_NOISE` (the seed, the octaves, the region cell, the amplitudes — exported as data for exactly
+  this reason), one GPU thread per (S+2)² grid cell, `step²` samples per cell, and compares every value against
+  `lodSampleGrid` — the production CPU grid, exported for the comparison rather than copied. It logs one line per
+  rung (mismatches, max |Δ|, GPU ms, CPU ms) plus a verdict, and toasts the summary. **The answer it exists to
+  produce**: f32 arithmetic over the same wrapping-integer hash reproduces the f64 field's rounded heights
+  exactly, or it does not — and if it does not, the coarse surface can sit a block low, which is a crack (P1.93),
+  so the fix is either f32 discipline on the CPU side or a one-block margin, decided from the probe's numbers.
+  VERIFIED: `tsc` 0; `check:ecs` **83/83**, with a new group pinning the probe's foundations (the reference
+  accessor IS the production max/min grid, re-derived cell by cell; `TERRAIN_NOISE` carries the field's numbers
+  and the octave cells divide the lap; the probe's noise reads that data and never retypes the seed; its declared
+  access and its `K` edge). The schedule's render batch gained a member (`lod.gpu.probe`), and AGENTS/TESTING
+  were updated with it. The GPU half itself is NOT gate-testable (Node has no WebGPU), which is why the probe
+  reports at runtime — M1-M3 will need the same kind of runtime self-check.
+  NOT DONE: M1-M3, and the numbers they must beat are the ones above.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

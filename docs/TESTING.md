@@ -90,6 +90,24 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   again and the real textures come back. It must
   NOT toggle on a held key (a repeat is one press) or on the key release, and it must survive walking (the
   colours follow the chunks, since they are a material, not a one-off paint).
+→ **`K` — THE GPU SAMPLER PROBE (M0 of the GPU route)**: enter a world and press **K** (it is not a bind, like
+  G/H/J). The probe re-samples the terrain field on the GPU with the same code path the LOD will use and compares
+  every value against the CPU's own grid, then toasts a one-line summary and writes the detail to `debug.log`.
+  What you must see:
+  (a) **a toast** — `LOD GPU 探针: 与 CPU 完全一致 ✓` (or, if the f32 port disagrees, the number of values and the
+      largest difference). Either answer is USEFUL: it is the question M1 depends on;
+  (b) **`LODPROBE` lines in `debug.log`**, one per rung, e.g.
+      `LODPROBE step 32: 2 column(s), 2312 value(s), mismatch 0, maxΔ 0 — gpu 5.2ms (dispatch+2 readbacks), cpu reference 590ms`,
+      then `LODPROBE RESULT: OK — 33524 values identical; gpu …ms vs cpu …ms`, and `LODPROBE start`/`done in …ms`;
+  (c) **the timing spread is the point**: the `gpu` number is the whole rung (dispatch + two readbacks), the `cpu`
+      number is the same work on the main thread — for step 16/32 expect the GPU to be two to three orders of
+      magnitude faster. That ratio, not the toast, is what M1 is bought with;
+  (d) **a stall while it runs is expected** (the CPU reference is built synchronously, ~1 s in total, dominated by
+      the two outer rungs) — the game keeps running afterwards, and pressing `K` again re-runs it;
+  (e) if it FAILS instead: the toast and `LODPROBE FAILED: …` carry the message (a backend without compute, or a
+      TSL/WGSL problem). Report that line — it is the M0 answer too, just the other one.
+  Nothing in the world changes: the probe owns no state. Do NOT look for a visual difference — the point is the
+  two numbers.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser
