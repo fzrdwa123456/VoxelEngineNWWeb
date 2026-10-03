@@ -34,8 +34,21 @@ pub struct WindowsWebview;
 /// msSmartScreenProtection` by default (`tauri-utils` documents exactly this), and setting the
 /// variable replaces that default - so it has to be spelled out here or those three components come
 /// back the moment anything appends to this list.
+///
+/// `--force_high_performance_gpu` (P2.07) is Chromium's switch for the OUTER half of the GPU choice.
+/// `WebGPURenderer` already asks for the discrete adapter (`powerPreference: "high-performance"`,
+/// `src/boot/main.ts`), but that is only a request inside the WebView: on a hybrid laptop Windows picks
+/// the adapter for the **WebView2 process** and defaults to the power-saving one, so the engine was
+/// running on the integrated GPU with the discrete one idle (the user's report, seen in Task Manager).
+/// The per-app route (Windows Settings -> Display -> Graphics -> `msedgewebview2.exe` -> High
+/// performance) fixes it too and is what the user did first; this flag makes it the default for every
+/// install. The informed-consent cost: the discrete GPU is used ALWAYS, so battery life on a laptop
+/// suffers, and on a machine whose only adapter is the integrated one Chromium simply ignores it.
+/// `boot.log` prints the argument list in force, and the GPU stage of the startup now prints WHICH
+/// adapter WebGPU actually got, so both halves are verifiable from the logs.
 const BROWSER_ARGS_BASE: &str = "--autoplay-policy=no-user-gesture-required \
 --no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist \
+--force_high_performance_gpu \
 --disable-gesture-requirement-for-presentation \
 --disable-blink-features=RateLimitPointerLockRequests \
 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";

@@ -4118,11 +4118,13 @@ check("diagnostics declares every external target it actually touches", () => {
   assert(!DIAGNOSTICS_ACCESS.readsExternal.includes("fpsCap"), "the frame cap is a resource now");
   // THE GPU TIMESTAMP IS SAMPLED, NOT PER FRAME (P1.88): with the display-rate limit lifted the lane draws
   // 500-650 frames a second, and a timestamp resolve per frame is a GPU sync point per frame for a number
-  // printed once a second. It is throttled AND gated on the panel being visible.
+  // printed once a second. It is throttled, and the FAST cadence is gated on the panel being visible — while the
+  // hidden case still drains at `GPU_IDLE_SAMPLE_MS`, because the `FRAME` line now prints `gpu=` whether or not
+  // F3 is up and an unresolved pool is what the old "Maximum number of queries exceeded" warning was about.
   const diag = stripComments(readSource("src/plugins/render/systems/diagnostics.ts"));
   assert(/const GPU_SAMPLE_MS = 250/.test(diag), "the GPU timestamp query has a sampling interval");
-  assert(/panelVisible && now - this\.gpuSampleAt >= GPU_SAMPLE_MS/.test(diag),
-    "…and is only issued while the F3 panel is on screen");
+  assert(/panelVisible \? GPU_SAMPLE_MS : GPU_IDLE_SAMPLE_MS/.test(diag),
+    "…the fast one only while the F3 panel is on screen, and a slow drain even when it is not");
   // THE PREDICATE IS `hidden === false` (P1.91 — measured bug). The HUD spawns the panel `hidden: true`
   // and ui.picker toggles that field, so `hidden !== false` is TRUE WHILE IT IS UP: the sampler was
   // skipped exactly when the panel was visible and the F3 `GPU:` number froze, while every other line
@@ -4289,6 +4291,15 @@ check("the frame cap is world state AND a persisted setting", () => {
     "…the host's base list is still published unconditionally");
   assert(!/disable-frame-rate-limit|disable-gpu-vsync/.test(stripComments(gameRs)),
     "…and neither frame-rate/vsync experiment is left in the tree (the comment that documents them is not code)");
+  // …EXCEPT THE ONE FLAG THAT CHOOSES THE GPU (P2.07, by request). `powerPreference: "high-performance"` is a
+  // request INSIDE the WebView; on a hybrid laptop Windows decides for the WebView2 PROCESS and defaults to the
+  // power-saving adapter, so the engine ran on the integrated GPU with the discrete one idle. Chromium's own
+  // switch, in the host's base list (published unconditionally, so it needs no config and no relaunch logic).
+  const webviewRs = stripComments(readSource("src-tauri/src/platform/windows/webview.rs"));
+  assert(/BROWSER_ARGS_BASE: &str = "[\s\S]*?--force_high_performance_gpu/.test(webviewRs),
+    "the host's base argument list forces the high-performance GPU (the discrete card is otherwise idle)");
+  assert(/--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection/.test(webviewRs),
+    "…and the list is still the COMPLETE one (a non-empty value replaces wry's default, which is why it is spelled out)");
   assert(/pacingTargetHz\(frameCap\.cap, frameCap\.vsync, frameCap\.refreshHz\)/.test(
     stripComments(readSource("src/boot/main.ts"))),
     "the cap and the switch still pace the loop (a cap below the refresh is exact: it skips whole refreshes)");
@@ -7549,6 +7560,31 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
   assert(/this\.frameProbe\.callsPerFrame/.test(diagSrc) && /this\.frameProbe\.drawCallMax/.test(diagSrc) &&
     /f3\.draw/.test(diagSrc),
     "…and the F3 panel reads the SAME account (one number, two readers)");
+
+  // 6c. AND THE CPU-vs-GPU QUESTION IS ANSWERABLE FROM THE LOGS (P2.07). The user's next question was which side
+  //     the frame is bound by, and neither log could say: the F3 panel showed a GPU TIME, nothing showed which
+  //     GPU, and the GPU number only existed while the panel was up. Three things are pinned here:
+  //       * the `FRAME` line carries `gpu=` beside `avg=` (a `gpu=` close to `avg=` is GPU-bound; a `gpu=` well
+  //         under a large `avg=` means the main thread is what the frame waits on) — so it must be printed
+  //         whether or not F3 is up;
+  //       * the sampler therefore drains the timestamp pool on a SLOW cadence even while the panel is hidden
+  //         (an unresolved pool is what the old "Maximum number of queries exceeded" warning was about), while
+  //         the fast cadence stays tied to the panel (P1.88: per-frame maps at an uncapped rate were the bug);
+  //       * the startup logs WHICH ADAPTER WebGPU got, because `powerPreference` is only a request and the
+  //         WebView2 process can be pinned to the integrated GPU by Windows — the engine could draw on the iGPU
+  //         with the discrete card idle and nothing said so.
+  assert(/gpu=\$\{perf\.gpuMs === null \? "\?" : perf\.gpuMs\.toFixed\(1\)\}ms/.test(mainSrc),
+    "the FRAME line prints `gpu=` beside `avg=` (the CPU-vs-GPU discriminator)…");
+  assert(/get gpuMs\(\): number \| null/.test(stripComments(readSource("src/core/services/perf.ts"))),
+    "…from the sampler's own EMA, which the F3 panel reads too…");
+  assert(/panelVisible \? GPU_SAMPLE_MS : GPU_IDLE_SAMPLE_MS/.test(diagSrc) &&
+    /const GPU_IDLE_SAMPLE_MS = 1000;/.test(diagSrc),
+    "…and the GPU timestamp query is drained on a slow cadence even with the panel hidden (no accumulation)");
+  const startupSrc = stripComments(readSource("src/boot/drivers/startup.ts"));
+  assert(/await logGpuAdapter\(deps\.log\);/.test(startupSrc) &&
+    /BOOT gpu adapter: vendor=\$\{field\(info\.vendor\)\}/.test(startupSrc) &&
+    /requestAdapter\(\{ powerPreference: "high-performance" \}\)/.test(startupSrc),
+    "…and the startup logs WHICH adapter WebGPU got (vendor/architecture/device, plus fallback and timestamp-query)");
 
   // 6b. …AND THE CHUNK TEXTURES ARE SHARED PER URL, which is the fix for the OTHER black-region report («按 G 之后
   //     出现纯黑块，有时自己消失»): three uploads a texture with no image yet as a 1×1 UNINITIALISED (black)

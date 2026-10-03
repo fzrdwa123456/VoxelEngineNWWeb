@@ -235,6 +235,22 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       far ring must look the same in both states (only uncoloured vs tier-coloured). If any of it flickers or
       throws surfaces across the screen, report the `FRAME` line's `batched=`/`calls=`, whether `H` cures it,
       whether `G` cures it, and whether standing still (no streaming) makes it stop.
+→ **WHICH GPU, AND IS THE FRAME CPU-BOUND OR GPU-BOUND (P2.07)**: two log lines, no F3 needed.
+  (a) **`debug.log` must carry `BOOT webview args: … --force_high_performance_gpu …`** (the whole list is
+      printed, so this also confirms wry's three default `--disable-features` are still spelled out), and
+      **right after it `BOOT gpu adapter: vendor=… architecture=… device=… description=… fallback=0
+      timestampQuery=1`**. Read the vendor: `intel` with a `gen-…`/`xe` architecture is the INTEGRATED card;
+      `nvidia`/`amd` (`ampere`, `ada`, `rdna-…`, `gfx…`) is the DISCRETE one. `description=?` is normal
+      (Chromium leaves it empty). If `fallback=1`, Chromium handed over a fallback adapter and every performance
+      number below is meaningless; if `timestampQuery=0`, `gpu=` can never be printed.
+      Cross-check in Task Manager (Details tab, add the **GPU engine** column): `msedgewebview2.exe` must now be
+      on the discrete GPU, and its **3D** engine is the one that should move while the game draws.
+  (b) **The `FRAME` line now carries `gpu=` next to `avg=`** (once a second, whether or not F3 is up). This is the
+      CPU-vs-GPU discriminator: with 帧率上限 set to **不限**, a `gpu=` that is close to `avg=` means the frame is
+      GPU-bound (its cost is the drawing); a `gpu=` well under a large `avg=` means the main thread is what the
+      frame waits on (streaming, meshing, uploads, submission). Report both lines together with what you were
+      doing — **standing still vs flying fast** is the experiment that separates them: a frame time that only
+      climbs while flying is the streaming path, not the drawing.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

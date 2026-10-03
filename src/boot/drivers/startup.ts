@@ -18,6 +18,55 @@ import type { World } from "../../core/world";
 import type { StageDriver } from "./stage";
 import type { WebGPURenderer } from "three/webgpu";
 
+/** What the WebGPU adapter calls itself. ALL of it is optional in the spec — Chromium fills vendor/architecture/
+ *  device and leaves description empty for privacy — so every field is read defensively. */
+interface AdapterInfo {
+  readonly vendor?: string;
+  readonly architecture?: string;
+  readonly device?: string;
+  readonly description?: string;
+}
+
+/** The WebGPU globals, typed locally: the engine does not depend on `@webgpu/types` (three carries its own), and
+ *  this is the only place that touches `navigator.gpu` outside the renderer. */
+interface GpuGlobals {
+  requestAdapter(options?: { powerPreference?: string }): Promise<
+    | { readonly info?: AdapterInfo; readonly isFallbackAdapter?: boolean; readonly features?: { has(name: string): boolean } }
+    | null
+  >;
+}
+
+/** WHICH GPU DID WEBGPU ACTUALLY GET (P2.07) — one line, and the only answer to "is this running on the discrete
+ *  card or the integrated one?" that does not need a Task Manager. `powerPreference: "high-performance"` is the
+ *  request the renderer makes; the launch argument `--force_high_performance_gpu` is Chromium's outer force; this
+ *  line is the RESULT. A second `requestAdapter` with the same preference (cheap, and it requests no device) is
+ *  what makes it readable: it is the adapter the renderer itself would be handed. Missing `navigator.gpu` means
+ *  the process fell back to WebGL, which is worth knowing for every other number in the logs. */
+async function logGpuAdapter(log: (line: string) => void): Promise<void> {
+  const gpu = (navigator as unknown as { gpu?: GpuGlobals }).gpu;
+  if (gpu === undefined) {
+    log("BOOT gpu adapter: (no navigator.gpu — this process is not on WebGPU)");
+    return;
+  }
+  try {
+    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+    if (adapter === null) {
+      log("BOOT gpu adapter: (requestAdapter returned null — no WebGPU adapter at all)");
+      return;
+    }
+    const info = adapter.info ?? {};
+    const field = (value: string | undefined): string => (value === undefined || value === "" ? "?" : value);
+    log(
+      `BOOT gpu adapter: vendor=${field(info.vendor)} architecture=${field(info.architecture)} ` +
+        `device=${field(info.device)} description=${field(info.description)} ` +
+        `fallback=${adapter.isFallbackAdapter === true ? 1 : 0} ` +
+        `timestampQuery=${adapter.features?.has("timestamp-query") === true ? 1 : 0}`,
+    );
+  } catch (error) {
+    log(`BOOT gpu adapter: FAILED to query (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
 export interface StartupDeps {
   readonly world: World;
   readonly log: (line: string) => void;
@@ -125,6 +174,15 @@ const BOOT_STAGES: readonly BootStage[] = [
     key: "loading.gpu",
     run: async () => {
       await deps.renderer.init();
+      // …and SAY WHICH GPU WEBGPU ACTUALLY GOT (P2.07). `powerPreference: "high-performance"` is only a REQUEST:
+      // on a hybrid laptop Chromium decides, and the WebView2 PROCESS can be pinned to the power-saving adapter by
+      // Windows' per-app graphics setting — the engine could therefore be drawing on the integrated GPU with the
+      // discrete one idle, and NOTHING in either log said so (the F3 panel shows a GPU *time*, not a GPU). This is
+      // a second, cheap `requestAdapter` made only to read `.info` (no device is requested, nothing is kept), and
+      // the vendor/architecture/device triple is what identifies the adapter: Chromium leaves `description` empty
+      // for privacy, so `intel`/`gen-12lp`/`0x9a49` (integrated) vs `nvidia`/`ampere`/`0x25a0` (discrete) is the
+      // answer. It runs after `renderer.init()` so the line sits next to the GPU handshake it describes.
+      await logGpuAdapter(deps.log);
       // From here the canvas may be sized (a load frame runs before this point) — and the size comes from
       // the VIEWPORT resource like every later resize, so there is ONE rule for "how big is the canvas".
       deps.loop.rendererReady = true;

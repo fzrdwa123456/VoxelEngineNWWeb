@@ -25,6 +25,14 @@ export class PerfSampler {
     return { fps, gpuMs: this.gpuSamples > 0 ? this.gpuRenderMs : null };
   }
 
+  /** The GPU render time in force (EMA; null until the first sample, or when timestamp-query is unsupported).
+   *  The `FRAME` line prints it next to `avg=`, which is what answers "is this frame CPU-bound or GPU-bound":
+   *  a `gpu=` close to `avg=` is a GPU-bound frame, and a `gpu=` well under a large `avg=` means the main thread
+   *  is what the frame is waiting on. */
+  get gpuMs(): number | null {
+    return this.gpuSamples > 0 ? this.gpuRenderMs : null;
+  }
+
     /** Async GPU render-time collection (renderer.resolveTimestampsAsync callback), EMA-smoothed */
   noteGpu(ms: number): void {
     this.gpuSamples++;

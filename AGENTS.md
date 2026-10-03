@@ -734,7 +734,9 @@ where it is:
   second) and the F3 panel (`f3.draw`) both carry `calls=` (draw calls in ONE frame), `callsMax=` (the window's
   worst frame), `tris=` (thousands of triangles), `renders=` (the monotonic `renderer.render(...)` count) and
   `attrs=` (the LIVE vertex-attribute count, ~3 per chunk geometry, so it tracks the mesh count), plus
-  `batched=` (M3a's batched INSTANCES and their bucket count — see below). They exist to
+  `batched=` (M3a's batched INSTANCES and their bucket count — see below) and `gpu=` (P2.07 — the GPU render
+  time from the timestamp query, so one line answers "is this frame CPU-bound or GPU-bound": a `gpu=` close to
+  `avg=` is GPU-bound, a `gpu=` far under a large `avg=` means the frame is waiting on the main thread). They exist to
   answer "is this frame draw-call bound" with a number: a stall reported next to `calls=1600` is a different
   problem from one next to `calls=300`. **THE PER-FRAME FIGURE IS THE RAW READING, sampled EVERY DRAWN FRAME**:
   `Renderer.info` documents `drawCalls` as "of the current frame", and the log AGREED — across a motionless minute
@@ -843,6 +845,17 @@ where it is:
     it) and SESSION-ONLY. What the gate CAN test is the bookkeeping (a real `BatchedMesh` on a real
     `BufferGeometry`: instances in, matrices/visibility set, instances out, capacity growth, the slice, and the
     material bump of the section above) — never a pixel, so a regression shows up as a report, not as a failure.
+* **WHICH GPU IS THIS RUNNING ON? (P2.07 — one line in `debug.log`).** Before this there was NO way to tell from the
+  logs: the F3 panel shows a GPU *time*, never a GPU, and `powerPreference` is only a request. The startup's GPU
+  stage (`boot/drivers/startup.ts`) now makes a second, cheap `requestAdapter({powerPreference:
+  "high-performance"})` — no device is requested, nothing is kept — and logs
+  `BOOT gpu adapter: vendor=… architecture=… device=… description=… fallback=… timestampQuery=…`. Chromium leaves
+  `description` EMPTY (privacy), so the vendor/architecture/device triple is what identifies the card: `intel` +
+  `gen-12lp` + `0x9a49` is the integrated one, `nvidia`/`amd` with an `ampere`/`rdna-3` architecture is the
+  discrete one. `fallback=1` means Chromium handed over a software/fallback adapter, and `timestampQuery=0` means
+  every `gpu=` number in the logs is unavailable. Paired with `--force_high_performance_gpu` (above) and Windows'
+  per-app Graphics setting, this line is how "is the discrete card actually being used" is answered — the same
+  question that made the pending GPU milestones look like they were not working.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it
@@ -1217,6 +1230,15 @@ untouched.
   being honoured between ~60 and ~200 and the whole ui lane ran once per drawn frame; `--disable-gpu-vsync`
   P1.89: a real immediate present, but it charged the synced mode 21-30ms worst frames). Nothing the user can
   switch may be a launch argument anyway, because a launch argument can only apply at the next launch.
+  **ONE flag has since been added back (P2.07, by request): `--force_high_performance_gpu`,** and it is not about
+  frame pacing but about WHICH GPU the WebView runs on. `WebGPURenderer` already asks for the discrete adapter
+  (`powerPreference: "high-performance"`, `boot/main.ts`), but that is a request INSIDE the webview: on a hybrid
+  laptop Windows picks the adapter for the **WebView2 process** and defaults to the power-saving one, so the engine
+  was drawing on the integrated GPU with the discrete card idle (the user's Task Manager observation). Windows'
+  per-app Graphics preference fixes the same thing per install; the flag makes it the default. The informed-consent
+  cost is battery life, and on a machine with only an integrated adapter Chromium ignores it. The result is
+  verifiable from the logs: the startup prints the argument list in force (`BOOT webview args: …`, debug.log), and
+  its GPU stage now prints the ADAPTER it actually got (below).
 - **NEVER move a window flag into `tauri.windows.conf.json`** (learned the hard way, P1.80): the platform
   overlay is merged with `json_patch::merge` (RFC 7386) - objects merge recursively, **arrays are REPLACED
   wholesale** - so a partial `app.windows: [{ label, ... }]` entry silently drops `center`, the size,

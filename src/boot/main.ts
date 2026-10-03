@@ -1509,6 +1509,7 @@ function frameProbe(): void {
   const batches = world.hasResource(RENDER_HANDLES) ? world.resource(RENDER_HANDLES).chunkStream.batchStats : null;
   logDebug(
     `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
+      `gpu=${perf.gpuMs === null ? "?" : perf.gpuMs.toFixed(1)}ms ` +
       `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms raf=${probe.vblanks}/s ` +
       `target=${target > 0 ? `${target.toFixed(2)}fps` : "uncapped"} ` +
       `calls=${probe.callsPerFrame.toFixed(0)} callsMax=${probe.drawCallMax} ` +
