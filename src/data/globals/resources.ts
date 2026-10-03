@@ -230,6 +230,15 @@ export interface FrameProbeState {
   pxMax: number;
   pxSum: number;
   pxN: number;
+  /** THE DRAW SIDE, as three.js reports it (M1b). `drawCalls`/`triangles` are the raw TOTAL counters, read and
+   *  re-read once per FRAME line to get the window's delta; `callsPerFrame`/`trisPerFrame` are that delta divided
+   *  by the drawn frames, i.e. what ONE frame costs — the number that says whether the frame is draw-call bound
+   *  (the far LOD ring puts thousands of chunk meshes in the scene). They live here rather than in the root
+   *  because the F3 panel reads them too, and a second copy of a counter is how the two disagree. */
+  drawCalls: number;
+  triangles: number;
+  callsPerFrame: number;
+  trisPerFrame: number;
 }
 
 export const FRAME_PROBE = defineResource<FrameProbeState>("frameProbe");
@@ -252,6 +261,10 @@ export function createFrameProbe(): FrameProbeState {
     pxMax: 0,
     pxSum: 0,
     pxN: 0,
+    drawCalls: 0,
+    triangles: 0,
+    callsPerFrame: 0,
+    trisPerFrame: 0,
   };
 }
 

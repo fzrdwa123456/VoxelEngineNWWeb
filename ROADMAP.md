@@ -3035,13 +3035,14 @@ Still outstanding:
   behaviour: (1) the packed buffer's slots are now PER COLUMN (its `CELLS` max cells then its `CELLS` min cells at
   `col * COLUMN_WORDS`), so what a batch wrote is one contiguous range and the readback asks for exactly those bytes
   — a 3-column step-32 batch copies 28 KB instead of the whole 592 KB, which is also less allocation churn per
-  batch; (2) `drawCalls`/`triangles`/`geometries` from three's own `renderer.info` are now in the once-a-second
-  `FRAME` line and in the F3 panel (`f3.draw`), so "is this frame draw-call bound" is a read number. **The batch
-  SIZE was deliberately left alone**: the live numbers say a batch's cost is dominated by the fixed round trip
-  (0.30M samples in 16-77 ms vs 4M in ~50 ms), so a smaller batch would mean more round trips for the same work.
-  Also fixed: `WORLD LOD ladder: N rung(s)` was printed BEFORE the ladder existed (right after `resetForNewWorld`),
-  so every entry into a resized world claimed `0 rung(s)` — a number that reads as "LOD is off" while the far ring
-  is being built. It is reported after the warm-up now, where it is real.
+  batch; (2) `drawCalls`/`triangles` (three's counters, as a DELTA — nothing resets them here) and the live
+  `memory.attributes` count are now in the once-a-second `FRAME` line and in the F3 panel (`f3.draw`), so "is this
+  frame draw-call bound" is a read number: the per-frame figure lives in one account (`FRAME_PROBE`) that both
+  readers read. **The batch SIZE was deliberately left alone**: the live numbers say a batch's cost is dominated by
+  the fixed round trip (0.30M samples in 16-77 ms vs 4M in ~50 ms), so a smaller batch would mean more round trips
+  for the same work. Also fixed: `WORLD LOD ladder: N rung(s)` was printed BEFORE the ladder existed (right after
+  `resetForNewWorld`), so every entry into a resized world claimed `0 rung(s)` — a number that reads as "LOD is
+  off" while the far ring is being built. It is reported after the warm-up now, where it is real.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

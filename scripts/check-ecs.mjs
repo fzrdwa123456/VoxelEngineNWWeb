@@ -7500,6 +7500,21 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
     /if \(cost === FAR_NOT_READY\) waits\+\+/.test(streamSrc),
     "…and a not-ready chunk spends THAT budget instead of the mesh budget");
   assert(/return FAR_NOT_READY/.test(streamSrc), "…while `buildFar` answers the sentinel instead of building nothing at all");
+
+  // 6. THE DRAW-SIDE ACCOUNTS (M1b), which are what the NEXT milestone is chosen from. three's counters are
+  //    TOTALS in this engine: nothing calls `info.reset()`, because that only happens in `setAnimationLoop`'s own
+  //    loop and this engine pumps its own rAF chain — so the per-frame figure has to be a DELTA over the window
+  //    (and a per-frame `reset()` would be worse: it zeroes the LIVE memory counts, which nothing repopulates).
+  //    The FRAME line and the F3 panel must read the SAME account, or the log and the screen disagree.
+  const mainSrc = stripComments(readSource("src/boot/main.ts"));
+  assert(/probe\.callsPerFrame = probe\.n > 0 \? \(info\.render\.drawCalls - probe\.drawCalls\) \/ probe\.n : 0/.test(mainSrc),
+    "the per-frame draw-call figure is a DELTA over the window (three's counters are totals here)");
+  assert(!/info\.reset\(\)/.test(mainSrc),
+    "…and nothing resets three's counters (a reset would zero the live memory counts for good)");
+  assert(/calls=\$\{probe\.callsPerFrame\.toFixed\(0\)\}/.test(mainSrc), "the FRAME line carries it");
+  const diagSrc = stripComments(readSource("src/plugins/render/systems/diagnostics.ts"));
+  assert(/this\.frameProbe\.callsPerFrame/.test(diagSrc) && /f3\.draw/.test(diagSrc),
+    "…and the F3 panel reads the SAME account (one number, two readers)");
 });
 
 // ===== report =====

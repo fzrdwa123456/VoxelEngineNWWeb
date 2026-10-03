@@ -15,6 +15,7 @@ import {
   DEBUG_LOG,
   F3_PANEL,
   FPS_CAP,
+  FRAME_PROBE,
   pacingTargetHz,
   INPUT_DIAGNOSTICS,
   LOCAL_PLAYER,
@@ -22,6 +23,7 @@ import {
   type DebugLogSink,
   type F3Panel,
   type FrameCapState,
+  type FrameProbeState,
   type InputDiagnostics,
 } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
@@ -100,6 +102,10 @@ export class DiagnosticsSystem {
   private readonly debugLog: DebugLogSink;
   /** The F3 panel's widget handles, spawned by the HUD view during wiring */
   private readonly f3: F3Panel;
+  /** The FRAME probe's accounts (M1b): the per-frame draw-call and triangle figures are computed ONCE per second
+   *  by the root (three's counters are totals — see the FRAME line) and read here for the panel, so the two can
+   *  never disagree about what a frame costs. */
+  private readonly frameProbe: FrameProbeState;
   /** When the GPU timestamp query was last issued (see the throttle in `step`) */
   private gpuSampleAt = 0;
 
@@ -113,6 +119,7 @@ export class DiagnosticsSystem {
     this.diag = world.resource(INPUT_DIAGNOSTICS);
     this.debugLog = world.resource(DEBUG_LOG);
     this.f3 = world.resource(F3_PANEL);
+    this.frameProbe = world.resource(FRAME_PROBE);
     this.control = world.get(player, CONTROL)!;
     this.motion = world.get(player, MOTION)!;
   }
@@ -208,11 +215,13 @@ export class DiagnosticsSystem {
       ` · target ${pacingTargetHz(info.fpsCap, info.vsync, info.refreshHz) > 0 ? `${pacingTargetHz(info.fpsCap, info.vsync, info.refreshHz).toFixed(0)}fps` : t("f3.unlimited")})\n` +
       `XYZ: ${info.x.toFixed(2)} / ${info.y.toFixed(2)} / ${info.z.toFixed(2)}\n` +
       `${t("f3.chunks")}: ${info.chunks}\n` +
-      // THE DRAW SIDE (M1b): three.js's own per-frame counters. `calls` is the one that says whether the frame is
-      // draw-call bound (the far ring holds thousands of chunk meshes), `geoms` how many geometry objects exist.
-      `${t("f3.draw")}: calls=${this.renderer.info.render.drawCalls} ` +
-      `tris=${Math.round(this.renderer.info.render.triangles / 1000)}k ` +
-      `geoms=${this.renderer.info.memory.geometries}\n` +
+      // THE DRAW SIDE (M1b): what one frame costs the renderer, from the FRAME probe's own accounts (the root
+      // computes them from three's totals once a second — see the FRAME line) plus the LIVE attribute count, which
+      // moves with the scene's geometry count (~3 per chunk geometry). `calls` is the number that says whether the
+      // far LOD ring's thousands of chunk meshes are what the frame is paying for.
+      `${t("f3.draw")}: calls=${this.frameProbe.callsPerFrame.toFixed(0)} ` +
+      `tris=${(this.frameProbe.trisPerFrame / 1000).toFixed(0)}k ` +
+      `attrs=${this.renderer.info.memory.attributes}\n` +
       (info.gpuMs !== null
         ? `GPU: ${info.gpuMs.toFixed(2)} ms ≈ ${t("f3.maxFps")} ${Math.round(1000 / info.gpuMs)} FPS\n`
         : `GPU: ${t("f3.gpuNa")}\n`) +

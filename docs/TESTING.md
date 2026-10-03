@@ -149,13 +149,13 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       correct, so a failure is not a crash).
 → **WHERE THE FRAME TIME NOW GOES (M1b)**: with the sampling on the GPU, the far ring's remaining cost is the
   SCENE, so the once-a-second `FRAME` line and the F3 panel both carry three.js's own counters:
-  `calls=` (draw calls in this frame), `tris=` (thousands of triangles) and `geoms=` (geometry objects — one per
-  chunk mesh, fine and far). What to look for:
+  `calls=` (draw calls in ONE frame, averaged over the second), `tris=` (thousands of triangles per frame) and
+  `attrs=` (LIVE vertex-attribute count — about three per chunk geometry, so it tracks the mesh count). What to
+  look for:
   (a) on the ground with the ring fully filled, `calls` is the number to watch — **if it is in the thousands, the
       frame is draw-call bound**, and that (not the terrain field) is what the next milestone has to attack;
-  (b) press **F3** and fly up ~200 blocks: the F3 `绘制/Draw:` line must track the same numbers live. `geoms` is the
-      total mesh count and should be stable once the ring stops growing (it grows while the ring fills — that is the
-      budget doing its job);
+  (b) press **F3** and fly up ~200 blocks: the F3 `绘制/Draw:` line must show the SAME `calls`/`tris` as the last
+      `FRAME` line (one account, two readers), and `attrs` must grow while the ring fills and then settle;
   (c) the `STALL` lines' neighbours tell the story: a stall next to `calls=2000` is a draw/scene problem, a stall
       next to a `LODSAMPLE` line would be the sampler's (none was seen in the M1 run);
   (d) `debug.log`'s world entry now reports the ladder AFTER the window is built, so
