@@ -187,8 +187,13 @@ function buildBatch(step: number, columns: number, lapCells: number, period: num
     // matches the GPU's numbers to within f32 rounding). Flattening the pair into `k` over `step²` removes the
     // shadowing AND the loop header.
     Loop(step * step, ({ i: k }: any) => {
-      const dz = div(k, uint(step));
-      const dx = mod(k, uint(step));
+      // `Loop`'s counter is an INT (three builds it with `nodeArray(params, 'int')`), so it must be converted
+      // before it meets a u32: `k % uint(step)` is `i32 % u32` in WGSL, which does NOT compile — the pipeline is
+      // created invalid, the dispatch writes nothing, and the probe reads its zero-filled buffers back (the third
+      // run: every value 0, max |Δ| 149, with the reason only in `renderer.log`).
+      const within: U32Node = n(k).toUint();
+      const dz: U32Node = div(within, uint(step));
+      const dx: U32Node = mod(within, uint(step));
       const t = tslTerrainHeight(period, wrap(add(bx, dx.toFloat())), wrap(add(bz, dz.toFloat())));
       hi.assign(max(hi, t));
       lo.assign(min(lo, t));
@@ -238,6 +243,9 @@ export class LodGpuProbeSystem {
     let gpuTotal = 0;
     let cpuTotal = 0;
     let samplesTotal = 0;
+    /** Batches whose readback came back all zeros: the kernel did not run (a WGSL/pipeline error is in
+     *  `renderer.log`, and `computeAsync` does not reject for it). */
+    let deadPipelines = 0;
     const examples: string[] = [];
     try {
       const period = terrainPeriod();
@@ -280,22 +288,36 @@ export class LodGpuProbeSystem {
         mismatched += bad;
         samplesTotal += columns * batch.cells * step * step;
         if (diff > maxDiff) maxDiff = diff;
+        // DID IT RUN AT ALL? A dead pipeline (a WGSL compile error, an unimplemented node) writes NOTHING, rather
+        // than failing the await: the buffers come back as they were allocated — all zeros — and the terrain field
+        // is never below TERRAIN_MIN_Y (96), so a grid of zeros is proof the kernel did not execute. Reported as
+        // its own verdict, because "the field is wrong" and "nothing ran" need opposite responses (the third run
+        // reported 67048 zero values as a PORTING BUG; the actual error was in `renderer.log`).
+        const dead = gpuMax.every((v) => v === 0) && gpuMin.every((v) => v === 0);
+        if (dead) deadPipelines++;
         this.log(
           `LODPROBE step ${step}: ${columns} column(s), ${columns * batch.cells * 2} value(s), mismatch ${bad}, ` +
-            `maxΔ ${diff} — gpu ${gpuMs.toFixed(1)}ms (dispatch+2 readbacks), cpu reference ${cpuMs.toFixed(0)}ms`,
+            `maxΔ ${diff}${dead ? " — KERNEL PRODUCED NOTHING (all zeros: check renderer.log for a WGSL/pipeline error)" : ""}` +
+            ` — gpu ${gpuMs.toFixed(1)}ms (dispatch+2 readbacks), cpu reference ${cpuMs.toFixed(0)}ms`,
         );
       }
-      // WHAT A DIFFERENCE MEANS, said out loud, because the two cases need opposite responses: f32-vs-f64 rounding
-      // can only ever move a height by ONE block (a half-value landing on the other side of `round`), so anything
-      // larger is a PORTING mistake in the GPU field — a wrong constant or a wrong seed — and the examples above
-      // are where to look. (The probe's first run reported max |Δ| 26, which was exactly such a mistake.)
+      // WHAT A DIFFERENCE MEANS, said out loud, because the cases need OPPOSITE responses:
+      //   * nothing at all ran → the kernel is broken (a WGSL/pipeline error, in `renderer.log`);
+      //   * one block → `PRECISION`: f32-vs-f64 rounding, which can only ever move a height by one block (a
+      //     half-value landing on the other side of `round`);
+      //   * more than one block → a PORTING mistake in the GPU field (a wrong constant, a wrong seed, a partial
+      //     sample set), and the examples above are where to look. The probe's first run reported max |Δ| 26
+      //     (a wrong hill seed) and its second max |Δ| 8 (nested loops that sampled only the diagonal).
       const verdict =
-        mismatched === 0
-          ? `OK — ${compared} values identical`
-          : maxDiff <= 1
-            ? `PRECISION — ${mismatched} of ${compared} values differ by 1 block (f32 vs f64 rounding)`
-            : `PORTING BUG — ${mismatched} of ${compared} values differ, max |Δ| = ${maxDiff} (far more than f32 `
-              + `rounding can explain: fix the GPU field, not the precision)`;
+        deadPipelines > 0
+          ? `KERNEL DID NOT RUN — ${deadPipelines} batch(es) came back all zeros, so nothing was compared: read `
+            + `renderer.log for the WGSL/pipeline error (debug.log only carries the symptom)`
+          : mismatched === 0
+            ? `OK — ${compared} values identical`
+            : maxDiff <= 1
+              ? `PRECISION — ${mismatched} of ${compared} values differ by 1 block (f32 vs f64 rounding)`
+              : `PORTING BUG — ${mismatched} of ${compared} values differ, max |Δ| = ${maxDiff} (far more than f32 `
+                + `rounding can explain: fix the GPU field, not the precision)`;
       const samplesPerSecond = samplesTotal / Math.max(1, gpuTotal / 1000);
       this.log(
         `LODPROBE RESULT: ${verdict}; gpu ${gpuTotal.toFixed(1)}ms vs cpu ${cpuTotal.toFixed(0)}ms ` +
@@ -308,11 +330,13 @@ export class LodGpuProbeSystem {
       this.world.commands.send(ShowToast, {
         key:
           `LOD GPU 探针: ` +
-          (mismatched === 0
-            ? "与 CPU 完全一致 ✓"
-            : maxDiff <= 1
-              ? `精度差异 ${mismatched} 个值 (±1 格)`
-              : `移植错误! ${mismatched} 个值不一致 (最大 ${maxDiff} 格)`) +
+          (deadPipelines > 0
+            ? "核函数没执行 (0 值; 看 renderer.log)"
+            : mismatched === 0
+              ? "与 CPU 完全一致 ✓"
+              : maxDiff <= 1
+                ? `精度差异 ${mismatched} 个值 (±1 格)`
+                : `移植错误! ${mismatched} 个值不一致 (最大 ${maxDiff} 格)`) +
           ` — 详情见 debug.log`,
         raw: true,
       });
