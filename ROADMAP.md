@@ -2950,10 +2950,22 @@ Still outstanding:
   FROM `TERRAIN_NOISE` (the seed, the octaves, the region cell, the amplitudes — exported as data for exactly
   this reason), one GPU thread per (S+2)² grid cell, `step²` samples per cell, and compares every value against
   `lodSampleGrid` — the production CPU grid, exported for the comparison rather than copied. It logs one line per
-  rung (mismatches, max |Δ|, GPU ms, CPU ms) plus a verdict, and toasts the summary. **The answer it exists to
-  produce**: f32 arithmetic over the same wrapping-integer hash reproduces the f64 field's rounded heights
-  exactly, or it does not — and if it does not, the coarse surface can sit a block low, which is a crack (P1.93),
-  so the fix is either f32 discipline on the CPU side or a one-block margin, decided from the probe's numbers.
+  rung (mismatches, max |Δ|, GPU ms, CPU ms) plus a verdict, and toasts the summary.
+  **WHAT ITS FIRST RUN FOUND** (the user's machine, `debug.log`): 63397 of 67048 values differ, max |Δ| = 26 —
+  i.e. 95% of the field, 20-odd blocks off, which f32 rounding can NOT explain (it can only move a height by one
+  block). It was a PORTING bug: `terrainHeight` uses `TERRAIN_SEED` for the region term and
+  `TERRAIN_SEED + 0x51ed270b` for the hill stack, and the GPU port seeded the hill octaves with the bare seed.
+  Fixed by making that seed DATA too (`TERRAIN_NOISE.hillSeed`, used by `terrain.ts` itself now, so it cannot be
+  inlined away again), and CONFIRMED WITHOUT A GPU: re-running the same comparison with the wrong seed on the CPU
+  reproduces 64115/67048 mismatches (95.6%) at max |Δ| 24 — the same field the GPU produced, ±1 of f32 rounding.
+  The probe now CLASSIFIES its verdict — `PRECISION` (differences of one block = f32 vs f64 rounding, which needs
+  a fround discipline or a one-block margin) vs `PORTING BUG` (anything larger) — so the next run says which
+  question is on the table.
+  **AND ITS SECOND MEASUREMENT, which shapes M1**: the GPU ran 36M field samples/s (a whole rung in 60-75 ms
+  including the dispatch and two readbacks), because the kernel is ONE THREAD PER GRID CELL with an inner loop of
+  `step²` samples — at step 32 that is only ~2300 threads, so the device is mostly idle. It also reports samples/s
+  now. M1 must therefore be ONE THREAD PER SAMPLE (with a workgroup reduction per cell) and one readback per
+  batch; the probe's timing is a floor, not the ceiling.
   VERIFIED: `tsc` 0; `check:ecs` **83/83**, with a new group pinning the probe's foundations (the reference
   accessor IS the production max/min grid, re-derived cell by cell; `TERRAIN_NOISE` carries the field's numbers
   and the octave cells divide the lap; the probe's noise reads that data and never retypes the seed; its declared

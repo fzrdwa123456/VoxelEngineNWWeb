@@ -94,11 +94,17 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   G/H/J). The probe re-samples the terrain field on the GPU with the same code path the LOD will use and compares
   every value against the CPU's own grid, then toasts a one-line summary and writes the detail to `debug.log`.
   What you must see:
-  (a) **a toast** — `LOD GPU 探针: 与 CPU 完全一致 ✓` (or, if the f32 port disagrees, the number of values and the
-      largest difference). Either answer is USEFUL: it is the question M1 depends on;
+  (a) **a toast** — `LOD GPU 探针: 与 CPU 完全一致 ✓` (or `精度差异 N 个值 (±1 格)`, or `移植错误! N 个值不一致
+      (最大 X 格)` if the GPU field itself is wrong). Either answer is USEFUL: it is the question M1 depends on;
   (b) **`LODPROBE` lines in `debug.log`**, one per rung, e.g.
       `LODPROBE step 32: 2 column(s), 2312 value(s), mismatch 0, maxΔ 0 — gpu 5.2ms (dispatch+2 readbacks), cpu reference 590ms`,
-      then `LODPROBE RESULT: OK — 33524 values identical; gpu …ms vs cpu …ms`, and `LODPROBE start`/`done in …ms`;
+      then a `LODPROBE RESULT:` line carrying the verdict, the two totals and the field SAMPLES/S (a floor: the
+      kernel runs one thread per grid cell, so M1's thread-per-sample layout should beat it by a lot), and
+      `LODPROBE start: backend=webgpu lap=… chunks` / `LODPROBE done in …ms`;
+  (b2) **how to read the verdict**: differences of ONE block = `PRECISION` (f32 vs f64 rounding — tolerable, and
+      the fix would be a fround discipline or a one-block margin); ANYTHING larger = `PORTING BUG` in the GPU
+      field, and the `examples:` list says which rung, column and cell — that is what the probe's first run
+      reported (max |Δ| 26, a wrong hill seed, since fixed);
   (c) **the timing spread is the point**: the `gpu` number is the whole rung (dispatch + two readbacks), the `cpu`
       number is the same work on the main thread — for step 16/32 expect the GPU to be two to three orders of
       magnitude faster. That ratio, not the toast, is what M1 is bought with;

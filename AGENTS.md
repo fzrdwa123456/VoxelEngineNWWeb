@@ -686,10 +686,17 @@ where it is:
   why that accessor is exported) and logs one line per rung plus a verdict, with a toast for the summary. **It
   exists to answer ONE question before anything is moved to the GPU: can f32 reproduce the f64 field exactly?**
   A one-block disagreement is not cosmetic — the coarse surface may never sit BELOW the fine one (P1.93) — so the
-  probe reports the difference instead of asserting there is none. The kernel is built from `TERRAIN_NOISE`
+  probe reports the difference instead of asserting there is none, and CLASSIFIES it: differences of ONE block are
+  `PRECISION` (f32 vs f64 rounding, fixed by a fround discipline or a one-block margin), anything larger is a
+  `PORTING BUG` in the GPU field. Its first run found exactly the latter — the hill stack's own seed
+  (`TERRAIN_NOISE.hillSeed`) had been replaced by the bare one, a field 20-26 blocks off — which is why that seed
+  is DATA now and why the gate asserts the probe reads it. The kernel is built from `TERRAIN_NOISE`
   (`data/world/terrain.ts`), never from a second copy of the seed and the octaves, and the gate asserts exactly
   that. It is a probe: it owns no component, changes no streaming state, and its own CPU reference is the slow
-  half (~1 s), so a stall while it runs is expected and logged.
+  half (~1 s), so a stall while it runs is expected and logged. **Its timing is a FLOOR, not a target**: the kernel
+  runs ONE THREAD PER GRID CELL with an inner loop of `step²` samples, so the outer rungs use a few thousand
+  threads and the device idles (measured 36M samples/s); it reports samples/s so that M1's layout (one thread per
+  SAMPLE) can be compared against it.
 * **A CHUNK THAT APPEARS FADES IN AND ONE THAT LEAVES FADES OUT (P1.98/P1.99 — `FADE_IN_MS` = 220 ms,
   `FADE_OUT_MS` = 260 ms, `J` switches both off).** The reported complaint was «区块加载就闪» — a chunk that
   streams in popped at full opacity, which reads as a flash (worst on the far ring, whose chunks cover 64×64

@@ -66,12 +66,19 @@ const OCTAVES: readonly (readonly [number, number])[] = [
 ];
 const OCTAVE_WEIGHT = 1.75; // 1 + 0.5 + 0.25: what the weights add up to, so the result stays in [0, 1)
 
+/** THE TWO SEEDS, and why they are named rather than inlined: the region term uses `TERRAIN_SEED` and the hill
+ *  stack uses a DIFFERENT one, and `hills` adds yet another offset per octave. Inlining the hill seed (which is
+ *  what the first version of the GPU probe did NOT do — it passed the bare seed and produced a field up to 20
+ *  blocks off, caught by the probe on its first run) is exactly the mistake this constant exists to prevent. */
+const HILL_SEED = TERRAIN_SEED + 0x51ed270b;
+
 /** THE FIELD, AS DATA (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`). A second implementation of
  *  this function — the GPU sampler that the LOD's sampling cost needs — must be BUILT from these numbers rather
  *  than typed out again, or the two drift and the coarse surface stops agreeing with the real chunks it has to
  *  meet. The probe's TSL reads THIS object, and the gate asserts it is the only place those numbers come from. */
 export const TERRAIN_NOISE = {
   seed: TERRAIN_SEED,
+  hillSeed: HILL_SEED,
   baseY: TERRAIN_BASE_Y,
   regionAmplitude: REGION_AMPLITUDE,
   hillAmplitude: HILL_AMPLITUDE,
@@ -84,7 +91,6 @@ export const TERRAIN_NOISE = {
 
 /** 2^32 as a reciprocal: an integer hash's low 32 bits -> [0, 1) with one multiply. */
 const INV_U32 = 2.3283064365386963e-10;
-
 /** Integer hash of a lattice cell -> [0, 1). `Math.imul` keeps every product exact 32-bit, so the value is
  *  identical on every engine and every platform (a float multiply would round differently). */
 function hash2(ix: number, iz: number, seed: number): number {
@@ -141,7 +147,7 @@ function hills(x: number, z: number, seed: number): number {
  *  read agree by construction. */
 export function terrainHeight(x: number, z: number): number {
   const region = (noise2(x, z, REGION_CELL, TERRAIN_SEED) - 0.5) * 2 * REGION_AMPLITUDE;
-  const hill = (hills(x, z, TERRAIN_SEED + 0x51ed270b) - 0.5) * 2 * HILL_AMPLITUDE;
+  const hill = (hills(x, z, HILL_SEED) - 0.5) * 2 * HILL_AMPLITUDE;
   const y = Math.round(TERRAIN_BASE_Y + region + hill);
   // The bounds are what the generator's fast paths trust, so they are ENFORCED here rather than hoped for:
   // a field that overshot them would put solid blocks in a chunk the generator filled as air.

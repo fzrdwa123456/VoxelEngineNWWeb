@@ -132,8 +132,10 @@ function tslTerrainHeight(period: number, x: F32Node, z: F32Node): F32Node {
   let sum: F32Node | null = null;
   for (let i = 0; i < spec.octaves.length; i++) {
     const octave = spec.octaves[i];
+    // THE HILL STACK'S OWN SEED, then one offset per octave: `terrainHeight` uses a different seed for the hills
+    // than for the region, and MISSING that offset is what the probe's first run caught (a field ~20 blocks off).
     const term = mul(
-      n(tslNoise(period, x, z, octave[0], (spec.seed + i * 0x9e3779b1) >>> 0)),
+      n(tslNoise(period, x, z, octave[0], (spec.hillSeed + i * 0x9e3779b1) >>> 0)),
       n(float(octave[1])),
     );
     sum = sum === null ? term : add(n(sum), n(term));
@@ -228,6 +230,7 @@ export class LodGpuProbeSystem {
     let maxDiff = 0;
     let gpuTotal = 0;
     let cpuTotal = 0;
+    let samplesTotal = 0;
     const examples: string[] = [];
     try {
       const period = terrainPeriod();
@@ -268,23 +271,42 @@ export class LodGpuProbeSystem {
         const cpuMs = performance.now() - cpuStart;
         cpuTotal += cpuMs;
         mismatched += bad;
+        samplesTotal += columns * batch.cells * step * step;
         if (diff > maxDiff) maxDiff = diff;
         this.log(
           `LODPROBE step ${step}: ${columns} column(s), ${columns * batch.cells * 2} value(s), mismatch ${bad}, ` +
             `maxΔ ${diff} — gpu ${gpuMs.toFixed(1)}ms (dispatch+2 readbacks), cpu reference ${cpuMs.toFixed(0)}ms`,
         );
       }
+      // WHAT A DIFFERENCE MEANS, said out loud, because the two cases need opposite responses: f32-vs-f64 rounding
+      // can only ever move a height by ONE block (a half-value landing on the other side of `round`), so anything
+      // larger is a PORTING mistake in the GPU field — a wrong constant or a wrong seed — and the examples above
+      // are where to look. (The probe's first run reported max |Δ| 26, which was exactly such a mistake.)
       const verdict =
         mismatched === 0
           ? `OK — ${compared} values identical`
-          : `MISMATCH — ${mismatched} of ${compared} values differ, max |Δ| = ${maxDiff}`;
+          : maxDiff <= 1
+            ? `PRECISION — ${mismatched} of ${compared} values differ by 1 block (f32 vs f64 rounding)`
+            : `PORTING BUG — ${mismatched} of ${compared} values differ, max |Δ| = ${maxDiff} (far more than f32 `
+              + `rounding can explain: fix the GPU field, not the precision)`;
+      const samplesPerSecond = samplesTotal / Math.max(1, gpuTotal / 1000);
       this.log(
         `LODPROBE RESULT: ${verdict}; gpu ${gpuTotal.toFixed(1)}ms vs cpu ${cpuTotal.toFixed(0)}ms ` +
-          `(both for ${compared / 2} grid values); examples: ${examples.join(" | ") || "(none)"}`,
+          `(both for ${compared / 2} grid values); ${(samplesTotal / 1e6).toFixed(1)}M field samples at ` +
+          `${(samplesPerSecond / 1e6).toFixed(0)}M/s — a FLOOR, not the ceiling: this kernel runs ONE THREAD PER `
+          + `GRID CELL (an inner loop of step² samples), so the outer rungs use only a few thousand threads; ` +
+          `M1 moves to one thread per SAMPLE. examples: ${examples.join(" | ") || "(none)"}`,
       );
       this.log(`LODPROBE done in ${(performance.now() - started).toFixed(0)}ms`);
       this.world.commands.send(ShowToast, {
-        key: `LOD GPU 探针: ${mismatched === 0 ? "与 CPU 完全一致 ✓" : `${mismatched} 个值不一致 (最大 ${maxDiff})`} — 详情见 debug.log`,
+        key:
+          `LOD GPU 探针: ` +
+          (mismatched === 0
+            ? "与 CPU 完全一致 ✓"
+            : maxDiff <= 1
+              ? `精度差异 ${mismatched} 个值 (±1 格)`
+              : `移植错误! ${mismatched} 个值不一致 (最大 ${maxDiff} 格)`) +
+          ` — 详情见 debug.log`,
         raw: true,
       });
     } catch (err) {

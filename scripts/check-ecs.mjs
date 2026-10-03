@@ -7343,6 +7343,9 @@ check("the LOD sampler probe (M0): the GPU field is built from the CPU field's o
   //    trust them, so a drift here would put solid blocks in a chunk the generator filled as air).
   const spec = T.TERRAIN_NOISE;
   equal(spec.regionCell, 512, "the region term's cell is DATA (it is what a legal world size is a multiple of)");
+  // THE TWO SEEDS are the trap that cost the probe's first run a wrong field (max |Δ| 26): the region uses
+  // `seed` and the hill stack uses `hillSeed`, and the GPU copy must take BOTH from here.
+  equal(spec.hillSeed, spec.seed + 0x51ed270b, "the hill stack's own seed is DATA, and it is not the region's");
   equal(spec.octaves.map((o) => o.join(":")).join(","), "128:1,64:0.5,32:0.25", "the octaves are DATA");
   equal(spec.octaveWeight, spec.octaves.reduce((s, o) => s + o[1], 0), "…and their weights add up to the divisor");
   equal(spec.maxY - spec.baseY, spec.regionAmplitude + spec.hillAmplitude, "the bounds follow the amplitudes");
@@ -7361,6 +7364,8 @@ check("the LOD sampler probe (M0): the GPU field is built from the CPU field's o
   assert(/lodSampleGrid\(/.test(probeCode), "…and it is compared against the production grid accessor");
   assert(/TERRAIN_NOISE\.octaves/.test(probeCode) && /spec\.regionCell/.test(probeCode),
     "…including the octave stack and the region cell");
+  assert(/spec\.hillSeed/.test(probeCode),
+    "…and the HILL stack's own seed (the omission that cost the probe's first run a field 20 blocks off)");
   const probeAccess = load("plugins/render/systems/lod-gpu-probe.js").LOD_PROBE_ACCESS;
   assert(probeAccess.readsExternal.includes("renderer3d"), "the probe declares the renderer it computes on");
   assert(probeAccess.writesExternal.includes("lodProbeBuffers"), "…and the scratch buffers it owns");
