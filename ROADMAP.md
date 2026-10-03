@@ -2961,11 +2961,22 @@ Still outstanding:
   The probe now CLASSIFIES its verdict — `PRECISION` (differences of one block = f32 vs f64 rounding, which needs
   a fround discipline or a one-block margin) vs `PORTING BUG` (anything larger) — so the next run says which
   question is on the table.
-  **AND ITS SECOND MEASUREMENT, which shapes M1**: the GPU ran 36M field samples/s (a whole rung in 60-75 ms
-  including the dispatch and two readbacks), because the kernel is ONE THREAD PER GRID CELL with an inner loop of
-  `step²` samples — at step 32 that is only ~2300 threads, so the device is mostly idle. It also reports samples/s
-  now. M1 must therefore be ONE THREAD PER SAMPLE (with a workgroup reduction per cell) and one readback per
-  batch; the probe's timing is a floor, not the ceiling.
+  **AND ITS SECOND RUN FOUND A SECOND BUG, in the probe itself** (`K` again after the seed fix): mismatches fell
+  from 63397 to 9240 (13.8%) and step 2/4 were left at ±1 — the expected f32 rounding — but the outer rungs still
+  showed max |Δ| 2/3/8, and a max/min over samples can only be off by as much as the worst SAMPLE. Diagnosed
+  without a GPU: modelling "only the DIAGONAL samples were visited" (`dx === dz`) reproduces 9147/67048 (13.6%)
+  at max |Δ| 7, against the GPU's 9240 (13.8%) at 8 — the same field. The cause is three's `Loop(count, ({ i }) => …)`:
+  its counter is named `i` BY DEFAULT, so two NESTED loops declare the same name, the inner one shadows the outer
+  in the emitted WGSL, and the outer counter ends up being the inner one — every cell sampled only its diagonal,
+  1/step of the samples, which is why the error grew with the rung. Fixed by FLATTENING the pair into one
+  `Loop(step²)` with `dz = k/step`, `dx = k%step` (which also removes a loop header).
+  **AND ITS TIMING, which sets M1's shape**: 4.0M field samples in 605 ms ≈ the same as the CPU's 638 ms — no win
+  at all — because the kernel is ONE THREAD PER GRID CELL with an inner loop of `step²` samples, so the outer
+  rungs use only ~2300 threads and the device idles. M1 must be ONE THREAD PER SAMPLE (with a workgroup reduction
+  per cell) and one readback per batch.
+  **M1's OPEN DECISION, from the ±1 values the probe now reports**: a coarse max one block BELOW the CPU's is a
+  crack (P1.93), while one above it is a one-block ledge — so if the fixed probe still shows ±1 anywhere, M1 adds a
+  deterministic +1 to the GPU's max (or the CPU side moves to f32 semantics) instead of tolerating it.
   VERIFIED: `tsc` 0; `check:ecs` **83/83**, with a new group pinning the probe's foundations (the reference
   accessor IS the production max/min grid, re-derived cell by cell; `TERRAIN_NOISE` carries the field's numbers
   and the octave cells divide the lap; the probe's noise reads that data and never retypes the seed; its declared

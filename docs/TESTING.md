@@ -102,9 +102,13 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       kernel runs one thread per grid cell, so M1's thread-per-sample layout should beat it by a lot), and
       `LODPROBE start: backend=webgpu lap=… chunks` / `LODPROBE done in …ms`;
   (b2) **how to read the verdict**: differences of ONE block = `PRECISION` (f32 vs f64 rounding — tolerable, and
-      the fix would be a fround discipline or a one-block margin); ANYTHING larger = `PORTING BUG` in the GPU
-      field, and the `examples:` list says which rung, column and cell — that is what the probe's first run
-      reported (max |Δ| 26, a wrong hill seed, since fixed);
+      the fix in M1 would be a +1 margin on the coarse max or a fround discipline); ANYTHING larger = `PORTING BUG`
+      in the GPU field, and the `examples:` list says which rung, column and cell. **Watch the SHAPE of the
+      error, not just its size**: if max |Δ| grows with the rung (1 → 2 → 3 → 8 across step 2 → 32), the SAMPLE SET
+      is wrong rather than a value — that is the signature of the nested-`Loop` aliasing this probe already hit
+      once (three names the loop counter `i` by default, so nested loops shadow each other and each cell samples
+      only its diagonal, `1/step` of the samples). Both bugs the probe has found so far were of that kind, and
+      both were diagnosed on the CPU by reproducing the suspected wrong field/grid and matching the numbers;
   (c) **the timing spread is the point**: the `gpu` number is the whole rung (dispatch + two readbacks), the `cpu`
       number is the same work on the main thread — for step 16/32 expect the GPU to be two to three orders of
       magnitude faster. That ratio, not the toast, is what M1 is bought with;

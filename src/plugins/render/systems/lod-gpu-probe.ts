@@ -179,12 +179,19 @@ function buildBatch(step: number, columns: number, lapCells: number, period: num
     const hi = float(0).toVar();
     const lo = float(TERRAIN_NOISE.maxY).toVar();
     const wrap = (v: any): any => mod(add(mod(v, float(period)), float(period)), float(period));
-    Loop(step, ({ i: dz }: any) => {
-      Loop(step, ({ i: dx }: any) => {
-        const t = tslTerrainHeight(period, wrap(add(bx, dx.toFloat())), wrap(add(bz, dz.toFloat())));
-        hi.assign(max(hi, t));
-        lo.assign(min(lo, t));
-      });
+    // ONE LOOP, and the reason is a MEASURED bug (the probe's second run): `Loop(count, ({ i }) => …)` names its
+    // counter `i` by DEFAULT, so two NESTED loops declare the same name, the inner one shadows the outer in the
+    // emitted WGSL, and the outer counter ends up being the inner one — every cell then sampled only its
+    // DIAGONAL (`dx === dz`), which is 1/step of the samples, so the max/min came from a subset and the error
+    // grew with the rung (measured max |Δ| 2/3/8 at step 8/16/32, and reproducing "diagonal only" on the CPU
+    // matches the GPU's numbers to within f32 rounding). Flattening the pair into `k` over `step²` removes the
+    // shadowing AND the loop header.
+    Loop(step * step, ({ i: k }: any) => {
+      const dz = div(k, uint(step));
+      const dx = mod(k, uint(step));
+      const t = tslTerrainHeight(period, wrap(add(bx, dx.toFloat())), wrap(add(bz, dz.toFloat())));
+      hi.assign(max(hi, t));
+      lo.assign(min(lo, t));
     });
     outMax.element(idx).assign(hi);
     outMin.element(idx).assign(lo);

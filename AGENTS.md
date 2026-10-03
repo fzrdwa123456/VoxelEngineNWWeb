@@ -688,11 +688,13 @@ where it is:
   A one-block disagreement is not cosmetic — the coarse surface may never sit BELOW the fine one (P1.93) — so the
   probe reports the difference instead of asserting there is none, and CLASSIFIES it: differences of ONE block are
   `PRECISION` (f32 vs f64 rounding, fixed by a fround discipline or a one-block margin), anything larger is a
-  `PORTING BUG` in the GPU field. Its first run found exactly the latter — the hill stack's own seed
-  (`TERRAIN_NOISE.hillSeed`) had been replaced by the bare one, a field 20-26 blocks off — which is why that seed
-  is DATA now and why the gate asserts the probe reads it. The kernel is built from `TERRAIN_NOISE`
-  (`data/world/terrain.ts`), never from a second copy of the seed and the octaves, and the gate asserts exactly
-  that. It is a probe: it owns no component, changes no streaming state, and its own CPU reference is the slow
+  `PORTING BUG` in the GPU field. It found two of the latter, both before any of M1 was written: the hill stack's
+  own seed (`TERRAIN_NOISE.hillSeed`) had been replaced by the bare one (a field 20-26 blocks off), and then the
+  kernel's NESTED `Loop`s aliased their counters — three names the loop variable `i` by default, so the inner loop
+  shadowed the outer and every cell sampled only its DIAGONAL, `1/step` of the samples, which is why the error grew
+  with the rung (max |Δ| 2/3/8 at step 8/16/32, reproduced on the CPU by modelling "diagonal only"). The kernel
+  therefore uses ONE flat `Loop(step²)`; both seeds and every octave come from `TERRAIN_NOISE`, and the gate asserts
+  exactly that. It is a probe: it owns no component, changes no streaming state, and its own CPU reference is the slow
   half (~1 s), so a stall while it runs is expected and logged. **Its timing is a FLOOR, not a target**: the kernel
   runs ONE THREAD PER GRID CELL with an inner loop of `step²` samples, so the outer rungs use a few thousand
   threads and the device idles (measured 36M samples/s); it reports samples/s so that M1's layout (one thread per
