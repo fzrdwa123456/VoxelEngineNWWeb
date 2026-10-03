@@ -1,0 +1,247 @@
+// ===== M2a'S PROBE: DOES THE GPU MESHER DECIDE EVERY FACE LIKE `meshChunk`? =====
+// The M0 probe answered "can the GPU reproduce the FIELD" with `K`; this answers the next question the GPU route
+// depends on — "can it reproduce the MESHER" — with `M`. It runs the kernel in `lod-gpu-mesher.ts` over a set of
+// SYNTHETIC chunk patterns (so it says something on a pristine world, and so the closed-form cases are checkable)
+// and then over the REAL chunks in the player's own column, compares the per-look census against the production
+// CPU mesher for each, and writes one line per case plus a verdict to `debug.log`, with a toast for the summary.
+//
+// IT IS A DEBUG PROBE: it owns no component, changes no streaming state, and does nothing unless `M` is pressed.
+// The CPU half is the slow one (~ms per chunk), and it runs on the thread that asked, so a stall for the duration
+// of the probe is expected and reported — the same shape M0 has.
+import { ShowToast } from "../../../data/globals/commands";
+import { RENDERER3D } from "../../../data/globals/gfx";
+import { KEY_EVENTS, LOCAL_PLAYER, VOXEL, KeyEdgeReader } from "../../../data/globals/resources";
+import { AIR, CHUNK_SIZE, CHUNK_VOLUME, SOLID, type Chunk } from "../../../data/world/chunk";
+import { CHUNK_Y_COUNT, MIN_CHUNK_Y, type VoxelWorld } from "../../../data/world/world";
+import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput } from "../../../data/world/mesh";
+import { worldChunksX, worldChunksZ } from "../../../data/world/size";
+import { POSITION } from "../../player/components";
+import { entityIndex, type SystemAccess, type World } from "../../../core/world";
+import { GpuChunkMesher, censusOfMesh, compareCensus } from "./lod-gpu-mesher";
+import type { WebGPURenderer } from "three/webgpu";
+
+/** The probe touches the GPU and nothing the world models: it reads the voxel data (to build the reference input
+ *  and to hand the kernel the same bytes) and the renderer, and it owns its own buffers. */
+export const MESH_PROBE_ACCESS: SystemAccess = {
+  readsExternal: ["renderer3d", "voxelBlocks"],
+  writesExternal: ["gpuMesherBuffers"],
+};
+
+/** How many of the player's own chunks the probe meshes both ways. Six is enough to cover a column's shapes
+ *  (surface, interior, bedrock) without making the CPU reference the slow half of the measurement. */
+const REAL_CHUNKS = 6;
+
+/** A synthetic chunk's voxel value at a local coordinate. */
+type Pattern = (lx: number, ly: number, lz: number) => number;
+
+interface ProbeCase {
+  readonly name: string;
+  readonly input: ChunkMeshInput;
+  /** A face count the pattern's GEOMETRY implies, checked as well: a census that agrees with a wrong CPU mesher
+   *  would still be wrong, and these are the cases where the answer is known without meshing anything. */
+  readonly expectedFaces?: number;
+}
+
+/** One synthetic input: the voxel bytes the CPU mesher wants (the GPU gets the same data through
+ *  `buildPaddedVoxels`), plus the six neighbour planes. */
+function syntheticInput(pattern: Pattern, planeSolid: boolean): ChunkMeshInput {
+  const blocks = new Uint8Array(CHUNK_VOLUME);
+  for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+    for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+        blocks[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE] = pattern(lx, ly, lz);
+      }
+    }
+  }
+  const planes = new Uint8Array(6 * CHUNK_SIZE * CHUNK_SIZE);
+  if (planeSolid) planes.fill(1);
+  return { uniform: false, uniformValue: AIR, blocks, planes };
+}
+
+/** The cases, ordered cheap-first so a failure shows up before the 100k-face one. The closed forms are the shape
+ *  of the culling rule: a solid block in air shows its whole shell (6 × 32²), a solid block with solid neighbours
+ *  on five sides shows only its top (32²), and so on. */
+function syntheticCases(): ProbeCase[] {
+  const S = CHUNK_SIZE;
+  return [
+    { name: "empty-air", input: syntheticInput(() => AIR, false), expectedFaces: 0 },
+    { name: "uniform-solid", input: syntheticInput(() => SOLID, false), expectedFaces: 6 * S * S },
+    { name: "top-only", input: syntheticInput(() => SOLID, true), expectedFaces: 0 },
+    // Solid everywhere with an AIR neighbour on top only: the top layer's faces, and nothing else.
+    {
+      name: "floor-top",
+      input: (() => {
+        const input = syntheticInput(() => SOLID, true);
+        // PLANE.PY is plane 2, laid out as (lx, lz): make it air, so the top face of every surface voxel emits.
+        input.planes.fill(0, 2 * S * S, 3 * S * S);
+        return input;
+      })(),
+      expectedFaces: S * S,
+    },
+    // Three values stacked in 8-voxel bands, air above: multi-value, multi-kind (top + sides).
+    {
+      name: "layers",
+      input: syntheticInput((_lx, ly) => (ly < 8 ? 1 : ly < 16 ? 2 : ly < 24 ? 3 : AIR), false),
+    },
+    // One block in the middle of an air chunk: the closed form is its six faces.
+    { name: "one-block", input: syntheticInput((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? 4 : AIR), false), expectedFaces: 6 },
+    // A solid chunk with a one-voxel hole and air planes: the shell plus the hole's six faces.
+    {
+      name: "hole",
+      input: (() => {
+        const input = syntheticInput((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? AIR : SOLID), false);
+        return input;
+      })(),
+      expectedFaces: 6 * S * S + 6,
+    },
+    // The dense case: a checkerboard emits a face wherever a neighbour differs, so it is the worst case for the
+    // culling rule AND the largest face count the kernel will see here.
+    { name: "checker", input: syntheticInput((lx, ly, lz) => ((lx + ly + lz) % 2 === 0 ? 1 : AIR), false) },
+    // A NON-UNIFORM BORDER, which is the only kind that exercises the pad's own ±Z transposition: a uniform plane
+    // is symmetric, so the kernel would read it the same either way. (The gate proved the transposition matters by
+    // mutation; this case is what carries it to the GPU.)
+    {
+      name: "patterned-border",
+      input: (() => {
+        const input = syntheticInput((_lx, ly) => (ly < 16 ? SOLID : AIR), false);
+        for (let a = 0; a < S; a++) {
+          for (let b = 0; b < S; b++) {
+            const on = (a * 5 + b * 3) % 7 < 2 ? 1 : 0;
+            for (let plane = 0; plane < 6; plane++) input.planes[plane * S * S + a * S + b] = on;
+          }
+        }
+        return input;
+      })(),
+    },
+  ];
+}
+
+/** RENDER lane. `M` starts the probe; everything else about it is reported, never acted on. */
+export class GpuMesherProbeSystem {
+  private readonly keys: KeyEdgeReader;
+  private readonly renderer: WebGPURenderer;
+  private readonly world: World;
+  private readonly log: (line: string) => void;
+  private readonly voxel: VoxelWorld;
+  private readonly playerIndex: number;
+  /** Built on first use (it allocates ~170 KB of GPU buffers) and kept: a second `M` reuses the pipeline. */
+  private mesher: GpuChunkMesher | null = null;
+  /** One probe at a time: a second `M` while it runs is ignored (it awaits the GPU). */
+  private busy = false;
+  /** `null` until the backend is asked; a non-WebGPU backend turns the probe into a logged no-op. */
+  private supported: boolean | null = null;
+
+  constructor(world: World, log: (line: string) => void) {
+    this.world = world;
+    this.renderer = world.resource(RENDERER3D);
+    this.voxel = world.resource(VOXEL);
+    this.keys = new KeyEdgeReader(world.resource(KEY_EVENTS));
+    this.playerIndex = entityIndex(world.resource(LOCAL_PLAYER));
+    this.log = log;
+  }
+
+  step(): void {
+    let presses = 0;
+    this.keys.drain((edge) => {
+      if (edge.down && !edge.repeat && edge.code === "KeyM") presses++;
+    });
+    if (presses > 0 && !this.busy) void this.run();
+  }
+
+  /** Run every case and report. Async on purpose: the lane may not block, and each case awaits its readback —
+   *  which is also what the GPU-vs-CPU milliseconds are measured around. */
+  private async run(): Promise<void> {
+    this.busy = true;
+    const started = performance.now();
+    const backend = (this.renderer as { backend?: { isWebGPUBackend?: boolean } }).backend;
+    if (this.supported === null) this.supported = backend?.isWebGPUBackend === true;
+    if (!this.supported) {
+      this.log("MESHPROBE off: this backend is not WebGPU, so there is no compute queue to mesh on");
+      this.busy = false;
+      return;
+    }
+    this.mesher ??= new GpuChunkMesher(this.renderer);
+    let cases = 0;
+    let mismatched = 0;
+    let facesCompared = 0;
+    let gpuMs = 0;
+    let cpuMs = 0;
+    const examples: string[] = [];
+    try {
+      const all: ProbeCase[] = [...syntheticCases(), ...this.realCases()];
+      for (const probeCase of all) {
+        const cpuStart = performance.now();
+        const mesh = meshChunk(probeCase.input);
+        const cpuCensus = censusOfMesh(mesh);
+        cpuMs += performance.now() - cpuStart;
+        const gpuStart = performance.now();
+        const gpuCensus = await this.mesher.run(probeCase.input);
+        gpuMs += performance.now() - gpuStart;
+        const diff = compareCensus(cpuCensus, gpuCensus);
+        const closedForm =
+          probeCase.expectedFaces === undefined
+            ? ""
+            : probeCase.expectedFaces === cpuCensus.total
+              ? " (closed form ✓)"
+              : ` (CLOSED FORM SAYS ${probeCase.expectedFaces} — the CPU mesher disagrees with the pattern!)`;
+        cases++;
+        facesCompared += diff.totalCpu;
+        if (diff.mismatchedKeys > 0 || diff.totalCpu !== diff.totalGpu) {
+          mismatched++;
+          for (const example of diff.examples) if (examples.length < 8) examples.push(`${probeCase.name}: ${example}`);
+        }
+        this.log(
+          `MESHPROBE ${probeCase.name}: faces cpu ${diff.totalCpu} / gpu ${diff.totalGpu}, ` +
+            `keys ${diff.keysCompared}, mismatched keys ${diff.mismatchedKeys}${closedForm}` +
+            ` — gpu ${(performance.now() - gpuStart).toFixed(2)}ms, cpu reference ${(performance.now() - cpuStart).toFixed(2)}ms`,
+        );
+      }
+      // WHAT A MISMATCH MEANS, said out loud, because "the kernel is broken" and "the kernel did not run" need
+      // opposite responses — the same distinction M0 had to learn: a WGSL/pipeline error leaves the accumulators
+      // at their reset value (all zeros), and `computeAsync` does NOT reject for it.
+      const ranAtAll = facesCompared > 0 || mismatched === 0;
+      const verdict = !ranAtAll
+        ? "KERNEL PRODUCED NOTHING (every census came back empty: read renderer.log for the WGSL/pipeline error)"
+        : mismatched === 0
+          ? `OK — ${cases} case(s), ${facesCompared} faces, every look's count and both signatures identical`
+          : `MISMATCH — ${mismatched} of ${cases} case(s) disagree; first: ${examples[0] ?? "(no example)"}`;
+      this.log(
+        `MESHPROBE RESULT: ${verdict}. gpu ${gpuMs.toFixed(1)}ms vs cpu ${cpuMs.toFixed(1)}ms for the same inputs ` +
+          `(the CPU half is the PRODUCTION mesher, run once per case; the GPU half is dispatch + a 12 KB readback). ` +
+          `examples: ${examples.join(" | ") || "(none)"}`,
+      );
+      this.log(`MESHPROBE done in ${(performance.now() - started).toFixed(0)}ms`);
+      this.world.commands.send(ShowToast, {
+        key:
+          "网格 GPU 探针: " +
+          (mismatched === 0 ? `与 CPU 完全一致 ✓ (${facesCompared} 个面)` : `不一致! ${mismatched}/${cases} 个用例 (见 debug.log)`),
+        raw: true,
+      });
+    } catch (err) {
+      this.log(`MESHPROBE FAILED: ${String((err as Error)?.message ?? err)}`);
+      this.world.commands.send(ShowToast, { key: `网格 GPU 探针失败: ${String((err as Error)?.message ?? err)}`, raw: true });
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** The REAL chunks: the player's own column, top down, the ones that actually have faces. This is the half that
+   *  makes the probe a measurement of THIS world rather than of hand-written patterns. */
+  private realCases(): ProbeCase[] {
+    const out: ProbeCase[] = [];
+    const periodX = worldChunksX();
+    const periodZ = worldChunksZ();
+    const wrap = (value: number, period: number): number => ((value % period) + period) % period;
+    const cx = wrap(Math.floor(POSITION.x[this.playerIndex] / CHUNK_SIZE), periodX);
+    const cz = wrap(Math.floor(POSITION.z[this.playerIndex] / CHUNK_SIZE), periodZ);
+    for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y && out.length < REAL_CHUNKS; cy--) {
+      const chunk: Chunk | null = this.voxel.getChunk(cx, cy, cz);
+      if (chunk === null) continue;
+      const input = gatherChunkMeshInput(this.voxel, chunk, cx, cy, cz);
+      if (meshChunk(input).faces === 0) continue; // a chunk with nothing to draw proves little
+      out.push({ name: `real(${cx},${cy},${cz})`, input });
+    }
+    if (out.length === 0) this.log("MESHPROBE: no real chunk with faces in the player's column (synthetic cases only)");
+    return out;
+  }
+}

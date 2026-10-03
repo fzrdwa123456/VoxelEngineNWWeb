@@ -3959,6 +3959,7 @@ function registrations() {
     // M1: the PRODUCTION sampler. It reads the chunk cache (the far key set is its work list, which is also why the
     // schedule must place it after `chunk.stream`) and writes its own buffers.
     LOD_SAMPLE_ACCESS: load("plugins/render/systems/lod-gpu-sampler.js").LOD_SAMPLE_ACCESS,
+MESH_PROBE_ACCESS: load("plugins/render/systems/lod-gpu-mesher-probe.js").MESH_PROBE_ACCESS,
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
@@ -4028,8 +4029,10 @@ check("the real schedule resolves into the batches the docs claim", () => {
   // which reads the scene they fill, stays in the batch after it.
   const expectedRender = [
     // `lod.gpu.probe` (M0 of the GPU route) joins them: it declares the renderer and its own scratch buffers —
-    // no component, so it conflicts with nobody and the schedule keeps the batch together.
-    ["diagnostics", "cameraView.render", "chunk.stream", "block.outline", "lod.gpu.probe"],
+    // no component, so it conflicts with nobody and the schedule keeps the batch together. `lod.gpu.meshProbe`
+    // (M2a) is the same shape one milestone further along: it reads the renderer and the voxel data, writes its
+    // own buffers, and shares no declared target with anything else in the lane.
+    ["diagnostics", "cameraView.render", "chunk.stream", "block.outline", "lod.gpu.probe", "lod.gpu.meshProbe"],
     // `lod.gpu.sample` (M1) READS the far key set `chunk.stream` writes, so the conflict rule puts it in the batch
     // AFTER that one — and nothing orders it against the draw (it fills its own buffers, which the draw never reads),
     // so the two share this batch and either order is correct.
@@ -6179,7 +6182,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(contribute(load("plugins/input/index.js").inputPlugin).list(S.SLOT_RESOURCES).length, 2,
     "the input plugin owns the bind table and the rebind gesture");
   assert(/SLOT_RESOURCES/.test(stripComments(readSource("src/plugins/render/index.ts"))) &&
-    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 6,
+    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 7,
     "the render plugin owns the GPU resources");
   assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
@@ -6329,9 +6332,9 @@ check("the plugin system: extension points, the registry, the install and the ma
   // under its own id, so a manifest line that disables it removes exactly that system.
   equal(countOf(stripComments(readSource("src/plugins/ui-debug/index.ts")), /api\.system\(/g), 1,
     "…and the ui-debug plugin declares the F3/picker system itself");
-  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 6,
-    "…the render plugin declares its six systems (the camera, the stream, the outline, the GPU sampler, the probe, " +
-      "the draw)");
+  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 7,
+    "…the render plugin declares its seven systems (the camera, the stream, the outline, the GPU sampler, the two " +
+      "probes — M0's field probe and M2a's mesher probe — and the draw)");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
     "…the player plugin declares its six systems");
   equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,
@@ -7599,6 +7602,148 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
     "…and the loader is called in exactly ONE place (a per-material texture is what made the black patches)");
   assert(/map: textureFor\(state, spec\.texture\)/.test(meshSrc) && /checkerMaterial\(state\)/.test(meshSrc),
     "…and every material (tinted variants and the checker included) takes its map from that cache");
+});
+
+// ===== M2a: the mesher's DECISION as a compute kernel, held to the production CPU mesher =====
+console.log("\n--- M2a: the GPU mesher decides every face like `meshChunk` ---");
+
+check("M2a: the padded block IS the culling rule, and the GPU census IS the CPU mesher's", () => {
+  // WHAT THIS CAN AND CANNOT TEST. There is no device here, so the kernel itself cannot run — but its LOGIC can,
+  // because it is a walk over the padded block with the offsets in `FACES`, and that walk exists on the CPU too
+  // (`censusOfPad`, the kernel's twin). So the gate proves the two things the kernel rests on:
+  //   1. `buildPaddedVoxels` answers EXACTLY what `meshChunk`'s own `solidAt` answers — a one-cell solidity border
+  //      whose every neighbour is a constant offset away, with the ±Z planes read the transposed way the gatherer
+  //      wrote them (reading them the other way is a bug that only shows at a chunk border);
+  //   2. the census that walk produces equals the census of the PRODUCTION mesher's output, for patterns whose
+  //      answer is also known in closed form.
+  // What stays unverified until the user presses `M` is the WGSL itself — the same position M0 was in, and the
+  // reason the probe reports a verdict rather than asserting one.
+  const mesher = load("plugins/render/systems/lod-gpu-mesher.js");
+  const mesh = load("data/world/mesh.js");
+  const { CHUNK_SIZE, CHUNK_VOLUME, AIR, SOLID } = load("data/world/chunk.js");
+
+  const synthetic = (pattern, planeSolid) => {
+    const blocks = new Uint8Array(CHUNK_VOLUME);
+    for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+      for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+          blocks[lx + ly * CHUNK_SIZE + lz * CHUNK_SIZE * CHUNK_SIZE] = pattern(lx, ly, lz);
+        }
+      }
+    }
+    const planes = new Uint8Array(6 * CHUNK_SIZE * CHUNK_SIZE);
+    if (planeSolid) planes.fill(1);
+    return { uniform: false, uniformValue: AIR, blocks, planes };
+  };
+  const censusOf = (input) => {
+    const cpu = mesher.censusOfMesh(mesh.meshChunk(input));
+    const pad = mesher.censusOfPad(mesh.buildPaddedVoxels(input));
+    return { cpu, pad };
+  };
+  const same = (a, b) =>
+    a.total === b.total &&
+    a.counts.every((v, i) => v === b.counts[i]) &&
+    a.sum.every((v, i) => v === b.sum[i]) &&
+    a.xor.every((v, i) => v === b.xor[i]);
+
+  // 1. THE CLOSED FORMS, where the culling rule's answer is arithmetic and nothing else.
+  const S = CHUNK_SIZE;
+  const cases = [
+    ["empty air", synthetic(() => AIR, false), 0],
+    ["uniform solid in air", synthetic(() => SOLID, false), 6 * S * S],
+    ["uniform solid, all neighbours solid", synthetic(() => SOLID, true), 0],
+    ["one block in air", synthetic((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? 4 : AIR), false), 6],
+    ["solid with one AIR voxel (the hole's six faces add)", synthetic((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? AIR : SOLID), false), 6 * S * S + 6],
+  ];
+  for (const [name, input, faces] of cases) {
+    const { cpu, pad } = censusOf(input);
+    equal(cpu.total, faces, `${name}: the CPU mesher emits the closed-form count`);
+    equal(pad.total, faces, `…and the walk over the PADDED block agrees (${name})`);
+  }
+
+  // 2. THE MULTI-VALUE CASES, where slots, kinds and the signature all matter: a wrong corner, normal or UV
+  //    changes the signature, and a wrong cull changes the count.
+  const multi = [
+    ["three value bands", synthetic((_lx, ly) => (ly < 8 ? 1 : ly < 16 ? 2 : ly < 24 ? 3 : AIR), false)],
+    ["checkerboard", synthetic((lx, ly, lz) => ((lx + ly + lz) % 2 === 0 ? 1 : AIR), false)],
+    ["edited chunk (a hole and a stray block)", synthetic((lx, ly, lz) => {
+      if (lx === 4 && ly === 5 && lz === 6) return AIR; // dug out of the rock
+      if (lx === 7 && ly === 20 && lz === 7) return 2; // placed in the air
+      return ly < 16 ? 3 : AIR;
+    }, false)],
+  ];
+  for (const [name, input] of multi) {
+    const { cpu, pad } = censusOf(input);
+    assert(cpu.total > 0, `${name}: something is meshed`);
+    assert(same(cpu, pad), `${name}: the padded walk's census equals the production mesher's (count, sum AND xor per look)`);
+  }
+
+  // 3. AND THE PAD IS THE *ONLY* DIFFERENCE: a border that disagrees with `meshChunk`'s neighbour planes must change
+  //    the census the same way on both sides. **A NON-UNIFORM BORDER IS THE ONLY KIND THAT PROVES IT**: a uniform
+  //    plane is symmetric, so a transposed ±Z read is invisible with all-air or all-solid planes (the mutation test
+  //    that dropped the transposition passed until this case existed — the same trap `makeSolidAt`'s comment
+  //    records for the production mesher).
+  const patterned = () => {
+    const input = synthetic((lx, ly) => (ly < 16 ? SOLID : AIR), false);
+    const S2 = CHUNK_SIZE;
+    for (let a = 0; a < S2; a++) {
+      for (let b = 0; b < S2; b++) {
+        // ASYMMETRIC on purpose: a pattern symmetric in (a, b) survives a transposed read, which is exactly how
+        // the first version of this case passed a deliberately broken pad.
+        const on = (a * 5 + b * 3) % 7 < 2 ? 1 : 0;
+        input.planes[0 * S2 * S2 + a * S2 + b] = on; // +X
+        input.planes[1 * S2 * S2 + a * S2 + b] = on; // -X
+        input.planes[2 * S2 * S2 + a * S2 + b] = on; // +Y
+        input.planes[3 * S2 * S2 + a * S2 + b] = on; // -Y
+        input.planes[4 * S2 * S2 + a * S2 + b] = on; // +Z, laid out as (a, b) = (lx, ly)
+        input.planes[5 * S2 * S2 + a * S2 + b] = on; // -Z
+      }
+    }
+    return input;
+  };
+  const checkerBorder = patterned();
+  {
+    const { cpu, pad } = censusOf(checkerBorder);
+    assert(cpu.total > 0, "a checkerboard border culls a different set of faces");
+    assert(same(cpu, pad), "…and the padded walk follows a NON-UNIFORM border exactly (this is what catches a transposed ±Z plane)");
+  }
+  const borderA = synthetic(() => SOLID, false); // air on all six sides: the whole 6 × 32² shell is drawn
+  const borderB = synthetic(() => SOLID, true); // solid on all six sides: nothing is drawn at all
+  assert(!same(censusOf(borderA).cpu, censusOf(borderB).cpu), "the neighbour planes really decide the shell's faces");
+  assert(
+    same(censusOf(borderA).cpu, censusOf(borderA).pad) && same(censusOf(borderB).cpu, censusOf(borderB).pad),
+    "…and the padded walk follows them in both extremes",
+  );
+
+  // 4. THE SOURCE CONTRACT: what the kernel must keep doing, and the two traps that already cost a test round each.
+  const mesherSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-mesher.ts"));
+  equal(countOf(mesherSrc, /\.toAtomic\(\)/g), 3,
+    "all three accumulators are ATOMIC (storage(attr, \"uint\", n) declares a plain ptr<storage, u32, read_write>, which has no atomicAdd — the pipeline then fails to compile and the dispatch silently writes nothing)");
+  assert(/atomicAdd\(counts\.element\(key\), uint\(1\)\)/.test(mesherSrc), "…and the face count is incremented per emitted face");
+  assert(/FACES\.map\(\(face, index\)/.test(mesherSrc) && /CORNER_UVS/.test(mesherSrc),
+    "the kernel's face table is DERIVED from the shared FACES/CORNER_UVS data (a retyped corner is how a port drifts)");
+  assert(/PAD_W/.test(mesherSrc) && !/face\.dir\[1\] \* 32/.test(mesherSrc),
+    "…and its neighbour offsets are pad strides, not hand-written 32s");
+  assert(/\)\.compute\(CHUNK_VOLUME\)/.test(mesherSrc) && /const lx = mod\(idx, uint\(CHUNK_SIZE\)\)/.test(mesherSrc),
+    "one thread per voxel, in meshChunk's own (lx + ly*32 + lz*1024) numbering");
+  assert(/uint\(/ .test(mesherSrc) && !/Loop\(/.test(mesherSrc),
+    "…and every index node is u32 with no `Loop` counter in sight (an i32 counter mixed into u32 arithmetic does not compile at all — M0's trap)");
+  const meshSrcPad = stripComments(readSource("src/data/world/mesh.ts"));
+  assert(/export function buildPaddedVoxels/.test(meshSrcPad) && /out\[padIndex\(lz, ly, S\)\]|out\[padIndex\(lx, ly, S\)\]/.test(meshSrcPad),
+    "the pad lives NEXT TO the gatherer that lays the planes out (the ±Z transposition has one home)");
+
+  // 5. THE PROBE: the production mesher is the reference, `M` is the trigger, and it must not pretend to work on a
+  //    backend without compute (a logged no-op, exactly like the M0 probe and the M1 sampler).
+  const probeSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-mesher-probe.ts"));
+  assert(/meshChunk\(probeCase\.input\)/.test(probeSrc) && /censusOfMesh\(mesh\)/.test(probeSrc),
+    "the probe compares against the PRODUCTION mesher's own output, per case");
+  assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
+    "`M` starts it, through the same one-edge channel every global chord uses");
+  assert(!/KeyM/.test(stripComments(readSource("src/data/globals/binds.ts"))), "…and M is not a gameplay bind");
+  assert(/isWebGPUBackend !== true/.test(probeSrc) || /backend\?\.isWebGPUBackend === true/.test(probeSrc),
+    "…and a backend without compute turns it into a logged no-op rather than a silent lie");
+  assert(/expectedFaces/.test(probeSrc) && /CLOSED FORM SAYS/.test(probeSrc),
+    "…and the synthetic cases carry a closed-form face count to check the CPU reference itself against");
 });
 
 // ===== M3a: the far ring drawn as (look, tier) batches =====

@@ -229,6 +229,70 @@ function writeFace(
   indices[io + 5] = firstVertex + 3;
 }
 
+/** ===== THE PADDED BLOCK (M2a of the GPU route) =====
+ *  The GPU mesher must answer "is the voxel one step outside this chunk on this face solid?" for EVERY face of
+ *  every voxel, and a compute kernel wants that answer as ONE expression: a branch per face (inside → the voxel
+ *  array, boundary → one of six differently-laid-out neighbour planes) is exactly where a port goes wrong — the
+ *  ±Z planes are transposed on purpose (see `makeSolidAt`) and a kernel that reads them the other way culls the
+ *  wrong cell, which is invisible until a block is broken at a chunk border.
+ *
+ *  So the GPU gets the resolved answer instead: the chunk's own voxels with a ONE-CELL SOLIDITY BORDER around
+ *  them, in one flat array whose neighbour of any face is a CONSTANT offset away. `buildPaddedVoxels` is that
+ *  translation, and it lives here — next to the gatherer that lays the planes out — so the two cannot drift; the
+ *  kernel then walks `padIndex` with the offsets in `FACES` and never thinks about planes at all.
+ *
+ *  The border holds 0/1 (solidity), the interior holds the voxel VALUE. That is enough because a neighbour query
+ *  is only ever tested with `!== AIR` — the same question the CPU's `solidAt` asks — so a border cell that says
+ *  "solid" needs no value of its own. Pad edges and corners are never queried (a face is one step from an interior
+ *  voxel, so it lands on an interior cell or exactly one pad face) and are left 0.
+ *
+ *  It is PURE and it is exported, because it is the contract the kernel rests on: `check:ecs` drives it against
+ *  `meshChunk` itself (the census of one input built from the pad must equal the census of the same input meshed
+ *  the CPU way), which is the closest a GPU-less test can get to the kernel. */
+export const PAD_W = CHUNK_SIZE + 2;
+
+/** A voxel's index in the padded array. Accepts -1 and `CHUNK_SIZE` for the border. */
+export function padIndex(lx: number, ly: number, lz: number): number {
+  return lx + 1 + (ly + 1) * PAD_W + (lz + 1) * PAD_W * PAD_W;
+}
+
+/** The padded block for one meshing input — see the note above `PAD_W`. One `u32` per cell, because that is what
+ *  a WGSL storage buffer holds; packing four bytes per word is the obvious later optimisation and would change
+ *  this function and the kernel's addressing together. */
+export function buildPaddedVoxels(input: ChunkMeshInput): Uint32Array {
+  const S = CHUNK_SIZE;
+  const out = new Uint32Array(PAD_W * PAD_W * PAD_W);
+  const plane = (index: number, a: number, b: number): number => input.planes[index * PLANE_BYTES + a * S + b];
+  for (let lz = 0; lz < S; lz++) {
+    for (let ly = 0; ly < S; ly++) {
+      for (let lx = 0; lx < S; lx++) {
+        out[padIndex(lx, ly, lz)] = input.blocks ? input.blocks[lx + ly * S + lz * S * S] : input.uniformValue;
+      }
+    }
+  }
+  // The six faces of the border, in the SAME cell order `gatherChunkMeshInput` wrote the planes in — including the
+  // ±Z transposition (`lx * S + ly`), which is the reason this function sits in this file.
+  for (let ly = 0; ly < S; ly++) {
+    for (let lz = 0; lz < S; lz++) {
+      out[padIndex(S, ly, lz)] = plane(PLANE.PX, ly, lz);
+      out[padIndex(-1, ly, lz)] = plane(PLANE.NX, ly, lz);
+    }
+  }
+  for (let lx = 0; lx < S; lx++) {
+    for (let lz = 0; lz < S; lz++) {
+      out[padIndex(lx, S, lz)] = plane(PLANE.PY, lx, lz);
+      out[padIndex(lx, -1, lz)] = plane(PLANE.NY, lx, lz);
+    }
+  }
+  for (let lx = 0; lx < S; lx++) {
+    for (let ly = 0; ly < S; ly++) {
+      out[padIndex(lx, ly, S)] = plane(PLANE.PZ, lx, ly);
+      out[padIndex(lx, ly, -1)] = plane(PLANE.NZ, lx, ly);
+    }
+  }
+  return out;
+}
+
 /** Build a job's input from the world (MAIN THREAD: it reads the chunks and the wrap).
  *
  *  Costs one pass over the six neighbour planes (6144 `isSolid` calls), which is the same work the scan

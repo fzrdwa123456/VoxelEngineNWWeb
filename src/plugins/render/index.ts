@@ -20,6 +20,9 @@ import { LodGpuProbeSystem, LOD_PROBE_ACCESS } from "./systems/lod-gpu-probe";
 // M1 of the GPU route: the PRODUCTION sampler. The stream asks it for a far column's height grids; it answers from
 // a GPU batch (or from the CPU when the backend has no compute), so the far ring stops costing 71 s of main thread.
 import { LodGpuSamplerSystem, LOD_SAMPLE_ACCESS } from "./systems/lod-gpu-sampler";
+// M2a of the GPU route: the MESHER's decision as a compute kernel, proven against the production CPU mesher by a
+// probe (`M`) — the step before the geometry can be produced on the GPU instead of on this thread.
+import { GpuMesherProbeSystem, MESH_PROBE_ACCESS } from "./systems/lod-gpu-mesher-probe";
 import { definePlugin } from "../../core/plugin/descriptor";
 import {
   BLOCK_OUTLINE,
@@ -68,6 +71,7 @@ export function createRenderSystems(w: RenderWiring) {
     menuBg: new MenuBackgroundSystem(w.world),
     lodProbe: new LodGpuProbeSystem(w.world, w.log ?? (() => {})),
     lodSampler,
+    mesherProbe: new GpuMesherProbeSystem(w.world, w.log ?? (() => {})),
   };
 }
 
@@ -128,6 +132,15 @@ export function createRenderPlugin(w: RenderWiring) {
   stage: "render",
   ...LOD_PROBE_ACCESS,
   run: () => s.lodProbe.step(),
+    });
+    api.system({
+  // M2a of the GPU route: `M` starts the MESHER probe. Its own target (`gpuMesherBuffers`) keeps it out of the
+  // sampler probe's way, and it reads the voxel data only to build the reference input — the same shape as the
+  // M0 probe, one milestone further along.
+  name: "lod.gpu.meshProbe",
+  stage: "render",
+  ...MESH_PROBE_ACCESS,
+  run: () => s.mesherProbe.step(),
     });
     api.system({
   // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself
