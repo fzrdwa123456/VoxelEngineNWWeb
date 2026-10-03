@@ -122,27 +122,23 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       into the transparent pass for 0.26 s, so the frame time must not visibly jump (it is bounded by
       `FADE_OUT_MAX`, past which the rest are removed at once); a teleport-sized unload (entering a world) must
       NOT hold thousands of meshes alive — that is what the cap is for.
-→ **THE TWO FADE SWITCHES IN THE SETTINGS (P2.01/P2.04)**: pause (ESC) → 设置, and look at the two rows under
-  垂直同步 — **最外层 LOD 淡入淡出** and **真实区块淡入淡出**. Expected out of the box: LOD = 已开启,
-  真实区块 = 已关闭. Check each of the four combinations by walking/flying across a chunk boundary with `G` on
-  (the rung colours make the junctions obvious):
-  (a) **LOD on**: a cell appearing at the OUTERMOST rung's own outer edge (the frontier of the whole ladder, where
-      there is nothing beyond it) fades in instead of popping; a cell leaving there fades out;
-  (a2) **and NOTHING IN BETWEEN**: the rungs inside the outermost must appear/disappear INSTANTLY — watch the
-      junction between two inner rungs while walking: no dissolve there, just a clean swap (the cell the outer rung
-      was holding in reserve takes over). A soft dissolve at an inner junction means the fade rule went back to
-      "every coarse rung" — the log's `FADE lod (outermost rung)` line is the setting's own name for it;
-  (b) **LOD off**: that outermost cell pops in and vanishes at once (and nothing else changes — the seams must
-      still never show sky, the P2.00 reserve is what covers them);
-  (c) **真实区块 on**: a real chunk appearing at the fine ring's edge fades in (a soft dissolve over the coarse
-      surface behind it);
-  (d) **真实区块 off** (the default): a real chunk appears at once — crisper, and still no flash of sky, which is
-      the whole point: the reserve, not the fade, is what closes the seam.
-  Both switches apply IMMEDIATELY (no restart) and are written to `config/settings.json` as `fadeLod` /
-  `fadeChunks` — flip one, relaunch, and the panel must show the same state. `J` still switches BOTH off for the
-  session without touching the file (a held key or the key release must not toggle it). A hand-edited
-  `"fadeLod": "yes"` must load as ON and `"fadeChunks": "yes"` as OFF (only a real `true` turns the fine ring's
-  fade on), and the boot line must not report either as an unknown setting.
+→ **THE FADE SWITCH IN THE SETTINGS (P2.01 → P2.05)**: pause (ESC) → 设置, and look at the row under 垂直同步 —
+  **淡入淡出(所有区块)**. Expected out of the box: 已开启. It is ONE switch now and it answers for EVERY chunk:
+  (a) **ON**: a chunk that appears fades in (~0.22 s) and one that leaves fades out (~0.26 s) — and that holds for
+      the REAL chunks of the fine ring AND for the coarse cells of every LOD rung, including the rungs in between
+      (with `G` on, a cell appearing at ANY colour boundary dissolves instead of popping). Inside the window a
+      coarser cell stays drawn until the finer chunks over it are fully opaque, so a fading chunk must never
+      uncover the sky — watch the fine ring's edge while walking;
+  (b) **OFF**: nothing fades anywhere — every chunk appears and vanishes instantly, and the seams must STILL never
+      show sky (the reserve, not the fade, is what covers them);
+  (c) **what to watch out for** (the reason this was once split per rung): with everything fading, a boundary can
+      show TWO translucent levels at once for ~0.2 s, which reads as a slight milky glow. That is expected, not a
+      bug — if it is too washy, say so and we narrow the fade again;
+  (d) the switch applies IMMEDIATELY (no restart) and is written to `config/settings.json` as `fadeLod`; the old
+      `fadeChunks` key is still ACCEPTED (an older file loads and is not reported as repaired) but does nothing —
+      there is no second row any more. `J` still switches the whole effect off for the session without touching
+      the file (a held key or the key release must not toggle it), and a hand-edited `"fadeLod": "yes"` must load
+      as ON.
 → **THE WORLD MUST NOT END AT ~5000 BLOCKS (P2.04 — the camera's far plane)**: on a big world (16384 blocks), get
   somewhere high (fly up) and look at the horizon. Before this round, everything past **5000 blocks** was culled by
   the camera itself, so the 6th rung was built and never drawn, and the far terrain ended in a boundary that

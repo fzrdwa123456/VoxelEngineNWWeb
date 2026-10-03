@@ -718,16 +718,19 @@ where it is:
     opacity now, the leaving ones are taken down now. Ending them at the switch is not cosmetic: with the effect
     off nothing would ever finish a fade, so a chunk caught mid-fade would stay translucent for ever. `J` is
     SESSION-ONLY and overrides both rings; the PERSISTED choice is the two settings rows below.
-  * **THE PERSISTED CHOICE IS PER RUNG (P2.01/P2.04): `settings.fadeLod` and `settings.fadeChunks`.** Since the
-    reserve (P2.00) the two are not the same question: the ladder's OUTERMOST rung has an edge with nothing behind
-    it (its fade covers a real pop — ON by default), while a real chunk is always replaced by geometry that is
-    already there (its fade is a look — OFF by default, and Voxy/DH cancel the per-chunk fade outright while
-    Cubyz fades only its LOD tier). **EVERY RUNG BETWEEN THEM NEVER FADES**: each of those is replaced by a cell
-    the rung outside it was already holding in reserve, so a fade there only made the swap look mushy — that is
-    the P2.04 change, and `fadeOn` asks the ladder in force (`this.ladder`, rebuilt as the window moves) which
-    rung is outermost, so a world whose lap holds fewer rungs fades its own outermost one. The values live in the
-    `FADE_OPTIONS` RESOURCE because `chunk-stream` reads
-    them every step, the panel changes them through the `SetFadeOption` COMMAND, and the save is HANDED the new
+  * **THE FADE IS ONE UNIFORM SWITCH (P2.01 → P2.05): `settings.fadeLod`, plus the `J` key as the session-only
+    master.** A chunk that APPEARS fades in and one that LEAVES fades out — a real 32³ chunk of the fine ring
+    and a coarse cell of any LOD rung alike. The history is worth knowing because it explains the shape: the
+    effect began over both rings (P1.98/P1.99), was split per ring when the reserve (P2.00) made them different
+    questions (P2.01), narrowed to the OUTERMOST rung (P2.04, on the argument that every rung inside it is
+    swapped for a reserved cell and has nothing to soften), and is uniform again by request (P2.05): which rung a
+    chunk belongs to is an implementation detail of the window, not the player's question. The reserve makes it
+    safe in every case — a coarse cell is drawn until the finer chunks over it are BUILT AND OPAQUE, so a
+    translucent chunk never uncovers the sky, it only lets the coarser level show through while it arrives.
+    `FadeOptions.chunks` is the RETIRED pre-P2.05 fine-ring switch: still read from an older `settings.json`
+    (so nothing reads as repaired) and no longer consulted — the row that set it is gone from the panel. The
+    value lives in the `FADE_OPTIONS` RESOURCE because `chunk-stream` reads
+    it every step, the panel changes it through the `SetFadeOption` COMMAND, and the save is HANDED the new
     value (reading the resource back would write the state the user just left) — the same shape as the frame cap
     and vsync.
   The gate drives all of it on a real stream (0 opacity on the first step → no progress with a zero delta → half

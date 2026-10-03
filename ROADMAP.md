@@ -2902,6 +2902,29 @@ Still outstanding:
   with while step 2 must appear on the SHARED material, and after flipping both settings (and MOVING the window,
   because the drain loop above leaves nothing new to build) the outermost rung appears shared with the fade off.
   Deliberately NOT verified live this round: the user asked to test the packaged build by hand.
+- **P2.05 — the fade is UNIFORM again: every chunk fades in when it appears, out when it leaves.** `DONE`, by
+  request («弄好淡出淡入…不改成最外层而是要那种…不分真实区块»). Supersedes the fade RULE of P2.01/P2.04 (the camera
+  work of P2.04 stands).
+  WHAT CHANGED: `fadeOn` was `step > 1 → only the outermost rung` (P2.04) and before that `step 1 → chunks,
+  step > 1 → lod` (P2.01). It is now ONE answer for every step — `fadeEnabled && fadeOptions.lod` — so a real
+  32³ chunk of the fine ring and a coarse cell of any rung behave identically: appeared → fade in, left → fade
+  out. The reservation machinery needed no change (a coarse cell is still drawn until the finer chunks over it
+  are BUILT AND OPAQUE, so a translucent chunk never uncovers the sky — it only lets the coarser level show
+  through while it arrives), and `FadeOptions.chunks` is now the RETIRED pre-P2.05 switch: still read from an
+  older `settings.json` so the boot check does not report it as repaired, no longer consulted by anything.
+  THE PANEL HAS ONE ROW NOW (`settings.fadeLod` → 「淡入淡出(所有区块)」 / "Fade in/out (all chunks)" /
+  「フェード(全チャンク)」, hint updated in zh/en/ja); the `真实区块淡入淡出` row is gone. `J` is still the
+  session-only master switch.
+  A SECOND FIX THE CHANGE EXPOSED: `pendingCount()` read the not-yet-built ladder and answered 0 before the
+  first step (`this.wanted === null` → `offsets.length * CHUNK_Y_COUNT` with an EMPTY `offsets`), i.e. "there is
+  no work" for a cold window — the same trap `needsWarmUp` had. It now builds the ladder for the player's own
+  column first (`ensureLadder`), so a driver's load bar, `warmUp` and the gate's fill loops all see the real
+  count.
+  VERIFIED: `tsc` 0; `check:ecs` **82/82** — the P2.01 group is rewritten for the uniform rule (with the fade ON
+  a real chunk AND both coarse rungs take their own material copies; with it OFF every one of them appears on the
+  SHARED material; and the retired `chunks` switch provably cannot turn it back on), the settings-source
+  assertions now require the single row, and the P2.00 reserve group passes again because the fine window is
+  filled where it should be. Not verified live: the user tests the packaged build by hand.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

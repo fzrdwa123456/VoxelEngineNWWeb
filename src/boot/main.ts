@@ -360,12 +360,10 @@ const frameCap = createFrameCap(
   shellInfo().displayRefreshMilliHz,
 );
 world.insertResource(FPS_CAP, frameCap);
-// The APPEARANCE FADES, per rung (P2.01/P2.04): the LOD ladder's OUTERMOST rung (on by default — its own
-// outer edge has nothing behind it) and the fine ring (off by default — the P2.00 reserve means a real chunk is
-// replaced by geometry that is already there, and no reference implementation fades its real chunks at that
-// boundary). The rungs BETWEEN them never fade: each is replaced by a cell the rung outside it held in reserve,
-// so there is nothing to soften. A resource, because `chunk-stream` reads it every step; the settings panel
-// sends SetFadeOption to change it.
+// The APPEARANCE FADE (P2.01 → P2.05): ONE switch, and it answers for EVERY chunk — real chunks and every LOD
+// rung alike (a chunk appeared → fade in, it left → fade out). P2.01/P2.04 split it per ring and then restricted
+// it to the outermost rung, which turned out to be a distinction the player has no reason to make. A resource,
+// because `chunk-stream` reads it every step; the settings panel sends SetFadeOption to change it.
 const fadeOptions = createFadeOptions(readSettings().fadeLod, readSettings().fadeChunks);
 world.insertResource(FADE_OPTIONS, fadeOptions);
 // THE WORLD SIZE (P2.02): the lap the noise, the torus and the LOD rings share. A resource, because the
@@ -898,18 +896,19 @@ const onSetVsync = (on: boolean): void => {
   world.commands.send(ShowToast, { key: on ? "toast.vsyncOn" : "toast.vsyncOff" });
 };
 
-/** The appearance fades, per rung (P2.01/P2.04): "does the ladder's OUTERMOST rung fade in/out" and "does the
- *  fine ring". Both are read by `chunk-stream` every step, so the change goes through the COMMAND (a UI callback
- *  may not assign a resource the tick reads) and the settings file is written here — the value is HANDED to the
- *  save, never read back before the barrier has applied it. */
+/** The appearance fade (P2.01 → P2.05): does EVERY chunk fade in/out when it appears/leaves. Read by
+ *  `chunk-stream` every step, so the change goes through the COMMAND (a UI callback may not assign a resource the
+ *  tick reads) and the settings file is written here — the value is HANDED to the save, never read back before
+ *  the barrier has applied it. `chunks` is the retired pre-P2.05 fine-ring switch: still accepted from the file
+ *  (an older settings.json loads untouched) and no longer set by anything. */
 const onSetFade = (which: "lod" | "chunks", on: boolean): void => {
   world.commands.send(SetFadeOption, { which, on });
   // HANDED the value, exactly like the cap and vsync: the command applies at the next barrier, so reading the
   // resource here would persist the state the user just left (measured on both of those).
   saveSettings(which === "lod" ? { fadeLod: on } : { fadeChunks: on });
   logDebug(
-    `FADE ${which === "lod" ? "lod (outermost rung)" : "chunks (real chunks)"} ${on ? "on" : "off"}` +
-      `${on ? "" : " — the reserve covers the swap, so the seam stays invisible"}`,
+    `FADE ${which === "lod" ? "all chunks" : "chunks (retired switch)"} ${on ? "on" : "off"}` +
+      `${on ? "" : " — nothing fades; the reserve still covers every swap"}`,
   );
 };
 

@@ -351,25 +351,24 @@ export function buildSettingsPanel(
     }
   });
 
-  // --- The APPEARANCE FADES (P2.01), one row per ring: the far ring (LOD) and the fine ring (real chunks).
-  //     They used to be one effect (P1.98/P1.99) and they are not the same question any more: the far ring's
-  //     fade covers a real pop at its own outer edge, while a real chunk is now always replaced by the P2.00
-  //     reserve — so its fade is a look, and off by default. Same shape as the two rows above: the name on the
-  //     left, a two-state button on the right, and the SWITCH's own state in local `let`s that only move when
-  //     the change was accepted (so the label can never disagree with the world). ---
-  const addFadeRow = (which: "lod" | "chunks", labelKey: string, hintKey: string, action: string): void => {
-    const ctl = spawnPanel(world, spawnRow(labelKey), "settings.rowCtl");
-    spawnLabel(world, ctl, "settings.rowMeta", hintKey);
-    let on = opts.isFadeOn(which);
-    const btn = spawnButton(world, ctl, "settings.rowBtn", action, "", on ? "settings.on" : "settings.off");
-    onUiAction(actions, action, () => {
+  // --- THE APPEARANCE FADE (P2.01/P2.05), ONE row now: every chunk mesh — real chunks AND every LOD rung —
+  //     fades in when it appears and out when it leaves. The two rows this replaces asked "the far ring" and
+  //     "the real chunks" separately, which stopped meaning anything the moment the rule became uniform: a
+  //     chunk either appeared (fade in) or left (fade out), and WHICH rung it belongs to is not the player's
+  //     question. Same shape as the rows above: the name on the left, a two-state button on the right, and the
+  //     SWITCH's own state in a local `let` that only moves when the change was accepted (so the label can
+  //     never disagree with the world). ---
+  {
+    const ctl = spawnPanel(world, spawnRow("settings.fadeLod"), "settings.rowCtl");
+    spawnLabel(world, ctl, "settings.rowMeta", "settings.fadeLodHint");
+    let on = opts.isFadeOn("lod");
+    const btn = spawnButton(world, ctl, "settings.rowBtn", `${id}.fadeLod`, "", on ? "settings.on" : "settings.off");
+    onUiAction(actions, `${id}.fadeLod`, () => {
       on = !on;
-      opts.onSetFade(which, on);
+      opts.onSetFade("lod", on);
       setUiText(world, btn, on ? "settings.on" : "settings.off");
     });
-  };
-  addFadeRow("lod", "settings.fadeLod", "settings.fadeLodHint", `${id}.fadeLod`);
-  addFadeRow("chunks", "settings.fadeChunks", "settings.fadeChunksHint", `${id}.fadeChunks`);
+  }
 
   // --- Language & fonts: a SECTION now (the nav selects it) ---
 

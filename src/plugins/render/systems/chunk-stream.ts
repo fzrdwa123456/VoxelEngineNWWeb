@@ -366,7 +366,17 @@ export class ChunkStreamSystem {
   /** Chunks in the window whose mesh has not been DECIDED yet — neither built nor known to be empty
    *  (a uniform chunk has no visible face and is never retried, so "no mesh" is a real answer). */
   pendingCount(): number {
-    if (this.wanted === null) return this.offsets.length * CHUNK_Y_COUNT;
+    if (this.wanted === null) {
+      // BEFORE the first step there is no window yet — and with LOD the OFFSETS are built per position too
+      // (`ensureLadder`), so answering from an empty window would tell every caller "there is no work": a
+      // driver's load bar, `warmUp` and the gate's fill loops all ask this question first, and a false "nothing
+      // to do" is a world that streams in over the next hundred frames instead of behind the screen.
+      this.ensureLadder(
+        fineBase(this.lod, Math.floor(POSITION.x[this.index] / CHUNK_SIZE)),
+        fineBase(this.lod, Math.floor(POSITION.z[this.index] / CHUNK_SIZE)),
+      );
+      return this.offsets.length * CHUNK_Y_COUNT;
+    }
     let pending = 0;
     for (const key of this.wanted) {
       if (!this.cache.meshes.has(key) && !this.cache.empty.has(key)) pending++;
@@ -1010,25 +1020,17 @@ export class ChunkStreamSystem {
     return this.pushFade(key, entry, true);
   }
 
-  /** Does THIS tier fade right now? Two independent answers (P2.01/P2.04), and the settings panel owns both:
-   *    * the `lod`/`chunks` options are the PERSISTED choice, and they answer for DIFFERENT rungs: `chunks` is
-   *      the fine ring (off by default — a fine chunk is replaced by geometry the reserve already holds), and
-   *      `lod` is the OUTERMOST coarse rung only;
-   *    * `fadeEnabled` is the `J` key's SESSION-ONLY master switch (it never writes the file).
-   *  A tier's fade is on only when both say so.
+  /** Does this chunk fade right now? ONE answer for EVERY chunk (P2.05 — the user's request, and it retires the
+   *  per-rung rule of P2.01/P2.04): a mesh that APPEARS fades in and one that LEAVES fades out, whether it is a
+   *  real 32³ chunk of the fine ring or a coarse cell of any LOD rung. Which rung a chunk belongs to is an
+   *  implementation detail of the window, not something the player should have to reason about — and the reserve
+   *  (P2.00) makes it safe: a coarse cell stays drawn until the finer chunks over it are BUILT AND OPAQUE, so a
+   *  translucent chunk never uncovers the sky, it only lets the coarser level show through while it arrives.
    *
-   *  WHY ONLY THE OUTERMOST RUNG FADES (P2.04 — the user's request, and the geometry agrees with it): every
-   *  rung inside the outermost is REPLACED by a cell the rung outside it has been holding in reserve
-   *  (`refreshFarVisibility`), so its arrival is a swap between two meshes that are both already there and
-   *  there is nothing to soften — a fade there only made the swap look mushy. The outermost rung is the one
-   *  whose own outer edge has NOTHING beyond it: a cell appearing there pops against the sky, and a cell
-   *  leaving there vanishes against it, so that one keeps the fade. On a world whose lap holds fewer rungs
-   *  (see `lodLadder`) it is simply that world's own outermost rung — `this.ladder` is the ladder in force. */
-  private fadeOn(step: number): boolean {
-    if (!this.fadeEnabled) return false;
-    if (step === 1) return this.fadeOptions.chunks;
-    const outer = this.ladder.length > 0 ? this.ladder[this.ladder.length - 1].step : 1;
-    return step === outer && this.fadeOptions.lod;
+   *  `fadeEnabled` is the `J` key's SESSION-ONLY master switch (it never writes the file) and `lod` is the
+   *  persisted switch; an edit never fades (see `beginFade`, P1.18i). */
+  private fadeOn(_step: number): boolean {
+    return this.fadeEnabled && this.fadeOptions.lod;
   }
 
   /** The shared half of both directions: the per-chunk copies, `transparent`, and the fade entry. */
