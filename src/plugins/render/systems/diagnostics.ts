@@ -208,6 +208,11 @@ export class DiagnosticsSystem {
       ` · target ${pacingTargetHz(info.fpsCap, info.vsync, info.refreshHz) > 0 ? `${pacingTargetHz(info.fpsCap, info.vsync, info.refreshHz).toFixed(0)}fps` : t("f3.unlimited")})\n` +
       `XYZ: ${info.x.toFixed(2)} / ${info.y.toFixed(2)} / ${info.z.toFixed(2)}\n` +
       `${t("f3.chunks")}: ${info.chunks}\n` +
+      // THE DRAW SIDE (M1b): three.js's own per-frame counters. `calls` is the one that says whether the frame is
+      // draw-call bound (the far ring holds thousands of chunk meshes), `geoms` how many geometry objects exist.
+      `${t("f3.draw")}: calls=${this.renderer.info.render.drawCalls} ` +
+      `tris=${Math.round(this.renderer.info.render.triangles / 1000)}k ` +
+      `geoms=${this.renderer.info.memory.geometries}\n` +
       (info.gpuMs !== null
         ? `GPU: ${info.gpuMs.toFixed(2)} ms ≈ ${t("f3.maxFps")} ${Math.round(1000 / info.gpuMs)} FPS\n`
         : `GPU: ${t("f3.gpuNa")}\n`) +

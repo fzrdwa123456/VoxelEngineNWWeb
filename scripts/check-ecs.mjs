@@ -7408,11 +7408,20 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
   //    * the atomics accumulate onto whatever is already in the buffer, so the used prefix has to be RESET before
   //      each dispatch or a batch answers with the maximum over the PREVIOUS batch's leftovers.
   equal(countOf(sampleSrc, /\.toAtomic\(\)/g), 1, "the packed accumulators are declared ATOMIC");
-  assert(/packed\.fill\(0, 0, slots\)/.test(sampleSrc) && /packed\.fill\(UNSET_MIN, PACKED_HALF, PACKED_HALF \+ slots\)/.test(sampleSrc),
-    "…and both halves of the packed buffer are RESET before every dispatch");
-  // …and the min half is addressed as an OFFSET of the fixed half, which is what makes the packed readback and the
-  // kernel agree without a second buffer.
-  assert(/add\(slot, uint\(PACKED_HALF\)\)/.test(sampleSrc), "the min half lives at a compile-time offset");
+  assert(/packed\.fill\(0, base, base \+ CELLS\)/.test(sampleSrc) &&
+    /packed\.fill\(UNSET_MIN, base \+ CELLS, base \+ COLUMN_WORDS\)/.test(sampleSrc),
+    "…and the cells this batch will write are RESET before every dispatch (max half and min half)");
+  // ONE COLUMN'S SLOTS ARE CONTIGUOUS (M1b): the max cells then the min cells, at `col * COLUMN_WORDS`, so the
+  // half offset is a compile-time constant AND what a batch wrote is one contiguous range the readback can ask for.
+  assert(/const COLUMN_WORDS = CELLS \* 2/.test(sampleSrc), "one column's slots are contiguous (max then min)");
+  assert(/atomicMax\(out\.element\(add\(base, cell\)\)/.test(sampleSrc) &&
+    /atomicMin\(out\.element\(add\(base, uint\(CELLS\), cell\)\)/.test(sampleSrc),
+    "…and the kernel addresses both halves off that base");
+  // …which is what makes the readback proportional to the BATCH instead of to the buffer: a 3-column step-32 batch
+  // used to copy the whole 592 KB back for 28 KB of answers.
+  assert(/const usedBytes = cols\.length \* COLUMN_WORDS \* 4/.test(sampleSrc) &&
+    /getArrayBufferAsync\(this\.packedAttr!, null, 0, usedBytes\)/.test(sampleSrc),
+    "the readback asks for exactly the bytes this batch wrote (offset 0, a multiple of 4)");
 
   // 2. THE WORKGROUP CEILING, as arithmetic: WebGPU's default `maxComputeWorkgroupsPerDimension` is 65535, and the
   //    batch cap is a SAMPLES (= threads) cap, so a future tuning of it can silently produce a failed dispatch.

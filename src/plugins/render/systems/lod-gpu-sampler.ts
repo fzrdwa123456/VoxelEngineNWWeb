@@ -69,11 +69,20 @@ const CELLS = LOD_SAMPLE_GRID_W * LOD_SAMPLE_GRID_W;
 const BATCH_COLUMNS = 64;
 /** Samples (i.e. THREADS) in one batch. 4M is a HARD ceiling, not a tuning choice: WebGPU's default
  *  `maxComputeWorkgroupsPerDimension` is 65535, and with 64-thread workgroups 4.19M threads is exactly that.
- *  The cap is spent on the outer rungs (a step-32 column is 1.18M samples, so 3 columns per batch there). */
+ *  The cap is spent on the outer rungs (a step-32 column is 1.18M samples, so 3 columns per batch there).
+ *
+ *  IT IS DELIBERATELY NOT SMALLER (M1b). Halving it looks like it should smooth the frame, but the measurement
+ *  says the opposite: a batch's cost is dominated by the FIXED round trip (submit + GPU + copy + map), so a
+ *  0.30M-sample batch cost 16-77 ms on the user's machine while a 4M-sample one cost ~50 ms — SMALLER batches
+ *  would mean more round trips for the same work. What was worth fixing is the READBACK, which used to be the
+ *  whole packed buffer whatever the batch was (see COLUMN_WORDS). */
 const BATCH_SAMPLES = 4_000_000;
-/** The `min` half starts here in the packed buffer. A compile-time constant, which is what lets the kernel stay
- *  a pure function of (instanceIndex, column buffer). */
-const PACKED_HALF = CELLS * BATCH_COLUMNS;
+/** ONE COLUMN'S SLOTS IN THE PACKED BUFFER: its `max` cells, then its `min` cells. PER COLUMN, not two big
+ *  halves, so that the region a batch actually wrote is CONTIGUOUS and the readback can ask for exactly that
+ *  (`getArrayBufferAsync`'s offset/count): a 3-column step-32 batch reads 28 KB instead of the whole 592 KB, and
+ *  a workspace column's 64 columns read their own 592 KB. The kernel addresses `col * COLUMN_WORDS + cell`, which
+ *  keeps the half offset a compile-time constant (`CELLS`). */
+const COLUMN_WORDS = CELLS * 2;
 /** Where an untouched `min` slot starts: above every possible height (the field is clamped to
  *  `[TERRAIN_NOISE.minY, TERRAIN_NOISE.maxY]`). The packed buffer is RESET to this before every dispatch, because
  *  `atomicMax`/`atomicMin` accumulate onto whatever the previous batch left there. */
@@ -285,23 +294,33 @@ export class LodGpuSampler implements LodGridSource {
         colData[i * 2 + 1] = cols[i][1];
       }
       this.colAttr!.needsUpdate = true;
-      // THE PACKED BUFFER IS RESET FIRST: the atomics accumulate onto what is already there, so the used prefix must
-      // start at 0 (`max`) / UNSET_MIN (`min`) or this batch's answer is the max over the LAST batch's leftovers.
+      // THE PACKED BUFFER IS RESET FIRST: the atomics accumulate onto what is already there, so the slots this
+      // batch will write must start at 0 (`max`) / UNSET_MIN (`min`) or its answer is the max over the LAST
+      // batch's leftovers. One column's worth at a time, because the `min` cells are interleaved per column.
       const packed = this.packedData!;
-      packed.fill(0, 0, slots);
-      packed.fill(UNSET_MIN, PACKED_HALF, PACKED_HALF + slots);
+      for (let i = 0; i < cols.length; i++) {
+        const base = i * COLUMN_WORDS;
+        packed.fill(0, base, base + CELLS);
+        packed.fill(UNSET_MIN, base + CELLS, base + COLUMN_WORDS);
+      }
       this.packedAttr!.needsUpdate = true;
 
       const kernel = this.kernelFor(step) as { count: number };
       kernel.count = slots * step * step;
       await this.renderer.computeAsync(kernel as never);
-      const raw = new Uint32Array(await this.renderer.getArrayBufferAsync(this.packedAttr!));
+      // ONLY WHAT THIS BATCH WROTE (offset 0, `count` in BYTES and a multiple of 4 — three validates that): the
+      // rest of the buffer is stale by design and never read.
+      const usedBytes = cols.length * COLUMN_WORDS * 4;
+      const raw = new Uint32Array(
+        await this.renderer.getArrayBufferAsync(this.packedAttr!, null, 0, usedBytes),
+      );
       for (let i = 0; i < cols.length; i++) {
         const max = new Int16Array(CELLS);
         const min = new Int16Array(CELLS);
+        const base = i * COLUMN_WORDS;
         for (let k = 0; k < CELLS; k++) {
-          max[k] = raw[i * CELLS + k];
-          min[k] = raw[PACKED_HALF + i * CELLS + k];
+          max[k] = raw[base + k];
+          min[k] = raw[base + CELLS + k];
         }
         const key = colKey(step, cols[i][0], cols[i][1]);
         this.ready.set(key, { max, min });
@@ -358,7 +377,7 @@ export class LodGpuSampler implements LodGridSource {
     const W = LOD_SAMPLE_GRID_W;
     const perCell = step * step;
     const perColumn = CELLS * perCell;
-    const out = storage(this.packedAttr!, "uint", PACKED_HALF * 2).toAtomic();
+    const out = storage(this.packedAttr!, "uint", COLUMN_WORDS * BATCH_COLUMNS).toAtomic();
     const cols = storage(this.colAttr!, "uint", BATCH_COLUMNS * 2);
     const period = this.period;
     const kernel = Fn(() => {
@@ -379,9 +398,10 @@ export class LodGpuSampler implements LodGridSource {
       const dz = div(within, uint(step));
       const dx = mod(within, uint(step));
       const t = tslTerrainHeight(period, tslWrap(add(bx, dx.toFloat()), period), tslWrap(add(bz, dz.toFloat()), period));
-      const slot = add(mul(col, uint(CELLS)), cell);
-      atomicMax(out.element(slot), uint(t));
-      atomicMin(out.element(add(slot, uint(PACKED_HALF))), uint(t));
+      // ONE COLUMN'S SLOTS: `max` at the column's base, `min` at base + CELLS (see COLUMN_WORDS).
+      const base = mul(col, uint(COLUMN_WORDS));
+      atomicMax(out.element(add(base, cell)), uint(t));
+      atomicMin(out.element(add(base, uint(CELLS), cell)), uint(t));
     })().compute(1);
     this.kernels.set(key, kernel);
     return kernel;
@@ -389,7 +409,7 @@ export class LodGpuSampler implements LodGridSource {
 
   private ensureBuffers(): void {
     if (this.packedAttr !== null) return;
-    this.packedData = new Uint32Array(PACKED_HALF * 2);
+    this.packedData = new Uint32Array(COLUMN_WORDS * BATCH_COLUMNS);
     this.packedAttr = new StorageBufferAttribute(this.packedData, 1);
     this.colData = new Uint32Array(BATCH_COLUMNS * 2);
     this.colAttr = new StorageBufferAttribute(this.colData, 1);
@@ -421,8 +441,9 @@ export class LodGpuSampler implements LodGridSource {
         }
       }
       const k = j * W + i;
+      // Column 0 of the batch, whose `raw` prefix is the batch's own readback (see COLUMN_WORDS).
       const gotMax = raw[k];
-      const gotMin = raw[PACKED_HALF + k];
+      const gotMin = raw[CELLS + k];
       values += 2;
       if (gotMax !== hi) {
         bad++;

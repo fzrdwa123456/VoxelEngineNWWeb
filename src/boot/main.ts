@@ -1485,10 +1485,16 @@ function frameProbe(): void {
     if (probe.pfBuckets[i] > 0) pf.push(`${i}:${probe.pfBuckets[i]}`);
   }
   const target = pacingTargetHz(frameCap.cap, frameCap.vsync, frameCap.refreshHz);
+  // WHAT THE FRAME COSTS THE GPU (M1b, and the number that decides the next milestone): `drawCalls` is three.js's
+  // per-frame draw-call count, `triangles` what those calls cover, `geometries` how many geometry objects exist —
+  // i.e. one per chunk mesh, fine AND far. The LOD's remaining cost is on THIS side (the far ring holds thousands
+  // of chunk meshes), so a stall that says `calls=2000` is a different problem from one that says `calls=300`.
+  const info = renderer.info;
   logDebug(
     `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
       `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms raf=${probe.vblanks}/s ` +
       `target=${target > 0 ? `${target.toFixed(2)}fps` : "uncapped"} ` +
+      `calls=${info.render.drawCalls} tris=${Math.round(info.render.triangles / 1000)}k geoms=${info.memory.geometries} ` +
       `mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
       `pf=[${pf.join(" ")}] px=${probe.pxN > 0 ? `${probe.pxMin.toFixed(1)}/${(probe.pxSum / probe.pxN).toFixed(1)}/${probe.pxMax.toFixed(1)}` : "-"} (${probe.pxN})`,
   );

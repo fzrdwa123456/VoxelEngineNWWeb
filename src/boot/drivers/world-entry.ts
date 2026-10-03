@@ -74,11 +74,11 @@ const enterWorld = async (mode: string): Promise<void> => {
     }
     // THE LADDER IS CAPPED BY THE LAP (P2.03): a rung at radius R repeats itself once R >= lap/2, so a small
     // world builds FEWER rungs than the policy asks for. Saying so here is the difference between "6 is set and
-    // it looks like 2" being a mystery and being a read number.
-    deps.log(
-      `WORLD LOD ladder: ${handles.lodTiers} rung(s) for this ${wanted.chunksX}-chunk lap ` +
-        `(the policy asks for up to ${deps.lod.tiers}; a bigger world in the world-type panel fits more)`,
-    );
+    // it looks like 2" being a mystery and being a read number — but it is reported AFTER the warm-up below
+    // (M1b), because the ladder does not exist yet at this point: `resetForNewWorld` just cleared it and it is
+    // `needsWarmUp`/`step` that builds it for the spawn column. The line used to be printed HERE, so every entry
+    // after a world-size change claimed `0 rung(s)` — a number that reads as "LOD is off" while the far ring is
+    // in fact being built.
   }
   // The entry watches the window for fiddling of its own (P1.62e): a drag during the loading is remembered
   // and makes this entry start on the pause menu instead of capturing behind the user's back.
@@ -154,6 +154,14 @@ const enterWorld = async (mode: string): Promise<void> => {
     deps.world.renderUi(); // the barrier applies the Teleport before the first game frame reads it
     deps.log("WORLD already warm, entering without a screen");
   }
+  // …and NOW the ladder exists (both branches above asked `needsWarmUp`, which builds it for the spawn column, and
+  // the warm-up's own `step()` keeps it current), so the report is a real number instead of the `0 rung(s)` the
+  // pre-warm-up position used to print.
+  deps.log(
+    `WORLD LOD ladder: ${deps.world.resource(RENDER_HANDLES).chunkStream.lodTiers} rung(s) for this ` +
+      `${deps.world.resource(WORLD_SIZE).chunksX}-chunk lap ` +
+      `(the policy asks for up to ${deps.lod.tiers}; a bigger world in the world-type panel fits more)`,
+  );
 
   // Hand the display over in ONE ui lane: the screen comes down and the world is drawn by the very
   // next frame (a game frame draws the scene BEFORE its ui lane runs, so there is no empty frame).

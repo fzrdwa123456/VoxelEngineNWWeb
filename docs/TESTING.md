@@ -147,6 +147,20 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (f) if a batch fails: `LODSAMPLE batch FAILED: …` in `debug.log`, and the real WGSL/pipeline reason in
       `renderer.log`. Report BOTH (the far ring would then be answering columns from the CPU, which is slow but
       correct, so a failure is not a crash).
+→ **WHERE THE FRAME TIME NOW GOES (M1b)**: with the sampling on the GPU, the far ring's remaining cost is the
+  SCENE, so the once-a-second `FRAME` line and the F3 panel both carry three.js's own counters:
+  `calls=` (draw calls in this frame), `tris=` (thousands of triangles) and `geoms=` (geometry objects — one per
+  chunk mesh, fine and far). What to look for:
+  (a) on the ground with the ring fully filled, `calls` is the number to watch — **if it is in the thousands, the
+      frame is draw-call bound**, and that (not the terrain field) is what the next milestone has to attack;
+  (b) press **F3** and fly up ~200 blocks: the F3 `绘制/Draw:` line must track the same numbers live. `geoms` is the
+      total mesh count and should be stable once the ring stops growing (it grows while the ring fills — that is the
+      budget doing its job);
+  (c) the `STALL` lines' neighbours tell the story: a stall next to `calls=2000` is a draw/scene problem, a stall
+      next to a `LODSAMPLE` line would be the sampler's (none was seen in the M1 run);
+  (d) `debug.log`'s world entry now reports the ladder AFTER the window is built, so
+      `WORLD LOD ladder: N rung(s) for this 512-chunk lap` is a REAL number (it used to print `0` on every entry
+      into a resized world, which read as "LOD is off"). On a 512-chunk lap expect several rungs, up to 6.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

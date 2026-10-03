@@ -688,11 +688,17 @@ where it is:
   key is still in `farWanted`; `LOD_WAIT_PER_FRAME` bounds how many of those one frame walks past). The batch is a
   RUN of same-step columns because that is what lets the step be a compile-time constant — ONE cached kernel per
   (step, period), re-dispatched with only `count` changed, no per-batch pipeline. The output is ONE packed u32
-  buffer (`max` half, then `min` half at `PACKED_HALF`), RESET before each dispatch because the atomics accumulate
-  onto what is there, and `.toAtomic()` on it is mandatory (see the probe's M1a runs: without it WGSL refuses the
-  pipeline and the dispatch silently writes nothing). `BATCH_SAMPLES` is a THREAD cap first of all — 4M threads at
-  64 per workgroup is what keeps a dispatch inside `maxComputeWorkgroupsPerDimension` (65535) — and the gate
-  asserts that arithmetic. THREE FALLBACKS, all deliberate: no WebGPU backend (or the Node gate, which passes no
+  buffer whose slots are per COLUMN — its `CELLS` max cells then its `CELLS` min cells at `col * COLUMN_WORDS`,
+  which keeps the half offset a compile-time constant AND makes what a batch wrote one contiguous range, so the
+  readback asks for exactly those bytes (`getArrayBufferAsync(attr, null, 0, usedBytes)`) instead of the whole
+  592 KB. It is RESET before each dispatch (per column, since the halves are interleaved) because the atomics
+  accumulate onto what is there, and `.toAtomic()` on it is mandatory (see the probe's M1a runs: without it WGSL
+  refuses the pipeline and the dispatch silently writes nothing). `BATCH_SAMPLES` is a THREAD cap first of all — 4M
+  threads at 64 per workgroup is what keeps a dispatch inside `maxComputeWorkgroupsPerDimension` (65535) — and the
+  gate asserts that arithmetic. **IT IS NOT SMALLER ON PURPOSE**: a batch's cost is dominated by the FIXED round
+  trip (submit + GPU + copy + map — measured 16-77 ms for a 0.30M-sample batch against ~50 ms for a 4M one), so
+  halving it would buy more round trips for the same work, not a smoother frame. THREE FALLBACKS, all deliberate:
+  no WebGPU backend (or the Node gate, which passes no
   sampler at all) samples on this thread exactly as before; a column the sampler misses `MISS_LIMIT` times in a row
   is answered on the CPU (a bounded stall beats a hole in the ring); and a renderer that never initialises gives up
   after `ABSENT_LIMIT` frames instead of leaving the far ring waiting for ever. The sampler also SELF-CHECKS: five
@@ -701,6 +707,12 @@ where it is:
   as a number rather than as a hole. The full value-by-value check is still `K`. `debug.log` carries
   `LODSAMPLE first batch: …` and one `LODSAMPLE window: … column(s) in N batch(es), …M samples, …ms of GPU round
   trips` line per window fill.
+* **THE DRAW SIDE IS MEASURED TOO (M1b).** With the sampling moved off the CPU the far ring's remaining cost is
+  the SCENE: a 512-chunk lap holds ~880 columns, i.e. thousands of far chunk meshes, and the `FRAME` line (once a
+  second) and the F3 panel (`f3.draw`) now carry three.js's own counters — `calls=` (draw calls this frame),
+  `tris=` (thousands of triangles) and `geoms=` (geometry objects, one per chunk mesh). They exist to answer "is
+  this frame draw-call bound" with a number: a stall reported next to `calls=2000` is a different problem from one
+  next to `calls=300`, and the next milestone after M1 is chosen that way.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it
