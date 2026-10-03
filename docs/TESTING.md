@@ -218,7 +218,16 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (f) **the debug views and a pack reload must keep working in batch mode**: with batching ON press `G` (rung tint)
       and `H` (wireframe) — both must apply to the batched ring too, exactly as with `L` off (the buckets re-resolve
       their material through the same path the meshes use), and after a pack reload the far ring must come back with
-      the new textures rather than black or checker.
+      the new textures rather than black or checker;
+  (g) **THE REGRESSION THAT MATTERS MOST — "the LOD is broken, flashing, faces flying everywhere"**: that was M3a's
+      first live build, and its cause was a batch RESIZE leaving the shader on a freed texture (see the M3a bullet
+      in AGENTS.md; a bucket's material is now rebuilt right after it grows). What it looked like: the far ring's
+      surfaces stretched, jumped and flickered, and it got WORSE as the ring filled — and it was briefly cured by
+      `G`, by `H` or by reloading the resource pack, then came back as soon as you moved. So the test is: fly
+      around for a minute or two with the whole six-rung ring visible (the fill is what grows the buckets) and
+      watch the far terrain — it must stay solid and still. If ANY of it flickers or throws surfaces across the
+      screen, report it with `batched=`/`calls=` from the `FRAME` line and whether `G` still cures it (that
+      combination is what separates "a resize went stale again" from "this GPU cannot draw the batch at all").
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

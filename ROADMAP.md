@@ -3107,6 +3107,26 @@ Still outstanding:
   Verified: `tsc` 0; `check:ecs` **86/86**, with two new groups that build real `BatchedMesh`es in Node (the
   batcher's whole lifecycle on a real geometry; the stream promoting and demoting far chunks as the window moves)
   and the `L` switch pinned as unbound and wired to the two drains.
+  **AND ITS FIRST LIVE RUN BROKE THE LOD, in a way only the GPU could show** (the report: «lod 好像被破坏了一样
+  在闪和面到处飞，按 G 或 H 或重载资源包又恢复正常，但一动起来又出问题»). The numbers were fine — `batched=5000+/18`,
+  `calls` down by roughly the far ring's share, no exception in either log, and a Node reproduction of the whole
+  bucket lifecycle (39094 checks across four growths, every live slice's vertices AND its full index list verified
+  against the pattern the mesher emits) found the CPU side of the batch perfectly consistent. The bug is a texture
+  LIFETIME, and it is three's own design: `setInstanceCount` DISPOSES and RECREATES a batch's `_matricesTexture`
+  and `_indirectTexture`, while the batching shader reads those two textures OFF THE MESH at node-graph build time
+  (`nodes/accessors/Batch.js` captures the texture objects) and only a `material.version` change rebuilds that
+  graph (`RenderObjects.get()`; `WebGPUBackend.getRenderCacheKey` does not mention the textures). So the first
+  bucket growth left the material sampling freed textures and every instance matrix came back garbage — surfaces
+  flying, flickering, worst while the ring filled, i.e. exactly when buckets grow. It also explains the cure that
+  made no sense at the time: `G`, `H` and a pack reload all recompile the material (new material object / a bumped
+  version), which rebuilds the node graph and re-captures the CURRENT textures — and the next window move grew a
+  bucket again and broke it again. THE FIX: `growFor` decides and applies the resize first, then sets
+  `bucket.material.needsUpdate = true` so the render object is disposed and rebuilt (the one path that re-runs
+  `batch()`), and the instance capacity is bought up front (`START_INSTANCES` 32 → 512, ~36 KB of matrices texture
+  per bucket) so a lap's bucket does not grow at all. `check:ecs`'s M3a group now DRIVES it (600 adds overflow the
+  512 start, and the material's version must rise) beside the source pin, so the rule cannot be edited away
+  silently. Not a rendering bug, not a data bug: a captured-object lifetime one, and the `L` A/B switch is what
+  made it describable in the first place.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

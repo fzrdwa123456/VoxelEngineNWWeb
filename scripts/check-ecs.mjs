@@ -7610,6 +7610,24 @@ check("M3a: the far ring's geometry is drawn through (look, tier) BATCHES", () =
   assert(/if \(!this\.batchingEnabled \|\| entry\.step <= 1 \|\| this\.batched\.has\(key\)\) return;/.test(streamSrc),
     "…respected by the promotion itself");
 
+  // 1c. A RESIZE MUST REBUILD THE BUCKET'S MATERIAL. This is the ONE thing `BatchedMesh` does not do for you, and
+  //     it is the bug M3a shipped first (reported as «lod 好像被破坏了一样在闪，面到处飞，按 G/H/重载资源包又恢复
+  //     正常，一动起来又出问题»): `setInstanceCount` DISPOSES and recreates `_matricesTexture`/`_indirectTexture`,
+  //     the compiled node graph captured those texture OBJECTS when it was built (`nodes/accessors/Batch.js`), and
+  //     the only thing that rebuilds it is a change of `material.version` (`RenderObjects.get()` — the pipeline
+  //     cache key does not mention the textures at all). Without the bump the shader keeps sampling freed textures
+  //     and every instance matrix comes back garbage; ANY material change recompiles it (which is why G, H and a
+  //     pack reload cured it) and the next growth breaks it again. So: the resize is decided and applied FIRST,
+  //     and the version is bumped after it.
+  assert(/const resizeInstances = bucket\.allocated \+ 1 > batch\.maxInstanceCount;/.test(batchSrc),
+    "a bucket's instance growth is decided BEFORE the two release calls…");
+  assert(/bucket\.material\.needsUpdate = true;/.test(batchSrc) && /if \(grow \|\| resizeInstances\)/.test(batchSrc),
+    "…and the bucket's material is marked dirty after any resize (the render object rebuild re-captures the NEW textures)");
+  assert(/START_INSTANCES = 512;/.test(batchSrc),
+    "…with the instance capacity bought up front: a rebuild is not free, so 512 covers a lap's bucket (~300)…");
+  assert(/INSTANCES START HIGH ON PURPOSE/.test(readSource("src/plugins/render/systems/far-batches.ts")),
+    "…and the reason is written where the next reader will hit it");
+
   // 2. THE BEHAVIOUR, on a REAL geometry (three object construction needs no GPU, which is what makes this
   //    testable here at all: only RENDERING a batch needs a device).
   const group = new THREE.Group();
@@ -7657,6 +7675,27 @@ check("M3a: the far ring's geometry is drawn through (look, tier) BATCHES", () =
   equal(batches.stats.instances, 4, "removing a chunk takes its instances out again (its two, of the six added)");
   batches.dispose();
   equal(batches.stats.buckets, 0, "dispose frees every bucket (a world-size change)");
+
+  // 3. THE RESIZE, DRIVEN FOR REAL (its own batcher, so the counts above keep their meaning): overflowing the
+  //    instance capacity must grow the batch AND bump the material's version, because that version is the only
+  //    thing that makes three.js rebuild the node graph which captured the batch's textures (see the group's
+  //    section 1c). A regression here is invisible in this file's other assertions and visible on screen as
+  //    "faces flying everywhere", so it is asserted as behaviour rather than as source text.
+  const growing = new FarBatches(new THREE.Group());
+  const growMaterial = new THREE.MeshBasicMaterial();
+  const growSpecs = [{ key: "grow-look", texture: null, color: "#ffffff" }];
+  const growGeometry = makeGeometry();
+  const grown = growing.add(4, growGeometry, growSpecs, [growMaterial], place);
+  assert(grown !== null, "a one-look chunk is batched");
+  const versionBefore = growMaterial.version;
+  const countBefore = grown.instances[0].bucket.batch.maxInstanceCount;
+  equal(countBefore, 512, "…into a bucket that starts at the pre-bought instance capacity");
+  for (let i = 0; i < 600; i++) growing.add(4, growGeometry, growSpecs, [growMaterial], place);
+  equal(growing.stats.instances, 601, "600 more chunks of that look are all accepted…");
+  assert(grown.instances[0].bucket.batch.maxInstanceCount > countBefore, "…the bucket GROWS to hold them…");
+  assert(growMaterial.version > versionBefore,
+    "…and the growth rebuilds the material (the only thing that re-captures the replaced matrices/indirect textures)");
+  growing.dispose();
 });
 
 check("M3a: the STREAM hands settled far chunks to the batches, and takes them back with the window", () => {

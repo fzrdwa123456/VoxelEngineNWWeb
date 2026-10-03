@@ -22,14 +22,36 @@
 // CAPACITY. `addGeometry`/`addInstance` THROW when a batch is full, so every bucket grows itself before it is
 // asked to: vertices/indices by doubling through `setGeometrySize`, instances through `setInstanceCount` (both
 // reallocate and copy, which is why this happens once per doubling rather than per chunk).
+//
+// AND A RESIZE MUST BE FOLLOWED BY A MATERIAL REBUILD — this is the ONE thing `BatchedMesh` does not do for you,
+// and getting it wrong is what M3a shipped first (the report: «lod 好像被破坏了一样在闪，面到处飞，按 G 或 H 或
+// 重载资源包又恢复正常，但一动起来又出问题»). `setInstanceCount` DISPOSES and RECREATES the batch's
+// `_matricesTexture` and `_indirectTexture`, and the batching shader reads those two textures OFF THE MESH AT
+// NODE-GRAPH BUILD TIME (`three/src/nodes/accessors/Batch.js`: `batchMesh._matricesTexture`), i.e. the compiled
+// graph captures the texture OBJECTS. The graph is only rebuilt when `material.version` changes
+// (`RenderObjects.get()`), and the pipeline cache key does not mention those textures at all
+// (`WebGPUBackend.getRenderCacheKey`) — so after a growth the batch went on sampling the textures three had just
+// freed: every instance matrix came back as garbage, which is exactly "surfaces flying around". ANY material
+// change recompiled the graph and picked the new textures up (which is why `G`, `H` and a pack reload cured it),
+// and the next window move grew a bucket again and broke it again. `growFor` therefore bumps the bucket material's
+// `needsUpdate`, which makes the renderer dispose and rebuild that render object; the rebuild re-runs `batch()` and
+// captures the new textures. (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read
+// per draw, and the vertex layout is unchanged — but the bump is harmless there and keeps the rule in ONE place.)
 import * as THREE from "three/webgpu";
 import type { ChunkFaceSpec } from "../../../data/globals/gfx";
 
 /** Starting capacity of a bucket, in vertices / indices / instances. Small: buckets are grown on demand, and a
- *  lap's rungs differ by orders of magnitude in what they hold. */
+ *  lap's rungs differ by orders of magnitude in what they hold.
+ *
+ *  INSTANCES START HIGH ON PURPOSE (512, against the ~300 a bucket really holds on a 512-chunk lap): a growth
+ *  costs a render-object AND shader rebuild (see the note above), so the instance capacity is bought once instead
+ *  of being discovered in five doublings. It is cheap — the matrices texture for 512 instances is
+ *  `ceil(√2048/4)·4 = 48` squared pixels of RGBA f32 ≈ 36 KB, and the indirect texture 23² u32 ≈ 2 KB, so ~40
+ *  buckets cost ~1.5 MB. Vertex/index capacity is NOT pre-bought: a bucket's slices vary by rung (a step-2 slice
+ *  is a whole chunk mesh), and their sum is only known as the ring fills. */
 const START_VERTICES = 4096;
 const START_INDICES = 6144;
-const START_INSTANCES = 32;
+const START_INSTANCES = 512;
 /** Faces a slice holds, from its index range (6 indices per face, and the mesher lays a slot out contiguously). */
 const FACES_PER_INDEX = 6;
 
@@ -187,7 +209,10 @@ export class FarBatches {
     this.buckets.clear();
   }
 
-  /** Grow a bucket until the slice fits — BEFORE `addGeometry`, which throws rather than shrinking the request. */
+  /** Grow a bucket until the slice fits — BEFORE `addGeometry`, which throws rather than shrinking the request.
+   *  A resize also REBUILDS THE BUCKET'S MATERIAL (see the note at the top of this file): `setInstanceCount`
+   *  replaces the matrices/indirect textures the compiled node graph captured, and without the rebuild the shader
+   *  would keep sampling the freed ones. */
   private growFor(bucket: Bucket, vertexCount: number, indexCount: number): void {
     const batch = bucket.batch;
     let vertices = bucket.capacityVertices;
@@ -201,13 +226,21 @@ export class FarBatches {
       indices = Math.max(indices * 2, indices + indexCount);
       grow = true;
     }
+    const resizeInstances = bucket.allocated + 1 > batch.maxInstanceCount;
     if (grow) batch.setGeometrySize(vertices, indices);
     bucket.capacityVertices = vertices;
     bucket.capacityIndices = indices;
     bucket.usedVertices += vertexCount;
     bucket.usedIndices += indexCount;
-    if (bucket.allocated + 1 > batch.maxInstanceCount) {
+    if (resizeInstances) {
       batch.setInstanceCount(Math.max(batch.maxInstanceCount * 2, bucket.allocated + 1));
+    }
+    if (grow || resizeInstances) {
+      // THE REBUILD (see the header): a new version makes `RenderObjects.get()` dispose this render object and
+      // build it again, which is the only thing that re-runs `batch()` and picks up the NEW textures. It is set on
+      // the bucket's own material, which is shared per (look, tint) — a sibling bucket or an unbatched chunk that
+      // shares it has an unchanged cache key and only syncs the version, so nothing else is rebuilt.
+      bucket.material.needsUpdate = true;
     }
   }
 }

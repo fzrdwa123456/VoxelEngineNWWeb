@@ -774,26 +774,46 @@ where it is:
     it the chunk's full attribute arrays would store every look's vertices once per look — the slice writes only
     that look's vertex range and rebases its indices to 0, so a bucket's geometry holds exactly the faces it
     draws. Indices are consumed `FACES_PER_INDEX` = 6 per bucket instance.
-  * **CAPACITY GROWS BEFORE THE ADD, NEVER AFTER** (`START_VERTICES`/`START_INDICES`/`START_INSTANCES` = 4096/
-    6144/32): `BatchedMesh.addGeometry` THROWS at capacity, so `growFor` calls `setGeometrySize`/
-    `setInstanceCount` first. `batch.frustumCulled = false` because the batch's own bounding volume is computed
-    from the instances present when it is asked and the instances are placed and hidden independently — culling
-    stays per instance, which is the whole point.
+  * **CAPACITY GROWS BEFORE THE ADD, NEVER AFTER — AND A GROWTH REBUILDS THE BUCKET'S MATERIAL** (`START_VERTICES`/
+    `START_INDICES`/`START_INSTANCES` = 4096/6144/**512**): `BatchedMesh.addGeometry` THROWS at capacity, so
+    `growFor` calls `setGeometrySize`/`setInstanceCount` first. `batch.frustumCulled = false` because the batch's
+    own bounding volume is computed from the instances present when it is asked and the instances are placed and
+    hidden independently — culling stays per instance, which is the whole point. **THE MATERIAL BUMP IS THE FIX
+    FOR M3a'S FIRST LIVE RUN** («lod 好像被破坏了一样在闪，面到处飞；按 G 或 H 或重载资源包又恢复正常，但一动起来
+    又出问题»), and the mechanism is worth knowing because it is invisible from this side of the API:
+    `setInstanceCount` DISPOSES and RECREATES the batch's `_matricesTexture` and `_indirectTexture`, and the
+    batching shader reads those two textures **off the mesh when the material's node graph is built**
+    (`three/src/nodes/accessors/Batch.js`: `batchMesh._matricesTexture` — the graph captures the texture OBJECTS).
+    The graph is rebuilt only when `material.version` changes (`RenderObjects.get()`; the pipeline cache key does
+    not mention those textures at all), so after a growth the batch went on sampling the textures three had just
+    freed: every instance matrix came back as garbage, i.e. surfaces flying around, flickering, worst while the
+    ring fills — which is exactly when buckets grow. ANY material change recompiled the graph (that is why `G`,
+    `H` and a pack reload cured it, and why `refreshMaterials` seemed to "fix" the LOD) and the next window move
+    grew a bucket again and broke it again. So `growFor` decides and applies the resize first and then sets
+    `bucket.material.needsUpdate = true`, which makes the renderer dispose that render object and build it again —
+    the one path that re-runs `batch()` and captures the NEW textures. INSTANCES START AT 512 on purpose (against
+    the ~300 a lap's bucket really holds): a growth costs a render-object AND shader rebuild, so the capacity is
+    bought once instead of discovered in five doublings, and 512 instances is only ~36 KB of matrices texture plus
+    ~2 KB of indirect per bucket (~40 buckets ⇒ ~1.5 MB). Vertex/index capacity is NOT pre-bought — a bucket's
+    slices vary by rung (a step-2 slice is a whole chunk mesh) and their sum is only known as the ring fills.
+    (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read per draw, `needsGeometry-
+    Update` picks up the replacement, and the vertex layout is unchanged — but the bump is harmless there and
+    keeps this rule in ONE place.)
   * **THE SOURCE GEOMETRY IS KEPT SO A DEMOTE CAN PUT THE MESH BACK.** `demoteFar` re-adds `entry.mesh` to its
     group and sets `visible = true`; the chunk's own `BufferGeometry` is never disposed at promotion, so far-ring
     VERTEX memory roughly doubles while a chunk is batched (the same attributes live in the chunk geometry and in
     the bucket). The noted mitigation — dispose the source at promotion and let three re-upload it when a demote
-    needs it again — is NOT done.
-  * **`L` IS THE A/B SWITCH, AND IT EXISTS BECAUSE THE ONE UNVERIFIABLE RISK IS THE DRAW ITSELF.** Whether a
-    `BatchedMesh` with the chunk's `MeshLambertMaterial` actually renders on the WebGPU backend is the thing
-    `check:ecs` cannot test: Node has no device, and the gate's M3a groups construct a real `BatchedMesh` on a
-    real `BufferGeometry` and assert the bookkeeping (instances in, matrices/visibility set, instances out,
-    capacity growth, the free function's slice) — never a pixel. `L`, in a world, runs `demoteAllFar` (every
-    batched chunk back into the scene as its own mesh) and `promoteAllFar` again, so "batches do not draw" and
-    "the far ring is missing" are one keypress apart and `calls=`/`batched=` say which one happened. Like
-    `G`/`H`/`J`/`K` it is unbound (`binds.ts` has no `KeyL`; the gate asserts it) and SESSION-ONLY.
-  A `BatchedMesh` failing to render is a VISIBLE failure (the far ring vanishes and `calls=` stays low while
-  `batched=` climbs), not a subtle one, and `L` is the way back to the shipped M1b behaviour without a rebuild.
+    needs it again — is NOT done. (A SECOND cost, also not addressed: `BatchedMesh.deleteGeometry` never reclaims
+    the space a removed slice reserved, so a bucket's vertex buffer only ever grows as the window moves and a pack
+    reload re-adds every slice. `optimize()` is the three.js call that compacts it in place, and it is deliberately
+    NOT called — a repack of a multi-megabyte bucket during streaming is worse than the space.)
+  * **`L` IS THE A/B SWITCH BACK TO THE PRE-M3a PATH.** `L`, in a world, runs `demoteAllFar` (every batched chunk
+    back into the scene as its own mesh) and `promoteAllFar` again, so "the far ring is missing" and "the batches
+    are drawing" are one keypress apart and `calls=`/`batched=` say which one happened — which is what made the
+    report above diagnosable at all. Like `G`/`H`/`J`/`K` it is unbound (`binds.ts` has no `KeyL`; the gate asserts
+    it) and SESSION-ONLY. What the gate CAN test is the bookkeeping (a real `BatchedMesh` on a real
+    `BufferGeometry`: instances in, matrices/visibility set, instances out, capacity growth, the slice, and the
+    material bump of the section above) — never a pixel, so a regression shows up as a report, not as a failure.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it
