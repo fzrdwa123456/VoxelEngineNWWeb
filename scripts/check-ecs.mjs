@@ -7565,6 +7565,173 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
     "…and every material (tinted variants and the checker included) takes its map from that cache");
 });
 
+// ===== M3a: the far ring drawn as (look, tier) batches =====
+console.log("\n--- M3a: the far ring's chunks are handed to (look, tier) BatchedMeshes ---");
+
+check("M3a: the far ring's geometry is drawn through (look, tier) BATCHES", () => {
+  // WHY THIS EXISTS. A six-rung ladder puts ~1250 chunk meshes in the scene and each draws one call per LOOK, so
+  // `calls` measured ~2520 (peak 3785) per frame. `THREE.BatchedMesh` collapses that to one call per (look, tier)
+  // — but it can only do so under two constraints the stream has to respect, and they are what this group pins:
+  //   * PER-INSTANCE VISIBILITY exists (the reserve handover needs it — `setVisibleAt`), and
+  //   * PER-INSTANCE OPACITY does not (one material per batch), so a chunk that is FADING is never batched: it is
+  //     promoted when its fade-in ends and demoted before a fade-out, which is exactly where those two calls sit.
+  const { FarBatches } = load("plugins/render/systems/far-batches.js");
+  const THREE = require("three/webgpu");
+  const batchSrc = stripComments(readSource("src/plugins/render/systems/far-batches.ts"));
+  const streamSrc = stripComments(readSource("src/plugins/render/systems/chunk-stream.ts"));
+
+  // 1. THE SOURCE CONTRACT. One bucket per (look, tier); grown BEFORE `addGeometry`, which THROWS at capacity
+  //    rather than shrinking the request; and the promote/demote pair around the fades.
+  assert(/new THREE\.BatchedMesh\(/.test(batchSrc), "the batches are three.js BatchedMesh objects (one draw call each)");
+  assert(/setGeometrySize\(/.test(batchSrc) && /setInstanceCount\(/.test(batchSrc),
+    "…grown through setGeometrySize/setInstanceCount before addGeometry (which throws at capacity)");
+  assert(/const key = `\$\{spec\.key\}\\u0000\$\{step\}`/.test(batchSrc), "…one bucket per (look, tier)");
+  assert(/if \(!this\.beginFade\(key, entry\)\) this\.promoteFar\(key, entry\);/.test(streamSrc),
+    "a far chunk that never faded (the fade switched off) is batched right away…");
+  assert(/if \(!fade\.out\) this\.promoteFar\(this\.keyOf\(fade\.entry\), fade\.entry\);/.test(streamSrc),
+    "…and one whose fade-IN ends is batched at that moment (a batch has one material, so no per-instance opacity)");
+  assert(/this\.demoteFar\(key\);\s*\n?\s*this\.cache\.meshes\.delete\(key\);/.test(streamSrc),
+    "a chunk that leaves the window comes OUT of its batches first (the fade-out needs its own mesh)");
+  assert(/private place\(entry: ChunkMeshEntry\): void \{[\s\S]{0,400}this\.batches\?\.setMatrix/.test(streamSrc),
+    "…and a batched chunk is placed by its INSTANCE matrices (each chunk keeps its own place and torus wrap)");
+  // The vertex data is sliced per look: `addGeometry` copies whatever it is handed, so handing it the chunk's full
+  // attribute arrays would store every look's vertices once per look.
+  assert(/function sliceLook\(/.test(batchSrc) && /getX\(indexStart \+ i\)/.test(batchSrc),
+    "each look becomes a self-contained slice (its own vertex range, indices rebased to 0)");
+
+  // 1b. `L` IS THE A/B SWITCH (M3a), and it must be unbound like G/H/J/K: whether a `BatchedMesh` actually DRAWS
+  //     is the one thing this gate cannot test (no device), so the engine ships a keypress that takes the far ring
+  //     back to the pre-M3a path and back again — "missing/misplaced far ring" and "batches do not render" are
+  //     then distinguishable in one press, and the FRAME line's `calls=` moves with it.
+  assert(!/KeyL/.test(stripComments(readSource("src/data/globals/binds.ts"))), "L is not a gameplay bind");
+  assert(/edge\.code === "KeyL"/.test(streamSrc) && /private demoteAllFar\(\)/.test(streamSrc) &&
+    /private promoteAllFar\(\)/.test(streamSrc),
+    "…and L switches the far ring's batching off (demote every chunk) and on (promote every settled one)");
+  assert(/if \(!this\.batchingEnabled \|\| entry\.step <= 1 \|\| this\.batched\.has\(key\)\) return;/.test(streamSrc),
+    "…respected by the promotion itself");
+
+  // 2. THE BEHAVIOUR, on a REAL geometry (three object construction needs no GPU, which is what makes this
+  //    testable here at all: only RENDERING a batch needs a device).
+  const group = new THREE.Group();
+  const batches = new FarBatches(group);
+  const makeGeometry = () => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(8 * 3), 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(8 * 3), 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(8 * 2), 2));
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]), 1));
+    geometry.addGroup(0, 6, 0); // look 0: the first face
+    geometry.addGroup(6, 6, 1); // look 1: the second
+    return geometry;
+  };
+  const specs = [
+    { key: "look-a", texture: null, color: "#ffffff" },
+    { key: "look-b", texture: null, color: "#000000" },
+  ];
+  const materials = [new THREE.MeshBasicMaterial(), new THREE.MeshBasicMaterial()];
+  const place = (matrix) => matrix.identity();
+  const first = batches.add(4, makeGeometry(), specs, materials, place);
+  assert(first !== null, "a real chunk geometry is sliced into its looks");
+  equal(first.instances.length, 2, "…one instance per look");
+  equal(batches.stats.buckets, 2, "…into one bucket per (look, tier)");
+  equal(batches.stats.instances, 2, "…both live");
+  const second = batches.add(4, makeGeometry(), specs, materials, place);
+  equal(batches.stats.buckets, 2, "another chunk of the same looks SHARES those buckets");
+  equal(batches.stats.instances, 4, "…it only adds instances (so it costs no draw call)");
+  batches.add(8, makeGeometry(), specs, materials, place);
+  equal(batches.stats.buckets, 4, "another TIER is another bucket (one draw call per look and tier)");
+  batches.setVisible(second, false);
+  equal(
+    second.instances.map((instance) => instance.bucket.batch.getVisibleAt(instance.id)).join(","),
+    "false,false",
+    "visibility is PER INSTANCE — which is what the reserve handover needs",
+  );
+  const swapped = new THREE.MeshBasicMaterial();
+  batches.refreshMaterials(() => swapped);
+  equal(
+    first.instances.every((instance) => instance.bucket.batch.material === swapped),
+    true,
+    "a bucket is ONE material: a tint/wireframe toggle or a reload reaches every instance at once",
+  );
+  batches.remove(first);
+  equal(batches.stats.instances, 4, "removing a chunk takes its instances out again (its two, of the six added)");
+  batches.dispose();
+  equal(batches.stats.buckets, 0, "dispose frees every bucket (a world-size change)");
+});
+
+check("M3a: the STREAM hands settled far chunks to the batches, and takes them back with the window", () => {
+  // The group above proves the batcher; this one proves the STREAM's half of it — and it needs a REAL geometry to
+  // do so, which is why it is its own world: every other far-ring group in this file drives a stub (a plain object
+  // with `groups`/`specs` and no attributes), and a stub is deliberately NOT batched (`FarBatches.add` returns null
+  // for anything it cannot slice, so those groups keep testing exactly what they always did).
+  const { ChunkStreamSystem } = load("plugins/render/systems/chunk-stream.js");
+  const { CHUNK_SIZE } = load("data/world/chunk.js");
+  const { VoxelWorld } = load("data/world/world.js");
+  const { lodSampleGrid } = load("data/world/lod.js");
+  const THREE = require("three/webgpu");
+  const P = loadPresentation();
+  const batchWorld = new World();
+  batchWorld.insertResource(VOXEL, new VoxelWorld());
+  batchWorld.insertResource(LOCAL_PLAYER, localPlayer);
+  const batchCache = P.createChunkMeshCache({ add() {}, remove() {} });
+  batchWorld.insertResource(P.CHUNK_MESHES, batchCache);
+  batchWorld.insertResource(P.CHUNK_MATERIAL, P.createChunkMaterial());
+  batchWorld.insertResource(FADE_OPTIONS, createFadeOptions(true, true)); // fades ON: promotion waits for one
+  batchWorld.insertResource(KEY_EVENTS, createKeyEventLog());
+  const batchFactory = {
+    createGeometry: () => {
+      const geometry = new THREE.BufferGeometry();
+      const quads = CHUNK_SIZE * CHUNK_SIZE;
+      geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(quads * 4 * 3), 3));
+      geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(quads * 4 * 3), 3));
+      geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(quads * 4 * 2), 2));
+      geometry.setIndex(new THREE.BufferAttribute(new Uint32Array([0, 1, 2, 0, 2, 3]), 1));
+      geometry.addGroup(0, 6, 0); // ONE look (the common far case)
+      return {
+        geometry,
+        specs: [{ key: "probe-look", texture: null, color: "#ffffff" }],
+        apply: () => 1,
+        rebuild: () => 1,
+        restyle: () => 1,
+        dispose() {},
+      };
+    },
+    getMaterial: () => new THREE.MeshBasicMaterial(),
+  };
+  const positionRow = entityIndex(localPlayer);
+  const startX = C.POSITION.x[positionRow];
+  try {
+    // A TINY ladder (2 rungs, reach 2), so the CPU sampler answers instantly and the ring is a few dozen chunks.
+    const stream = new ChunkStreamSystem(
+      batchWorld,
+      batchFactory,
+      null,
+      { tiers: 2, reach: 2 },
+      { gridFor: (step, cx, cz) => lodSampleGrid(step, cx, cz) },
+    );
+    // A big delta per step: every fade in flight finishes, so a chunk built in this step is promoted by the next.
+    for (let i = 0; i < 40; i++) stream.step(1000);
+    const stats = stream.batchStats;
+    assert(stats.batchedChunks > 0, `settled far chunks end up in batches (${stats.batchedChunks})`);
+    assert(stats.instances >= stats.batchedChunks, "…with at least one instance each (one per look)");
+    assert(stats.buckets >= 1 && stats.buckets < stats.instances,
+      `…in far fewer buckets than instances (${stats.buckets} buckets, ${stats.instances} instances)`);
+    // …and every batched chunk's own mesh has LEFT the scene (the batch draws those pixels now).
+    const batchedMeshes = [...batchCache.meshes.entries()].filter(([key]) => key.includes(":"));
+    assert(batchedMeshes.length > 0, "the far ring has entries at all");
+    // MOVING THE WINDOW retires the far chunks that left: they have to come back OUT (their fade-out needs their
+    // own mesh, and a batch nobody owns would keep drawing them where they no longer belong).
+    const before = stats.instances;
+    C.POSITION.x[positionRow] = startX + 4 * CHUNK_SIZE;
+    stream.step(1000);
+    stream.step(1000);
+    assert(stream.batchStats.instances < before,
+      `a window move takes the leaving chunks back out of the batches (${before} -> ${stream.batchStats.instances})`);
+  } finally {
+    C.POSITION.x[positionRow] = startX;
+  }
+});
+
 // ===== report =====
 console.log(`\n=== check-ecs report ===`);
 if (failed) {

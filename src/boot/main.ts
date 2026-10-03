@@ -1504,6 +1504,9 @@ function frameProbe(): void {
   const frames = probe.n > 0 ? probe.n : 1;
   probe.callsPerFrame = probe.drawCallRawSum / frames;
   probe.trisPerFrame = probe.triangleRawSum / frames;
+  // M3a: how much of the far ring is drawn through (look, tier) batches. `calls` should fall by roughly this
+  // factor once the ring has settled — an instance is a chunk-look that no longer costs a call of its own.
+  const batches = world.hasResource(RENDER_HANDLES) ? world.resource(RENDER_HANDLES).chunkStream.batchStats : null;
   logDebug(
     `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
       `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms raf=${probe.vblanks}/s ` +
@@ -1511,6 +1514,7 @@ function frameProbe(): void {
       `calls=${probe.callsPerFrame.toFixed(0)} callsMax=${probe.drawCallMax} ` +
       `tris=${(probe.trisPerFrame / 1000).toFixed(0)}k ` +
       `renders=${info.render.calls} attrs=${info.memory.attributes} ` +
+      (batches !== null ? `batched=${batches.instances}/${batches.buckets} ` : "") +
       `mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
       `pf=[${pf.join(" ")}] px=${probe.pxN > 0 ? `${probe.pxMin.toFixed(1)}/${(probe.pxSum / probe.pxN).toFixed(1)}/${probe.pxMax.toFixed(1)}` : "-"} (${probe.pxN})`,
   );

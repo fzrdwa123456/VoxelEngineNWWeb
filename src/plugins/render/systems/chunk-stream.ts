@@ -31,6 +31,7 @@ import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialSta
 import { FADE_OPTIONS, LOCAL_PLAYER, VOXEL, type FadeOptions } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
 import { buildLodMeshInput, fineBase, inTierAnnulus, inTierHole, lodLadder, tierOfStep, tierTint, type LodPolicy, type LodSampledGrid, type LodTier } from "../../../data/world/lod";
+import { FarBatches, type FarBatchHandle } from "./far-batches";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
@@ -91,6 +92,12 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, 1],
   [0, 0, -1],
 ];
+
+/** Scratch transform, so placing the whole window (a `place` per chunk on every column crossing) allocates
+ *  nothing: `Matrix4.compose` reads them immediately and `BatchedMesh.setMatrixAt` copies the result. */
+const _placePosition = new THREE.Vector3();
+const _placeScale = new THREE.Vector3();
+const _placeRotation = new THREE.Quaternion();
 
 /** The chunk mesher, INJECTED rather than imported (the layer rule in check:ecs): a chunk geometry owns
  *  three.js buffers and the material is a GPU object, so the PLATFORM builds them and the composition root
@@ -201,12 +208,22 @@ export class ChunkStreamSystem {
   private lodTint = false;
   /** `H` draws the meshes as TRIANGLE WIREFRAME (P1.96) — the same material switch, one flag further. */
   private wireframe = false;
+  /** `L` SWITCHES THE FAR RING'S BATCHING OFF AND ON (M3a) — the A/B switch for the one thing a GPU-side
+   *  change cannot be gate-tested for: whether the batches DRAW. With it off every far chunk is an ordinary mesh
+   *  again (the code path that shipped before M3a), so "the far ring is missing/misplaced" can be told apart from
+   *  "batches do not render at all" in one keypress — and the draw-call count in the FRAME line moves with it. */
+  private batchingEnabled = true;
   /** THE FAR RING'S LOOK QUEUE (P1.97). A chain change cannot mark the far ring through the WORLD: it is
    *  procedural and holds no chunk in the voxel map (P1.93), so `VoxelWorld.markAllStale()` never names it and
    *  every already-loaded far chunk kept the previous chain's materials — new textures only appeared once a
    *  far chunk was built or rebuilt. `markFarStale()` fills this from the MESH CACHE instead, and the same
    *  budgeted restyle pass drains it. */
   private readonly farStale = new Set<string>();
+  /** M3a: the far ring drawn as (look, tier) BATCHES. `batches` is created lazily (the first settled far chunk
+   *  creates it), and `batched` maps a chunk key to the instances it owns — the two are the single source of
+   *  truth for "is this chunk batched", which is why they live beside the fades rather than in the cache. */
+  private batches: FarBatches | null = null;
+  private readonly batched = new Map<string, FarBatchHandle>();
   /** THE APPEARANCE FADES (P1.98/P1.99): the chunks that are fading in or out right now.
    *
    *  IN: a chunk that APPEARS (a first build — never an edit, see `rebuild`) gets a per-chunk copy of its
@@ -479,19 +496,21 @@ export class ChunkStreamSystem {
     // interval), which is what makes the fade independent of the frame rate and testable in the gate.
     this.advanceFades(deltaMs);
 
-    // G, H AND J: THE DEBUG VIEWS (P1.94/P1.96/P1.98). The edges are published by `player.input` and every
+    // G, H, J AND L: THE DEBUG VIEWS (P1.94/P1.96/P1.98/M3a). The edges are published by `player.input` and every
     // consumer keeps its own cursor, so a second consumer costs the log nothing. Handled HERE because this
     // system owns the meshes and their materials — the toggles ARE material changes, and no other system may
-    // touch a mesh. One drain for all three, and an ODD number of presses flips (a repeat or a key release is
+    // touch a mesh. One drain for all four, and an ODD number of presses flips (a repeat or a key release is
     // ignored).
     let tintPresses = 0;
     let wirePresses = 0;
     let fadePresses = 0;
+    let batchPresses = 0;
     this.keys.drain((edge) => {
       if (!edge.down || edge.repeat) return;
       if (edge.code === "KeyG") tintPresses++;
       else if (edge.code === "KeyH") wirePresses++;
       else if (edge.code === "KeyJ") fadePresses++;
+      else if (edge.code === "KeyL") batchPresses++;
     });
     if ((tintPresses & 1) === 1) {
       this.lodTint = !this.lodTint;
@@ -500,6 +519,13 @@ export class ChunkStreamSystem {
     if ((wirePresses & 1) === 1) {
       this.wireframe = !this.wireframe;
       this.refreshMaterials();
+    }
+    if ((batchPresses & 1) === 1) {
+      // See `batchingEnabled`: with it off the far ring is drawn exactly as it was before M3a (one mesh per chunk),
+      // which is what makes "the batches do not draw" a distinguishable failure from "the far ring is wrong".
+      this.batchingEnabled = !this.batchingEnabled;
+      if (this.batchingEnabled) this.promoteAllFar();
+      else this.demoteAllFar();
     }
     if ((fadePresses & 1) === 1) {
       this.fadeEnabled = !this.fadeEnabled;
@@ -686,6 +712,11 @@ export class ChunkStreamSystem {
     for (const fade of this.fading) for (const clone of fade.clones) clone.dispose();
     this.fading.length = 0;
     this.farStale.clear();
+    // M3a: the far ring's batches die with the world — their instance buffers are as stale as the meshes (a key
+    // is a wrapped identity, so "column 5" means a different place in a different lap).
+    this.batches?.dispose();
+    this.batches = null;
+    this.batched.clear();
     this.wanted = null;
     this.farWanted = null;
     // The LADDER goes too: the lap decides how many rungs fit, so the one built for the old world is not even
@@ -714,14 +745,22 @@ export class ChunkStreamSystem {
 
   /** The reload path (a chain change): re-resolve this chunk's LOOKS in place. Nothing is meshed, so there is
    *  no pool to consult and nothing to fail — a chunk with no mesh has nothing to restyle (it is either in
-   *  `empty`, or undecided and therefore already covered by the streaming budget below). */
+   *  `empty`, or undecided and therefore already covered by the streaming budget below).
+   *
+   *  A BATCHED chunk is DEMOTED, restyled and promoted again (M3a): a bucket is keyed by (look, tier), and this
+   *  is exactly the moment those looks change — so the chunk has to move to another bucket. The three steps are
+   *  cheap (an instance out, one look resolution, an instance in) and they keep the reload's invariant, "every
+   *  mesh has its looks re-resolved", true for the batched half of the ring as well.) */
   private restyle(key: string): void {
     const entry = this.cache.meshes.get(key);
     if (!entry) return;
+    const wasBatched = this.batched.has(key);
+    if (wasBatched) this.demoteFar(key);
     entry.geom.restyle(this.voxel);
     // The material CACHE was dropped by the reload (see the pack driver), so these come back from the new
     // chain's textures. `groups` is untouched: a slot index still means the same material index.
     entry.mesh.material = this.materialsFor(entry.geom, entry.step);
+    if (wasBatched) this.promoteFar(key, entry);
   }
 
   /** Re-resolve up to `limit` of the chunks a chain change marked STALE, and answer how many the queue handed
@@ -870,6 +909,9 @@ export class ChunkStreamSystem {
     const far = this.farWanted;
     for (const [key, entry] of this.cache.meshes) {
       if (wanted.has(key) || (far !== null && far.has(key))) continue;
+      // A BATCHED chunk comes out of its batches FIRST (M3a): the fade-out below needs a mesh it can give its own
+      // material copies to, and a bucket is one material for every instance in it.
+      this.demoteFar(key);
       this.cache.meshes.delete(key);
       this.cache.empty.delete(key);
       // A job for a chunk that left the window is dropped when it comes back (`drain` checks this set).
@@ -1004,7 +1046,10 @@ export class ChunkStreamSystem {
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
-    this.beginFade(key, entry); // a coarse chunk that APPEARED fades in too (P1.98)
+    // A coarse chunk that APPEARED fades in too (P1.98) — and the moment its fade ends it is handed to the
+    // (look, tier) BATCH (M3a), which is what takes the far ring from one draw call per chunk to one per look.
+    // When the fade is switched off there is nothing to wait for, so it is batched right away.
+    if (!this.beginFade(key, entry)) this.promoteFar(key, entry);
     return LOD_MESH_COST;
   }
 
@@ -1019,6 +1064,88 @@ export class ChunkStreamSystem {
       return this.debugged(this.mesh.getMaterial(this.material, undefined, tint));
     }
     return geom.specs.map((spec) => this.debugged(this.mesh.getMaterial(this.material, spec, tint)));
+  }
+
+  /** THE ONE LOOK OF A BATCH (M3a): a bucket is one material, so this is `materialsFor` for a single spec — the
+   *  same cache and the same tint/wireframe rules, which is what keeps a batched far chunk looking exactly like
+   *  an unbatched one. */
+  private materialFor(step: number, spec: ChunkFaceSpec): THREE.Material {
+    const tint = this.lodTint ? tierTint(step) : null;
+    return this.debugged(this.mesh.getMaterial(this.material, spec, tint));
+  }
+
+  /** How many (look, tier) buckets and instances the far ring is drawn with (M3a) — reported by the FRAME line
+   *  as `batched=instances/buckets`, so "is the batching actually carrying the ring" is a read number. */
+  get batchStats(): { readonly buckets: number; readonly instances: number; readonly batchedChunks: number } {
+    const stats = this.batches?.stats ?? { buckets: 0, instances: 0 };
+    return { ...stats, batchedChunks: this.batched.size };
+  }
+
+  private ensureBatches(): FarBatches {
+    if (this.batches === null) this.batches = new FarBatches(this.cache.group);
+    return this.batches;
+  }
+
+  /** HAND A SETTLED FAR CHUNK TO ITS BATCHES (M3a). Called when the chunk exists AND is opaque (its fade-in
+   *  ended, or the fade is switched off) — never while it is translucent, because a batch has one material and
+   *  therefore no per-instance opacity (see far-batches.ts). The individual mesh is taken OUT of the scene but
+   *  KEPT (its geometry is what a demote re-attaches), so this is reversible at any moment. */
+  private promoteFar(key: string, entry: ChunkMeshEntry): void {
+    if (!this.batchingEnabled || entry.step <= 1 || this.batched.has(key)) return;
+    // …AND ONLY WHILE THE CHUNK IS STILL IN THE WINDOW. The two callers are "a far chunk was built without a
+    // fade" and "its fade-in ended", and the second can fire for a chunk that LEFT while it was fading in (its
+    // fade is dropped when the leaving fade takes the mesh over): promoting that one would put a chunk nobody
+    // wants back on screen, from a batch that outlives the cache entry. The identity check makes that impossible.
+    if (this.cache.meshes.get(key) !== entry) return;
+    const handle = this.ensureBatches().add(
+      entry.step,
+      entry.geom.geometry,
+      entry.geom.specs,
+      (() => {
+        const resolved = this.materialsFor(entry.geom, entry.step);
+        return Array.isArray(resolved) ? resolved : [resolved];
+      })(),
+      (out) => this.entryMatrix(entry, out),
+    );
+    if (handle === null) return;
+    this.batched.set(key, handle);
+    this.batches!.setVisible(handle, entry.mesh.visible);
+    this.cache.group.remove(entry.mesh);
+  }
+
+  /** Take EVERY far chunk back out of its batches (`L` switching batching off): the `L` key's half of the A/B —
+   *  the far ring then draws exactly as it did before M3a. */
+  private demoteAllFar(): void {
+    for (const key of [...this.batched.keys()]) this.demoteFar(key);
+  }
+
+  /** …and hand every SETTLED far chunk back (`L` switching it on again). A chunk that is mid-fade is left alone:
+   *  it is promoted when its fade ends, which is the one rule that keeps a batch's single material honest. */
+  private promoteAllFar(): void {
+    const fadingIn = new Set<string>();
+    for (const fade of this.fading) if (!fade.out) fadingIn.add(fade.key);
+    for (const [key, entry] of this.cache.meshes) {
+      if (entry.step <= 1 || fadingIn.has(key)) continue;
+      this.promoteFar(key, entry);
+    }
+  }
+
+  /** Take a FAR CHUNK BACK OUT OF ITS BATCHES (M3a) — before it is faded out or removed, so the ordinary
+   *  per-chunk path (which owns the fade's material copies) has its mesh again. */
+  private demoteFar(key: string): void {
+    const handle = this.batched.get(key);
+    if (handle === undefined) return;
+    this.batched.delete(key);
+    this.batches?.remove(handle);
+    const entry = this.cache.meshes.get(key);
+    if (entry !== undefined) {
+      // …and it must be VISIBLE to fade out: its `visible` flag is whatever `refreshFarVisibility` last decided
+      // for a batched chunk (which is now the batch's business), and a leaving chunk that popped out invisible
+      // would be the very pop P1.99 exists to hide. Re-adding is unconditional (`Object3D.add` detaches a child
+      // from any previous parent first, and a stub group in the gate answers `add` with a no-op).
+      entry.mesh.visible = true;
+      this.cache.group.add(entry.mesh);
+    }
   }
 
   /** Apply the debug view's material switches. They are set on the material the CACHE hands back — shared per
@@ -1043,11 +1170,13 @@ export class ChunkStreamSystem {
   }
 
   /** Re-resolve every entry's material IN PLACE after a debug toggle: the geometry is untouched, so this is a
-   *  material swap per chunk — exactly as cheap as the pack reload's restyle. */
+   *  material swap per chunk — exactly as cheap as the pack reload's restyle. A BATCHED chunk's material lives on
+   *  its bucket (one per look, tier), so the buckets are re-resolved through the same look cache (M3a). */
   private refreshMaterials(): void {
     for (const entry of this.cache.meshes.values()) {
       entry.mesh.material = this.materialsFor(entry.geom, entry.step);
     }
+    this.batches?.refreshMaterials((step, spec) => this.materialFor(step, spec));
   }
 
   /** START A CHUNK'S FADE IN (P1.98). Called when a mesh is created for the first time — NEVER from `rebuild`,
@@ -1058,9 +1187,9 @@ export class ChunkStreamSystem {
    *  `transparent` + 0 opacity, and swapped back for the shared ones when the fade ends. `depthWrite` stays ON:
    *  the chunk keeps occluding itself correctly (depth-tested), so a fading chunk never shows its own back
    *  faces — the only thing it blends with is what is already drawn behind it. */
-  private beginFade(key: string, entry: ChunkMeshEntry): void {
-    if (!this.fadeOn(entry.step)) return;
-    this.pushFade(key, entry, false);
+  private beginFade(key: string, entry: ChunkMeshEntry): boolean {
+    if (!this.fadeOn(entry.step)) return false;
+    return this.pushFade(key, entry, false);
   }
 
   /** START A CHUNK'S FADE OUT (P1.99), and answer whether the fade took the mesh over.
@@ -1164,13 +1293,18 @@ export class ChunkStreamSystem {
 
   /** End ONE fade: put the SHARED material back on the mesh (an IN fade), or take the mesh down (an OUT one),
    *  and free the copies either way. `keepMaterial` false leaves whatever the mesh holds — the caller used it
-   *  when it already replaced or removed the material itself. */
+   *  when it already replaced or removed the material itself.
+   *
+   *  AN IN FADE THAT ENDS HANDS THE CHUNK TO ITS BATCHES (M3a): that is the moment it became opaque, so the
+   *  batch's single-material constraint is satisfied. (`keepMaterial` false means someone else already replaced
+   *  the material, which is also "settled" — the `J` switch and a pack reload both land here.) */
   private dropFade(index: number, keepMaterial = false): void {
     const fade = this.fading[index];
     this.fading.splice(index, 1);
     if (fade.out) this.removeMesh(fade.entry);
     else if (keepMaterial) fade.entry.mesh.material = this.materialsFor(fade.entry.geom, fade.entry.step);
     for (const clone of fade.clones) clone.dispose();
+    if (!fade.out) this.promoteFar(this.keyOf(fade.entry), fade.entry);
   }
 
   /** End every fade at once (the `J` switch turning the effect off): the ones that were arriving reach full
@@ -1185,8 +1319,16 @@ export class ChunkStreamSystem {
    *  super voxels are `step` blocks across — so the origin is scaled by `step` in X/Z AND the mesh gets
    *  `scale = (step, 1, step)`. That one scale is what turns a 32×32 super-voxel face into a `32·step`-block
    *  face; every normal stays axis-aligned, so nothing else has to know. Y is never decimated, so `cy` and the
-   *  vertical extent are the same units in both rings. */
+   *  vertical extent are the same units in both rings.
+   *
+   *  A BATCHED far chunk (M3a) has no mesh in the scene: the same transform goes into its instances' matrices,
+   *  which is how each chunk of a batch keeps its own place (and its own torus wrap). */
   private place(entry: ChunkMeshEntry): void {
+    const handle = this.batched.get(this.keyOf(entry));
+    if (handle !== undefined) {
+      this.batches?.setMatrix(handle, (out) => this.entryMatrix(entry, out));
+      return;
+    }
     const step = entry.step;
     const pcx = step === 1 ? this.lastPcx : Math.floor(this.lastPcx / step);
     const pcz = step === 1 ? this.lastPcz : Math.floor(this.lastPcz / step);
@@ -1195,6 +1337,28 @@ export class ChunkStreamSystem {
     entry.mesh.position.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
     entry.mesh.scale.set(step, 1, step);
     entry.mesh.updateMatrix();
+  }
+
+  /** The world matrix a chunk's drawing sits at, without touching a mesh: the batched path needs the same
+   *  transform the unbatched one computes (see `place`), and `out` is a scratch matrix so a window move does not
+   *  allocate one per chunk. */
+  private entryMatrix(entry: ChunkMeshEntry, out: THREE.Matrix4): void {
+    const step = entry.step;
+    const pcx = step === 1 ? this.lastPcx : Math.floor(this.lastPcx / step);
+    const pcz = step === 1 ? this.lastPcz : Math.floor(this.lastPcz / step);
+    const rx = nearestWrap(entry.cx, pcx, worldChunksX() / step);
+    const rz = nearestWrap(entry.cz, pcz, worldChunksZ() / step);
+    _placePosition.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
+    _placeScale.set(step, 1, step);
+    out.compose(_placePosition, _placeRotation, _placeScale);
+  }
+
+  /** The cache key of an entry, for the two lookups that only have the entry (`place`, `refreshFarVisibility`).
+   *  Fine keys are `cx,cy,cz` and far ones `<step>:cx,cy,cz` (see `build`/`buildFar`), i.e. exactly this. */
+  private keyOf(entry: ChunkMeshEntry): string {
+    return entry.step === 1
+      ? `${entry.cx},${entry.cy},${entry.cz}`
+      : `${entry.step}:${entry.cx},${entry.cy},${entry.cz}`;
   }
 
   /** WHICH COARSE CHUNKS ARE DRAWN (P2.00). A coarse chunk the fine ring covers is the READY RESERVE: it is
@@ -1231,8 +1395,15 @@ export class ChunkStreamSystem {
       columns.add(`${parts[0]},${parts[2]}`);
     }
     const decided = new Map<string, boolean>();
-    for (const entry of this.cache.meshes.values()) {
+    for (const [key, entry] of this.cache.meshes) {
       if (entry.step <= 1) continue;
+      const handle = this.batched.get(key);
+      /** One chunk's visibility, wherever its pixels come from: a batched chunk has no mesh in the scene, so the
+       *  same decision goes to its instances (M3a — which is why a batch kept the per-instance visibility flag). */
+      const show = (visible: boolean): void => {
+        if (handle !== undefined) this.batches?.setVisible(handle, visible);
+        else entry.mesh.visible = visible;
+      };
       const tier = tierOfStep(this.ladder, entry.step);
       if (tier === null) continue;
       const period = worldChunksX() / entry.step;
@@ -1242,7 +1413,7 @@ export class ChunkStreamSystem {
       const rz = nearestWrap(entry.cz, ccz, period);
       // OUTSIDE ITS HOLE the rung is simply drawn: nothing finer covers it.
       if (!inTierHole(tier, rx - ccx, rz - ccz)) {
-        entry.mesh.visible = true;
+        show(true);
         continue;
       }
       // INSIDE IT, the chunk is the READY RESERVE (P2.00): drawn only while the chunks of the rung INSIDE this
@@ -1254,7 +1425,7 @@ export class ChunkStreamSystem {
         ready = !this.finerColumnFading(entry.step, rx, rz, fading) && this.finerColumnDecided(entry.step, rx, rz);
         decided.set(memoKey, ready);
       }
-      entry.mesh.visible = !ready;
+      show(!ready);
     }
   }
 

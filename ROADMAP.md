@@ -3063,20 +3063,50 @@ Still outstanding:
   `col * COLUMN_WORDS`), so what a batch wrote is one contiguous range and the readback asks for exactly those bytes
   — a 3-column step-32 batch copies 28 KB instead of the whole 592 KB, which is also less allocation churn per
   batch; (2) the draw side is measured in the once-a-second `FRAME` line and in the F3 panel (`f3.draw`):
-  `calls=`/`callsΔ=` (the same counter under the two readings it could have — see below), `callsMax=`, `tris=`,
-  `renders=` (the monotonic render-pass count) and `attrs=` (the live vertex-attribute count, ~3 per chunk
-  geometry). The per-frame figure lives in one account (`FRAME_PROBE`) that both readers read. **The counter's
-  behaviour had to be settled by MEASUREMENT, not by reading three**: `Renderer.info` documents `drawCalls` as
-  "of the current frame" while this engine calls no `info.reset()` (only `setAnimationLoop`'s own loop does), and
-  the first version — reading it once a second — printed impossible values: two readings a second apart were
-  roughly EQUAL (±200 over ~50 drawn frames), which is what a per-frame counter does. So the sampler now reads it
-  EVERY DRAWN FRAME and reports both the raw reading and the rebased delta; whichever lands in a sane range is the
-  truth (the other is degenerate: millions vs ~nothing). **The batch SIZE was deliberately left alone**: the live
+  `calls=` (draw calls in ONE frame), `callsMax=` (the window's worst frame), `tris=` (thousands of triangles),
+  `renders=` (the monotonic render-pass count), `attrs=` (the live vertex-attribute count, ~3 per chunk
+  geometry) and — since M3a — `batched=` (the batched instances and their bucket count). The per-frame figure lives
+  in one account (`FRAME_PROBE`) that both readers read. **The counter's behaviour had to be settled by
+  MEASUREMENT, not by reading three**, and it took two wrong versions: `Renderer.info` documents `drawCalls` as
+  "of the current frame" while this engine calls no `info.reset()` (only `setAnimationLoop`'s own loop does), so the
+  first version read it ONCE A SECOND and printed impossible negative values, and the second reported a rebased
+  DELTA beside it. The log settled both: across a motionless minute the raw `calls` stayed at exactly 1620 while
+  `renders` kept climbing — the counter IS per frame, so a second reading a second later is the SAME number and
+  the delta was noise. The delta field is gone; the metric is the raw reading sampled EVERY DRAWN FRAME, which is
+  what makes `calls=` a number M3a can be judged by. **The batch SIZE was deliberately left alone**: the live
   numbers say a batch's cost is dominated by the fixed round trip (0.30M samples in 16-77 ms vs 4M in ~50 ms), so
   a smaller batch would mean more round trips for the same work. Also fixed: `WORLD LOD ladder: N rung(s)` was
   printed BEFORE the ladder existed (right after `resetForNewWorld`), so every entry into a resized world claimed
   `0 rung(s)` — a number that reads as "LOD is off" while the far ring is being built. It is reported after the
   warm-up now, where it is real.
+  **M3a AS LANDED — the far ring's chunks are drawn through per-(look, tier) `BatchedMesh`es.** M1b's numbers put
+  the question beyond doubt: ~2521 draw calls per frame on average and 3785 at worst on the user's machine (a
+  512-chunk lap, six rungs, ~1250 far chunk meshes × ~2 looks), with the frame still inside the 60 fps cap — the
+  far ring is draw-call bound, not field bound. So it stops issuing one call per chunk:
+  `plugins/render/systems/far-batches.ts` owns ONE `THREE.BatchedMesh` per (look, step) and `chunk-stream.ts`
+  PROMOTES a settled far chunk into it (deleting its mesh from the scene) and DEMOTES it back out. The split is by
+  FADE STATE, not by distance: `BatchedMesh` visibility is per INSTANCE but opacity is per MATERIAL, and a fade IS
+  a per-chunk material copy — so a chunk mid-fade cannot be batched. Promotion happens exactly where a chunk stops
+  needing its own material (the fade-in ended, or fades are off), demotion just before an out-fade begins, and
+  `restyle` demotes → restyles → promotes. The fine ring (`step <= 1`) stays ordinary meshes, because those chunks
+  are edited and rebuilt constantly. Four implementation facts are load-bearing: the geometry is SLICED per look
+  before `addGeometry` (which copies whatever it is handed, so the whole attribute arrays would store every look's
+  vertices once per look); capacity is grown BEFORE the add (it throws at capacity); `frustumCulled = false` keeps
+  culling per instance (which is the point, and what the P2.00 reserve and the fades need); and the source
+  `BufferGeometry` is KEPT so a demote can put the mesh back, so far-ring vertex memory roughly doubles while a
+  chunk is batched (the noted mitigation — dispose at promotion, let three re-upload on reuse — is not done).
+  `L`, unbound and session-only like `G`/`H`/`J`/`K`, is the A/B switch back to the M1b path.
+  **The one thing the gate cannot test is whether a `BatchedMesh` carrying the chunk's `MeshLambertMaterial`
+  actually DRAWS on the WebGPU backend** — Node has no device. So the gate builds real `BatchedMesh`es on real
+  `BufferGeometry`s and asserts the BOOKKEEPING (instances in, matrix and visibility set, instances out, capacity
+  growth, the slice), and the live half is `batched=instances/buckets` on the FRAME line beside `calls=`, plus `L`.
+  A failure here is visible rather than subtle: the far ring disappears, `batched=` climbs and `calls=` stays low.
+  NOT DONE: M3b (batching the FINE ring — a different problem: those chunks are edited, rebuilt and faded
+  constantly), M3c (reload and edge cases), and M3 proper (GPU geometry + indirect draw, which M3a leaves within
+  reach: ~20-40 batches is a number an indirect path can carry).
+  Verified: `tsc` 0; `check:ecs` **86/86**, with two new groups that build real `BatchedMesh`es in Node (the
+  batcher's whole lifecycle on a real geometry; the stream promoting and demoting far chunks as the window moves)
+  and the `L` switch pinned as unbound and wired to the two drains.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

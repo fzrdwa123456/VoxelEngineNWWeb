@@ -658,7 +658,8 @@ where it is:
     Entering a world of the same size does none of it (a re-entry stays free). The CHOICE is a resource
     (`WORLD_SIZE`) the driver reads, changed by the `SetWorldSize` command from the world-type panel (presets +
     a slider bound to the value in force), and persisted as `worldXZ`.
-* **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** In a world, `G` tints every chunk mesh by its
+* **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** (`L` is the far ring's batching switch and `K`
+  the GPU sampler probe — both are their own bullets below.) In a world, `G` tints every chunk mesh by its
   RUNG: `LOD_TIER_TINT` has one colour per rung the shipped ladder can have (six, indexed by the rung), `H`
   switches every chunk
   mesh to three.js's TRIANGLE
@@ -732,7 +733,8 @@ where it is:
   the SCENE: a 512-chunk lap holds ~880 columns, i.e. thousands of far chunk meshes, and the `FRAME` line (once a
   second) and the F3 panel (`f3.draw`) both carry `calls=` (draw calls in ONE frame), `callsMax=` (the window's
   worst frame), `tris=` (thousands of triangles), `renders=` (the monotonic `renderer.render(...)` count) and
-  `attrs=` (the LIVE vertex-attribute count, ~3 per chunk geometry, so it tracks the mesh count). They exist to
+  `attrs=` (the LIVE vertex-attribute count, ~3 per chunk geometry, so it tracks the mesh count), plus
+  `batched=` (M3a's batched INSTANCES and their bucket count — see below). They exist to
   answer "is this frame draw-call bound" with a number: a stall reported next to `calls=1600` is a different
   problem from one next to `calls=300`. **THE PER-FRAME FIGURE IS THE RAW READING, sampled EVERY DRAWN FRAME**:
   `Renderer.info` documents `drawCalls` as "of the current frame", and the log AGREED — across a motionless minute
@@ -744,6 +746,54 @@ where it is:
   it. MEASURED (a 512-chunk lap with the full six-rung ring, 60 fps cap): `calls=1620 callsMax=1620 tris=1848k
   attrs=4576` while standing still (the frame holds the cap), and 20-27 ms frames in the stretches where the ring
   is being rebuilt — i.e. ~1525 chunk meshes at ~1.06 draw calls each, which is where the machine's limit is.
+* **M3a — THE FAR RING IS DRAWN THROUGH PER-(LOOK, TIER) `BatchedMesh`ES (`plugins/render/systems/far-batches.ts`,
+  integrated by `chunk-stream.ts`).** `calls=` above answers the question: a 512-chunk lap holds ~880 columns,
+  i.e. ~1250 far chunk meshes, and a chunk's faces resolve to ~2 materials (its looks) ⇒ **~2521 draw calls per
+  frame, peak 3785** on this machine, with the frame still inside the 60 fps cap (16.6-17.5 ms) — the far ring is
+  draw-call bound, and the fix is to stop issuing one call per chunk. `FarBatches` owns ONE `THREE.BatchedMesh`
+  per key `` `${look.key}\u0000${step}` `` (a BUCKET), placed at the origin with a per-instance matrix, and the
+  stream hands every SETTLED far chunk to it: `add(step, geometry, specs, materials, place)` returns a
+  `FarBatchHandle` the stream keeps in `batched` keyed by chunk key, `setMatrix` replaces the old `place()`
+  branch (`entryMatrix` is the ONE builder of that matrix, shared with the ordinary path), `setVisible` stands in
+  for `mesh.visible` (per-INSTANCE, so `refreshFarVisibility` stays a loop over the cache and only the two
+  writers differ), `refreshMaterials` re-resolves a bucket's material from the same `materialFor(step, spec)` the
+  meshes use (so `G`/`H` and a pack reload keep working), and `remove`/`dispose` are the way back out. `stats`
+  (`{buckets, instances, batchedChunks}`) is reported by the FRAME line as `batched=instances/buckets` — the
+  field to read while A/B-testing, since `calls=` alone cannot say whether the batches are the thing drawing.
+  FIVE THINGS ARE LOAD-BEARING:
+  * **PER-INSTANCE VISIBILITY EXISTS, PER-INSTANCE OPACITY DOES NOT.** `setVisibleAt`/`getVisibleAt` are per
+    instance; the OPACITY of a `BatchedMesh` is one material, so a chunk mid-fade CANNOT be in a batch — the
+    fade's whole mechanism is a per-chunk COPY of the material. The split is therefore by FADE STATE, not by
+    distance: `promoteFar` is called where a chunk stops needing its own material (`beginFade` returning false —
+    fades off, or the fade-in already over) and `beginFadeOut`'s caller demotes FIRST (`unloadOutside` demotes
+    before deleting the key; `dropFade` promotes when the fade that ended was an OUT), and `restyle` demotes,
+    restyles, promotes. `promoteFar` itself guards on `batchingEnabled`, `step <= 1` (the FINE ring stays
+    ordinary meshes — it is edited and rebuilt constantly) and "already batched", and it re-checks
+    `this.cache.meshes.get(key) !== entry` so a stale build result cannot batch a mesh the cache has moved past.
+  * **THE VERTEX DATA IS SLICED PER LOOK (`sliceLook`).** `addGeometry` COPIES whatever it is handed, so handing
+    it the chunk's full attribute arrays would store every look's vertices once per look — the slice writes only
+    that look's vertex range and rebases its indices to 0, so a bucket's geometry holds exactly the faces it
+    draws. Indices are consumed `FACES_PER_INDEX` = 6 per bucket instance.
+  * **CAPACITY GROWS BEFORE THE ADD, NEVER AFTER** (`START_VERTICES`/`START_INDICES`/`START_INSTANCES` = 4096/
+    6144/32): `BatchedMesh.addGeometry` THROWS at capacity, so `growFor` calls `setGeometrySize`/
+    `setInstanceCount` first. `batch.frustumCulled = false` because the batch's own bounding volume is computed
+    from the instances present when it is asked and the instances are placed and hidden independently — culling
+    stays per instance, which is the whole point.
+  * **THE SOURCE GEOMETRY IS KEPT SO A DEMOTE CAN PUT THE MESH BACK.** `demoteFar` re-adds `entry.mesh` to its
+    group and sets `visible = true`; the chunk's own `BufferGeometry` is never disposed at promotion, so far-ring
+    VERTEX memory roughly doubles while a chunk is batched (the same attributes live in the chunk geometry and in
+    the bucket). The noted mitigation — dispose the source at promotion and let three re-upload it when a demote
+    needs it again — is NOT done.
+  * **`L` IS THE A/B SWITCH, AND IT EXISTS BECAUSE THE ONE UNVERIFIABLE RISK IS THE DRAW ITSELF.** Whether a
+    `BatchedMesh` with the chunk's `MeshLambertMaterial` actually renders on the WebGPU backend is the thing
+    `check:ecs` cannot test: Node has no device, and the gate's M3a groups construct a real `BatchedMesh` on a
+    real `BufferGeometry` and assert the bookkeeping (instances in, matrices/visibility set, instances out,
+    capacity growth, the free function's slice) — never a pixel. `L`, in a world, runs `demoteAllFar` (every
+    batched chunk back into the scene as its own mesh) and `promoteAllFar` again, so "batches do not draw" and
+    "the far ring is missing" are one keypress apart and `calls=`/`batched=` say which one happened. Like
+    `G`/`H`/`J`/`K` it is unbound (`binds.ts` has no `KeyL`; the gate asserts it) and SESSION-ONLY.
+  A `BatchedMesh` failing to render is a VISIBLE failure (the far ring vanishes and `calls=` stays low while
+  `batched=` climbs), not a subtle one, and `L` is the way back to the shipped M1b behaviour without a rebuild.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

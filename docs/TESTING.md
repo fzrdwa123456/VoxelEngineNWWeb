@@ -168,20 +168,19 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       `renderer.log`. Report BOTH (the far ring would then be answering columns from the CPU, which is slow but
       correct, so a failure is not a crash).
 → **WHERE THE FRAME TIME NOW GOES (M1b)**: with the sampling on the GPU, the far ring's remaining cost is the
-  SCENE, so the once-a-second `FRAME` line and the F3 panel carry three.js's own counters. The line now prints
-  **two readings of the same counter on purpose** (`calls=` and `callsΔ=`) — `Renderer.info` documents `drawCalls`
-  as "of the current frame" while this engine calls no `info.reset()`, and reading it a second apart produced
-  roughly EQUAL values, which is what a per-frame counter does. So: `calls=` is the per-frame count under the
-  "per frame" reading, `callsΔ=` the same under the "accumulating" reading, and **whichever is in a sane range
-  (tens to a few thousand, stable) is the truth** — the other is degenerate (millions, or ~0). Also:
-  `callsMax=` (the window's worst frame), `tris=` (thousands of triangles per frame), `renders=` (the monotonic
-  `renderer.render(...)` count — it must grow by about `n` per window, which is how we know the readings happen)
-  and `attrs=` (LIVE vertex-attribute count — about three per chunk geometry, so it tracks the mesh count). What
-  to look for:
+  SCENE, so the once-a-second `FRAME` line and the F3 panel carry three.js's own counters: `calls=` (draw calls in
+  ONE frame), `callsMax=` (the window's worst frame), `tris=` (thousands of triangles per frame), `renders=` (the
+  monotonic `renderer.render(...)` count — it must grow steadily, which is how we know the readings happen),
+  `attrs=` (the LIVE vertex-attribute count — about three per chunk geometry, so it tracks the mesh count) and
+  `batched=` (M3a's batched instances and their bucket count — see the next section). **`calls=` is the RAW
+  per-frame reading, sampled on EVERY drawn frame.** The earlier `callsΔ=` (a second, "accumulating" reading) is
+  GONE: the log settled it — across a motionless minute `calls` stayed at exactly 1620 while `renders` kept
+  climbing, i.e. `Renderer.info`'s counter IS per frame, so the "accumulated" reading was subtracting two samples
+  of the same number. What to look for:
   (a) **THE ONE THING TO REPORT**: a few `FRAME` lines (i) on the ground with the ring fully filled, (ii) flying
-      high with the whole ring visible, and (iii) one from a window with a `STALL`. Together with `attrs`, the
-      sane one of `calls=`/`callsΔ=` is what decides whether the next milestone is the far ring's mesh count or
-      something else — **if it is in the thousands, the frame is draw-call bound**;
+      high with the whole ring visible, and (iii) one from a window with a `STALL`. Together with `attrs` and
+      `batched`, `calls=` is what decides where the bottleneck is — **if it is in the thousands with `batched=0/0`,
+      the frame is draw-call bound**;
   (b) press **F3**: the `绘制/Draw:` line shows the same `calls`/`max`/`tris`/`attrs` as the last `FRAME` line
       (one account, two readers), and `attrs` must grow while the ring fills and then settle;
   (c) the `STALL` lines' neighbours tell the story: a stall next to `calls=2000` is a draw/scene problem, a stall
@@ -189,6 +188,37 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (d) `debug.log`'s world entry reports the ladder AFTER the window is built, so
       `WORLD LOD ladder: N rung(s) for this 512-chunk lap` is a REAL number (it used to print `0` on every entry
       into a resized world, which read as "LOD is off"). On a 512-chunk lap expect several rungs, up to 6.
+→ **M3a — THE FAR RING IS DRAWN THROUGH BATCHES, AND `L` SWITCHES THEM OFF AND ON**: the far ring's thousands of
+  chunk meshes are now drawn as a handful of `(look, rung)` batches instead of one mesh each, so `calls=` must fall
+  to a fraction of the M1b baseline (measured then: ~2521 average, 3785 peak, ~1250 far chunk meshes × ~2 looks).
+  **The far terrain must look EXACTLY as before** — this milestone changes how it is DRAWN, never what or where.
+  What to check:
+  (a) **`batched=` on the `FRAME` line** — `<instances>/<buckets>`. Once the ring has filled (walk a moment or
+      stand still a few seconds), `instances` must be in the hundreds-to-thousands (every settled far chunk) and
+      `buckets` in the tens (one per (look, rung) pair actually in use: a few looks × up to 5 far rungs).
+      **`0/0` means nothing was ever promoted** — report it together with the whole `FRAME` line;
+  (b) **`calls=` must fall while `batched=` is non-zero.** The FINE ring is deliberately NOT batched (those chunks
+      are edited and rebuilt constantly), so `calls=` will not reach single digits — it should drop by roughly the
+      far ring's share. On a 60 fps-capped machine the FRAME TIME may not change at all (the cap hides it): **read
+      `calls=`, not `avg`**;
+  (c) **PRESS `L`** in a world (it is not a bind, like G/H/J/K — it is session-only). Every batched chunk must come
+      BACK as its own mesh: the far ring must stay complete, `batched=` must fall to `0/0` and `calls=` must climb
+      back to the old thousands. Pressing `L` again must hand them back to the batches. **This is the test that
+      matters most**: whether a `BatchedMesh` actually DRAWS on this GPU cannot be checked without a device — if
+      the far ring is MISSING with batching on, `L` brings it back, and that is the answer "batches do not render
+      here". In that case report: the `FRAME` line before/after `L`, and `renderer.log`;
+  (d) **the batched ring must still be COMPLETE**: fly up and look at the whole ring (press `G` for the rung bands)
+      — no missing rung, no hole where a chunk should be, no rung at the wrong height, and the same seam/edge
+      behaviour as with `L` off. A rung that turns solid green or magenta means a batch resolved the wrong look;
+  (e) **the streaming edges must still work with batching on**: walk a few hundred blocks with `batched=` in view —
+      newly built far chunks must appear (fading in as usual, see `J` below: a chunk that is mid-FADE is
+      deliberately not batched), chunks that leave must fade out and then vanish, and digging a block in the fine
+      ring must still take effect at once. Watch for a far chunk drawn TWICE or a stuck patch (a ghost left behind
+      by a demote) — report it;
+  (f) **the debug views and a pack reload must keep working in batch mode**: with batching ON press `G` (rung tint)
+      and `H` (wireframe) — both must apply to the batched ring too, exactly as with `L` off (the buckets re-resolve
+      their material through the same path the meshes use), and after a pack reload the far ring must come back with
+      the new textures rather than black or checker.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

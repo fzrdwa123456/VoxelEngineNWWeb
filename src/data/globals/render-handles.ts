@@ -36,6 +36,14 @@ export interface RenderHandles {
      *  world builds fewer rungs than the policy asks for — and the entry says so, instead of leaving the player
      *  to wonder why "6" looks like "2". */
     readonly lodTiers: number;
+    /** M3a: how many far chunks are drawn through (look, tier) BATCHES, and how many buckets that is. The FRAME
+     *  line prints it (`batched=instances/buckets`), so "is the batching actually carrying the ring, and did the
+     *  draw calls fall by that much" is something the log answers rather than something to trust. */
+    readonly batchStats: {
+      readonly buckets: number;
+      readonly instances: number;
+      readonly batchedChunks: number;
+    };
   };
   /** The MENU frame drives this too (`menuFrame`): the background own step, once per ui frame. */
   readonly menuBackground: { step(): void };
