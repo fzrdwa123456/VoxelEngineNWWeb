@@ -7628,6 +7628,21 @@ check("M3a: the far ring's geometry is drawn through (look, tier) BATCHES", () =
   assert(/INSTANCES START HIGH ON PURPOSE/.test(readSource("src/plugins/render/systems/far-batches.ts")),
     "…and the reason is written where the next reader will hit it");
 
+  // 1d. THE BATCH'S INDEX BUFFER MUST BE 32-BIT FROM BIRTH — upstream three.js #34211, which 0.185.1 still has,
+  //     and the reason the first live M3a looked SHATTERED (shards of neighbouring chunks, only the first slice
+  //     correct). `BatchedMesh` allocates a Uint16 index while `maxVertexCount <= 65535` (every bucket here),
+  //     `onBeforeRender` caches the multi-draw offsets in BYTES at that element size, and the WebGPU backend's
+  //     first upload rewrites the index array to Uint32 IN PLACE — after which the backend divides those cached
+  //     bytes by 4, i.e. every draw after the first starts at HALF its offset. Forcing the index to 32 bit before
+  //     the first draw (and after every `setGeometrySize`, which builds a fresh Uint16 one) keeps both sides at 4.
+  assert(/function upgradeIndex\(batch: THREE\.BatchedMesh\)/.test(batchSrc) &&
+    /index\.array instanceof Uint16Array/.test(batchSrc) && /new Uint32Array\(index\.array\)/.test(batchSrc),
+    "a batch's index is forced to 32 bit (the upload's Uint16→Uint32 rewrite is what desynchronises the offsets)…");
+  assert(/const geometryId = bucket\.batch\.addGeometry\(slice\.geometry\);\s*upgradeIndex\(bucket\.batch\);/.test(batchSrc),
+    "…right after addGeometry, which is what initializes the buffers (and after a growth that replaced them)");
+  assert(/#34211/.test(readSource("src/plugins/render/systems/far-batches.ts")),
+    "…with the upstream issue named where the next reader will hit it");
+
   // 2. THE BEHAVIOUR, on a REAL geometry (three object construction needs no GPU, which is what makes this
   //    testable here at all: only RENDERING a batch needs a device).
   const group = new THREE.Group();
@@ -7687,6 +7702,8 @@ check("M3a: the far ring's geometry is drawn through (look, tier) BATCHES", () =
   const growGeometry = makeGeometry();
   const grown = growing.add(4, growGeometry, growSpecs, [growMaterial], place);
   assert(grown !== null, "a one-look chunk is batched");
+  equal(grown.instances[0].bucket.batch.geometry.getIndex().array instanceof Uint32Array, true,
+    "…and its index buffer is 32 bit from birth, not the Uint16 three.js would allocate (#34211)");
   const versionBefore = growMaterial.version;
   const countBefore = grown.instances[0].bucket.batch.maxInstanceCount;
   equal(countBefore, 512, "…into a bucket that starts at the pre-bought instance capacity");
@@ -7695,7 +7712,72 @@ check("M3a: the far ring's geometry is drawn through (look, tier) BATCHES", () =
   assert(grown.instances[0].bucket.batch.maxInstanceCount > countBefore, "…the bucket GROWS to hold them…");
   assert(growMaterial.version > versionBefore,
     "…and the growth rebuilds the material (the only thing that re-captures the replaced matrices/indirect textures)");
+  const grownBatch = grown.instances[0].bucket.batch;
+  equal(grownBatch.geometry.getIndex().array instanceof Uint32Array, true,
+    "…while the index stays 32 bit (setGeometrySize builds a fresh Uint16 one, so it is re-applied)");
+
+  // 4. AND EVERY DRAW MUST DRAW ITS OWN SLICE. `onBeforeRender` caches the offsets in BYTES and the backend
+  //    converts them back with the index array's CURRENT element size — the unit mismatch #34211 is built on — so
+  //    the invariant is asserted the way the GPU sees it: simulate the upload's in-place Uint16→Uint32 rewrite
+  //    (a no-op once the index is 32 bit from birth), then check that the slice each draw lands in is the slice of
+  //    the instance the indirect texture names for that draw. A half offset still lands on a REAL slice start
+  //    (half of an even indexStart), so alignment alone would not catch it — the ownership is the test.
+  const camera = new THREE.PerspectiveCamera();
+  camera.position.set(0, 0, 10);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld();
+  grownBatch.onBeforeRender(null, null, camera, grownBatch.geometry, grownBatch.material);
+  equal(grownBatch.geometry.getIndex().array.BYTES_PER_ELEMENT, 4, "the offsets are cached at 4 bytes per index…");
+  assert(grownBatch._multiDrawCount > 0, "…for a real draw list…");
+  const upload = grownBatch.geometry.getIndex();
+  if (upload.array instanceof Uint16Array) {
+    // EXACTLY what WebGPUAttributeUtils.createAttribute does on first upload (0xffff is the primitive restart).
+    const converted = new Uint32Array(upload.array);
+    for (let i = 0; i < converted.length; i++) if (converted[i] === 0xffff) converted[i] = 0xffffffff;
+    upload.array = converted;
+  }
+  const bytesPerIndex = grownBatch.geometry.getIndex().array.BYTES_PER_ELEMENT;
+  const indirect = grownBatch._indirectTexture.image.data;
+  let ownSlice = 0;
+  for (let i = 0; i < grownBatch._multiDrawCount; i++) {
+    const element = grownBatch._multiDrawStarts[i] / bytesPerIndex;
+    const instanceId = indirect[i];
+    const info = grownBatch._geometryInfo[grownBatch._instanceInfo[instanceId].geometryIndex];
+    if (info.indexStart === element) ownSlice++;
+  }
+  equal(ownSlice, grownBatch._multiDrawCount,
+    "…and every draw lands in ITS OWN slice's index range (a half offset would draw a neighbouring chunk's faces)");
   growing.dispose();
+
+  // 5. AND THE CHECK ABOVE HAS TEETH: the same batcher WITHOUT the 32-bit index — a bare `BatchedMesh`, driven the
+  //    way `FarBatches` drives one — must FAIL it once the upload's conversion is simulated. This is the upstream
+  //    bug itself, pinned as the negative control of the assertion above (it is why the fix exists at all), and it
+  //    is also the answer to "would this test have caught it?".
+  const control = new THREE.BatchedMesh(8, 4096, 6144, new THREE.MeshBasicMaterial());
+  const controlIds = [];
+  for (let i = 0; i < 5; i++) {
+    const geometryId = control.addGeometry(makeGeometry());
+    const id = control.addInstance(geometryId);
+    control.setMatrixAt(id, new THREE.Matrix4().makeTranslation(i * 1, 0, 0));
+    controlIds.push(id);
+  }
+  equal(control.geometry.getIndex().array.constructor.name, "Uint16Array",
+    "three.js allocates a Uint16 index for a batch under 65536 vertices (#34211)…");
+  control.onBeforeRender(null, null, camera, control.geometry, control.material);
+  const controlIndex = control.geometry.getIndex();
+  const upconverted = new Uint32Array(controlIndex.array);
+  for (let i = 0; i < upconverted.length; i++) if (upconverted[i] === 0xffff) upconverted[i] = 0xffffffff;
+  controlIndex.array = upconverted;
+  let controlWrong = 0;
+  for (let i = 0; i < control._multiDrawCount; i++) {
+    const element = control._multiDrawStarts[i] / control.geometry.getIndex().array.BYTES_PER_ELEMENT;
+    const instanceId = control._indirectTexture.image.data[i];
+    const info = control._geometryInfo[control._instanceInfo[instanceId].geometryIndex];
+    if (info.indexStart !== element) controlWrong++;
+  }
+  assert(control._multiDrawCount > 1 && controlWrong > 0,
+    "…and after the upload's in-place Uint16→Uint32 rewrite those same offsets land in a NEIGHBOUR'S slice — the trap the fix closes");
+  control.dispose();
 });
 
 check("M3a: the STREAM hands settled far chunks to the batches, and takes them back with the window", () => {

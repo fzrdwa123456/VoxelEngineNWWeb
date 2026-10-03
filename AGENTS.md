@@ -799,6 +799,30 @@ where it is:
     (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read per draw, `needsGeometry-
     Update` picks up the replacement, and the vertex layout is unchanged — but the bump is harmless there and
     keeps this rule in ONE place.)
+  * **THE BATCH'S INDEX BUFFER IS FORCED TO 32 BIT FROM BIRTH (`upgradeIndex`) — THE SECOND, AND DECISIVE, CAUSE OF
+    THE "SHATTERED" FAR RING.** This one is not in this engine's code at all; it is upstream three.js
+    **issue #34211, still present in the pinned `three@0.185.1` (fixed in r186)**, and it needs all four pieces to
+    line up: (1) `BatchedMesh` allocates its internal index as a **Uint16Array** whenever `maxVertexCount <= 65535`
+    — every bucket here, since they start at 4096 vertices; (2) `onBeforeRender` caches the multi-draw offsets in
+    **BYTES**, using `index.array.BYTES_PER_ELEMENT` at that moment (`geometryInfo.start * 2`); (3) the WebGPU
+    backend's FIRST upload rewrites that index array to a `Uint32Array` **IN PLACE**
+    (`WebGPUAttributeUtils.createAttribute`: `bufferAttribute.array = array`, plus the `0xffff` primitive-restart
+    remap); (4) `WebGPUBackend._draw` divides the cached bytes by the array's CURRENT element size — 4 — so
+    `firstIndex` lands at HALF the intended offset. Half of an even `indexStart` is *another slice's* `indexStart`,
+    so the draw reads `count` indices starting in the middle of a NEIGHBOURING chunk's index range: stretched
+    shards of the wrong chunk, `indexStart === 0` being the only draw that is right. It is a one-frame artefact per
+    attribute creation (our `perObjectFrustumCulled`/`sortObjects` defaults make `onBeforeRender` recompute every
+    frame), which is why it read as "flashing + faces flying around" rather than as a permanently wrong ring — and
+    why it appeared exactly while the ring FILLS (a bucket's first `addGeometry`, and every `setGeometrySize`, both
+    build a fresh Uint16 index). **`H` "curing" it was the giveaway**: the wireframe branch computes
+    `bytesPerElement` with the SAME `position.count > 65535 ? 4 : 2` formula on both sides, so the units agree
+    again while the wireframe is on. `upgradeIndex` copies the index to a `Uint32Array` right after `addGeometry`
+    returns (which is also when a growth has just replaced the buffers), so the element size is 4 before any draw
+    ever caches an offset, in both halves. The gate DRIVES this: it simulates the upload's in-place rewrite and
+    asserts that every draw lands in the index range of the geometry the indirect texture names for it (alignment
+    alone would not catch it — the half offset lands on a real slice start), with a bare `BatchedMesh` as the
+    negative control that must FAIL the same check. The eventual cleanup is a three.js upgrade past r186; the
+    workaround is pinned here until then.
   * **THE SOURCE GEOMETRY IS KEPT SO A DEMOTE CAN PUT THE MESH BACK.** `demoteFar` re-adds `entry.mesh` to its
     group and sets `visible = true`; the chunk's own `BufferGeometry` is never disposed at promotion, so far-ring
     VERTEX memory roughly doubles while a chunk is batched (the same attributes live in the chunk geometry and in

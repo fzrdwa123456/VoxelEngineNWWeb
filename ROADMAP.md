@@ -3127,6 +3127,30 @@ Still outstanding:
   512 start, and the material's version must rise) beside the source pin, so the rule cannot be edited away
   silently. Not a rendering bug, not a data bug: a captured-object lifetime one, and the `L` A/B switch is what
   made it describable in the first place.
+  **THAT WAS ONLY HALF OF IT, and the second half is not this engine's code at all: three.js issue #34211, which
+  0.185.1 still has** (the second report: «只解决了一半，进入地图加载好像会闪…按 G 看 LOD 已经被破坏了» — and the
+  pre-buy above, which cut the number of instance growths, is exactly why it read as "half"). Four pieces have to
+  line up, all verified in `node_modules/three`: `BatchedMesh` allocates a **Uint16** index while
+  `maxVertexCount <= 65535` (every bucket, they start at 4096); `onBeforeRender` caches the multi-draw offsets in
+  BYTES at that element size (`start * 2`); the WebGPU backend's first upload rewrites the index to `Uint32`
+  **in place** (`WebGPUAttributeUtils.createAttribute`); and `_draw` divides those cached bytes by the array's
+  CURRENT size — 4 — so `firstIndex` is **half** the intended offset. Half of an even `indexStart` is another
+  slice's `indexStart`, so the draw reads `count` indices from the middle of a NEIGHBOURING chunk's index range:
+  shards of the wrong chunk stretched across the ring, only `indexStart === 0` correct. It is a ONE-FRAME artefact
+  per attribute creation (our `perObjectFrustumCulled`/`sortObjects` defaults make `onBeforeRender` recompute every
+  frame), which is why the report is "flashing + faces flying" rather than a permanently wrong ring — and why it
+  happened while the ring FILLED: a bucket's first `addGeometry` and every `setGeometrySize` build a fresh Uint16
+  index. **`H` curing it was the giveaway**: wireframe computes `bytesPerElement` with the same
+  `position.count > 65535 ? 4 : 2` formula on both sides, so the units agree again. THE FIX (`upgradeIndex`): copy
+  the batch's index to a `Uint32Array` right after `addGeometry` returns, i.e. before any draw caches an offset and
+  again after every growth; the values cannot overflow (it only runs while the index is Uint16, so every index is
+  already < 65535, and unlike the upload this needs no `0xffff` restart remap). VERIFIED IN NODE, the way the GPU
+  does it: the whole sequence was replayed against the installed three (cache the offsets with a Uint16 index →
+  simulate the in-place upload → convert the cached bytes) and the pre-fix batcher draws a neighbour's slice
+  (`bytes 12 / 4 = index 3`, inside the first slice's range) where the fixed one draws its own (`24 / 4 = 6`);
+  `check:ecs` now asserts exactly that ownership for every draw, with a bare `BatchedMesh` as the negative control
+  that fails it. The eventual cleanup is a three.js upgrade past r186 (the fix landed there); this workaround is
+  pinned until then, and the `L` A/B switch stays as the field switch it always was.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

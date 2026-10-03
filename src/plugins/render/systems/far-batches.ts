@@ -37,6 +37,19 @@
 // `needsUpdate`, which makes the renderer dispose and rebuild that render object; the rebuild re-runs `batch()` and
 // captures the new textures. (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read
 // per draw, and the vertex layout is unchanged — but the bump is harmless there and keeps the rule in ONE place.)
+// THE INDEX BUFFER MUST BE 32 BIT FROM BIRTH (`upgradeIndex`) — THE REASON M3a LOOKED "SHATTERED" ON THE GPU, and
+// the half of it that has nothing to do with this file's own bookkeeping. `BatchedMesh` allocates its internal
+// index as a **Uint16Array** whenever `maxVertexCount <= 65535` (which every bucket here is: they start at 4096),
+// `onBeforeRender` caches the multi-draw offsets in BYTES using that element size (`geometryInfo.start * 2`), and
+// then the WebGPU backend's FIRST UPLOAD rewrites the index array to a `Uint32Array` IN PLACE
+// (`WebGPUAttributeUtils.createAttribute`: `bufferAttribute.array = array`, with the `0xffff` primitive-restart
+// remap). The backend divides those cached byte offsets by the array's CURRENT element size, i.e. by 4 — so every
+// draw whose `indexStart > 0` starts at HALF its offset and renders 36-odd indices out of the MIDDLE of a
+// neighbouring slice: shards of chunks stretched across the ring, flickering, with only the first slice correct.
+// That is upstream three.js issue #34211 (fixed in r186; this engine pins 0.185.1), and it is why `H` "cured" it —
+// the wireframe branch of both halves uses the same `position.count > 65535 ? 4 : 2` formula, so the units agree
+// again. Making the index 32 bit OURSELVES, before the first draw and after every `setGeometrySize` (which builds
+// a fresh Uint16 one), keeps both sides at 4 bytes forever.
 import * as THREE from "three/webgpu";
 import type { ChunkFaceSpec } from "../../../data/globals/gfx";
 
@@ -159,6 +172,9 @@ export class FarBatches {
       if (slice === null) continue;
       this.growFor(bucket, slice.vertexCount, slice.indexCount);
       const geometryId = bucket.batch.addGeometry(slice.geometry);
+      // AFTER the add, because `addGeometry` is what initializes the batch's buffers — and after `growFor`, which
+      // may just have replaced them with a fresh Uint16 index (see the note at the top of this file).
+      upgradeIndex(bucket.batch);
       const id = bucket.batch.addInstance(geometryId);
       bucket.batch.setMatrixAt(id, this.matrix);
       bucket.batch.setVisibleAt(id, true);
@@ -243,6 +259,18 @@ export class FarBatches {
       bucket.material.needsUpdate = true;
     }
   }
+}
+
+/** GIVE A BATCH A 32-BIT INDEX BUFFER (three.js #34211 — see the note at the top of this file). A no-op once the
+ *  batch's index already is one (which is the case for a bucket that has grown past 65536 vertices), and the ONE
+ *  place the units the multi-draw offsets are cached in are made to agree with the element size the WebGPU backend
+ *  divides them by. The values cannot overflow: it only ever runs while the batch's index is Uint16, i.e. while
+ *  `maxVertexCount <= 65535`, so every index is below 65535 already (and unlike the upload's own conversion this
+ *  never has to remap the `0xffff` primitive restart, because no index can be that large). */
+function upgradeIndex(batch: THREE.BatchedMesh): void {
+  const index = batch.geometry.getIndex();
+  if (index === null || !(index.array instanceof Uint16Array)) return;
+  batch.geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(index.array), 1));
 }
 
 /** One look's faces, as a self-contained geometry: its own vertex range (the mesher lays a slot's faces out
