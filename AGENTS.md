@@ -695,10 +695,12 @@ where it is:
   with the rung (max |Δ| 2/3/8 at step 8/16/32, reproduced on the CPU by modelling "diagonal only"). The kernel
   therefore uses ONE flat `Loop(step²)`; both seeds and every octave come from `TERRAIN_NOISE`, and the gate asserts
   exactly that. It is a probe: it owns no component, changes no streaming state, and its own CPU reference is the slow
-  half (~1 s), so a stall while it runs is expected and logged. **Its timing is a FLOOR, not a target**: the kernel
-  runs ONE THREAD PER GRID CELL with an inner loop of `step²` samples, so the outer rungs use a few thousand
-  threads and the device idles (measured 36M samples/s); it reports samples/s so that M1's layout (one thread per
-  SAMPLE) can be compared against it.
+  half (~1 s), so a stall while it runs is expected and logged. **Its layout is the point of M1a**: one thread per
+  SAMPLE with an atomic reduce per cell (`columns × cells × step²` threads — 2.37M for a step-32 batch), because
+  the first version ran one thread per GRID CELL with an inner loop of `step²` samples, which left the device idle
+  and measured 4M samples/s — no better than the CPU, and 12× SLOWER at step 2 where the per-rung
+  dispatch+readback round trip dominates. It reports the thread count and samples/s so the next layout change can
+  be judged against it.
 * **A CHUNK THAT APPEARS FADES IN AND ONE THAT LEAVES FADES OUT (P1.98/P1.99 — `FADE_IN_MS` = 220 ms,
   `FADE_OUT_MS` = 260 ms, `J` switches both off).** The reported complaint was «区块加载就闪» — a chunk that
   streams in popped at full opacity, which reads as a flash (worst on the far ring, whose chunks cover 64×64
