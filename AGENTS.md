@@ -687,6 +687,14 @@ where it is:
   material resolution (`debugged`) rather than only on the key press, so a pack reload — which drops that cache
   and builds fresh materials — cannot silently lose the view. The two keys are independent, so a tier-coloured
   wireframe (the useful combination while checking the LOD) is just both pressed.
+  **AND THE TEXTURES ARE SHARED PER URL (`CHUNK_MATERIAL.textures`), which fixed the SECOND black-region report**
+  («按 G 之后出现纯黑块，有时又自己消失»). A `Texture` with no image yet is uploaded by three as a 1×1
+  UNINITIALISED — black — texture, so building a fresh `TextureLoader().load(url)` per MATERIAL made every newly
+  created material draw pure black until its image landed; `G` creates the whole (look × tier) batch at once, so
+  whole rungs went black and then "healed themselves" when the images finished (which reads as "the LOD brushed it
+  away"). One texture per resolved URL, cached in the resource, means a tinted material reuses the image that was
+  loaded when the chunk first appeared — no window at all, and one GPU copy of a PNG instead of one per tier.
+  `textureFor` is the ONLY caller of `TextureLoader` in the tree and the gate asserts that.
   MEASURED (this machine, P1.92 for comparison): the fine ring alone is 1568 chunks / 324 materialised /
   241k faces / 35 MB; the far ring adds 1408 chunks / 296 materialised / 245k faces / 35 MB at 0.83 ms per
   chunk, taking the visible world from ~256 to ~512 blocks for 486k faces and 70 MB in total — i.e. **twice
@@ -722,18 +730,20 @@ where it is:
   trips` line per window fill.
 * **THE DRAW SIDE IS MEASURED TOO (M1b).** With the sampling moved off the CPU the far ring's remaining cost is
   the SCENE: a 512-chunk lap holds ~880 columns, i.e. thousands of far chunk meshes, and the `FRAME` line (once a
-  second) and the F3 panel (`f3.draw`) both carry `calls=`/`callsΔ=` (see below), `callsMax=` (worst frame),
-  `tris=` (thousands of triangles), `renders=` (the monotonic `renderer.render(...)` count) and `attrs=` (the LIVE
-  vertex-attribute count, ~3 per chunk geometry, so it tracks the mesh count). They exist to answer "is this frame
-  draw-call bound" with a number: a stall reported next to `calls=2000` is a different problem from one next to
-  `calls=300`, and the next milestone after M1 is chosen that way. **THE PER-FRAME FIGURE IS SAMPLED EVERY DRAWN
-  FRAME AND PRINTED TWICE, which is not an accident**: this engine pumps its own rAF chain and never calls
-  `renderer.setAnimationLoop`, which is the only thing that runs `info.reset()` — yet reading `drawCalls` a second
-  apart gave roughly EQUAL values, i.e. what a per-frame counter does and not what an accumulating one does. So
-  `calls=` is the raw reading's average (the per-frame count under the per-frame reading) and `callsΔ=` the
-  rebased per-frame delta (the per-frame count under the accumulating reading); one of the two is degenerate
-  (millions, or ~0) and the other is the truth. A `reset()` of our own would be worse than useless — it zeroes the
-  LIVE memory counts, which nothing repopulates. One account lives in `FRAME_PROBE` and both readers read it.
+  second) and the F3 panel (`f3.draw`) both carry `calls=` (draw calls in ONE frame), `callsMax=` (the window's
+  worst frame), `tris=` (thousands of triangles), `renders=` (the monotonic `renderer.render(...)` count) and
+  `attrs=` (the LIVE vertex-attribute count, ~3 per chunk geometry, so it tracks the mesh count). They exist to
+  answer "is this frame draw-call bound" with a number: a stall reported next to `calls=1600` is a different
+  problem from one next to `calls=300`. **THE PER-FRAME FIGURE IS THE RAW READING, sampled EVERY DRAWN FRAME**:
+  `Renderer.info` documents `drawCalls` as "of the current frame", and the log AGREED — across a motionless minute
+  `calls` stayed at exactly 1620 while `renders` kept climbing, which is a per-frame counter, not an accumulating
+  one (nothing in this engine calls `info.reset()`; only `setAnimationLoop`'s own loop does, and this engine pumps
+  its own rAF chain — so the first version, reading it once a second, printed impossible negative values, and a
+  second "accumulated delta" reading was printed beside it for one round, proved wrong by the same log, and is
+  gone). `attrs` is a live count (~3 per chunk geometry); one account lives in `FRAME_PROBE` and both readers read
+  it. MEASURED (a 512-chunk lap with the full six-rung ring, 60 fps cap): `calls=1620 callsMax=1620 tris=1848k
+  attrs=4576` while standing still (the frame holds the cap), and 20-27 ms frames in the stretches where the ring
+  is being rebuilt — i.e. ~1525 chunk meshes at ~1.06 draw calls each, which is where the machine's limit is.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

@@ -7522,34 +7522,47 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
   assert(/return FAR_NOT_READY/.test(streamSrc), "…while `buildFar` answers the sentinel instead of building nothing at all");
 
   // 6. THE DRAW-SIDE ACCOUNTS (M1b), which are what the NEXT milestone is chosen from. `Renderer.info` documents
-  //    its counters as "of the current frame", yet nothing in this engine calls `info.reset()` (that happens only
-  //    in `setAnimationLoop`'s own loop, and this engine pumps its own rAF chain) — and the first version, which
-  //    read them once a SECOND, printed impossible values (negative: a counter that only grows cannot shrink; two
-  //    readings a second apart came out roughly equal instead). Both interpretations are therefore accumulated
-  //    PER DRAWN FRAME and printed as `calls=` (the raw reading) and `callsΔ=` (the rebased delta), so ONE run
-  //    says which the counter is — the other lands in a degenerate range (millions vs ~nothing). The FRAME line
-  //    and the F3 panel must read the SAME account, and the monotonic render-pass count rides along as a sanity
-  //    reference.
+  //    its counters as "of the current frame", and the MEASUREMENT agreed: across a motionless minute `calls`
+  //    stayed at exactly 1620 while `renders` kept climbing — a per-frame counter, not an accumulating one (and
+  //    nothing here calls `info.reset()`, which only happens in `setAnimationLoop`'s own loop, so the first
+  //    version — reading it once a second — printed impossible values). One reading therefore arrives, sampled
+  //    EVERY DRAWN FRAME and averaged; a second "accumulated delta" reading was tried for one round, proved wrong
+  //    by that log, and is gone. The FRAME line and the F3 panel must read the SAME account, and the monotonic
+  //    render-pass count rides along as a sanity reference.
   const mainSrc = stripComments(readSource("src/boot/main.ts"));
-  assert(/const deltaCalls = rawDrawCalls >= probe\.drawCalls \? rawDrawCalls - probe\.drawCalls : rawDrawCalls;/.test(mainSrc) &&
-    /probe\.drawCallRawSum \+= rawDrawCalls;/.test(mainSrc) && /probe\.drawCallDeltaSum \+= deltaCalls;/.test(mainSrc),
-    "the draw-call figure is sampled PER FRAME, both as read and as a rebased delta");
+  assert(/probe\.drawCallRawSum \+= rawDrawCalls;/.test(mainSrc) && /probe\.triangleRawSum \+= rawTriangles;/.test(mainSrc),
+    "the draw-call figure is the RAW reading, sampled every drawn frame");
   assert(/probe\.callsPerFrame = probe\.drawCallRawSum \/ frames;/.test(mainSrc) &&
-    /probe\.callsPerFrameDelta = probe\.drawCallDeltaSum \/ frames;/.test(mainSrc),
-    "…and both are averaged over the DRAWN frames");
+    /probe\.trisPerFrame = probe\.triangleRawSum \/ frames;/.test(mainSrc),
+    "…averaged over the DRAWN frames");
+  assert(!/DeltaSum|callsΔ/.test(mainSrc),
+    "…and the accumulated-delta reading is gone (the log proved the counter is per frame)");
   assert(/if \(rawDrawCalls > probe\.drawCallMax\) probe\.drawCallMax = rawDrawCalls;/.test(mainSrc),
     "…keeping the window's worst frame");
   assert(!/info\.reset\(\)/.test(mainSrc),
     "…and nothing resets three's counters (a reset would zero the live memory counts for good)");
-  assert(/calls=\$\{probe\.callsPerFrame\.toFixed\(0\)\} callsΔ=\$\{probe\.callsPerFrameDelta\.toFixed\(1\)\} /.test(mainSrc) &&
-    /callsMax=\$\{probe\.drawCallMax\}/.test(mainSrc),
-    "the FRAME line carries all three");
+  assert(/calls=\$\{probe\.callsPerFrame\.toFixed\(0\)\} callsMax=\$\{probe\.drawCallMax\}/.test(mainSrc),
+    "the FRAME line carries both");
   assert(/renders=\$\{info\.render\.calls\}/.test(mainSrc),
     "…plus the monotonic render-pass count, which must grow by about `n` per window");
   const diagSrc = stripComments(readSource("src/plugins/render/systems/diagnostics.ts"));
   assert(/this\.frameProbe\.callsPerFrame/.test(diagSrc) && /this\.frameProbe\.drawCallMax/.test(diagSrc) &&
     /f3\.draw/.test(diagSrc),
     "…and the F3 panel reads the SAME account (one number, two readers)");
+
+  // 6b. …AND THE CHUNK TEXTURES ARE SHARED PER URL, which is the fix for the OTHER black-region report («按 G 之后
+  //     出现纯黑块，有时自己消失»): three uploads a texture with no image yet as a 1×1 UNINITIALISED (black)
+  //      texture, so building a fresh `TextureLoader().load(url)` per MATERIAL made every new material draw black
+  //      until its image landed — and pressing G resolves every look for every rung at once. One texture per URL
+  //      (cached in the CHUNK_MATERIAL resource) reuses the already-loaded image instead.
+  const meshSrc = stripComments(readSource("src/host/browser/chunkmesh.ts"));
+  assert(/function textureFor\(state: ChunkMaterialState, url: string\)/.test(meshSrc) &&
+    /state\.textures\.get\(url\)/.test(meshSrc) && /state\.textures\.set\(url, texture\)/.test(meshSrc),
+    "one TEXTURE per resolved URL, cached in the CHUNK_MATERIAL resource");
+  equal(countOf(meshSrc, /new THREE\.TextureLoader\(\)\.load\(/g), 1,
+    "…and the loader is called in exactly ONE place (a per-material texture is what made the black patches)");
+  assert(/map: textureFor\(state, spec\.texture\)/.test(meshSrc) && /checkerMaterial\(state\)/.test(meshSrc),
+    "…and every material (tinted variants and the checker included) takes its map from that cache");
 });
 
 // ===== report =====

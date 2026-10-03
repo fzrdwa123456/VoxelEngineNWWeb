@@ -231,26 +231,22 @@ export interface FrameProbeState {
   pxSum: number;
   pxN: number;
   /** THE DRAW SIDE, as three.js reports it (M1b). `drawCalls`/`triangles` are the last RAW counter values seen,
-   *  sampled EVERY DRAWN FRAME (not once a second — the first version compared two readings a second apart and
-   *  printed impossible negative numbers).
+   *  sampled EVERY DRAWN FRAME; `drawCallRawSum`/`triangleRawSum` accumulate those readings and
+   *  `callsPerFrame`/`trisPerFrame` divide them by the drawn frames, i.e. what ONE frame costs.
    *
-   *  TWO INTERPRETATIONS ARE ACCUMULATED ON PURPOSE, because the two readings disagree about what the counter IS
-   *  and the log can settle it in one run: `render.drawCalls` is documented as "of the current frame" while this
-   *  engine calls no `info.reset()`, and a 1-second delta in the field came out at ±200 for ~50 drawn frames —
-   *  i.e. the reading a second apart was roughly EQUAL, which is what a per-frame counter does.
-   *    * `drawCallRawSum / n`  → the per-frame count **if the counter is per frame** (the evidence);
-   *    * `drawCallDeltaSum / n` → the per-frame count **if it accumulates**, and ~0-30 if it does not.
-   *  Whichever lands in a sane range is the truth; the other is degenerate (millions vs ~nothing). One run
-   *  decides it and the line can then be simplified to the winner. */
+   *  WHY THE RAW READING IS THE RIGHT ONE (settled by measurement, not by reading three): `Renderer.info`
+   *  documents `drawCalls` as "of the current frame" while this engine calls no `info.reset()` — that only
+   *  happens in `setAnimationLoop`'s own loop — so the first version read it once a second and printed impossible
+   *  values. The live log settled it: across a motionless minute `calls` stayed at exactly 1620 while `renders`
+   *  kept climbing, which is a PER-FRAME counter, not an accumulating one. (`calls=` IS that average; the
+   *  accumulated-delta interpretation was printed beside it for one round and read ~0-900 on the same frames,
+   *  i.e. it was the wrong one, and it is gone.) */
   drawCalls: number;
-  drawCallDeltaSum: number;
   drawCallRawSum: number;
   drawCallMax: number;
   triangles: number;
-  triangleDeltaSum: number;
   triangleRawSum: number;
   callsPerFrame: number;
-  callsPerFrameDelta: number;
   trisPerFrame: number;
 }
 
@@ -275,14 +271,11 @@ export function createFrameProbe(): FrameProbeState {
     pxSum: 0,
     pxN: 0,
     drawCalls: 0,
-    drawCallDeltaSum: 0,
     drawCallRawSum: 0,
     drawCallMax: 0,
     triangles: 0,
-    triangleDeltaSum: 0,
     triangleRawSum: 0,
     callsPerFrame: 0,
-    callsPerFrameDelta: 0,
     trisPerFrame: 0,
   };
 }

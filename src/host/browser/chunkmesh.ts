@@ -51,17 +51,30 @@ import { getBlockDef } from "../../data/assets/blockregistry";
 import { CHECKER_TEXTURE_URL, resolveTexture } from "../../data/assets/textures";
 
 /** The engine's own look, for a block whose definition ships no texture and no colour. */
-function checkerMaterial(): THREE.MeshLambertMaterial {
-  return new THREE.MeshLambertMaterial({ map: textureFrom(CHECKER_TEXTURE_URL) });
+function checkerMaterial(state: ChunkMaterialState): THREE.MeshLambertMaterial {
+  return new THREE.MeshLambertMaterial({ map: textureFor(state, CHECKER_TEXTURE_URL) });
 }
 
-function textureFrom(url: string): THREE.Texture {
+/** ONE TEXTURE PER URL, cached in the `CHUNK_MATERIAL` resource — and that cache is not only about memory.
+ *
+ *  A `Texture` whose image has not arrived yet is uploaded by three as a 1×1 UNINITIALISED texture
+ *  (`WebGPUTextureUtils.createDefaultTexture`), i.e. BLACK, and WebGPU zero-initialises it. Building a fresh
+ *  `TextureLoader().load(url)` for every material therefore makes every new material draw pure black until its
+ *  data lands; the LOD view multiplies that by resolving EVERY look for EVERY rung at once when `G` is pressed,
+ *  which painted whole rungs black (the reported «按 G 之后部分区域变成黑色，有时被刷掉»: the patches vanish when
+ *  the images finish, not when anything re-meshes). Sharing the texture means a tinted material reuses the
+ *  image that was loaded and uploaded when the chunk first appeared, so there is nothing to wait for — and one
+ *  GPU copy of a PNG instead of one per (look, tier). */
+function textureFor(state: ChunkMaterialState, url: string): THREE.Texture {
+  const hit = state.textures.get(url);
+  if (hit !== undefined) return hit;
   const texture = new THREE.TextureLoader().load(url);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
+  state.textures.set(url, texture);
   return texture;
 }
 
@@ -77,7 +90,11 @@ function textureFrom(url: string): THREE.Texture {
  *
  *  So the tint is applied as the rung colour's HUE and SATURATION at the BLOCK'S OWN LIGHTNESS: the region
  *  still says which rung it is, at the brightness that block always had. `getHSL`/`setHSL` both default to the
- *  working (linear) space, so the lightness is preserved rather than round-tripped through sRGB. */
+ *  working (linear) space, so the lightness is preserved rather than round-tripped through sRGB.
+ *
+ *  (The OTHER black-region report — patches that appear only under `G` and vanish on their own — was a different
+ *  cause: a brand-new `Texture` per material, which three draws as a 1×1 black until its image arrives. See
+ *  `textureFor`.) */
 function tintedLook(base: string, tint: string): THREE.Color {
   const colour = new THREE.Color(base);
   const tintHsl = { h: 0, s: 0, l: 0 };
@@ -102,12 +119,12 @@ export function getChunkMaterial(
   tint?: string | null,
 ): THREE.Material {
   if (!spec) {
-    if (!state.material) state.material = checkerMaterial();
+    if (!state.material) state.material = checkerMaterial(state);
     if (!tint) return state.material;
     const key = `\u0000${tint}`;
     const hit = state.materials.get(key);
     if (hit) return hit;
-    const tinted = checkerMaterial();
+    const tinted = checkerMaterial(state);
     tinted.color = new THREE.Color(tint);
     state.materials.set(key, tinted);
     return tinted;
@@ -117,7 +134,10 @@ export function getChunkMaterial(
   if (hit) return hit;
   const made =
     spec.texture !== null
-      ? new THREE.MeshLambertMaterial({ map: textureFrom(spec.texture), color: new THREE.Color(tint ?? "#ffffff") })
+      ? new THREE.MeshLambertMaterial({
+          map: textureFor(state, spec.texture),
+          color: new THREE.Color(tint ?? "#ffffff"),
+        })
       : new THREE.MeshLambertMaterial({
           color: tint ? tintedLook(spec.color ?? "#ffffff", tint) : new THREE.Color(spec.color ?? "#ffffff"),
         });

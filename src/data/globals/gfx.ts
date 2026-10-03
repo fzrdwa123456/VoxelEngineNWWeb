@@ -154,6 +154,14 @@ export interface ChunkMaterialState {
   /** One material per LOOK (P1.46), keyed by `ChunkFaceSpec.key`: a chunk that holds grass, dirt and stone
    *  draws three groups, and every chunk showing grass shares one material. */
   readonly materials: Map<string, THREE.Material>;
+  /** One TEXTURE per resolved URL, shared by every material that shows that look — including the LOD view's
+   *  tinted variants. It exists because the alternative is not merely wasteful but VISIBLE: a `Texture` with no
+   *  image yet is uploaded by three as a 1×1 UNINITIALISED (black) texture, so a material built from a fresh
+   *  `TextureLoader().load(url)` draws pure black until its data arrives. Building one per (look, tier) meant
+   *  pressing `G` — which resolves every look for every rung at once — painted whole rungs black for as long as
+   *  their images took to decode, which is the reported «按 G 之后部分区域变成黑色，有时又被刷掉». Sharing the
+   *  loaded texture removes the window entirely AND keeps one GPU copy of a PNG instead of one per tier. */
+  readonly textures: Map<string, THREE.Texture>;
 }
 
 export const CHUNK_MATERIAL: Resource<ChunkMaterialState> =

@@ -1474,25 +1474,17 @@ function frameProbe(): void {
     if (meter.px > probe.pxMax) probe.pxMax = meter.px;
   }
   // ===== WHAT ONE FRAME COSTS THE DRAW SIDE, sampled PER DRAWN FRAME (M1b) =====
-  // TWO READINGS OF THE SAME COUNTER, on purpose. `Renderer.info` documents `drawCalls` as "of the current
-  // frame", but this engine never calls `info.reset()` (that happens only in `setAnimationLoop`'s own loop) — and
-  // the previous version, which read the counter once a SECOND, printed impossible values: two readings a second
-  // apart came out roughly EQUAL with ±200 of noise over ~50 drawn frames, which is what a per-frame counter does
-  // and NOT what an accumulating one does. So both interpretations are accumulated and printed:
-  //   * `calls=`  — the average of the RAW readings: the per-frame count IF the counter is per frame;
-  //   * `callsΔ=` — the average of the per-frame DELTAS (rebased when it goes backwards): the per-frame count IF
-  //                 it accumulates, and ~0 if it does not.
-  // Whichever lands in a sane range is the truth (the other is degenerate: millions vs ~nothing), and one run
-  // settles it. `renders` is the monotonic `renderer.render(...)` count, a sanity reference that must grow by
-  // about `n` per window; `attrs` is a LIVE count (~3 per chunk geometry), so it tracks the mesh count.
+  // `Renderer.info` documents `drawCalls`/`triangles` as "of the current frame", and measurement AGREED with the
+  // docs: across a motionless minute `calls` stayed at exactly 1620 while `renders` kept climbing, i.e. the
+  // counter is per frame and not accumulating (nothing in this engine calls `info.reset()` — that happens only in
+  // `setAnimationLoop`'s own loop — so the first version, which read it once a second, printed impossible
+  // values). The RAW reading is therefore the per-frame figure; it is sampled every drawn frame and averaged.
+  // `renders` is the monotonic `renderer.render(...)` count (a sanity reference that must grow by about `n` per
+  // window), and `attrs` is a LIVE count (~3 per chunk geometry), so it tracks the mesh count.
   const info = renderer.info;
   const rawDrawCalls = info.render.drawCalls;
   const rawTriangles = info.render.triangles;
-  const deltaCalls = rawDrawCalls >= probe.drawCalls ? rawDrawCalls - probe.drawCalls : rawDrawCalls;
-  const deltaTris = rawTriangles >= probe.triangles ? rawTriangles - probe.triangles : rawTriangles;
-  probe.drawCallDeltaSum += deltaCalls;
   probe.drawCallRawSum += rawDrawCalls;
-  probe.triangleDeltaSum += deltaTris;
   probe.triangleRawSum += rawTriangles;
   if (rawDrawCalls > probe.drawCallMax) probe.drawCallMax = rawDrawCalls;
   probe.drawCalls = rawDrawCalls;
@@ -1511,14 +1503,13 @@ function frameProbe(): void {
   const target = pacingTargetHz(frameCap.cap, frameCap.vsync, frameCap.refreshHz);
   const frames = probe.n > 0 ? probe.n : 1;
   probe.callsPerFrame = probe.drawCallRawSum / frames;
-  probe.callsPerFrameDelta = probe.drawCallDeltaSum / frames;
   probe.trisPerFrame = probe.triangleRawSum / frames;
   logDebug(
     `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
       `stalls=${probe.stalls} stallMax=${probe.stallMax.toFixed(0)}ms raf=${probe.vblanks}/s ` +
       `target=${target > 0 ? `${target.toFixed(2)}fps` : "uncapped"} ` +
-      `calls=${probe.callsPerFrame.toFixed(0)} callsΔ=${probe.callsPerFrameDelta.toFixed(1)} ` +
-      `callsMax=${probe.drawCallMax} tris=${(probe.trisPerFrame / 1000).toFixed(0)}k ` +
+      `calls=${probe.callsPerFrame.toFixed(0)} callsMax=${probe.drawCallMax} ` +
+      `tris=${(probe.trisPerFrame / 1000).toFixed(0)}k ` +
       `renders=${info.render.calls} attrs=${info.memory.attributes} ` +
       `mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
       `pf=[${pf.join(" ")}] px=${probe.pxN > 0 ? `${probe.pxMin.toFixed(1)}/${(probe.pxSum / probe.pxN).toFixed(1)}/${probe.pxMax.toFixed(1)}` : "-"} (${probe.pxN})`,
@@ -1530,10 +1521,8 @@ function frameProbe(): void {
   probe.stalls = 0;
   probe.stallMax = 0;
   probe.vblanks = 0;
-  probe.drawCallDeltaSum = 0;
   probe.drawCallRawSum = 0;
   probe.drawCallMax = 0;
-  probe.triangleDeltaSum = 0;
   probe.triangleRawSum = 0;
   probe.pfBuckets.fill(0);
   probe.pxMin = Number.POSITIVE_INFINITY;

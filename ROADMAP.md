@@ -2582,6 +2582,18 @@ Still outstanding:
     any block order a pack ships and removes the one path that could land on `missing` — the block whose look is
     the engine's magenta/black checker, i.e. a large PURE BLACK patch. Both halves are pinned by the gate and by
     the TESTING checklist.
+    **AND A THIRD CAUSE, found by the screenshots the user sent** («黑色没有完全修复，按 g 键就会显示出来 … 和兜底
+    的紫黑棋盘格完全不一样» — pure black, chunk-shaped, healing on its own): it is NOT the checker (that carries
+    magenta) and NOT the multiply. Three uploads a texture with no image yet as a 1×1 UNINITIALISED texture
+    (`WebGPUTextureUtils.createDefaultTexture`; WebGPU zero-initialises it ⇒ black), and `textureFrom()` built a
+    NEW `Texture` for EVERY material — so `G`, which resolves every (look × tier) at once, painted whole rungs
+    black until their images finished decoding, then "healed" them (which reads exactly like "the LOD brushed it
+    away"). THE FIX: `CHUNK_MATERIAL.textures`, ONE texture per resolved URL shared by every material that shows
+    that look (`textureFor` is the only `TextureLoader` caller in the tree; the gate pins that), so a tinted
+    material reuses an image that was loaded and uploaded long before — no window at all, and one GPU copy of a
+    PNG instead of one per tier. Also gone: the `callsΔ=` reading, which was printed for one round to settle
+    whether `render.drawCalls` is per-frame or accumulating; the log answered it (a motionless minute: `calls`
+    pinned at 1620 while `renders` climbed) and only `calls=`/`callsMax=` remain.
   NOT FIXED, BY REQUEST: the far ring's outward rim still has no walls (a coarse chunk culls its outer faces
   against terrain that is not drawn there — the documented "edge of the world", now at ~512 blocks), and the
   ring boundary is still a visible LEDGE (the conservative max), not a stitched seam.

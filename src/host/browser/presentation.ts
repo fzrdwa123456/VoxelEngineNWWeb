@@ -52,7 +52,7 @@ export function createIconBake(): IconBakeState {
 }
 
 export function createChunkMaterial(): ChunkMaterialState {
-  return { material: null, materials: new Map() };
+  return { material: null, materials: new Map(), textures: new Map() };
 }
 
 /** The factory takes the MESH the composition root built and added to the scene, exactly like
