@@ -182,8 +182,16 @@ function buildBatch(step: number, columns: number, lapCells: number, period: num
   const threads = columns * perColumn;
   const maxAttr = new StorageBufferAttribute(new Uint32Array(slots), 1);
   const minAttr = new StorageBufferAttribute(new Uint32Array(slots).fill(UNSET_MIN), 1);
-  const outMax = storage(maxAttr, "uint", slots);
-  const outMin = storage(minAttr, "uint", slots);
+  // `.toAtomic()` IS LOAD-BEARING, and its absence cost a whole test round (M1a run #1: every batch came back
+  // untouched — the probe correctly said "the kernel did not run"). `storage(attr, "uint", n)` declares a plain
+  // `ptr<storage, u32, read_write>`, and WGSL has NO `atomicMax` for that: the pipeline fails to compile, the
+  // dispatch silently writes nothing, and the only trace is in `renderer.log`
+  // (`no matching call to 'atomicMax(ptr<storage, u32, read_write>, u32)'`). `.toAtomic()` re-declares the buffer
+  // as `ptr<storage, atomic<u32>>`, which is what the atomic builtins require. It must be applied to EVERY buffer
+  // an atomic touches — the plain `storage()` above is the NODE, so this cannot be pushed down into `buildBatch`'s
+  // caller.
+  const outMax = storage(maxAttr, "uint", slots).toAtomic();
+  const outMin = storage(minAttr, "uint", slots).toAtomic();
   const kernel = Fn(() => {
     const idx = instanceIndex;
     const col = div(idx, uint(perColumn));

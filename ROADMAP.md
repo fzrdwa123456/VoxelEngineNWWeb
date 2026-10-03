@@ -2932,7 +2932,7 @@ Still outstanding:
   SHARED material; and the retired `chunks` switch provably cannot turn it back on), the settings-source
   assertions now require the single row, and the P2.00 reserve group passes again because the fine window is
   filled where it should be. Not verified live: the user tests the packaged build by hand.
-- **P2.06 — the LOD pipeline moves to the GPU (M0 DONE: the sampler probe).** By request («我觉得应该把lod仍进gpu才行
+- **P2.06 — the LOD pipeline moves to the GPU (M0 + M1a DONE: the sampler probe).** By request («我觉得应该把lod仍进gpu才行
   现在是不是纯cpu计算» → «c吧毕竟cpu吃不消»).
   WHAT WAS MEASURED FIRST, because the decision rests on it (one column = 8 Y chunks, sampling included):
   step 2 → 1.76 ms, step 4 → 5.34 ms, step 8 → 19.2 ms, step 16 → 73.8 ms, **step 32 → 289.7 ms** — the cost is
@@ -2974,6 +2974,24 @@ Still outstanding:
   at all — because the kernel is ONE THREAD PER GRID CELL with an inner loop of `step²` samples, so the outer
   rungs use only ~2300 threads and the device idles. M1 must be ONE THREAD PER SAMPLE (with a workgroup reduction
   per cell) and one readback per batch.
+  **M1a AS LANDED** (that layout, still as a measurement rather than a change to the world): every SAMPLE gets a
+  thread — `columns × cells × step²` of them, 2.37M for the step-32 batch — and the per-cell max/min is combined
+  with `atomicMax`/`atomicMin` (two atomics per sample — three implements both, so no complement trick is needed).
+  The buffers are u32, because atomics need integers
+  and the field rounds to integers anyway, and the "kernel did not run" check learned what an UNTOUCHED
+  u32 buffer looks like (every `max` 0, every `min` `UNSET_MIN = 4096`).
+  **AND RUNNING IT FOUND TWO MORE MISTAKES, both invisible without a device and both in `renderer.log` only** —
+  `computeAsync` resolves happily on a pipeline that never compiled, so the probe's untouched-buffer verdict is what
+  turns them into a readable message:
+  1. `Loop`'s counter is an **i32** while `instanceIndex` is a u32, and `i32 % u32` does not compile at all
+     (`no matching overload for 'operator % (i32, u32)'`) — fixed with `.toUint()`.
+  2. `storage(attr, "uint", n)` declares `ptr<storage, u32, read_write>`, and WGSL has **no `atomicMax` for that**:
+     the declaration must be `ptr<storage, atomic<u32>>`, which is what `StorageBufferNode.toAtomic()` produces
+     (three then emits `array<atomic<u32>>`). Without it the error is
+     `no matching call to 'atomicMax(ptr<storage, u32, read_write>, u32)'`. **`toAtomic()` is therefore mandatory on
+     every buffer an atomic touches**, and it belongs on the NODE, not on the attribute.
+  Both are recorded here because M1 (`StorageBufferAttribute` inputs feeding a WGSL mesher) will hit the same two
+  traps.
   **M1's OPEN DECISION, from the ±1 values the probe now reports**: a coarse max one block BELOW the CPU's is a
   crack (P1.93), while one above it is a one-block ledge — so if the fixed probe still shows ±1 anywhere, M1 adds a
   deterministic +1 to the GPU's max (or the CPU side moves to f32 semantics) instead of tolerating it.
@@ -2983,7 +3001,9 @@ Still outstanding:
   access and its `K` edge). The schedule's render batch gained a member (`lod.gpu.probe`), and AGENTS/TESTING
   were updated with it. The GPU half itself is NOT gate-testable (Node has no WebGPU), which is why the probe
   reports at runtime — M1-M3 will need the same kind of runtime self-check.
-  NOT DONE: M1-M3, and the numbers they must beat are the ones above.
+  NOT DONE: M1 proper (one dispatch per rung, one async readback, feeding the REAL streaming path) and M2-M3, and
+  the numbers they must beat are the ones above. M1a is the measurement that decides M1's shape: if its samples/s
+  is far above the CPU's, sampling moves to the GPU wholesale; if only the cheap rungs lose, M1 keeps 2/3 on the CPU.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be
