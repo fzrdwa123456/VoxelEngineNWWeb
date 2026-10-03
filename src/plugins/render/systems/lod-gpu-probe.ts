@@ -24,22 +24,21 @@
 // for the duration of the probe is expected and reported.
 import {
   Fn,
-  Loop,
+  add,
+  atomicMax,
+  atomicMin,
   bitXor,
   clamp,
   div,
   float,
   floor,
   instanceIndex,
-  max,
-  min,
   mod,
   mul,
   shiftRight,
   storage,
-  uint,
-  add,
   sub,
+  uint,
 } from "three/tsl";
 import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
 import { CHUNK_SIZE } from "../../../data/world/chunk";
@@ -156,54 +155,64 @@ interface ProbeBatch {
   readonly cells: number;
   /** The column coordinates, in the order the kernel derives them — the CPU reference asks for the same ones. */
   readonly columns: ReadonlyArray<readonly [number, number]>;
+  /** Threads this batch dispatches: `columns × cells × step²`, i.e. ONE PER SAMPLE. */
+  readonly threads: number;
 }
 
+/** Where an untouched `min` slot starts: above every possible height (the field is clamped to
+ *  `[TERRAIN_NOISE.minY, TERRAIN_NOISE.maxY]`), so a grid of these proves the kernel never ran. */
+const UNSET_MIN = 4096;
+
+/** ONE THREAD PER SAMPLE (M1a — the shape M1 needs, measured before anything is built on it).
+ *
+ *  WHY THIS REPLACED THE CELL-PER-THREAD VERSION: that one gave each thread a whole grid cell with an inner loop
+ *  of `step²` samples, so a step-32 batch was ~2300 threads — the device sat idle and the measured throughput
+ *  (4M samples/s) was no better than the CPU's. Here every SAMPLE gets a thread: `columns × cells × step²` of
+ *  them, millions for the outer rungs, and the per-cell max/min is combined with ATOMICS rather than by a serial
+ *  loop (two `atomicMax`es per sample — one on the height, one on its complement, which is how a `min` is spelled
+ *  when only max-atomics are needed).
+ *
+ *  u32 BUFFERS, because atomics need integers. The field ROUNDS to integers anyway, so nothing is lost, and the
+ *  readback is compared against the CPU's Int16 grids exactly as before. */
 function buildBatch(step: number, columns: number, lapCells: number, period: number): ProbeBatch {
   const W = LOD_SAMPLE_GRID_W;
   const cells = W * W;
-  const total = columns * cells;
-  const maxAttr = new StorageBufferAttribute(new Float32Array(total), 1);
-  const minAttr = new StorageBufferAttribute(new Float32Array(total), 1);
-  const outMax = storage(maxAttr, "float", total);
-  const outMin = storage(minAttr, "float", total);
+  const perColumn = cells * step * step;
+  const slots = columns * cells;
+  const threads = columns * perColumn;
+  const maxAttr = new StorageBufferAttribute(new Uint32Array(slots), 1);
+  const minAttr = new StorageBufferAttribute(new Uint32Array(slots).fill(UNSET_MIN), 1);
+  const outMax = storage(maxAttr, "uint", slots);
+  const outMin = storage(minAttr, "uint", slots);
   const kernel = Fn(() => {
     const idx = instanceIndex;
-    const col = div(idx, uint(cells));
-    const cell = mod(idx, uint(cells));
+    const col = div(idx, uint(perColumn));
+    const rem = mod(idx, uint(perColumn));
+    const cell = div(rem, uint(step * step));
+    const s = mod(rem, uint(step * step));
     const i = mod(cell, uint(W));
     const j = div(cell, uint(W));
     const cx = mod(mul(col, uint(11)), uint(lapCells));
     const cz = mod(mul(col, uint(7)), uint(lapCells));
     const bx = mul(add(add(mul(cx.toFloat(), float(CHUNK_SIZE)), i.toFloat()), float(-1)), float(step));
     const bz = mul(add(add(mul(cz.toFloat(), float(CHUNK_SIZE)), j.toFloat()), float(-1)), float(step));
-    const hi = float(0).toVar();
-    const lo = float(TERRAIN_NOISE.maxY).toVar();
+    // THE TYPES ARE THE TRAP HERE, and it cost a whole test round: `instanceIndex` is a u32 but `Loop`'s counter is
+    // an i32, and mixing them (`i32 % u32`) does not compile at all — the pipeline is created invalid, the
+    // dispatch writes nothing, and the probe reads its untouched buffers back (that run reported every value 0,
+    // max |Δ| 149, with the reason only in `renderer.log`). Everything in this kernel is u32 on purpose, and the
+    // untouched-buffer grid is what the probe now detects as "the kernel did not run".
+    const within: U32Node = n(s).toUint();
+    const dz: U32Node = div(within, uint(step));
+    const dx: U32Node = mod(within, uint(step));
     const wrap = (v: any): any => mod(add(mod(v, float(period)), float(period)), float(period));
-    // ONE LOOP, and the reason is a MEASURED bug (the probe's second run): `Loop(count, ({ i }) => …)` names its
-    // counter `i` by DEFAULT, so two NESTED loops declare the same name, the inner one shadows the outer in the
-    // emitted WGSL, and the outer counter ends up being the inner one — every cell then sampled only its
-    // DIAGONAL (`dx === dz`), which is 1/step of the samples, so the max/min came from a subset and the error
-    // grew with the rung (measured max |Δ| 2/3/8 at step 8/16/32, and reproducing "diagonal only" on the CPU
-    // matches the GPU's numbers to within f32 rounding). Flattening the pair into `k` over `step²` removes the
-    // shadowing AND the loop header.
-    Loop(step * step, ({ i: k }: any) => {
-      // `Loop`'s counter is an INT (three builds it with `nodeArray(params, 'int')`), so it must be converted
-      // before it meets a u32: `k % uint(step)` is `i32 % u32` in WGSL, which does NOT compile — the pipeline is
-      // created invalid, the dispatch writes nothing, and the probe reads its zero-filled buffers back (the third
-      // run: every value 0, max |Δ| 149, with the reason only in `renderer.log`).
-      const within: U32Node = n(k).toUint();
-      const dz: U32Node = div(within, uint(step));
-      const dx: U32Node = mod(within, uint(step));
-      const t = tslTerrainHeight(period, wrap(add(bx, dx.toFloat())), wrap(add(bz, dz.toFloat())));
-      hi.assign(max(hi, t));
-      lo.assign(min(lo, t));
-    });
-    outMax.element(idx).assign(hi);
-    outMin.element(idx).assign(lo);
-  })().compute(total);
+    const t = tslTerrainHeight(period, wrap(add(bx, dx.toFloat())), wrap(add(bz, dz.toFloat())));
+    const slot = add(mul(col, uint(cells)), cell);
+    atomicMax(outMax.element(slot), uint(t));
+    atomicMin(outMin.element(slot), uint(t));
+  })().compute(threads);
   const coords: Array<readonly [number, number]> = [];
   for (let c = 0; c < columns; c++) coords.push([(c * 11) % lapCells, (c * 7) % lapCells]);
-  return { kernel: kernel as ProbeBatch["kernel"], maxAttr, minAttr, cells, columns: coords };
+  return { kernel: kernel as ProbeBatch["kernel"], maxAttr, minAttr, cells, columns: coords, threads };
 }
 
 /** RENDER lane. `K` starts the probe; everything else about it is reported, never acted on. */
@@ -255,8 +264,8 @@ export class LodGpuProbeSystem {
         const batch = buildBatch(step, columns, lapCells, period);
         const gpuStart = performance.now();
         await this.renderer.computeAsync(batch.kernel as never);
-        const gpuMax = new Float32Array(await this.renderer.getArrayBufferAsync(batch.maxAttr));
-        const gpuMin = new Float32Array(await this.renderer.getArrayBufferAsync(batch.minAttr));
+        const gpuMax = new Uint32Array(await this.renderer.getArrayBufferAsync(batch.maxAttr));
+        const gpuMin = new Uint32Array(await this.renderer.getArrayBufferAsync(batch.minAttr));
         const gpuMs = performance.now() - gpuStart;
         gpuTotal += gpuMs;
         const cpuStart = performance.now();
@@ -288,17 +297,19 @@ export class LodGpuProbeSystem {
         mismatched += bad;
         samplesTotal += columns * batch.cells * step * step;
         if (diff > maxDiff) maxDiff = diff;
-        // DID IT RUN AT ALL? A dead pipeline (a WGSL compile error, an unimplemented node) writes NOTHING, rather
-        // than failing the await: the buffers come back as they were allocated — all zeros — and the terrain field
-        // is never below TERRAIN_MIN_Y (96), so a grid of zeros is proof the kernel did not execute. Reported as
-        // its own verdict, because "the field is wrong" and "nothing ran" need opposite responses (the third run
-        // reported 67048 zero values as a PORTING BUG; the actual error was in `renderer.log`).
-        const dead = gpuMax.every((v) => v === 0) && gpuMin.every((v) => v === 0);
+        // DID IT RUN AT ALL? A dead pipeline (a WGSL compile error, an unimplemented node) writes NOTHING rather
+        // than failing the await: the buffers come back exactly as they were allocated — every `max` slot 0 and
+        // every `min` slot `UNSET_MIN` — and the field is clamped well inside those bounds, so that grid is proof
+        // the kernel did not execute. Reported as its own verdict, because "the field is wrong" and "nothing ran"
+        // need opposite responses (one run reported 67048 untouched slots as a PORTING BUG; the actual error was a
+        // WGSL type mix, and it was only in `renderer.log`).
+        const dead = gpuMax.every((v) => v === 0) && gpuMin.every((v) => v === UNSET_MIN);
         if (dead) deadPipelines++;
         this.log(
           `LODPROBE step ${step}: ${columns} column(s), ${columns * batch.cells * 2} value(s), mismatch ${bad}, ` +
-            `maxΔ ${diff}${dead ? " — KERNEL PRODUCED NOTHING (all zeros: check renderer.log for a WGSL/pipeline error)" : ""}` +
-            ` — gpu ${gpuMs.toFixed(1)}ms (dispatch+2 readbacks), cpu reference ${cpuMs.toFixed(0)}ms`,
+            `maxΔ ${diff}${dead ? " — KERNEL PRODUCED NOTHING (untouched buffers: check renderer.log for a WGSL/pipeline error)" : ""}` +
+            ` — gpu ${gpuMs.toFixed(1)}ms for ${(batch.threads / 1e6).toFixed(2)}M threads (dispatch+2 readbacks), ` +
+            `cpu reference ${cpuMs.toFixed(0)}ms`,
         );
       }
       // WHAT A DIFFERENCE MEANS, said out loud, because the cases need OPPOSITE responses:
@@ -310,7 +321,7 @@ export class LodGpuProbeSystem {
       //     (a wrong hill seed) and its second max |Δ| 8 (nested loops that sampled only the diagonal).
       const verdict =
         deadPipelines > 0
-          ? `KERNEL DID NOT RUN — ${deadPipelines} batch(es) came back all zeros, so nothing was compared: read `
+          ? `KERNEL DID NOT RUN — ${deadPipelines} batch(es) came back untouched, so nothing was compared: read `
             + `renderer.log for the WGSL/pipeline error (debug.log only carries the symptom)`
           : mismatched === 0
             ? `OK — ${compared} values identical`
@@ -322,9 +333,10 @@ export class LodGpuProbeSystem {
       this.log(
         `LODPROBE RESULT: ${verdict}; gpu ${gpuTotal.toFixed(1)}ms vs cpu ${cpuTotal.toFixed(0)}ms ` +
           `(both for ${compared / 2} grid values); ${(samplesTotal / 1e6).toFixed(1)}M field samples at ` +
-          `${(samplesPerSecond / 1e6).toFixed(0)}M/s — a FLOOR, not the ceiling: this kernel runs ONE THREAD PER `
-          + `GRID CELL (an inner loop of step² samples), so the outer rungs use only a few thousand threads; ` +
-          `M1 moves to one thread per SAMPLE. examples: ${examples.join(" | ") || "(none)"}`,
+          `${(samplesPerSecond / 1e6).toFixed(0)}M/s — M1a's layout: ONE THREAD PER SAMPLE with an atomic `
+          + `reduce per cell. This is still only the SAMPLING half (the CPU mesher and the per-rung `
+          + `dispatch+readback round trip are not in it), so compare it against the CPU numbers above and against `
+          + `the 4M/s of the cell-per-thread version. examples: ${examples.join(" | ") || "(none)"}`,
       );
       this.log(`LODPROBE done in ${(performance.now() - started).toFixed(0)}ms`);
       this.world.commands.send(ShowToast, {

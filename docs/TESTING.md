@@ -97,10 +97,12 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (a) **a toast** — `LOD GPU 探针: 与 CPU 完全一致 ✓` (or `精度差异 N 个值 (±1 格)`, or `移植错误! N 个值不一致
       (最大 X 格)` if the GPU field itself is wrong). Either answer is USEFUL: it is the question M1 depends on;
   (b) **`LODPROBE` lines in `debug.log`**, one per rung, e.g.
-      `LODPROBE step 32: 2 column(s), 2312 value(s), mismatch 0, maxΔ 0 — gpu 5.2ms (dispatch+2 readbacks), cpu reference 590ms`,
-      then a `LODPROBE RESULT:` line carrying the verdict, the two totals and the field SAMPLES/S (a floor: the
-      kernel runs one thread per grid cell, so M1's thread-per-sample layout should beat it by a lot), and
-      `LODPROBE start: backend=webgpu lap=… chunks` / `LODPROBE done in …ms`;
+      `LODPROBE step 32: 2 column(s), 4624 value(s), mismatch 0, maxΔ 0 — gpu 12.3ms for 2.37M threads (dispatch+2 readbacks), cpu reference 376ms`,
+      then a `LODPROBE RESULT:` line carrying the verdict, the two totals and the field SAMPLES/S. **The layout is
+      the thing to watch now (M1a)**: the kernel is ONE THREAD PER SAMPLE with an atomic reduce per cell, so the
+      `…M threads` and the samples/s say whether the GPU is finally doing the work in parallel — the previous
+      cell-per-thread layout measured 4M samples/s, i.e. no better than the CPU. What is NOT in this number: the
+      CPU side of M1 (the mesher) and, in production, one dispatch+readback per rung;
   (b2) **how to read the verdict**: differences of ONE block = `PRECISION` (f32 vs f64 rounding — tolerable, and
       the fix in M1 would be a +1 margin on the coarse max or a fround discipline); ANYTHING larger = `PORTING BUG`
       in the GPU field, and the `examples:` list says which rung, column and cell. **Watch the SHAPE of the
