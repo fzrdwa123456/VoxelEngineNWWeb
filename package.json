@@ -26,13 +26,13 @@
     "@tauri-apps/api": "^2.9.0",
     "fflate": "^0.8.3",
     "onnxruntime-web": "^1.29.0",
-    "three": "^0.185.1",
+    "three": "^0.186.1",
     "vgpu": "^0.4.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.0.0",
-    "@types/three": "^0.185.4",
+    "@types/three": "^0.186.0",
     "typescript": "^7.0.2",
     "vite": "^8.2.1"
   }

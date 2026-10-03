@@ -3128,7 +3128,8 @@ Still outstanding:
   silently. Not a rendering bug, not a data bug: a captured-object lifetime one, and the `L` A/B switch is what
   made it describable in the first place.
   **THAT WAS ONLY HALF OF IT, and the second half is not this engine's code at all: three.js issue #34211, which
-  0.185.1 still has** (the second report: «只解决了一半，进入地图加载好像会闪…按 G 看 LOD 已经被破坏了» — and the
+  the then-pinned 0.185.1 still had** (the second report: «只解决了一半，进入地图加载好像会闪…按 G 看 LOD 已经被
+  破坏了» — and the
   pre-buy above, which cut the number of instance growths, is exactly why it read as "half"). Four pieces have to
   line up, all verified in `node_modules/three`: `BatchedMesh` allocates a **Uint16** index while
   `maxVertexCount <= 65535` (every bucket, they start at 4096); `onBeforeRender` caches the multi-draw offsets in
@@ -3149,8 +3150,22 @@ Still outstanding:
   simulate the in-place upload → convert the cached bytes) and the pre-fix batcher draws a neighbour's slice
   (`bytes 12 / 4 = index 3`, inside the first slice's range) where the fixed one draws its own (`24 / 4 = 6`);
   `check:ecs` now asserts exactly that ownership for every draw, with a bare `BatchedMesh` as the negative control
-  that fails it. The eventual cleanup is a three.js upgrade past r186 (the fix landed there); this workaround is
-  pinned until then, and the `L` A/B switch stays as the field switch it always was.
+  that fails it. **THE UPGRADE IS THE CLEANUP: the engine now pins `three@0.186.1`**, whose release notes carry
+  «WebGPURenderer — Fix draw offsets of `BatchedMesh` (#34212)» — the fix for exactly this issue — together with
+  the render-object cache work this file leans on («Fix stale render object cache», «Monitor dispose for geometries
+  and textures», «NodeMaterialObserver: add geometry version check»). The r185-only 32-bit-index workaround is
+  GONE, deliberately: the bug was upstream's, and the gate now reads BOTH halves of the r186 fix out of
+  `node_modules` (`BatchedMesh._multiDrawBytesPerElement`, and `WebGPUBackend` dividing by it) so a downgrade fails
+  loudly instead of shipping shards again.
+  **AND THE THIRD REPORT («当 G 键关闭后 lod 又会像被破坏了一样，但是有时候又莫名其妙恢复») WAS THE MATERIAL SET.** The
+  resize rule above was right but too narrow: three.js keeps ONE RENDER OBJECT PER (batch, material) PAIR, and each
+  of them captured the batch's matrices/indirect textures when IT was built — so bumping only the material in force
+  at the resize left the OTHER one (the untinted look that `G` switches back to) sampling freed textures. The
+  bucket was therefore correct under the tint and broken without it, and it "recovered on its own" whenever
+  anything else happened to bump the stale material (`H`, a pack reload, another resize). `Bucket.materials` is a
+  SET of every material the bucket has been drawn with (`refreshMaterials` adds the one it installs) and a resize
+  bumps all of them; `check:ecs` drives it with two materials, swapping them the way `G` does, and asserts the
+  version of the one NOT in force rises too.
 - **P2 — write ownership.** `PARTLY DONE`. Every write from outside a system is a named command
   (`SetMode`, `Teleport`, `SelectSlot`, `SwapSlots` in `ecs/commands.ts`) instead of a direct write
   in `main.ts`, `ui/gamemode.ts` or `plugins/ui/views/inventory.ts`. The per-entity capabilities that used to be

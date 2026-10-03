@@ -790,39 +790,44 @@ where it is:
     ring fills — which is exactly when buckets grow. ANY material change recompiled the graph (that is why `G`,
     `H` and a pack reload cured it, and why `refreshMaterials` seemed to "fix" the LOD) and the next window move
     grew a bucket again and broke it again. So `growFor` decides and applies the resize first and then sets
-    `bucket.material.needsUpdate = true`, which makes the renderer dispose that render object and build it again —
-    the one path that re-runs `batch()` and captures the NEW textures. INSTANCES START AT 512 on purpose (against
-    the ~300 a lap's bucket really holds): a growth costs a render-object AND shader rebuild, so the capacity is
-    bought once instead of discovered in five doublings, and 512 instances is only ~36 KB of matrices texture plus
-    ~2 KB of indirect per bucket (~40 buckets ⇒ ~1.5 MB). Vertex/index capacity is NOT pre-bought — a bucket's
-    slices vary by rung (a step-2 slice is a whole chunk mesh) and their sum is only known as the ring fills.
-    (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read per draw, `needsGeometry-
-    Update` picks up the replacement, and the vertex layout is unchanged — but the bump is harmless there and
-    keeps this rule in ONE place.)
-  * **THE BATCH'S INDEX BUFFER IS FORCED TO 32 BIT FROM BIRTH (`upgradeIndex`) — THE SECOND, AND DECISIVE, CAUSE OF
-    THE "SHATTERED" FAR RING.** This one is not in this engine's code at all; it is upstream three.js
-    **issue #34211, still present in the pinned `three@0.185.1` (fixed in r186)**, and it needs all four pieces to
-    line up: (1) `BatchedMesh` allocates its internal index as a **Uint16Array** whenever `maxVertexCount <= 65535`
-    — every bucket here, since they start at 4096 vertices; (2) `onBeforeRender` caches the multi-draw offsets in
-    **BYTES**, using `index.array.BYTES_PER_ELEMENT` at that moment (`geometryInfo.start * 2`); (3) the WebGPU
-    backend's FIRST upload rewrites that index array to a `Uint32Array` **IN PLACE**
-    (`WebGPUAttributeUtils.createAttribute`: `bufferAttribute.array = array`, plus the `0xffff` primitive-restart
-    remap); (4) `WebGPUBackend._draw` divides the cached bytes by the array's CURRENT element size — 4 — so
-    `firstIndex` lands at HALF the intended offset. Half of an even `indexStart` is *another slice's* `indexStart`,
-    so the draw reads `count` indices starting in the middle of a NEIGHBOURING chunk's index range: stretched
-    shards of the wrong chunk, `indexStart === 0` being the only draw that is right. It is a one-frame artefact per
-    attribute creation (our `perObjectFrustumCulled`/`sortObjects` defaults make `onBeforeRender` recompute every
-    frame), which is why it read as "flashing + faces flying around" rather than as a permanently wrong ring — and
-    why it appeared exactly while the ring FILLS (a bucket's first `addGeometry`, and every `setGeometrySize`, both
-    build a fresh Uint16 index). **`H` "curing" it was the giveaway**: the wireframe branch computes
-    `bytesPerElement` with the SAME `position.count > 65535 ? 4 : 2` formula on both sides, so the units agree
-    again while the wireframe is on. `upgradeIndex` copies the index to a `Uint32Array` right after `addGeometry`
-    returns (which is also when a growth has just replaced the buffers), so the element size is 4 before any draw
-    ever caches an offset, in both halves. The gate DRIVES this: it simulates the upload's in-place rewrite and
-    asserts that every draw lands in the index range of the geometry the indirect texture names for it (alignment
-    alone would not catch it — the half offset lands on a real slice start), with a bare `BatchedMesh` as the
-    negative control that must FAIL the same check. The eventual cleanup is a three.js upgrade past r186; the
-    workaround is pinned here until then.
+    `bucket.material.needsUpdate = true` — for EVERY material in `bucket.materials`, not just the one in force.
+    That set is the second half of this fix, and it is the answer to the follow-up report «当 G 键关闭后 lod 又会像
+    被破坏了一样，但是有时候又莫名其妙恢复»: three.js keeps **one render object PER (batch, material) pair**, and
+    each of them captured the batch's textures when IT was built — so a resize that marks only the material being
+    drawn leaves the other one (the untinted look, the one `G` switches to) sampling freed textures, and it
+    "recovers on its own" the moment something else bumps that material (`H`, a pack reload, another resize).
+    INSTANCES START AT 512 on purpose (against the ~300 a lap's bucket really holds): a growth costs a
+    render-object AND shader rebuild, so the capacity is bought once instead of discovered in five doublings, and
+    512 instances is only ~36 KB of matrices texture plus ~2 KB of indirect per bucket (~40 buckets ⇒ ~1.5 MB).
+    Vertex/index capacity is NOT pre-bought — a bucket's slices vary by rung (a step-2 slice is a whole chunk mesh)
+    and their sum is only known as the ring fills. (`setGeometrySize` is safe on its own — the geometry and its
+    attributes are re-read per draw, `needsGeometryUpdate` picks up the replacement, and the vertex layout is
+    unchanged — but the bump is harmless there and keeps this rule in ONE place.)
+  * **THE BATCH'S INDEX BUFFER IS WHAT LOOKED "SHATTERED", AND THE FIX IS A THREE.JS UPGRADE (r186).** This one is
+    not in this engine's code at all: upstream three.js **issue #34211**, "WebGPURenderer: BatchedMesh draws every
+    geometry after the first at half its index offset when the internal index is Uint16", fixed in r186 by
+    "Fix draw offsets of `BatchedMesh` (#34212)". It needs all four pieces to line up: (1) `BatchedMesh` allocates
+    its internal index as a **Uint16Array** whenever `maxVertexCount <= 65535` — every bucket here, since they
+    start at 4096 vertices; (2) `onBeforeRender` caches the multi-draw offsets in **BYTES**, using
+    `index.array.BYTES_PER_ELEMENT` at that moment (`geometryInfo.start * 2`); (3) the WebGPU backend's FIRST
+    upload rewrites that index array to a `Uint32Array` **IN PLACE** (`WebGPUAttributeUtils.createAttribute`, plus
+    the `0xffff` primitive-restart remap); (4) the backend then divided the cached bytes by the array's CURRENT
+    element size — 4 — so `firstIndex` landed at HALF the intended offset. Half of an even `indexStart` is *another
+    slice's* `indexStart`, so the draw read `count` indices starting in the middle of a NEIGHBOURING chunk's index
+    range: stretched shards of the wrong chunk, `indexStart === 0` the only draw that was right. It is a one-frame
+    artefact per attribute creation (our `perObjectFrustumCulled`/`sortObjects` defaults make `onBeforeRender`
+    recompute every frame), which is why it read as "flashing + faces flying around" rather than as a permanently
+    wrong ring — and why it happened exactly while the ring FILLS (a bucket's first `addGeometry`, and every
+    `setGeometrySize`, build a fresh Uint16 index). **`H` "curing" it was the giveaway**: the wireframe branch
+    computes `bytesPerElement` with the same `position.count > 65535 ? 4 : 2` formula on both sides, so the units
+    agreed again while the wireframe was on. **This engine therefore pins `three@0.186.1`** (r186 remembers the
+    element size the offsets were cached with — `_multiDrawBytesPerElement` — and `WebGPUBackend` divides by THAT),
+    and the gate reads BOTH halves of that fix out of `node_modules` so a downgrade fails loudly instead of
+    shipping shards. A 32-bit-index workaround was written for r185 and is now GONE, deliberately: it is upstream's
+    bug to fix, and the follow-up release also carries the render-object cache fixes this file leans on
+    ("Fix stale render object cache", "Monitor dispose for geometries and textures"). The gate also simulates the
+    upload's in-place conversion and asserts every draw lands in the index range of the geometry the indirect
+    texture names for it (alignment alone would not catch it — the half offset lands on a real slice start).
   * **THE SOURCE GEOMETRY IS KEPT SO A DEMOTE CAN PUT THE MESH BACK.** `demoteFar` re-adds `entry.mesh` to its
     group and sets `visible = true`; the chunk's own `BufferGeometry` is never disposed at promotion, so far-ring
     VERTEX memory roughly doubles while a chunk is batched (the same attributes live in the chunk geometry and in

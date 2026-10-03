@@ -23,9 +23,10 @@
 // asked to: vertices/indices by doubling through `setGeometrySize`, instances through `setInstanceCount` (both
 // reallocate and copy, which is why this happens once per doubling rather than per chunk).
 //
-// AND A RESIZE MUST BE FOLLOWED BY A MATERIAL REBUILD — this is the ONE thing `BatchedMesh` does not do for you,
-// and getting it wrong is what M3a shipped first (the report: «lod 好像被破坏了一样在闪，面到处飞，按 G 或 H 或
-// 重载资源包又恢复正常，但一动起来又出问题»). `setInstanceCount` DISPOSES and RECREATES the batch's
+// AND A RESIZE MUST BE FOLLOWED BY A MATERIAL REBUILD, FOR EVERY MATERIAL THE BUCKET HAS USED — this is the ONE
+// thing `BatchedMesh` does not do for you, and getting it wrong is what M3a shipped first (the report: «lod 好像被
+// 破坏了一样在闪，面到处飞，按 G 或 H 或重载资源包又恢复正常，但一动起来又出问题», then «当 G 键关闭后 lod 又会像
+// 被破坏了一样，但是有时候又莫名其妙恢复»). `setInstanceCount` DISPOSES and RECREATES the batch's
 // `_matricesTexture` and `_indirectTexture`, and the batching shader reads those two textures OFF THE MESH AT
 // NODE-GRAPH BUILD TIME (`three/src/nodes/accessors/Batch.js`: `batchMesh._matricesTexture`), i.e. the compiled
 // graph captures the texture OBJECTS. The graph is only rebuilt when `material.version` changes
@@ -33,23 +34,25 @@
 // (`WebGPUBackend.getRenderCacheKey`) — so after a growth the batch went on sampling the textures three had just
 // freed: every instance matrix came back as garbage, which is exactly "surfaces flying around". ANY material
 // change recompiled the graph and picked the new textures up (which is why `G`, `H` and a pack reload cured it),
-// and the next window move grew a bucket again and broke it again. `growFor` therefore bumps the bucket material's
-// `needsUpdate`, which makes the renderer dispose and rebuild that render object; the rebuild re-runs `batch()` and
-// captures the new textures. (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read
-// per draw, and the vertex layout is unchanged — but the bump is harmless there and keeps the rule in ONE place.)
-// THE INDEX BUFFER MUST BE 32 BIT FROM BIRTH (`upgradeIndex`) — THE REASON M3a LOOKED "SHATTERED" ON THE GPU, and
-// the half of it that has nothing to do with this file's own bookkeeping. `BatchedMesh` allocates its internal
-// index as a **Uint16Array** whenever `maxVertexCount <= 65535` (which every bucket here is: they start at 4096),
-// `onBeforeRender` caches the multi-draw offsets in BYTES using that element size (`geometryInfo.start * 2`), and
-// then the WebGPU backend's FIRST UPLOAD rewrites the index array to a `Uint32Array` IN PLACE
-// (`WebGPUAttributeUtils.createAttribute`: `bufferAttribute.array = array`, with the `0xffff` primitive-restart
-// remap). The backend divides those cached byte offsets by the array's CURRENT element size, i.e. by 4 — so every
-// draw whose `indexStart > 0` starts at HALF its offset and renders 36-odd indices out of the MIDDLE of a
-// neighbouring slice: shards of chunks stretched across the ring, flickering, with only the first slice correct.
-// That is upstream three.js issue #34211 (fixed in r186; this engine pins 0.185.1), and it is why `H` "cured" it —
-// the wireframe branch of both halves uses the same `position.count > 65535 ? 4 : 2` formula, so the units agree
-// again. Making the index 32 bit OURSELVES, before the first draw and after every `setGeometrySize` (which builds
-// a fresh Uint16 one), keeps both sides at 4 bytes forever.
+// and the next window move grew a bucket again and broke it again — and because three.js keeps ONE RENDER OBJECT
+// PER (batch, material) PAIR, marking only the material in force at the resize left the other one stale: that is
+// the second report, where the bucket was correct under the tint and broken under the untinted look until
+// something else happened to bump that material. `growFor` therefore bumps EVERY material in `bucket.materials`.
+// (`setGeometrySize` is safe on its own — the geometry and its attributes are re-read per draw, and the vertex
+// layout is unchanged — but the bump is harmless there and keeps the rule in ONE place.)
+//
+// AND THE INDEX BUFFER'S ELEMENT SIZE USED TO MATTER: `BatchedMesh` allocates its internal index as a Uint16Array
+// while `maxVertexCount <= 65535` (every bucket here: they start at 4096 vertices), `onBeforeRender` caches the
+// multi-draw offsets in BYTES at that element size, and the WebGPU backend's first upload rewrites the index to
+// `Uint32` IN PLACE (`WebGPUAttributeUtils.createAttribute`) — so the backend used to divide those cached bytes by
+// the array's CURRENT size, by 4, and every draw whose `indexStart > 0` started at HALF its offset and read
+// indices out of the MIDDLE of a neighbouring slice: shards of the wrong chunk stretched across the ring, with
+// only the first slice correct (upstream three.js issue #34211). That is why `H` "cured" it — the wireframe branch
+// uses the same element-size formula on both sides — and it is now fixed UPSTREAM: **three r186 remembers the size
+// the offsets were cached with (`_multiDrawBytesPerElement`) and divides by that** (`WebGPUBackend`), so this
+// engine pins `three@0.186.1` and needs no workaround. `check:ecs` reads BOTH halves of the fix out of
+// `node_modules` (so a downgrade fails the gate instead of shipping shards) and simulates the upload's in-place
+// conversion to assert every draw still lands in its own slice.
 import * as THREE from "three/webgpu";
 import type { ChunkFaceSpec } from "../../../data/globals/gfx";
 
@@ -74,6 +77,13 @@ interface Bucket {
   readonly spec: ChunkFaceSpec;
   readonly step: number;
   material: THREE.Material;
+  /** EVERY material this bucket has been drawn with — the `G` tint and a pack reload swap the current one, and
+   *  three.js keeps ONE render object PER (batch, material) pair. Each of those captured the batch's
+   *  matrices/indirect textures as they were when IT was built, so a resize has to mark ALL of them dirty, not
+   *  just the one in force at that moment (`growFor`). Skipping one is exactly the reported "turn the tint OFF and
+   *  the LOD is broken again, sometimes it recovers on its own": the untinted material's render object predated
+   *  the resize and went on sampling the freed textures until something else recompiled it. */
+  readonly materials: Set<THREE.Material>;
   /** Live instances (so `setInstanceCount` can be grown before `addInstance` throws). */
   live: number;
   /** Instances ever handed out, the high-water mark the capacity is compared against. */
@@ -108,6 +118,7 @@ function makeBucket(spec: ChunkFaceSpec, step: number, material: THREE.Material)
     spec,
     step,
     material,
+    materials: new Set([material]),
     live: 0,
     allocated: 0,
     capacityVertices: START_VERTICES,
@@ -172,9 +183,6 @@ export class FarBatches {
       if (slice === null) continue;
       this.growFor(bucket, slice.vertexCount, slice.indexCount);
       const geometryId = bucket.batch.addGeometry(slice.geometry);
-      // AFTER the add, because `addGeometry` is what initializes the batch's buffers — and after `growFor`, which
-      // may just have replaced them with a fresh Uint16 index (see the note at the top of this file).
-      upgradeIndex(bucket.batch);
       const id = bucket.batch.addInstance(geometryId);
       bucket.batch.setMatrixAt(id, this.matrix);
       bucket.batch.setVisibleAt(id, true);
@@ -197,12 +205,15 @@ export class FarBatches {
 
   /** Re-resolve every bucket's material through the stream's own look resolution (the `G`/`H` toggles and a pack
    *  reload go through here: a bucket is one material, so a tinted world is one material per (look, tier) — which
-   *  is exactly what the untinted world already does). */
+   *  is exactly what the untinted world already does). The installed material joins the bucket's `materials` set:
+   *  a LATER resize has to mark it dirty too, because three.js keeps the render object it is about to get (and its
+   *  captured textures) for as long as the pair (batch, material) exists. */
   refreshMaterials(lookup: (step: number, spec: ChunkFaceSpec) => THREE.Material): void {
     for (const bucket of this.buckets.values()) {
       const material = lookup(bucket.step, bucket.spec);
       if (material === bucket.material) continue;
       bucket.material = material;
+      bucket.materials.add(material);
       bucket.batch.material = material;
     }
   }
@@ -226,9 +237,9 @@ export class FarBatches {
   }
 
   /** Grow a bucket until the slice fits — BEFORE `addGeometry`, which throws rather than shrinking the request.
-   *  A resize also REBUILDS THE BUCKET'S MATERIAL (see the note at the top of this file): `setInstanceCount`
-   *  replaces the matrices/indirect textures the compiled node graph captured, and without the rebuild the shader
-   *  would keep sampling the freed ones. */
+   *  A resize also marks EVERY material the bucket has been drawn with dirty (see the note at the top of this
+   *  file): `setInstanceCount` replaces the matrices/indirect textures each of them captured, and three.js only
+   *  rebuilds a render object when its material's version moves. */
   private growFor(bucket: Bucket, vertexCount: number, indexCount: number): void {
     const batch = bucket.batch;
     let vertices = bucket.capacityVertices;
@@ -252,25 +263,17 @@ export class FarBatches {
       batch.setInstanceCount(Math.max(batch.maxInstanceCount * 2, bucket.allocated + 1));
     }
     if (grow || resizeInstances) {
-      // THE REBUILD (see the header): a new version makes `RenderObjects.get()` dispose this render object and
-      // build it again, which is the only thing that re-runs `batch()` and picks up the NEW textures. It is set on
-      // the bucket's own material, which is shared per (look, tint) — a sibling bucket or an unbatched chunk that
-      // shares it has an unchanged cache key and only syncs the version, so nothing else is rebuilt.
-      bucket.material.needsUpdate = true;
+      // THE REBUILD (see the header): a new version makes `RenderObjects.get()` dispose that render object and
+      // build it again, which is the only thing that re-runs `batch()` and picks up the NEW textures — and it has
+      // to be done for EVERY material this bucket has been drawn with, because three.js keeps one render object per
+      // (batch, material) pair and only rebuilds the one whose material version moved. Marking just the current one
+      // is the reported bug: after a resize the bucket is correct under the tint in force and STALE under the other
+      // one ("turn `G` off and the LOD is broken again, sometimes it recovers on its own" — it recovers when
+      // something else bumps that material). The bump is on shared materials, but a render object whose own cache
+      // key did not change (an unbatched chunk, a bucket whose textures are untouched) only syncs the version.
+      for (const material of bucket.materials) material.needsUpdate = true;
     }
   }
-}
-
-/** GIVE A BATCH A 32-BIT INDEX BUFFER (three.js #34211 — see the note at the top of this file). A no-op once the
- *  batch's index already is one (which is the case for a bucket that has grown past 65536 vertices), and the ONE
- *  place the units the multi-draw offsets are cached in are made to agree with the element size the WebGPU backend
- *  divides them by. The values cannot overflow: it only ever runs while the batch's index is Uint16, i.e. while
- *  `maxVertexCount <= 65535`, so every index is below 65535 already (and unlike the upload's own conversion this
- *  never has to remap the `0xffff` primitive restart, because no index can be that large). */
-function upgradeIndex(batch: THREE.BatchedMesh): void {
-  const index = batch.geometry.getIndex();
-  if (index === null || !(index.array instanceof Uint16Array)) return;
-  batch.geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(index.array), 1));
 }
 
 /** One look's faces, as a self-contained geometry: its own vertex range (the mesher lays a slot's faces out

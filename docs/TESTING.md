@@ -220,17 +220,21 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       their material through the same path the meshes use), and after a pack reload the far ring must come back with
       the new textures rather than black or checker;
   (g) **THE REGRESSION THAT MATTERS MOST — "the LOD is broken, flashing, faces flying everywhere"**. That was M3a's
-      first two live builds, and it had TWO causes, both now closed (see the M3a bullet in AGENTS.md): a batch
-      RESIZE leaving the shader on a freed matrices/indirect texture, and upstream three.js issue #34211 — a batch
-      under 65536 vertices gets a Uint16 index, the WebGPU upload rewrites it to Uint32 in place, and the cached
-      multi-draw offsets are then halved, so every slice after the first draws `count` indices out of the MIDDLE of
-      a neighbouring chunk's range. What it looked like: the far ring's surfaces stretched and jumped, worst while
-      the ring FILLED (that is when a bucket is created and grown), and it went away while `H` (wireframe) was on —
-      **if you ever see it cured by `H`, it is this bug, because wireframe computes the element size the same way
-      on both sides.** So the test is: fly around for a minute or two with the whole six-rung ring visible and
-      watch the far terrain — it must stay solid and still, with `H` both off and on. If any of it flickers or
-      throws surfaces across the screen, report the `FRAME` line's `batched=`/`calls=`, whether `H` still cures it,
-      and whether standing still (no streaming) makes it stop.
+      first three live builds, and it had three causes, all now closed (see the M3a bullet in AGENTS.md): a batch
+      RESIZE leaving the shader on a freed matrices/indirect texture (fixed by marking the bucket's materials
+      dirty), the same resize marking only the material IN FORCE — so the ring was correct with `G` on and broken
+      with `G` off, recovering on its own whenever something else recompiled that material, and upstream three.js
+      issue #34211, where a batch under 65536 vertices gets a Uint16 index, the WebGPU upload rewrites it to Uint32
+      in place, and the cached multi-draw offsets were then halved so every slice after the first drew indices out
+      of the MIDDLE of a neighbouring chunk's range (**fixed by upgrading to `three@0.186.1`** — "Fix draw offsets
+      of `BatchedMesh`"). What it looked like: the far ring's surfaces stretched and jumped, worst while the ring
+      FILLED, and it went away while `H` (wireframe) was on — **if you ever see it cured by `H` again, it is that
+      upstream bug, not this engine's code.** So the test has two parts: (i) fly around for a minute or two with
+      the whole six-rung ring visible and watch the far terrain — it must stay solid and still, with `H` both off
+      and on; (ii) once the ring has filled, **toggle `G` off and on a few times and walk between toggles** — the
+      far ring must look the same in both states (only uncoloured vs tier-coloured). If any of it flickers or
+      throws surfaces across the screen, report the `FRAME` line's `batched=`/`calls=`, whether `H` cures it,
+      whether `G` cures it, and whether standing still (no streaming) makes it stop.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser
