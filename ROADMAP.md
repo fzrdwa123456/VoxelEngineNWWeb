@@ -3156,6 +3156,19 @@ Still outstanding:
   those buffers, ADDITIVELY (nothing in the live path changes): the chunk's CPU-meshed version is 40 blocks below it,
   one flat colour per face kind, so "does it render", "does its shape match" and "did the look slices land right" are
   all answerable by eye.
+  **AND ITS SECOND REPORT WAS TWO FALSE ALARMS ABOUT THAT COPY, both worth remembering.** (i) «挑的区块有问题，我去其他
+  区块按下 m 不显示出来» — the copy was placed at the chunk's WRAPPED lattice index, which is its torus IDENTITY and not
+  where it is drawn: standing at x = -137 the probe addressed chunk 507 and put the copy at x = 16224, i.e. a whole lap
+  away, so `M` appeared to draw nothing at all (it was on the far side from the start of that session). The origin now
+  goes through `nearestWrap` against the player's chunk, the same rule `chunk-stream` places meshes with; the wrapped
+  index stays in the chunk's NAME, because that really is its key. (ii) «看不到底面» — a world with no overhangs has no
+  bottom faces anywhere: the terrain is a 2D height field filled from each chunk's floor up (`generateChunk`), so no
+  voxel ever has AIR beneath it and kind 1 is never emitted; the copy's `keys 2` said so in one number, `faces cpu 243 /
+  gpu 243` and `mismatched keys 0` said the GPU had produced exactly what the CPU did, and the probe's own synthetic
+  cases (`uniform-solid`, `one-block`) both reported `keys 3` with every vertex identical, i.e. the kernel emits kind 1
+  correctly. Compounding it: a lifted mesh keeps the culling the mesher did WITH its neighbours, and the material is
+  single-sided, so a bottom face is only visible from BELOW the copy. The recipe for seeing brown is in TESTING.md
+  (stack a block, break the lower one, press `M` again → `keys` becomes 3).
   **AND THE FIRST DRAW OF THAT COPY TOOK THE WHOLE WORLD DOWN — THE GEOMETRY IS NOW NON-INDEXED (`VERTS_PER_FACE = 6`).**
   The design promised that a failure here could not touch the live path; the device disagreed. `renderer.log` grew to
   1.78 MB with 2665 copies of `Buffer usage (CopySrc|CopyDst|Vertex|Storage) doesn't include BufferUsage::Index` and an

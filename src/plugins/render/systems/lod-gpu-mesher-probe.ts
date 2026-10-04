@@ -12,7 +12,7 @@ import { ShowToast } from "../../../data/globals/commands";
 import { RENDERER3D, SCENE3D } from "../../../data/globals/gfx";
 import { KEY_EVENTS, LOCAL_PLAYER, VOXEL, KeyEdgeReader } from "../../../data/globals/resources";
 import { AIR, CHUNK_SIZE, CHUNK_VOLUME, SOLID, type Chunk } from "../../../data/world/chunk";
-import { CHUNK_Y_COUNT, MIN_CHUNK_Y, type VoxelWorld } from "../../../data/world/world";
+import { CHUNK_Y_COUNT, MIN_CHUNK_Y, nearestWrap, type VoxelWorld } from "../../../data/world/world";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
 import { POSITION } from "../../player/components";
@@ -470,14 +470,23 @@ export class GpuMesherProbeSystem {
     const periodX = worldChunksX();
     const periodZ = worldChunksZ();
     const wrap = (value: number, period: number): number => ((value % period) + period) % period;
-    const cx = wrap(Math.floor(POSITION.x[this.playerIndex] / CHUNK_SIZE), periodX);
-    const cz = wrap(Math.floor(POSITION.z[this.playerIndex] / CHUNK_SIZE), periodZ);
+    const playerCx = Math.floor(POSITION.x[this.playerIndex] / CHUNK_SIZE);
+    const playerCz = Math.floor(POSITION.z[this.playerIndex] / CHUNK_SIZE);
+    const cx = wrap(playerCx, periodX);
+    const cz = wrap(playerCz, periodZ);
+    // THE DRAWING COPY GOES WHERE THE STREAM WOULD DRAW THAT CHUNK, i.e. at the representation NEAREST the player
+    // (`nearestWrap`), NOT at the wrapped lattice index. The wrapped index is a torus identity; its BLOCK origin is
+    // only where the chunk actually is when the player is in the positive lap. Using it put the copy on the far side
+    // of the torus — `at 16224/136/0` while the player stood at x = -137 — so past the seam `M` looked like it drew
+    // nothing at all. The identity in the NAME stays wrapped (it is the chunk's real key); only the origin is flat.
+    const drawX = nearestWrap(cx, playerCx, periodX) * CHUNK_SIZE;
+    const drawZ = nearestWrap(cz, playerCz, periodZ) * CHUNK_SIZE;
     for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y && out.length < REAL_CHUNKS; cy--) {
       const chunk: Chunk | null = this.voxel.getChunk(cx, cy, cz);
       if (chunk === null) continue;
       const input = gatherChunkMeshInput(this.voxel, chunk, cx, cy, cz);
       if (meshChunk(input).faces === 0) continue; // a chunk with nothing to draw proves little
-      out.push({ name: `real(${cx},${cy},${cz})`, input, origin: [cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE] });
+      out.push({ name: `real(${cx},${cy},${cz})`, input, origin: [drawX, cy * CHUNK_SIZE, drawZ] });
     }
     if (out.length === 0) this.log("MESHPROBE: no real chunk with faces in the player's column (synthetic cases only)");
     return out;

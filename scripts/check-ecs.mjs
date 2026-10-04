@@ -7793,6 +7793,15 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   assert(/geometry\.addGroup\(slot\.start \* 6, slot\.count \* 6, slot\.key & 3\)/.test(probeSrc) &&
     /world\.resource\(SCENE3D\)\.add\(mesh\)/.test(probeSrc) && /disposeCopy\(\)/.test(probeSrc),
     "…one group per look slice, added to the scene, and the previous copy taken down and disposed");
+  // …AND THE COPY IS PLACED AT THE NEAREST TORUS REPRESENTATION, which is a FIXED REPORT rather than a nicety: the
+  // wrapped lattice index is the chunk's IDENTITY, not where it is drawn, so using it as the block origin put the copy
+  // at x = 16224 while the player stood at x = -137 — i.e. past the seam `M` drew nothing anywhere the player could
+  // look. The stream's own rule (`nearestWrap`) is the only one that agrees with what is on screen.
+  assert(/const playerCx = Math\.floor\(POSITION\.x\[this\.playerIndex\] \/ CHUNK_SIZE\)/.test(probeSrc) &&
+    /nearestWrap\(cx, playerCx, periodX\) \* CHUNK_SIZE/.test(probeSrc) &&
+    /nearestWrap\(cz, playerCz, periodZ\) \* CHUNK_SIZE/.test(probeSrc) &&
+    /origin: \[drawX, cy \* CHUNK_SIZE, drawZ\]/.test(probeSrc),
+    "…and the real chunk it copies is DRAWN at its nearest representation (the wrapped index stays the chunk's name only)");
   assert(/const cpuCaseMs = performance\.now\(\) - cpuStart;/.test(probeSrc) && /cpuMs \+= cpuCaseMs;/.test(probeSrc),
     "…and the CPU half is timed ALONE (the first version measured it at log time, i.e. after the awaited GPU readback)");
   assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),

@@ -285,8 +285,8 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       is expected (the CPU half runs on the thread that asked).
   (f) **AND LOOK 40 BLOCKS UP: THE DRAWING CHECK (M2c step 1).** After the last real case the probe puts a
       **floating copy** of the topmost real chunk in the scene, drawn ONLY from the compute-written buffers
-      (`MESHPROBE draw: a floating copy of real(cx,cy,cz) …` in the log names the column). The chunk the CPU meshed is
-      40 blocks BELOW it, so three things are checkable by eye at once:
+      (`MESHPROBE draw: a floating copy of real(cx,cy,cz) …` in the log names the column and the block position). The
+      chunk the CPU meshed is 40 blocks BELOW it, so three things are checkable by eye at once:
       * **it renders at all** — if nothing appears (or the world's own chunk is unaffected), the storage-buffer →
         vertex-buffer path did not bind: report it with `renderer.log`. **The world MUST be unaffected either way**:
         the whole render pass turned invalid the one time an index buffer was bound here (2665 validation errors and a
@@ -297,6 +297,14 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
         suspect);
       * **its SLICES landed right** — top faces are GREEN, side faces GREY, bottom faces BROWN. One solid colour
         everywhere means the per-look groups collapsed; a wrong colour pattern means a slice's range is off.
+        **BROWN IS OFTEN ABSENT AND THAT IS CORRECT**: the terrain is a 2D height field, so nothing has AIR under it
+        and kind 1 is never emitted; the copy reports `keys 2` in that case. To see brown, place a block, stack a
+        second one on top of it, break the LOWER one (the upper one now floats), then press `M` again — `keys` must
+        become 3. And a bottom face only shows from BELOW the copy (it faces down and the material is single-sided).
+      **THE COPY IS ALWAYS ABOVE THE CHUNK YOU ARE STANDING IN** (it is placed at the chunk's nearest torus
+      representation, exactly where the stream draws it), so if you see nothing, the `MESHPROBE draw:` line's
+      coordinates are the first thing to report — they must be within a few dozen blocks of you, not on the far side
+      of the lap.
       Pressing `M` again replaces the copy (the previous one is removed and disposed). The copy is purely additive:
       nothing in the live world draws from it yet.
   Note what it does NOT do yet: the LIVE far ring still draws through its `BatchedMesh` buckets, fed from CPU

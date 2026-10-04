@@ -949,7 +949,19 @@ where it is:
     GROUP per look slice), so the three things to verify are all visible at once — that a `BufferGeometry` whose
     attributes ARE the mesher's `StorageBufferAttribute`s renders at all, that its slices/material indices land
     right, and that its silhouette matches the terrain below it. Nothing in the live path changes; a failure leaves
-    the world exactly as it is.
+    the world exactly as it is. **IT IS PLACED AT THE CHUNK'S NEAREST TORUS REPRESENTATION (`nearestWrap`), NOT AT
+    ITS WRAPPED LATTICE INDEX, and that was a report**: the wrapped index is the chunk's torus IDENTITY, not where it
+    is drawn, so using it as the block origin put the copy at `x = 16224` while the player stood at `x = -137` — past
+    the seam `M` looked like it drew nothing at all. The chunk's NAME in the log stays wrapped (it is the real key);
+    only the origin is flat, and it is what the stream itself uses (`chunk-stream`'s `placeMesh`).
+  * **AND A WORLD WITH NO OVERHANGS HAS NO BOTTOM FACES AT ALL — the other half of that same report.** The
+    terrain is a pure 2D height field filled from each chunk's floor up to its surface (`world.ts`'s
+    `generateChunk`), so no voxel ever has AIR beneath it and kind 1 is never emitted anywhere; the copy's `keys 2`
+    (two (value, kind) slices) said so in one number. Adding to the confusion: the copy's underside looks hollow
+    anyway, because a lifted mesh keeps the culling the mesher did WITH its neighbours (the chunk below is solid) and
+    because the material is single-sided — you must look UP at the copy to see a downward face even when one exists.
+    To see brown: place a block, stack a second one on top, break the lower one, then press `M` again (`keys` becomes
+    3). The probe's own synthetic cases cover it (`uniform-solid` and `one-block` both report `keys 3` and match).
   * **THREE GIVES A COMPUTE BUFFER THE USAGES A VERTEX BUFFER NEEDS — verified in r186's `WebGPUBackend` before any
     of this was written**: `createStorageAttribute` = `STORAGE | VERTEX | COPY_SRC | COPY_DST`. So the buffer the
     kernels fill is the buffer three binds — no readback, no CPU copy. **AND THE DRAWN LAYOUT IS `vec4`, NOT
