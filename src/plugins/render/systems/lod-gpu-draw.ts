@@ -23,7 +23,7 @@
 // A dense `position`/`normal`/`uv` triple in the mesher's own drawn layout (`DRAWN_STRIDE` floats per vertex, six
 // vertices per face), with each cluster's CHUNK-LOCAL vertices placed by its `place` vector — `local * (step, 1,
 // step) + origin` — so one buffer serves a fine chunk and a far rung alike.
-import { Break, Fn, If, Loop, add, greaterThanEqual, instanceIndex, lessThan, mul, storage, uint } from "three/tsl";
+import { Fn, If, Loop, add, instanceIndex, lessThan, mul, storage, uint } from "three/tsl";
 import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
 import { DRAWN_STRIDE, VERTS_PER_FACE, type MesherOutput } from "./lod-gpu-mesher";
 import { n } from "./lod-gpu-field";
@@ -142,16 +142,18 @@ function buildCompactionKernel(
     const step = place === null ? null : place.element(n(add(at, uint(3))));
     Loop(draw.faceCapacity, ({ i }) => {
       const face = n(i).toUint();
-      // THE GUARD IS WHAT MAKES THE COPY CORRECT; THE `Break` IS ONLY A FAST EXIT. The loop bound is a compile-time
-      // number (the draw budget) and every cluster stops at its OWN face count — and the first version relied on
-      // `Break` alone to do that, which is what the `O` probe's report («侧面跑到别的位置»: faces from elsewhere
-      // appearing inside the copy) pointed at: a `Loop` that runs the full budget reads PAST its cluster in the arena
-      // and writes PAST its own region in the compacted buffer, so neighbours overwrite each other and the winner is
-      // whatever ran last. With the guard, the writes are bounded by `faces` whether the `break` is emitted or not —
-      // and the budget is never smaller than a cluster, so nothing is truncated either.
-      If(greaterThanEqual(face, faces), () => {
-        Break();
-      });
+      // THE GUARD IS THE WHOLE BOUND, AND `Break` IS DELIBERATELY NOT USED — it is a FIXED BUG. The first version was
+      // `Loop(budget) { If(face >= faces) Break(); copy... }`, i.e. the walk's only exit was a `Break` inside an `If`
+      // inside a `Loop`; on the device it broke too early (or unconditionally), so each cluster wrote a face or two and
+      // the rest of the compacted buffer was left holding the PREVIOUS run's vertices. What that looked like is what
+      // `O` reported («侧面跑到别的位置»), and what found it was the value check below the probe runs: vertex 0 of the
+      // first cluster read `-174` where the arena said `-192` — a previous run's origin, i.e. a STALE buffer. Every
+      // COUNT stayed right, because the counts come from the cull and not from the copy.
+      //
+      // The guard alone is exactly correct and needs no early exit: a face past the cluster's own count is simply not
+      // copied, and the loop bound (the draw budget) is never smaller than a cluster, so nothing is truncated either.
+      // The price is a no-op comparison for the rest of the budget, which is why the bound is the ARENA's face count
+      // rather than a worst case.
       If(lessThan(face, faces), () => {
       const source = n(add(base, face));
       const destination = n(add(faceSlot, face));

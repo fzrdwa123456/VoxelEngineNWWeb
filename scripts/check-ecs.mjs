@@ -8057,8 +8057,16 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
   assert(/const cluster = list\.element\(instanceIndex\);/.test(drawSrc) &&
     /const faceSlot = faceSlots\.element\(cluster\);/.test(drawSrc),
     "the compaction's work item is the VISIBLE LIST: a culled cluster is not in it, so it copies nothing at all…");
-  assert(/If\(greaterThanEqual\(face, faces\), \(\) => \{\n        Break\(\);\n      \}\);\n      If\(lessThan\(face, faces\), \(\) => \{/.test(drawSrc),
-    "…and the walk is bounded by the GUARD, not by `Break`: a `Loop` that runs past its own cluster reads another chunk's faces out of the arena and overwrites the next cluster's region (which is what «侧面跑到别的位置» was), so correctness does not depend on the `break` being emitted — the budget is never smaller than a cluster, so nothing is truncated either…");
+  // AND THE WALK USES NO `Break` AT ALL — a FIXED BUG, and the most expensive one of this series. The first version
+  // was `Loop(budget) { If(face >= faces) Break(); copy }`, i.e. the only exit was a `Break` inside an `If` inside a
+  // `Loop`; on the device it broke too early, so each cluster wrote a face or two and the REST OF THE COMPACTED BUFFER
+  // KEPT THE PREVIOUS RUN'S VERTICES. Every count stayed right (they come from the cull, not from the copy), and what
+  // the user saw was «侧面跑到别的位置». The value check below is what found it: vertex 0 of the first cluster read
+  // `-174` against the arena's `-192` — a previous run's origin, i.e. a stale buffer. The guard (`face < faces`) is
+  // now the ONLY bound, and it is sufficient: a face past the cluster's count is simply not copied, and the loop bound
+  // is never smaller than a cluster, so nothing is truncated.
+  assert(/If\(lessThan\(face, faces\), \(\) => \{/.test(drawSrc) && !/Break/.test(drawSrc),
+    "…and the walk's only bound is the GUARD: `Break` is not used anywhere in the compaction (it broke early on the device and left the buffer holding the previous run's vertices), and correctness does not need it");
   assert(/compactProblem === "" && indirect\[0\] === visibleFaces \* 6/.test(probeSrc) &&
     /private async checkCompaction\(/.test(probeSrc) && /CULLPROBE compact:/.test(probeSrc),
     "…and the COMPACTION is verified BY VALUE: the compacted buffer is read back and compared against `arena source + place` component by component, with the first difference reported (that check is how a copy bug is found, because every count stays right)");
