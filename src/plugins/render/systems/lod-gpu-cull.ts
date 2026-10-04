@@ -37,8 +37,9 @@
 // setFromProjectionMatrix` gives INWARD normals; a point is inside when `n·p + d >= 0`), so the CPU reference can
 // be `intersectsSphere` itself rather than a second implementation of the same idea.
 import { Fn, If, Loop, add, equal, float, instanceIndex, lessThan, mul, storage, uint, Var } from "three/tsl";
-import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
+import { IndirectStorageBufferAttribute, StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
 import { n } from "./lod-gpu-field";
+import { VERTS_PER_FACE } from "./lod-gpu-mesher";
 
 /** HOW MANY CLUSTERS ONE PASS CAN CULL — a compile-time constant because it is a storage array's length and a
  *  `Loop`/`compute` count. The far ring's ladder measures a few thousand cells.
@@ -62,6 +63,11 @@ export interface ClusterSet {
   readonly bounds: Float32Array;
   /** `(base, faces, look, lod)` per cluster. */
   readonly info: Uint32Array;
+  /** WHERE THE CLUSTER'S GEOMETRY GOES WHEN IT IS DRAWN: `vec4(offsetX, offsetY, offsetZ, step)`. The mesher writes
+   *  CHUNK-LOCAL vertices (`0..32`), so a cluster is only placeable with its chunk's origin — and the far ring
+   *  scales a chunk by `(step, 1, step)`, which is what the fourth component carries. This is the per-instance
+   *  TRANSFORM a draw needs, and it is the third field the arena does not produce by itself. */
+  readonly place: Float32Array;
 }
 
 /** THE SIX PLANES as `(nx, ny, nz, d)`, normals INWARD — 24 floats, three's own convention. */
@@ -74,8 +80,14 @@ export function createClusterSet(capacity: number = CLUSTER_CAPACITY): {
   count: number;
   bounds: Float32Array;
   info: Uint32Array;
+  place: Float32Array;
 } {
-  return { count: 0, bounds: new Float32Array(capacity * 4), info: new Uint32Array(capacity * 4) };
+  return {
+    count: 0,
+    bounds: new Float32Array(capacity * 4),
+    info: new Uint32Array(capacity * 4),
+    place: new Float32Array(capacity * 4),
+  };
 }
 
 /** IS ONE CLUSTER'S SPHERE INSIDE ALL SIX PLANES? Exported because the probe compares the GPU against it cluster
@@ -117,6 +129,7 @@ export class GpuClusterCuller {
   private readonly capacity: number;
   private readonly boundsAttr: StorageBufferAttribute;
   private readonly infoAttr: StorageBufferAttribute;
+  private readonly placeAttr: StorageBufferAttribute;
   private readonly planeAttr: StorageBufferAttribute;
   /** HOW MANY OF THE `capacity` SLOTS ARE REAL. One cell, read by the visibility kernel — see `CLUSTER_CAPACITY`
    *  for why "zero the padding" is not a substitute. */
@@ -125,6 +138,15 @@ export class GpuClusterCuller {
   private readonly slotAttr: StorageBufferAttribute;
   private readonly listAttr: StorageBufferAttribute;
   private readonly countAttr: StorageBufferAttribute;
+  /** WHERE A SURVIVOR'S FACES GO in a compacted draw buffer — the face-weighted prefix sum, i.e. the same scan
+   *  weighted by `faces` instead of by 1. This is the number a GPU-driven draw needs and the reason the compaction
+   *  can run without the CPU: the destination is a device-side value like every other offset in this pipeline. */
+  private readonly faceSlotAttr: StorageBufferAttribute;
+  /** THE INDIRECT DRAW PARAMETERS, written by the compact pass and read by the DRAW — four `u32`s
+   *  (`vertexCount`, `instanceCount`, `firstVertex`, `firstInstance`), which is exactly what WebGPU's
+   *  `drawIndirect` takes and what `geometry.setIndirect` binds. **This is the whole point of the step: the CPU
+   *  never learns how many vertices are visible.** */
+  private readonly indirectAttr: IndirectStorageBufferAttribute;
   private readonly visibility: { count: number };
   private readonly compact: { count: number };
   private readonly gather: { count: number };
@@ -134,27 +156,41 @@ export class GpuClusterCuller {
     this.capacity = capacity;
     this.boundsAttr = new StorageBufferAttribute(new Float32Array(capacity * 4), 4);
     this.infoAttr = new StorageBufferAttribute(new Uint32Array(capacity * 4), 4);
+    this.placeAttr = new StorageBufferAttribute(new Float32Array(capacity * 4), 4);
     this.planeAttr = new StorageBufferAttribute(new Float32Array(24), 4);
     this.limitAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
     this.flagAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
     this.slotAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
     this.listAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
     this.countAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
+    this.faceSlotAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
+    this.indirectAttr = new IndirectStorageBufferAttribute(new Uint32Array(4), 1);
     // Built ONCE: the capacity is baked into all three kernels' storage lengths, the same rule the mesher follows
     // (a per-call build would compile a pipeline per frame).
     this.visibility = buildVisibilityKernel(this.planeAttr, this.boundsAttr, this.limitAttr, this.flagAttr, capacity);
-    this.compact = buildCompactKernel(this.flagAttr, this.slotAttr, this.countAttr, capacity);
+    this.compact = buildCompactKernel(this.flagAttr, this.infoAttr, this.slotAttr, this.faceSlotAttr, this.countAttr, this.indirectAttr, capacity);
     this.gather = buildGatherKernel(this.flagAttr, this.slotAttr, this.listAttr, capacity);
   }
 
-  /** The buffers a DRAW binds: `list` is the compacted visible-cluster index list, and `info`/`bounds` describe the
-   *  clusters it names (an indirect draw reads its instance count from the same kind of buffer). */
+  /** The buffers the DRAW binds: `list` names the surviving clusters in order, `info`/`place` describe them,
+   *  `faceSlot` says where each cluster's faces go in a compacted buffer, and `indirect` is the draw call the
+   *  device wrote for itself. NOTHING HERE COMES BACK TO THE CPU. */
   get clusterBuffers(): {
     list: StorageBufferAttribute;
     info: StorageBufferAttribute;
     bounds: StorageBufferAttribute;
+    place: StorageBufferAttribute;
+    faceSlot: StorageBufferAttribute;
+    indirect: IndirectStorageBufferAttribute;
   } {
-    return { list: this.listAttr, info: this.infoAttr, bounds: this.boundsAttr };
+    return {
+      list: this.listAttr,
+      info: this.infoAttr,
+      bounds: this.boundsAttr,
+      place: this.placeAttr,
+      faceSlot: this.faceSlotAttr,
+      indirect: this.indirectAttr,
+    };
   }
 
   /** Upload `set` and `planes`, cull, and read the list back. THE READBACK IS THE PROBE'S NEED, NOT THE DRAW'S: the
@@ -167,13 +203,15 @@ export class GpuClusterCuller {
     bounds.set(set.bounds.subarray(0, set.count * 4));
     bounds.fill(0, set.count * 4);
     (this.infoAttr.array as Uint32Array).set(set.info.subarray(0, set.count * 4));
+    (this.placeAttr.array as Float32Array).set(set.place.subarray(0, set.count * 4));
     (this.planeAttr.array as Float32Array).set(planes.subarray(0, 24));
     (this.limitAttr.array as Uint32Array)[0] = set.count;
     this.boundsAttr.needsUpdate = true;
     this.infoAttr.needsUpdate = true;
+    this.placeAttr.needsUpdate = true;
     this.planeAttr.needsUpdate = true;
     this.limitAttr.needsUpdate = true;
-    for (const attr of [this.flagAttr, this.slotAttr, this.countAttr]) {
+    for (const attr of [this.flagAttr, this.slotAttr, this.countAttr, this.faceSlotAttr, this.indirectAttr]) {
       (attr.array as Uint32Array).fill(0);
       attr.needsUpdate = true;
     }
@@ -232,27 +270,57 @@ function buildVisibilityKernel(
   })().compute(capacity) as unknown as { count: number };
 }
 
-/** 2. COMPACT: ONE thread, `capacity` iterations — the exclusive prefix sum of the flags, plus the count. It is the
- *  mesher's scan kernel with `1` in place of a key's face count, and the `Var` rule is the same FIXED BUG: an
- *  accumulator kept in a STORAGE CELL is an expression TSL re-evaluates after the assignment, which once shifted a
- *  whole slice table by one key. */
+/** 2. COMPACT: ONE thread, `capacity` iterations — TWO exclusive prefix sums in one pass, plus the indirect draw the
+ *  device writes for itself.
+ *
+ *  It is the mesher's scan kernel, run twice over the same flags:
+ *    * weighted by `1`, into `slots` — where a survivor's INDEX goes in the visible list (`gather` reads this), and
+ *      the running total is the cluster count;
+ *    * weighted by `faces`, into `faceSlot` — where a survivor's GEOMETRY goes in a compacted draw buffer. That
+ *      second sum is what lets a draw be built with no CPU involvement at all: the destination of every vertex is a
+ *      device-side number like every other offset in this pipeline.
+ *
+ *  AND THE TAIL IS THE MILESTONE: `vertexCount = faceTotal * VERTS_PER_FACE`, `instanceCount = 1`, and the two
+ *  zeros, written into the INDIRECT buffer — i.e. the draw call describes itself, and the CPU never learns how much
+ *  is visible. `geometry.setIndirect` binds exactly this buffer, and WebGPU's `drawIndirect` reads it.
+ *
+ *  The `Var` rule is the same FIXED BUG as everywhere else in this codebase: an accumulator kept in a STORAGE CELL
+ *  is an expression TSL re-evaluates after the assignment, which once shifted a whole slice table by one key. */
 function buildCompactKernel(
   flagAttr: StorageBufferAttribute,
+  infoAttr: StorageBufferAttribute,
   slotAttr: StorageBufferAttribute,
+  faceSlotAttr: StorageBufferAttribute,
   countAttr: StorageBufferAttribute,
+  indirectAttr: StorageBufferAttribute,
   capacity: number,
 ): { count: number } {
   const flags = storage(flagAttr, "uint", capacity);
+  const info = storage(infoAttr, "uint", capacity * 4);
   const slots = storage(slotAttr, "uint", capacity);
+  const faceSlots = storage(faceSlotAttr, "uint", capacity);
   const total = storage(countAttr, "uint", 1);
+  const indirect = storage(indirectAttr, "uint", 4);
   return Fn(() => {
     const running = Var(uint(0));
+    const faces = Var(uint(0));
     Loop(capacity, ({ i }) => {
       const cluster = n(i).toUint();
+      const flag = flags.element(cluster);
+      // The exclusive prefixes: the slot is written BEFORE the running totals advance, or every survivor would be
+      // shifted by its own contribution.
       slots.element(cluster).assign(n(running));
-      running.assign(n(add(n(running), flags.element(cluster))));
+      faceSlots.element(cluster).assign(n(faces));
+      running.assign(n(add(n(running), flag)));
+      // `faces` is the cluster's face count in the arena (`info` is `(base, faces, look, lod)`), counted only when
+      // the cluster survives — a culled cluster must contribute nothing to the compacted buffer's layout.
+      faces.assign(n(add(n(faces), n(mul(flag, info.element(n(add(mul(cluster, uint(4)), uint(1)))))))));
     });
     total.element(uint(0)).assign(n(running));
+    indirect.element(uint(0)).assign(n(mul(n(faces), uint(VERTS_PER_FACE)))); // vertexCount
+    indirect.element(uint(1)).assign(uint(1)); // instanceCount: the whole compacted buffer is ONE draw
+    indirect.element(uint(2)).assign(uint(0)); // firstVertex
+    indirect.element(uint(3)).assign(uint(0)); // firstInstance
   })().compute(1) as unknown as { count: number };
 }
 

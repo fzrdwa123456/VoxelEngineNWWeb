@@ -1078,14 +1078,32 @@ where it is:
     three's `intersectsSphere` (two references, because a twin that is wrong on its own would agree with itself), and
     a WIREFRAME BOX per surviving cluster drawn into the scene, additively: the kept boxes must be the ones in front
     of you, and turning around must empty the screen. A count is not a check.
-  * **WHAT THE ROUTE STILL NEEDS, in order**: (a) the INDIRECT DRAW — `IndirectStorageBufferAttribute` =
-    `STORAGE | INDIRECT`, fed by a per-`(rung, look)` bucket count so the draw reads its instance count off the
-    device, with the visible list addressing the arena (the `BatchedMesh` shape, with compute filling the list the
-    CPU fills today); (b) the LOD CUT on the GPU (the rung ladder is a quadtree, so "draw this cluster or its four
-    children" is a per-cluster error test — no offline simplifier, the parent is the same terrain re-meshed coarser,
-    which is the one place a voxel world is CHEAPER than Nanite's DAG); (c) geometry RESIDENT on the GPU with page
-    allocation and eviction (the far ring rebuilds as the window moves today, which a resident arena cannot do);
-    (d) HZB occlusion, last, because a heightfield world gains least from it.
+  * **AND STEP 2 — THE DEVICE WRITES ITS OWN DRAW CALL — IS LANDED (`lod-gpu-draw.ts`, `O`).** The visibility pass
+    already computes two exclusive prefix sums in its single-threaded `compact` pass: one weighted by `1` (where each
+    survivor's INDEX goes in the visible list) and one weighted by its FACES (where its GEOMETRY goes in a compacted
+    draw buffer), plus — the milestone — the four `u32`s of an `IndirectStorageBufferAttribute`:
+    `vertexCount = visible faces × VERTS_PER_FACE`, `instanceCount = 1`, and two zeros. **That buffer is the draw
+    call, written by the pass that knows the answer, read by the GPU, never seen by the CPU.**
+    The draw itself is ONE `Mesh` whose `position`/`normal`/`uv` attributes ARE the compacted buffers (written by
+    compute, exactly as M2c step 1 proved three binds them) with `geometry.setIndirect(buffer)` and NO `drawRange`
+    and NO count from this thread — the first draw in this engine whose size the CPU does not know.
+  * **WHY A COMPACTION COPY RATHER THAN ONE INSTANCE PER CLUSTER**: instancing would avoid the copy and cost a
+    hand-written node material (the position fetched out of a storage buffer), a FIXED per-instance vertex count —
+    one indirect draw has one `vertexCount`, so every instance would run to the LARGEST cluster and collapse the
+    leftovers into degenerate triangles, burning work proportional to the worst cluster instead of the average one —
+    and the placement in the shader that the compaction bakes in for free. The copy is bounded by WHAT IS VISIBLE
+    (a culled cluster copies nothing), it is a pure memcpy, and it leaves the draw an ORDINARY `Mesh` with ordinary
+    materials. `check:ecs` pins the compaction's work item being the visible list, the `Break` that stops each thread
+    at its own face count, the `(step, 1, step)` placement, the `IndirectStorageBufferAttribute` usage declaration
+    (`STORAGE | INDIRECT`, because the first binding wins) and the probe's `vertexCount === visible × 6` check.
+  * **WHAT THE ROUTE STILL NEEDS, in order**: (a) the LOD CUT on the GPU (the rung ladder is a quadtree, so "draw
+    this cluster or its four children" is a per-cluster error test — no offline simplifier, the parent is the same
+    terrain re-meshed coarser, which is the one place a voxel world is CHEAPER than Nanite's DAG); (b) geometry
+    RESIDENT on the GPU with page allocation and eviction (the far ring rebuilds as the window moves today, which a
+    resident arena cannot do — and the arena/compaction budget is `ARENA_FACES` in the probe, a placeholder for that
+    policy); (c) per-LOOK buckets for the compacted buffer, so the far ring's palette materials come back (today the
+    probe draws the copy with ONE material); (d) HZB occlusion, last, because a heightfield world gains least from
+    it.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

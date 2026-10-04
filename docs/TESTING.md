@@ -344,6 +344,21 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       removed and disposed).
   Note what it does NOT do: the boxes are NOT the far ring, and nothing draws from the cluster list yet — this step
   proves WHO DECIDES, and the indirect draw that consumes the list is the next one.
+→ **`O` — THE GPU-DRIVEN DRAW (the Nanite route, step 2)**: in a world, press **O**. It meshes a batch of the chunks
+  in your own column into ONE arena, culls them on the GPU, COMPACTS the survivors' vertices into a dense draw buffer,
+  and draws that buffer with an **indirect call the device wrote itself** — the copy floats 40 blocks up. What to
+  check:
+  (a) **a toast** — `GPU 间接绘制探针: 已画出 N 个面 ✓`;
+  (b) **`CULLPROBE draw:` in `debug.log`** — arena faces and chunk count, the cluster count, how many are visible and
+      how many faces that is, and **the device's own draw call**: `vertexCount` must equal `visible faces × 6` and
+      `instanceCount` must be `1`. That equality IS the step: nothing on this thread decided how much to draw;
+  (c) **`CULLPROBE draw RESULT: OK`** — the indirect buffer holds exactly the visible geometry, with the cull +
+      compaction milliseconds. Anything else prints what disagreed;
+  (d) **THE COPY MUST LOOK EXACTLY LIKE THE CHUNK 40 BLOCKS BELOW IT** — same silhouette, same holes, same edges.
+      Nothing at all, or a scrambled/spiky copy, means the placement (`place`), the arena offsets (`base`/`slice`,
+      which the mesher computes on the device) or the indirect count is wrong. Pressing `O` again replaces it;
+  (e) it is ADDITIVE: the live world still draws through its own path, so a failure here changes nothing about the
+      terrain on screen — but `renderer.log` must stay at 0/几十 KB, and a broken shader appears THERE first.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

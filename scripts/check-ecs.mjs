@@ -8001,9 +8001,13 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
     "…dispatched per cluster, ONE thread, and per cluster again");
   assert(!/\.toAtomic\(\)/.test(src),
     "…and NO ATOMICS anywhere: TSL's `atomicAdd` is a statement whose value cannot be used, so a fetch-add append is impossible — the position comes from the SCAN instead");
-  assert(/const running = Var\(uint\(0\)\);/.test(src) &&
-    /slots\.element\(cluster\)\.assign\(n\(running\)\);[\s\S]{0,120}?running\.assign\(n\(add\(n\(running\), flags\.element\(cluster\)\)\)\);/.test(src),
-    "…the prefix sum's accumulator is a `Var` assigned AFTER the slot is written (the exclusive-prefix order: writing the running total first would shift every survivor by one, the mesher's slice-table bug)…");
+  assert(/const running = Var\(uint\(0\)\);/.test(src) && /const faces = Var\(uint\(0\)\);/.test(src) &&
+    /slots\.element\(cluster\)\.assign\(n\(running\)\);[\s\S]{0,200}?faceSlots\.element\(cluster\)\.assign\(n\(faces\)\);[\s\S]{0,200}?running\.assign\(n\(add\(n\(running\), flag\)\)\);/.test(src),
+    "…the prefix sums' accumulators are `Var`s written AFTER the slot is written (the exclusive order: writing the running total first would shift every survivor by one, the mesher's slice-table bug) — TWO of them, one weighted by `1` (the list) and one by the cluster's FACES (the compacted draw buffer)…");
+  assert(/indirect\.element\(uint\(0\)\)\.assign\(/.test(src) &&
+    /mul\(n\(faces\), uint\(VERTS_PER_FACE\)\)/.test(src) &&
+    /indirect\.element\(uint\(1\)\)\.assign\(uint\(1\)\);/.test(src),
+    "…and the pass ends by writing the DRAW CALL ITSELF (vertexCount = visible faces × 6, ONE instance): the draw describes its own size, which is what lets the CPU stop knowing how much is visible");
   assert(/Loop\(capacity,[\s\S]{0,400}?total\.element\(uint\(0\)\)\.assign\(n\(running\)\);/.test(src),
     "…and the total is read out only AFTER the loop");
   assert(/If\(lessThan\(distance, n\(mul\(radius, float\(-1\)\)\)\)/.test(src),
@@ -8040,6 +8044,26 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
   assert(!/KeyN/.test(stripComments(readSource("src/data/globals/binds.ts"))), "…and N is not a gameplay bind");
   assert(/backend\?\.isWebGPUBackend !== true/.test(probeSrc),
     "…and a backend without compute turns it into a logged no-op rather than a silent lie");
+
+  // 4. THE DRAW PATH (step 2): the compaction and the device's own draw call.
+  const drawSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-draw.ts"));
+  assert(/const cluster = list\.element\(instanceIndex\);/.test(drawSrc) &&
+    /const faceSlot = faceSlots\.element\(cluster\);/.test(drawSrc),
+    "the compaction's work item is the VISIBLE LIST: a culled cluster is not in it, so it copies nothing at all…");
+  assert(/If\(greaterThanEqual\(face, faces\), \(\) => \{\n        Break\(\);/.test(drawSrc),
+    "…and the walk stops at the cluster's OWN face count with a `Break` — a `Loop` bound is a compile-time number, so the alternative is `capacity × budget` iterations for `visible faces` of real work…");
+  assert(/axis === 1 \? local : n\(mul\(local, step\)\)/.test(drawSrc) &&
+    /dstPosition\.element\(dst\)\.assign\(n\(add\(scaled, axis === 0 \? originX/.test(drawSrc),
+    "…while the placement scales X and Z by the rung's step and leaves Y alone (`(step, 1, step)`, the same scale the stream gives its own far meshes) and adds the cluster's origin…");
+  assert(/geometry\.setIndirect\(indirect\)/.test(probeSrc) && /visibleFaces \* 6/.test(probeSrc) &&
+    /indirect\[0\] === visibleFaces \* 6/.test(probeSrc),
+    "…and the DRAW's size is the buffer the DEVICE wrote (`setIndirect`), checked against the visible set's own face count — the probe reads it only to report, which is the whole distinction this step exists to make…");
+  const cullSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-cull.ts"));
+  assert(/new IndirectStorageBufferAttribute\(new Uint32Array\(4\), 1\)/.test(cullSrc) &&
+    /indirect: IndirectStorageBufferAttribute;/.test(cullSrc),
+    "…and that buffer is an `IndirectStorageBufferAttribute` (`STORAGE | INDIRECT`), so the compute pass can write it and the draw can read it — usages are fixed by the FIRST binding, and this one has to declare both…");
+  assert(/edge\.code === "KeyO"/.test(probeSrc) && !/KeyO/.test(stripComments(readSource("src/data/globals/binds.ts"))),
+    "`O` runs the draw probe through the same one-edge channel, and it is not a gameplay bind");
 });
 
 // ===== M3a: the far ring drawn as (look, tier) batches =====

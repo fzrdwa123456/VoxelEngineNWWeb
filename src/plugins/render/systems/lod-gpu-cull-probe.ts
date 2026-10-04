@@ -15,17 +15,21 @@
 //
 // IT IS A DEBUG PROBE: it owns no component, changes no streaming state, and does nothing unless `N` is pressed.
 import * as THREE from "three/webgpu";
-import type { WebGPURenderer } from "three/webgpu";
-import { ShowToast } from "../../../data/globals/commands";
+import type { IndirectStorageBufferAttribute, WebGPURenderer } from "three/webgpu";import { ShowToast } from "../../../data/globals/commands";
 import { CAMERA3D, RENDERER3D, SCENE3D } from "../../../data/globals/gfx";
-import { KEY_EVENTS, LOCAL_PLAYER, KeyEdgeReader } from "../../../data/globals/resources";
+import { KEY_EVENTS, LOCAL_PLAYER, VOXEL, KeyEdgeReader } from "../../../data/globals/resources";
 import { CHUNK_SIZE } from "../../../data/world/chunk";
+import { WORLD_SURFACE_Y, nearestWrap } from "../../../data/world/world";
+import { CHUNK_Y_COUNT, MIN_CHUNK_Y } from "../../../data/world/world";
+import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput } from "../../../data/world/mesh";
+import type { Chunk } from "../../../data/world/chunk";
+import { createMesherOutput, GpuChunkMesher, MESHER_SLOTS } from "./lod-gpu-mesher";
+import { createCompactedDraw, GpuGeometryCompactor, type CompactedDraw } from "./lod-gpu-draw";
 import { DEFAULT_LOD, inTierCoverage, lodLadder } from "../../../data/world/lod";
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
-import { nearestWrap } from "../../../data/world/world";
 import { POSITION } from "../../player/components";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
-import { CLUSTER_CAPACITY, GpuClusterCuller, cullClustersCpu, sphereInside, type ClusterSet, type FrustumPlanes } from "./lod-gpu-cull";
+import { CLUSTER_CAPACITY, GpuClusterCuller, createClusterSet, cullClustersCpu, sphereInside, type ClusterSet, type FrustumPlanes } from "./lod-gpu-cull";
 
 /** The probe touches the GPU and the camera (to build the planes) and adds its own boxes to the scene; it owns its
  *  own buffers. */
@@ -38,9 +42,18 @@ export const CULL_PROBE_ACCESS: SystemAccess = {
  *  this is a guard against a pathological set, not a normal limit. */
 const BOX_CAP = 1500;
 
+/** The arena the draw probe meshes into, in FACES. It is also the compaction's budget: a cluster past it is
+ *  truncated by the mesher's own capacity check rather than by the draw. */
+const ARENA_FACES = 8192;
+
 /** Height of a far chunk's super-voxel column, in blocks: the ladder scales a chunk by `(step, 1, step)`, so its
  *  vertical extent stays 32 blocks while its footprint grows. */
 const FAR_CHUNK_HEIGHT = CHUNK_SIZE;
+
+/** WHERE A FAR CELL'S GEOMETRY SITS VERTICALLY. The far ring's own mesh input is built around the surface, so its
+ *  chunk is placed at the terrain band's base — the probe's clusters use the same level, which is what makes the
+ *  spheres (and a later compaction) sit where the ring actually draws. */
+const FAR_CHUNK_BASE_Y = WORLD_SURFACE_Y;
 
 /** RENDER lane. `N` starts the probe; everything else about it is reported, never acted on. */
 export class GpuCullProbeSystem {
@@ -51,6 +64,9 @@ export class GpuCullProbeSystem {
   private readonly log: (line: string) => void;
   private readonly playerIndex: number;
   private culler: GpuClusterCuller | null = null;
+  private compactor: GpuGeometryCompactor | null = null;
+  private compacted: CompactedDraw | null = null;
+  private drawn: THREE.Mesh | null = null;
   private boxes: THREE.LineSegments | null = null;
   /** One probe at a time: a second `N` while it runs is ignored (it awaits the GPU). */
   private busy = false;
@@ -66,10 +82,173 @@ export class GpuCullProbeSystem {
 
   step(): void {
     let presses = 0;
+    let draws = 0;
     this.keys.drain((edge) => {
-      if (edge.down && !edge.repeat && edge.code === "KeyN") presses++;
+      if (!edge.down || edge.repeat) return;
+      if (edge.code === "KeyN") presses++;
+      if (edge.code === "KeyO") draws++;
     });
     if (presses > 0 && !this.busy) void this.run();
+    else if (draws > 0 && !this.busy) void this.runDraw();
+  }
+
+  /** `O`: THE WHOLE GPU-DRIVEN DRAW, end to end, on ONE batch of real chunks.
+   *
+   *  It is the smallest thing that exercises every part of the route at once: the mesher fills an ARENA, the cull
+   *  keeps what the camera sees, the compaction copies those clusters into a dense buffer, and the DRAW reads its
+   *  vertex count out of an indirect buffer THE DEVICE WROTE. Nothing about what is drawn comes back to this thread
+   *  — the readbacks below exist only to REPORT.
+   *
+   *  The copy floats 40 blocks up (`place.y`), so it cannot be confused with the chunk it came from: an identical
+   *  silhouette 40 blocks higher IS the proof, and a scrambled or empty copy is a failure of the placement, the
+   *  offsets or the indirect count. */
+  private async runDraw(): Promise<void> {
+    this.busy = true;
+    const started = performance.now();
+    const backend = (this.renderer as { backend?: { isWebGPUBackend?: boolean } }).backend;
+    if (backend?.isWebGPUBackend !== true) {
+      this.log("CULLPROBE draw off: this backend is not WebGPU, so there is no compute queue to draw from");
+      this.busy = false;
+      return;
+    }
+    try {
+      const batch = this.realChunks();
+      if (batch.length === 0) {
+        this.log("CULLPROBE draw: no real chunk with faces in the player's column (nothing to draw)");
+      } else {
+        // 1. THE ARENA: one kernel build, `batch.length` chunks, offsets decided on the device.
+        const output = createMesherOutput(ARENA_FACES);
+        const mesher = new GpuChunkMesher(this.renderer, output, batch.length);
+        const packed = await mesher.run(batch.map((entry) => entry.input));
+        // 2. THE CLUSTERS: one per (chunk, look slice) — the arena offsets the mesher reported, the chunk's origin
+        //    as the placement, and the slice's own bounding box lifted 40 blocks.
+        const set = createClusterSet(CLUSTER_CAPACITY);
+        let arenaFaces = 0;
+        for (let chunk = 0; chunk < packed.length; chunk++) {
+          const geometry = packed[chunk];
+          const origin = batch[chunk].origin;
+          arenaFaces += geometry.faces;
+          for (const slice of geometry.slots) {
+            const at = set.count * 4;
+            set.bounds[at] = origin[0] + CHUNK_SIZE / 2;
+            set.bounds[at + 1] = origin[1] + 40 + CHUNK_SIZE / 2;
+            set.bounds[at + 2] = origin[2] + CHUNK_SIZE / 2;
+            set.bounds[at + 3] = Math.SQRT2 * CHUNK_SIZE;
+            set.info[at] = geometry.base + slice.start;
+            set.info[at + 1] = slice.count;
+            set.info[at + 2] = slice.key;
+            set.info[at + 3] = 1;
+            set.place[at] = origin[0];
+            set.place[at + 1] = origin[1] + 40;
+            set.place[at + 2] = origin[2];
+            set.place[at + 3] = 1;
+            set.count++;
+          }
+        }
+        // 3. CULL, then 4. COMPACT — the first pass decides what exists, the second copies it.
+        this.culler ??= new GpuClusterCuller(this.renderer, CLUSTER_CAPACITY);
+        const planes = this.frustumPlanes();
+        const gpuStart = performance.now();
+        const visible = await this.culler.cull(set, planes);
+        let visibleFaces = 0;
+        for (const cluster of visible) visibleFaces += set.info[cluster * 4 + 1];
+        const compacted = this.compacted ?? createCompactedDraw(ARENA_FACES);
+        this.compacted = compacted;
+        this.compactor ??= new GpuGeometryCompactor(this.renderer, this.culler, output, compacted, CLUSTER_CAPACITY);
+        await this.compactor.run();
+        const gpuMs = performance.now() - gpuStart;
+        // 5. THE DRAW: an ordinary Mesh whose attributes are the COMPACTED buffers and whose vertex count is the
+        //    buffer the device wrote. No `drawRange`, no count from here — `setIndirect` is the whole mechanism.
+        const indirectAttr = this.culler.clusterBuffers.indirect;
+        this.showDraw(compacted, indirectAttr, visibleFaces);
+        const indirect = new Uint32Array(await this.renderer.getArrayBufferAsync(indirectAttr));
+        this.log(
+          `CULLPROBE draw: arena ${arenaFaces} face(s) in ${packed.length} chunk(s), ${set.count} cluster(s) — ` +
+            `${visible.length} visible = ${visibleFaces} face(s) of ${compacted.faceCapacity}; the DEVICE's own draw call is ` +
+            `vertexCount ${indirect[0]} (= ${visibleFaces * 6} expected), instanceCount ${indirect[1]}, firstVertex ${indirect[2]}`,
+        );
+        this.log(
+          `CULLPROBE draw RESULT: ${
+            indirect[0] === visibleFaces * 6 && indirect[1] === 1
+              ? "OK — the indirect buffer holds exactly the visible geometry and ONE instance"
+              : "MISMATCH — the device's draw call disagrees with the visible set"
+          }; cull + compact took ${gpuMs.toFixed(2)}ms (3 cull dispatches + 1 compaction, and the only readback here is this report's)`,
+        );
+        this.world.commands.send(ShowToast, {
+          key:
+            "GPU 间接绘制探针: " +
+            (indirect[0] === visibleFaces * 6 ? `已画出 ${visibleFaces} 个面 ✓` : `间接参数不符! ${indirect[0]}`),
+          raw: true,
+        });
+      }
+    } catch (err) {
+      this.log(`CULLPROBE draw FAILED: ${String((err as Error)?.message ?? err)}`);
+      this.world.commands.send(ShowToast, { key: `GPU 间接绘制失败: ${String((err as Error)?.message ?? err)}`, raw: true });
+    } finally {
+      this.log(`CULLPROBE draw done in ${(performance.now() - started).toFixed(0)}ms`);
+      this.busy = false;
+    }
+  }
+
+  /** THE REAL CHUNKS this probe may draw: the player's own column, top down, the ones with faces — the same choice
+   *  the mesher probe makes, because an arena with nothing in it proves nothing. */
+  private realChunks(): { input: ChunkMeshInput; origin: [number, number, number] }[] {
+    const out: { input: ChunkMeshInput; origin: [number, number, number] }[] = [];
+    const periodX = worldChunksX();
+    const periodZ = worldChunksZ();
+    const wrap = (value: number, period: number): number => ((value % period) + period) % period;
+    const playerChunkX = Math.floor(POSITION.x[this.playerIndex] / CHUNK_SIZE);
+    const playerChunkZ = Math.floor(POSITION.z[this.playerIndex] / CHUNK_SIZE);
+    const cx = wrap(playerChunkX, periodX);
+    const cz = wrap(playerChunkZ, periodZ);
+    // The nearest torus representation, so the copy lands next to the player rather than a lap away (the M2c probe
+    // reported that exact mistake once).
+    const atX = nearestWrap(cx, playerChunkX, periodX) * CHUNK_SIZE;
+    const atZ = nearestWrap(cz, playerChunkZ, periodZ) * CHUNK_SIZE;
+    const voxel = this.world.resource(VOXEL);
+    for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y && out.length < MESHER_SLOTS; cy--) {
+      const chunk: Chunk | null = voxel.getChunk(cx, cy, cz);
+      if (chunk === null) continue;
+      const input = gatherChunkMeshInput(voxel, chunk, cx, cy, cz);
+      if (meshChunk(input).faces === 0) continue;
+      out.push({ input, origin: [atX, cy * CHUNK_SIZE, atZ] });
+    }
+    return out;
+  }
+
+  /** Put the compacted buffer in the scene as an ordinary `Mesh`, drawn by the DEVICE's indirect call. The previous
+   *  run's mesh is removed and disposed first; the buffers themselves stay (they are the compactor's). */
+  private showDraw(draw: CompactedDraw, indirect: IndirectStorageBufferAttribute, visibleFaces: number): void {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", draw.position);
+    geometry.setAttribute("normal", draw.normal);
+    geometry.setAttribute("uv", draw.uv);
+    // THE ONLY NEW CONCEPT: the draw's size comes from a buffer the compute pass wrote. No `drawRange`, no count.
+    geometry.setIndirect(indirect);
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
+    const material = new THREE.MeshLambertMaterial({ color: 0x7fd4ff });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = "gpu-indirect-draw-probe";
+    mesh.frustumCulled = false;
+    this.disposeDraw();
+    this.world.resource(SCENE3D).add(mesh);
+    this.drawn = mesh;
+    this.log(
+      `CULLPROBE draw: a floating copy of ${visibleFaces} visible face(s), drawn by the DEVICE's indirect call — it ` +
+        `must look EXACTLY like the chunk 40 blocks below it (same silhouette, same holes). An empty or scrambled ` +
+        `copy means the placement, the arena offsets or the indirect count is wrong.`,
+    );
+  }
+
+  private disposeDraw(): void {
+    const mesh = this.drawn;
+    if (mesh === null) return;
+    this.world.resource(SCENE3D).remove(mesh);
+    mesh.geometry.dispose();
+    const material = mesh.material;
+    if (Array.isArray(material)) for (const one of material) one.dispose();
+    else material.dispose();
+    this.drawn = null;
   }
 
   /** Build the cluster set, cull it on the GPU, compare it against both CPU references, and draw the survivors. */
@@ -161,10 +340,11 @@ export class GpuCullProbeSystem {
    *  everything that would be resident), placed at its nearest torus representation exactly as the stream places its
    *  meshes. The bounding sphere is the cell's extent: `32 * step` wide in X/Z (the mesh is scaled by `(step, 1,
    *  step)`) and one chunk tall in Y. */
-  private clusterSet(): { count: number; bounds: Float32Array; info: Uint32Array } {
+  private clusterSet(): { count: number; bounds: Float32Array; info: Uint32Array; place: Float32Array } {
     const capacity = CLUSTER_CAPACITY;
     const bounds = new Float32Array(capacity * 4);
     const info = new Uint32Array(capacity * 4);
+    const place = new Float32Array(capacity * 4);
     const playerX = POSITION.x[this.playerIndex];
     const playerZ = POSITION.z[this.playerIndex];
     const playerY = POSITION.y[this.playerIndex];
@@ -195,11 +375,17 @@ export class GpuCullProbeSystem {
           info[at + 1] = 0;
           info[at + 2] = 0;
           info[at + 3] = rung + 1;
+          // WHERE THE CELL'S GEOMETRY WOULD GO, at the rung's own scale — the same numbers the stream places meshes
+          // with, so a compaction of this set would land exactly on the terrain the ring draws.
+          place[at] = nearX * cell;
+          place[at + 1] = FAR_CHUNK_BASE_Y;
+          place[at + 2] = nearZ * cell;
+          place[at + 3] = tier.step;
           count++;
         }
       }
     }
-    return { count, bounds, info };
+    return { count, bounds, info, place };
   }
 
   private rungCount(): number {
