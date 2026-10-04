@@ -3960,6 +3960,9 @@ function registrations() {
     // schedule must place it after `chunk.stream`) and writes its own buffers.
     LOD_SAMPLE_ACCESS: load("plugins/render/systems/lod-gpu-sampler.js").LOD_SAMPLE_ACCESS,
 MESH_PROBE_ACCESS: load("plugins/render/systems/lod-gpu-mesher-probe.js").MESH_PROBE_ACCESS,
+    // The NANITE ROUTE's first step: the visibility pass (`N`). It reads the camera (the frustum planes the kernel
+    // and both CPU references share) and writes its own buffers plus its own boxes.
+    CULL_PROBE_ACCESS: load("plugins/render/systems/lod-gpu-cull-probe.js").CULL_PROBE_ACCESS,
     // ui/inventory.ts is NOT compiled by this gate (it imports the renderer), so its declared access is
     // read out of the SOURCE and mapped onto the real component objects: the schedule then sees exactly
     // what the file declares, and the source-text assertion below keeps the two honest.
@@ -4036,7 +4039,7 @@ check("the real schedule resolves into the batches the docs claim", () => {
     // `lod.gpu.sample` (M1) READS the far key set `chunk.stream` writes, so the conflict rule puts it in the batch
     // AFTER that one — and nothing orders it against the draw (it fills its own buffers, which the draw never reads),
     // so the two share this batch and either order is correct.
-    ["lod.gpu.sample", "renderer.draw"],
+    ["lod.gpu.sample", "lod.gpu.cullProbe", "renderer.draw"],
   ];
   // The ui lane: every widget-data WRITER, then the reconciler that reads all of it. The writers are a
   // chain rather than a pair because the conflict model is per COMPONENT, not per entity —the
@@ -6182,7 +6185,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(contribute(load("plugins/input/index.js").inputPlugin).list(S.SLOT_RESOURCES).length, 2,
     "the input plugin owns the bind table and the rebind gesture");
   assert(/SLOT_RESOURCES/.test(stripComments(readSource("src/plugins/render/index.ts"))) &&
-    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 7,
+    countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g) === 8,
     "the render plugin owns the GPU resources");
   assert(/SLOT_RESOURCES, \[PERF_SAMPLER, DEBUG_LOG\]/.test(readSource("src/plugins/diagnostics/index.ts")),
     "the diagnostics plugin owns the perf sampler and the log forwarder");
@@ -6332,9 +6335,9 @@ check("the plugin system: extension points, the registry, the install and the ma
   // under its own id, so a manifest line that disables it removes exactly that system.
   equal(countOf(stripComments(readSource("src/plugins/ui-debug/index.ts")), /api\.system\(/g), 1,
     "…and the ui-debug plugin declares the F3/picker system itself");
-  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 7,
-    "…the render plugin declares its seven systems (the camera, the stream, the outline, the GPU sampler, the two " +
-      "probes — M0's field probe and M2a's mesher probe — and the draw)");
+  equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 8,
+    "…the render plugin declares its eight systems (the camera, the stream, the outline, the GPU sampler, the three " +
+      "probes — M0's field probe, M2a's mesher probe and the Nanite route's visibility probe — and the draw)");
   equal(countOf(stripComments(readSource("src/plugins/player/index.ts")), /api\.system\(/g), 6,
     "…the player plugin declares its six systems");
   equal(countOf(stripComments(readSource("src/plugins/diagnostics/index.ts")), /api\.system\(/g), 1,
@@ -7920,6 +7923,110 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "…and a backend without compute turns it into a logged no-op rather than a silent lie");
   assert(/expectedFaces/.test(probeSrc) && /CLOSED FORM SAYS/.test(probeSrc),
     "…and the synthetic cases carry a closed-form face count to check the CPU reference itself against");
+});
+
+// ===== The Nanite route, step 1: the GPU visibility pass =====
+console.log("\n--- the Nanite route: clusters -> a compacted visible list, on the GPU ---");
+
+check("the visibility pass: the three passes, the CPU twin, and the probe's two references", () => {
+  // WHY THIS EXISTS. The route inverts who decides what is drawn, so its first component is a cull that must be
+  // RIGHT before it is fast: a cluster dropped while it is on screen is a hole in the world. What can be proven
+  // without a device is the ALGORITHM (the CPU twin is the same three steps: flag, exclusive prefix, gather) and
+  // the fact that its rule is three's own `Frustum` rule — so the device comparison has a reference that is not a
+  // second copy of the same idea.
+  const cull = load("plugins/render/systems/lod-gpu-cull.js");
+  const THREE = require("three/webgpu");
+
+  // 1. THE ALGORITHM, DRIVEN: a real `Frustum`, and a grid of clusters laid out so that a cull which kept
+  //    everything or nothing would fail the assertions below rather than pass them.
+  const camera = new THREE.PerspectiveCamera(70, 16 / 9, 0.1, 600);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  camera.updateMatrixWorld();
+  const frustum = new THREE.Frustum().setFromProjectionMatrix(
+    new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+  const planes = new Float32Array(24);
+  for (let p = 0; p < 6; p++) {
+    planes[p * 4] = frustum.planes[p].normal.x;
+    planes[p * 4 + 1] = frustum.planes[p].normal.y;
+    planes[p * 4 + 2] = frustum.planes[p].normal.z;
+    planes[p * 4 + 3] = frustum.planes[p].constant;
+  }
+
+  const set = cull.createClusterSet(512);
+  let count = 0;
+  for (let x = -200; x <= 200; x += 50) {
+    for (let z = -200; z <= 200; z += 50) {
+      const at = count * 4;
+      set.bounds[at] = x;
+      set.bounds[at + 1] = 0;
+      set.bounds[at + 2] = z;
+      set.bounds[at + 3] = 20;
+      count++;
+    }
+  }
+  set.count = count;
+  const list = cull.cullClustersCpu(set, planes);
+  assert(list.length > 0 && list.length < count,
+    `the cull neither keeps nor drops everything (${list.length} of ${count} clusters visible — a test that cannot fail is not a test)`);
+
+  const visible = new Set(list);
+  let threeDisagrees = 0;
+  const sphere = new THREE.Sphere();
+  for (let i = 0; i < count; i++) {
+    sphere.set(new THREE.Vector3(set.bounds[i * 4], set.bounds[i * 4 + 1], set.bounds[i * 4 + 2]), set.bounds[i * 4 + 3]);
+    // THREE'S OWN RULE IS THE TWIN'S RULE: both treat a sphere that OVERLAPS a plane as visible (a cull must never
+    // drop something the frustum touches), so they must agree exactly — not approximately — on the same planes.
+    if (frustum.intersectsSphere(sphere) !== cull.sphereInside(set, planes, i)) threeDisagrees++;
+    if (visible.has(i) !== cull.sphereInside(set, planes, i)) threeDisagrees++;
+  }
+  equal(threeDisagrees, 0, "every cluster is classified the same way by the CPU twin, the list it produced, and THREE's own Frustum");
+
+  let ascending = true;
+  for (let i = 1; i < list.length; i++) if (list[i] <= list[i - 1]) ascending = false;
+  assert(ascending, "…and the list is in CLUSTER ORDER: the scan hands survivors their slots in index order, which is what makes the draw list reproducible frame to frame");
+
+  // THE ARENA FIELDS SURVIVE THE ROUND TRIP: `info` is what a draw buckets by, and it is the mesher's own
+  // `(base, faces, look, lod)` — a cull that lost it would leave the draw nothing to draw.
+  for (let i = 0; i < count; i++) set.info[i * 4] = 1000 + i;
+  const infoSet = load("plugins/render/systems/lod-gpu-cull.js").createClusterSet(512);
+  infoSet.info.set(set.info);
+  equal(infoSet.info[0], 1000, "the cluster's arena offset rides along in `info` (base, faces, look, lod)");
+
+  // 2. THE SOURCE CONTRACT.
+  const src = stripComments(readSource("src/plugins/render/systems/lod-gpu-cull.ts"));
+  equal(countOf(src, /\.compute\(/g), 3,
+    "THREE passes, and the count is the design: visibility (one thread per cluster), compact (ONE thread, the prefix sum) and gather (one thread per cluster)");
+  assert(/\)\(\)\.compute\(capacity\) as unknown as \{ count: number \};\n\}/.test(src) && /\)\(\)\.compute\(1\) as unknown as \{ count: number \};/.test(src),
+    "…dispatched per cluster, ONE thread, and per cluster again");
+  assert(!/\.toAtomic\(\)/.test(src),
+    "…and NO ATOMICS anywhere: TSL's `atomicAdd` is a statement whose value cannot be used, so a fetch-add append is impossible — the position comes from the SCAN instead");
+  assert(/const running = Var\(uint\(0\)\);/.test(src) &&
+    /slots\.element\(cluster\)\.assign\(n\(running\)\);[\s\S]{0,120}?running\.assign\(n\(add\(n\(running\), flags\.element\(cluster\)\)\)\);/.test(src),
+    "…the prefix sum's accumulator is a `Var` assigned AFTER the slot is written (the exclusive-prefix order: writing the running total first would shift every survivor by one, the mesher's slice-table bug)…");
+  assert(/Loop\(capacity,[\s\S]{0,400}?total\.element\(uint\(0\)\)\.assign\(n\(running\)\);/.test(src),
+    "…and the total is read out only AFTER the loop");
+  assert(/If\(lessThan\(distance, n\(mul\(radius, float\(-1\)\)\)\)/.test(src),
+    "…and the sphere test is the CONSERVATIVE one (`distance < -radius`, so an overlap stays visible)");
+  assert(/for \(let p = 0; p < 6; p\+\+\)/.test(src),
+    "the six planes are UNROLLED in TypeScript, so the plane count is a compile-time fact the shader cannot disagree about");
+  assert(/If\(equal\(flags\.element\(instanceIndex\), uint\(1\)\)/.test(src),
+    "…and the gather writes only for a surviving flag (a cluster that fails is never placed)");
+
+  // 3. THE PROBE: two CPU references, a visual, and its own key.
+  const probeSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-cull-probe.ts"));
+  assert(/cullClustersCpu\(set, planes\)/.test(probeSrc) && /frustum\.intersectsSphere\(sphere\)/.test(probeSrc),
+    "the probe compares the GPU's list against the CPU twin AND against THREE's own sphere test — two references, because a twin that is wrong on its own would agree with itself");
+  assert(/lodLadder\(DEFAULT_LOD, worldChunksX\(\), playerX, playerZ\)/.test(probeSrc) && /nearestWrap\(pcx \+ dx, pcx, period\)/.test(probeSrc),
+    "…over the REAL rung ladder around the player, at the nearest torus representation the stream places its meshes with (the wrapped-index bug the M2c probe already reported once)");
+  assert(/new THREE\.LineSegments\(geometry, material\)/.test(probeSrc) && /world\.resource\(SCENE3D\)\.add\(lines\)/.test(probeSrc) &&
+    /disposeBoxes\(\)/.test(probeSrc),
+    "…and it DRAWS the survivors as wireframe boxes, additively, replacing the previous run's (a count is not a check: the kept boxes have to be the ones in front of you)");
+  assert(/edge\.code === "KeyN"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
+    "`N` starts it, through the same one-edge channel every global chord uses");
+  assert(!/KeyN/.test(stripComments(readSource("src/data/globals/binds.ts"))), "…and N is not a gameplay bind");
+  assert(/backend\?\.isWebGPUBackend !== true/.test(probeSrc),
+    "…and a backend without compute turns it into a logged no-op rather than a silent lie");
 });
 
 // ===== M3a: the far ring drawn as (look, tier) batches =====

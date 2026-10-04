@@ -23,6 +23,9 @@ import { LodGpuSamplerSystem, LOD_SAMPLE_ACCESS } from "./systems/lod-gpu-sample
 // M2a of the GPU route: the MESHER's decision as a compute kernel, proven against the production CPU mesher by a
 // probe (`M`) — the step before the geometry can be produced on the GPU instead of on this thread.
 import { GpuMesherProbeSystem, MESH_PROBE_ACCESS } from "./systems/lod-gpu-mesher-probe";
+// The NANITE ROUTE's first step: the GPU visibility pass (`N` proves it against two CPU references, and draws the
+// survivors it kept). The CPU stops deciding what to draw, which is the whole point of the route.
+import { GpuCullProbeSystem, CULL_PROBE_ACCESS } from "./systems/lod-gpu-cull-probe";
 import { definePlugin } from "../../core/plugin/descriptor";
 import {
   BLOCK_OUTLINE,
@@ -72,6 +75,7 @@ export function createRenderSystems(w: RenderWiring) {
     lodProbe: new LodGpuProbeSystem(w.world, w.log ?? (() => {})),
     lodSampler,
     mesherProbe: new GpuMesherProbeSystem(w.world, w.log ?? (() => {})),
+    cullProbe: new GpuCullProbeSystem(w.world, w.log ?? (() => {})),
   };
 }
 
@@ -141,6 +145,18 @@ export function createRenderPlugin(w: RenderWiring) {
   stage: "render",
   ...MESH_PROBE_ACCESS,
   run: () => s.mesherProbe.step(),
+    });
+    api.system({
+  // THE NANITE ROUTE's visibility pass: `N` runs it. It reads the camera (to build the frustum planes the kernel
+  // and the CPU reference share) and writes only its own buffers plus its own boxes, so it lands beside the other
+  // probes and touches nothing the live draw reads.
+  name: "lod.gpu.cullProbe",
+  stage: "render",
+  ...CULL_PROBE_ACCESS,
+  // DECLARED, because the camera has a writer: the planes must be the pose this frame was drawn with, so the probe
+  // runs after `cameraView.render` (registration order is not a dependency — the schedule refuses to guess).
+  after: ["cameraView.render"],
+  run: () => s.cullProbe.step(),
     });
     api.system({
   // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself

@@ -659,7 +659,7 @@ where it is:
     (`WORLD_SIZE`) the driver reads, changed by the `SetWorldSize` command from the world-type panel (presets +
     a slider bound to the value in force), and persisted as `worldXZ`.
 * **`G`, `H` AND `J` ARE THE DEBUG VIEWS (P1.94/P1.96/P1.98).** (`L` is the far ring's batching switch, `K` the GPU
-  sampler probe and `M` the GPU mesher probe — each is its own bullet below.) In a world, `G` tints every chunk mesh by its
+  sampler probe, `M` the GPU mesher probe and `N` the visibility pass — each is its own bullet below.) In a world, `G` tints every chunk mesh by its
   RUNG: `LOD_TIER_TINT` has one colour per rung the shipped ladder can have (six, indexed by the rung), `H`
   switches every chunk
   mesh to three.js's TRIANGLE
@@ -1040,6 +1040,41 @@ where it is:
     = `STORAGE | INDIRECT`, and the backend already consumes `renderObject.getIndirect()`); (c) then the far ring's
     stream swaps its CPU meshes for these, with the reserve and the fades intact (per-Mesh `visible` and per-chunk
     material copies behave exactly as today).
+* **`N` IS THE VISIBILITY PASS (the NANITE ROUTE's step 1, `plugins/render/systems/lod-gpu-cull.ts` +
+  `lod-gpu-cull-probe.ts`).** Every GPU step before this one still ended the same way: the CPU decided WHAT TO DRAW
+  (which chunks, which rung, which are in front of the camera) and the GPU only drew it — the classic LOD shape, and
+  the reason the main thread is the wall. The Nanite shape inverts it: geometry is a set of CLUSTERS resident on the
+  GPU, and the GPU decides which survive and hands the draw a LIST. This step is the first half of that (the list;
+  the indirect draw is next), and it is ADDITIVE — nothing in the live scene reads it.
+  * **A CLUSTER IS NOT A NEW CONCEPT HERE**: one contiguous run of faces in the mesher's arena (`base`, `faces`) plus
+    a world-space bounding sphere and the `look`/`lod` a draw buckets by. The arena already produces the unit; this
+    file adds the two fields it was missing.
+  * **THE VISIBILITY TEST IS THREE PASSES, AND THE REASON IS THE SAME ONE THE MESHER HIT: TSL HAS NO FETCH-ADD.**
+    `atomicAdd` is a statement (TSL wraps it in `.toStack()`), so "append at the slot the counter returned" is not
+    expressible. Instead: `visibility` (one thread per cluster, six plane tests, a 0/1 flag — the only pass doing
+    real work), `compact` (ONE thread, `capacity` iterations: the EXCLUSIVE PREFIX SUM of the flags, so `slots[i]`
+    is where cluster `i` goes IF it survives — the mesher's scan kernel with `1` where a key's count was), and
+    `gather` (one thread per cluster: a survivor writes its own index at `slots[i]`). The list comes out in CLUSTER
+    ORDER, so the same camera gives the same list frame to frame — a property a fetch-add order would not have.
+  * **THE PLANES COME FROM THE CPU, ON PURPOSE, FOR THIS STEP**: the kernel has to be VERIFIABLE, so the gate and the
+    probe push the identical 24 floats through three's own `Frustum`, and the sphere rule (`distance < -radius` is
+    culled, so an OVERLAP stays visible) is exactly `Frustum.intersectsSphere`'s. The CPU twin (`cullClustersCpu`) is
+    written as the same three steps rather than as a filter, because the slot each survivor lands in is part of what
+    must agree.
+  * **`N`, in a world, runs it and REPORTS THREE THINGS**: the cluster count and the ladder's rung count (built from
+    the REAL `lodLadder` around the player, each cell placed at its nearest torus representation — the wrapped-index
+    mistake the M2c probe already reported once), the GPU's visible count against `cullClustersCpu` AND against
+    three's `intersectsSphere` (two references, because a twin that is wrong on its own would agree with itself), and
+    a WIREFRAME BOX per surviving cluster drawn into the scene, additively: the kept boxes must be the ones in front
+    of you, and turning around must empty the screen. A count is not a check.
+  * **WHAT THE ROUTE STILL NEEDS, in order**: (a) the INDIRECT DRAW — `IndirectStorageBufferAttribute` =
+    `STORAGE | INDIRECT`, fed by a per-`(rung, look)` bucket count so the draw reads its instance count off the
+    device, with the visible list addressing the arena (the `BatchedMesh` shape, with compute filling the list the
+    CPU fills today); (b) the LOD CUT on the GPU (the rung ladder is a quadtree, so "draw this cluster or its four
+    children" is a per-cluster error test — no offline simplifier, the parent is the same terrain re-meshed coarser,
+    which is the one place a voxel world is CHEAPER than Nanite's DAG); (c) geometry RESIDENT on the GPU with page
+    allocation and eviction (the far ring rebuilds as the window moves today, which a resident arena cannot do);
+    (d) HZB occlusion, last, because a heightfield world gains least from it.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

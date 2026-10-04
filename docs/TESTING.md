@@ -318,6 +318,26 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   Note what it does NOT do yet: the LIVE far ring still draws through its `BatchedMesh` buckets, fed from CPU
   meshes, so the terrain on screen is unchanged by design — the floating copy above you is the only thing the GPU
   mesher's own buffers draw.
+→ **`N` — THE VISIBILITY PASS (the Nanite route, step 1)**: in a world, press **N** (not a bind, like G/H/J/K/L/M).
+  It builds the REAL rung ladder's cells around you as CLUSTERS, culls them on the GPU in three compute passes, and
+  draws a wireframe box at every cluster the GPU KEPT. Nothing in the live world changes. What to check:
+  (a) **a toast** — `剔除 GPU 探针: 与 CPU 一致 ✓ (k/n 可见)` — or `不一致! …` with the first difference;
+  (b) **`CULLPROBE set:` in `debug.log`** — the cluster count, the ladder's rung count, and THREE counts of the same
+      thing: what the GPU kept, what the CPU twin kept, and what three's own `Frustum` kept. **All three must be the
+      same number**; a difference between the CPU twin and three's Frustum would mean the CPU reference is the thing
+      that is wrong, so read the line rather than just the verdict;
+  (c) **`CULLPROBE RESULT: OK`** — the GPU's list is `identical to the CPU's, in the same order`, with how many of the
+      clusters were culled and the GPU milliseconds (3 dispatches + readback). Anything else prints the first
+      position where the two lists differ;
+  (d) **THE BOXES ARE THE REAL CHECK.** Look around: every box must be in FRONT of you, none behind, none missing at
+      the edge of the screen, and turning 180° must leave the screen empty. Then fly forward and press `N` again —
+      the boxes must follow the new camera. A box that stays behind you, or a spot in front with no box, is the thing
+      to report (say which, and whether it is at the screen edge — the sphere rule keeps anything the frustum
+      TOUCHES, so a box straddling the edge is correct);
+  (e) **`CULLPROBE draw:`** names how many boxes were drawn. A second `N` replaces them (the previous ones are
+      removed and disposed).
+  Note what it does NOT do: the boxes are NOT the far ring, and nothing draws from the cluster list yet — this step
+  proves WHO DECIDES, and the indirect draw that consumes the list is the next one.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser
