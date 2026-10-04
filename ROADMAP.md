@@ -3186,12 +3186,34 @@ Still outstanding:
   CPU mesher's indexed vertices through that table and never reads its index buffer, and the gate pins the absence of
   every index structure plus the six-vertex sizing of all three buffers (including the kernels' own accessor lengths,
   which were still derived from the old four).
-  **STILL TO DO, in order**: (a) a shared arena per rung with a per-chunk region and a base-offset uniform — one kernel
-  for every chunk, which is what the injectable output exists to enable; (b) the per-chunk draw metadata the CPU needs
-  for `drawRange`/`groups`, which lives on the DEVICE: either a batched readback or a compute-written indirect draw list
-  (`IndirectStorageBufferAttribute` = `STORAGE | INDIRECT`, and the backend already consumes
-  `renderObject.getIndirect()`); (c) the far ring's stream swapping its CPU meshes for these, with the reserve and the
-  fades intact (per-Mesh `visible` and per-chunk material copies behave exactly as today).
+  **M2c STEP 2a AS LANDED — THE ARENA: ONE KERNEL BUILD, MANY CHUNKS.** The per-chunk output set was the one shape
+  that could not ship, because a storage array's length is baked into the kernel: one output set means one pipeline
+  build (~200 ms), so a chunk-per-build design was never going to reach the far ring. The mesher now takes a BATCH of
+  `MESHER_SLOTS` chunks into ONE output set, and the mechanism is that **the slot is decoded from the thread id**
+  (`slot = instanceIndex / KEYS` in emit, `/ CHUNK_VOLUME` in census). That choice is deliberate: the alternative — a
+  per-chunk uniform (or a storage cell the CPU writes) updated between dispatches — would have to be re-uploaded
+  inside one frame, and three gives no promise about that; a thread-id decode has no state to get wrong. Four kernels
+  replace three: `census` (over `slots * CHUNK_VOLUME`, into `counts[slot*KEYS + key]`), `scan` (ONE THREAD PER SLOT,
+  that slot's prefix sum and total), the new **`bases`** (ONE thread over the slots: the exclusive prefix sum of the
+  totals, i.e. where each slot begins in the arena, with the grand total in the last of `slots + 1` cells), and `emit`
+  (one thread per (slot, key), writing ARENA-ABSOLUTE at `bases[slot] + starts[slot][key] + rank`). `bases` is the
+  kernel that makes the whole thing possible: **the CPU does not know how many faces a chunk will produce, and with
+  this pass it does not have to** — the offsets are decided on the device, per batch, with no round trip.
+  `run(inputs)` returns one `PackedGeometry` per input, each holding a `subarray` SLICE of the one arena (nothing is
+  copied) plus the `base` that says where that slice really is; `slots[].start` stays slot-relative (what
+  `geometry.addGroup` wants) and `base + start` is the arena offset a whole-arena draw would use. The CPU twin stayed
+  ONE implementation: `packFromPad` is now `packBatchFromPad([padded], capacity)[0]`, so the single and batched paths
+  cannot drift about the walk, the layout or the slice table. `check:ecs` DRIVES the arena over five synthetic chunks
+  (one of them AIR) and pins what the rollout depends on: every slot still equals `meshChunk` face by face, the
+  offsets are the RUNNING SUM (no overlap, no gap, and an empty slot still occupies its own offset so the slots after
+  it cannot move), each slice really is the arena window its `base` points at — read through the shared buffer, which
+  a per-slot comparison cannot see — and an arena one face too small THROWS instead of truncating. `M` does the same
+  on the device over up to `MESHER_SLOTS` real chunks and reports `MESHPROBE arena: …`, counted in the verdict.
+  **WHAT STEP 2a DOES NOT DECIDE, and why it is the next question**: how big the arena is and who gets a region.
+  A worst-case reservation is impossible — a face is ~240 B in the drawn layout (6 vertices × vec4 position + vec4
+  normal + vec2 uv), so a ~5000-chunk far ring would need gigabytes — which is why the measurement matters more than
+  the design: `M`'s arena line reports the REAL faces per chunk and the size the batch actually needed, and that is
+  the number a bump allocator, a packed vertex format or a CPU fallback has to be chosen against.
   **THE SECOND LIVE RUN CONFIRMED THE TABLE AND NARROWED THE REST TO THE SAME CAUSE.** Every case reported
   `slice table ok`, every look's count was right, and the mismatches were down from "each slice's face 0, values
   wildly off" to "a few faces per slice, from position 1-2, off by one coordinate" (`value 1 kind 2 face 2: corner 0

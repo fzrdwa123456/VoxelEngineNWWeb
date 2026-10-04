@@ -17,7 +17,7 @@ import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult }
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
 import { POSITION } from "../../player/components";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
-import { GpuChunkMesher, createMesherOutput, DRAWN_STRIDE, FACE_CORNERS, VERTS_PER_FACE, type PackedGeometry } from "./lod-gpu-mesher";
+import { GpuChunkMesher, MESHER_SLOTS, createMesherOutput, DRAWN_STRIDE, FACE_CORNERS, VERTS_PER_FACE, type PackedGeometry } from "./lod-gpu-mesher";
 import type { WebGPURenderer } from "three/webgpu";
 import * as THREE from "three/webgpu";
 
@@ -30,6 +30,11 @@ export const MESH_PROBE_ACCESS: SystemAccess = {
 
 /** How many of the player's own chunks the probe meshes both ways. */
 const REAL_CHUNKS = 6;
+
+/** The arena the batch check (M2c step 2a) sizes its output set for: `MESHER_SLOTS` real chunks of a surface column,
+ *  which measured a few hundred to ~1400 faces each. A fixed capacity is what production wants, so the probe fails
+ *  loudly instead of growing it — that failure IS the measurement the allocation policy needs. */
+const ARENA_CAPACITY = 8192;
 
 /** A synthetic chunk's voxel value at a local coordinate. */
 type Pattern = (lx: number, ly: number, lz: number) => number;
@@ -281,7 +286,8 @@ export class GpuMesherProbeSystem {
     let cpuMs = 0;
     const examples: string[] = [];
     try {
-      const all: ProbeCase[] = [...syntheticCases(), ...this.realCases()];
+      const real = this.realCases();
+      const all: ProbeCase[] = [...syntheticCases(), ...real];
       let drewCopy = false;
       for (const probeCase of all) {
         // THE CPU HALF IS TIMED ALONE — it is closed before the GPU call, and the GPU half is timed on its own. (The
@@ -293,7 +299,7 @@ export class GpuMesherProbeSystem {
         const cpuCaseMs = performance.now() - cpuStart;
         cpuMs += cpuCaseMs;
         const gpuStart = performance.now();
-        const gpu = await this.mesher.run(probeCase.input);
+        const [gpu] = await this.mesher.run([probeCase.input]);
         const gpuCaseMs = performance.now() - gpuStart;
         gpuMs += gpuCaseMs;
         const tableProblem = checkSliceTable(gpu);
@@ -320,7 +326,7 @@ export class GpuMesherProbeSystem {
           `MESHPROBE ${probeCase.name}: faces cpu ${diff.facesCpu} / gpu ${diff.facesGpu}, ` +
             `keys ${diff.keysCompared}, mismatched keys ${diff.mismatchedKeys}${closedForm}` +
             ` — slice table ${tableProblem === null ? "ok" : `BROKEN (${tableProblem})`}` +
-            `, gpu ${gpuCaseMs.toFixed(2)}ms (3 dispatches + readback), cpu reference ${cpuCaseMs.toFixed(2)}ms`,
+            `, gpu ${gpuCaseMs.toFixed(2)}ms (4 dispatches + readback), cpu reference ${cpuCaseMs.toFixed(2)}ms`,
         );
         // …AND DRAW ONE OF THEM. Only the first real chunk (the topmost with faces, i.e. the one nearest the
         // surface), and only once: the point is the DRAW PATH, not a pile of copies.
@@ -328,6 +334,14 @@ export class GpuMesherProbeSystem {
           drewCopy = true;
           await this.drawCopy(probeCase, probeCase.input, cpu.faces);
         }
+      }
+      // M2c STEP 2a: THE ARENA — several real chunks through ONE kernel build and ONE output set, which is the thing
+      // a per-chunk pipeline build (~200 ms each) makes impossible. Counted as its own case in the verdict.
+      const arenaProblem = await this.checkArena(real);
+      if (arenaProblem !== null) {
+        mismatched++;
+        cases++;
+        if (examples.length < 8) examples.push(`arena: ${arenaProblem}`);
       }
       // WHAT A MISMATCH MEANS, said out loud, because "the kernel is broken" and "the kernel did not run" need
       // opposite responses — the same distinction M0 had to learn: a WGSL/pipeline error leaves the buffers at their
@@ -395,6 +409,57 @@ export class GpuMesherProbeSystem {
     }
   }
 
+  /** THE ARENA (M2c step 2a): SEVERAL REAL CHUNKS THROUGH ONE KERNEL BUILD AND ONE OUTPUT SET.
+   *
+   *  Why it needs its own check: everything above meshes ONE chunk per `run`, which is the shape that cannot ship —
+   *  the capacity and the slot count are baked into a storage array's length, so a per-chunk output set means a
+   *  pipeline build per chunk (~200 ms each), and the batch is the whole point of the milestone. What this proves on
+   *  the device is the part no CPU test can: that `bases` — the arena offsets the FOURTH kernel computes from the
+   *  per-slot totals — really places each chunk's faces where the readback says they are, with no two chunks
+   *  overlapping and none running past the arena.
+   *
+   *  It also reports the number that decides the rollout's allocation policy: how big the arena had to be for the
+   *  batch, i.e. the actual face counts (`bases` and the per-slot deltas) rather than a worst-case reservation. */
+  private async checkArena(real: readonly ProbeCase[]): Promise<string | null> {
+    const batch = real.slice(0, MESHER_SLOTS);
+    if (batch.length < 2) return null;
+    // ONE arena for the whole batch, sized for what these chunks really need plus headroom — a fixed capacity is
+    // what production wants, and the probe should fail loudly rather than grow it.
+    const output = createMesherOutput(ARENA_CAPACITY);
+    const mesher = new GpuChunkMesher(this.renderer, output, batch.length);
+    const gpuStart = performance.now();
+    const gpu = await mesher.run(batch.map((probeCase) => probeCase.input));
+    const gpuMs = performance.now() - gpuStart;
+    let bad = 0;
+    let firstProblem = "";
+    const layout: string[] = [];
+    let total = 0;
+    for (let i = 0; i < gpu.length; i++) {
+      const diff = compareGeometry(meshChunk(batch[i].input), gpu[i]);
+      if (diff.mismatchedKeys > 0 || diff.facesCpu !== diff.facesGpu) {
+        bad++;
+        if (firstProblem === "") firstProblem = `${batch[i].name}: ${diff.examples[0] ?? `${diff.mismatchedKeys} key(s)`}`;
+      }
+      layout.push(`${batch[i].name} @${gpu[i].base}+${gpu[i].faces}`);
+      total += gpu[i].faces;
+    }
+    // NO OVERLAP AND NO OVERRUN, read off the bases alone: the arena offsets must be the running sum, in slot order.
+    let expected = 0;
+    for (const entry of gpu) {
+      if (entry.base !== expected) {
+        bad++;
+        if (firstProblem === "") firstProblem = `arena: slot base ${entry.base} where the running sum says ${expected}`;
+      }
+      expected += entry.faces;
+    }
+    this.log(
+      `MESHPROBE arena: ${gpu.length} chunk(s) in ONE ${ARENA_CAPACITY}-face arena and ONE kernel build — ` +
+        `${total} faces, ${layout.join(", ")}, ${bad === 0 ? "every slot matches the CPU mesher and the offsets are the running sum" : `${bad} problem(s)`}` +
+        `, gpu ${gpuMs.toFixed(2)}ms (4 dispatches + readback of ${(total / Math.max(1, gpu.length)).toFixed(0)} faces/chunk)`,
+    );
+    return bad === 0 ? null : firstProblem;
+  }
+
   /** THE DRAWING HALF OF M2, on ONE real chunk (M2c step 1).
    *
    *  Everything M2 has proven so far is about NUMBERS: the kernels' geometry equals the CPU mesher's, byte for byte.
@@ -416,7 +481,7 @@ export class GpuMesherProbeSystem {
     const capacity = Math.max(1024, capacityFaces + 256);
     const output = createMesherOutput(capacity);
     const mesher = new GpuChunkMesher(this.renderer, output);
-    const gpu = await mesher.run(input);
+    const [gpu] = await mesher.run([input]);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", output.position);
     geometry.setAttribute("normal", output.normal);

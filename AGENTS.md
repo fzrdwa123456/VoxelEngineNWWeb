@@ -991,13 +991,39 @@ where it is:
     the kernel: one output set = one kernel build. A per-chunk output set would mean a pipeline build per chunk
     (~200 ms), so the production rollout must share ONE set per rung and address a chunk's region with a **base
     offset** — which is why the parameter exists and why the probe (one chunk, one build) is the right first step.
-  * **WHAT M2c STILL NEEDS, in order**: (a) a shared arena per rung with a per-chunk region and a base-offset
-    uniform, so one kernel serves every chunk; (b) the per-chunk draw metadata the CPU needs to set `drawRange` and
-    `groups` — which is where the counts live on the DEVICE, so the choice is between a batched readback and an
-    indirect draw list written by a compute pass (three has `IndirectStorageBufferAttribute` = `STORAGE | INDIRECT`,
-    and `WebGPUBackend._draw` already takes `renderObject.getIndirect()`); (c) then the far ring's stream swaps its
-    CPU meshes for these, keeping the reserve and the fades (per-Mesh `visible` and per-chunk material copies behave
-    exactly as they do today).
+  * **AND M2c STEP 2a — THE ARENA — IS LANDED: ONE KERNEL BUILD, MANY CHUNKS.** The per-chunk output set was the one
+    shape that could not ship (a capacity is baked into a storage array's length, so it meant a ~200 ms pipeline
+    build per chunk), so the mesher now takes a BATCH: `MESHER_SLOTS` chunks share one output set and land in it at
+    offsets THEY chose. Four kernels, and the slot is **decoded from the thread id** — `slot = instanceIndex / KEYS`
+    (emit) or `/ CHUNK_VOLUME` (census) — so nothing has to be re-uploaded between chunks and there is no per-dispatch
+    state for three's upload timing to disagree about:
+    1. `census` — dispatched over `slots * CHUNK_VOLUME`, counting each slot's keys into `counts[slot*KEYS + key]`;
+    2. `scan` — ONE THREAD PER SLOT (1024 iterations each), that slot's exclusive prefix sum into its own `starts`,
+       plus its total in `totals[slot]`;
+    3. `bases` — ONE thread over the slots: the exclusive prefix sum of the totals, i.e. where each slot begins in the
+       arena, with the grand total in the buffer's last cell (`slots + 1` cells). **This is what lets the CPU stay
+       ignorant of the face counts** — the offsets are decided on the device, per batch, with no round trip;
+    4. `emit` — one thread per (slot, key), writing at `bases[slot] + starts[slot][key] + rank`, i.e. ARENA-ABSOLUTE.
+    `run(inputs)` returns one `PackedGeometry` per input: its own `positions`/`normals`/`uvs` SLICE (a `subarray` of
+    the one arena, so nothing is copied), its `counts`/`starts` tables, and the `base` that says where the slice
+    really is. `slots[].start` is relative to the slot (what `geometry.addGroup` wants); `base + start` is the
+    arena offset a whole-arena draw would use. The CPU twin is ONE implementation, not two: `packFromPad` is
+    `packBatchFromPad([padded], capacity)[0]`. `check:ecs` DRIVES the arena over five synthetic chunks (one of them
+    empty) and asserts the three things the rollout depends on — every slot still equals `meshChunk`, the offsets are
+    the running sum (no overlap, no gap, an empty slot still occupies its offset), and each slice really is the arena
+    window its `base` points at (read through the shared buffer, which a per-slot comparison could not see) — plus
+    that an arena one face too small THROWS rather than truncating. `M` runs the same thing on the device over up to
+    `MESHER_SLOTS` real chunks, reports it as `MESHPROBE arena: …` and counts it in the verdict.
+  * **WHAT M2c STILL NEEDS, in order**: (a) the ARENA'S ALLOCATION POLICY — how big it is, how a chunk gets a region
+    as the ring moves, and what happens when it is full. The region CANNOT be reserved worst-case: ~180-240 B per
+    face (6 vertices × vec4 position + vec4 normal + vec2 uv) against a far ring of ~5000 chunks would be gigabytes,
+    so it is a bump allocator over a per-rung arena with compaction (or a packed vertex format) and a CPU-mesher
+    fallback for the overflow. `M`'s arena line is the measurement that decides it (faces per chunk, hence bytes per
+    chunk); (b) the per-chunk DRAW METADATA — `drawRange`/`groups` need each chunk's slices, which live in the
+    device's tables: either a batched readback or a compute-written indirect draw list (`IndirectStorageBufferAttribute`
+    = `STORAGE | INDIRECT`, and the backend already consumes `renderObject.getIndirect()`); (c) then the far ring's
+    stream swaps its CPU meshes for these, with the reserve and the fades intact (per-Mesh `visible` and per-chunk
+    material copies behave exactly as today).
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

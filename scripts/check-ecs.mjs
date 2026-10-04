@@ -7693,29 +7693,87 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     equal(agrees(input), "", "…and the packed walk follows a NON-UNIFORM border exactly (this is what catches a transposed ±Z plane)");
   }
 
-  // 4. THE SOURCE CONTRACT: the three kernels, the walk order, and the atomics rule.
+  // 3b. THE ARENA (M2c step 2a), DRIVEN: several chunks through ONE output set, at offsets the packing decided for
+  //     itself. This is the CPU half of what the fourth kernel does on the device, and the assertions are the three
+  //     things the rollout depends on: every slot still equals `meshChunk`, the offsets are the RUNNING SUM of the
+  //     slots' face counts (so no two chunks overlap and none is lost), and a slot's returned geometry really is the
+  //     arena slice `base` points at (a `subarray` that reads the wrong window is invisible in a per-slot comparison
+  //     and fatal in a draw).
+  {
+    const batchInputs = [
+      synthetic((_lx, ly) => (ly < 8 ? 1 : ly < 16 ? 2 : ly < 24 ? 3 : AIR), false),
+      synthetic((lx, ly, lz) => ((lx + ly + lz) % 2 === 0 ? 1 : AIR), false),
+      synthetic((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? 4 : AIR), false),
+      synthetic(() => AIR, false), // an EMPTY slot in the middle: it must claim no arena space and break nothing
+      synthetic((_lx, ly) => (ly < 16 ? SOLID : AIR), false),
+    ];
+    const batch = mesher.packBatchFromPad(batchInputs.map(mesh.buildPaddedVoxels));
+    equal(batch.length, batchInputs.length, "every slot comes back");
+    let running = 0;
+    for (let slot = 0; slot < batch.length; slot++) {
+      const cpu = mesh.meshChunk(batchInputs[slot]);
+      equal(batch[slot].faces, cpu.faces, `arena slot ${slot}: the face count is the CPU mesher's`);
+      equal(batch[slot].base, running, `arena slot ${slot}: its base is the RUNNING SUM of the slots before it (no overlap, no gap)`);
+      running += cpu.faces;
+      const diff = compareGeometry(cpu, batch[slot]);
+      equal(diff.mismatchedKeys, 0, `arena slot ${slot}: every drawn vertex, normal and UV is the production mesher's`);
+      equal(diff.facesCpu, diff.facesGpu, `arena slot ${slot}: …and so is the count the comparison saw`);
+      // THE SLICE IS THE ARENA WINDOW `base` POINTS AT. The slices are `subarray`s of the ONE arena buffer, so the
+      // whole arena is reachable through any of them: slot `k`'s first vertex must be the arena's vertex
+      // `base * VERTS_PER_FACE * DRAWN_STRIDE`, and its last must be the one before its own end.
+      if (batch[slot].faces > 0) {
+        const arena = new Float32Array(batch[slot].positions.buffer);
+        const at = batch[slot].base * mesher.VERTS_PER_FACE * mesher.DRAWN_STRIDE;
+        equal(batch[slot].positions[0], arena[at], `arena slot ${slot}: its slice starts at the arena window its base points at`);
+        equal(batch[slot].positions[batch[slot].positions.length - 1],
+          arena[at + batch[slot].faces * mesher.VERTS_PER_FACE * mesher.DRAWN_STRIDE - 1],
+          `arena slot ${slot}: …and ends exactly where its own faces end`);
+      }
+      equal(batch[slot].positions.length, batch[slot].faces * mesher.VERTS_PER_FACE * mesher.DRAWN_STRIDE,
+        `arena slot ${slot}: the slice is exactly its own faces long (a slice one face too long would draw the NEXT slot's geometry)`);
+    }
+    // EVERY SLOT'S OCCUPANCY IS EXACTLY [base, base + faces): the arena is fully covered, once, by the batch.
+    equal(running, batch.reduce((sum, entry) => sum + entry.faces, 0), "the arena's end is the sum of the slots' faces");
+    const empty = batch[3];
+    equal(empty.faces, 0, "an AIR slot emits nothing…");
+    equal(empty.base, batch[2].base + batch[2].faces, "…and still sits at its own offset, so the slots after it cannot move");
+    // THE ARENA'S BUDGET IS ENFORCED: one face short of the batch must throw, not silently truncate.
+    let threw = false;
+    try {
+      mesher.packBatchFromPad(batchInputs.map(mesh.buildPaddedVoxels), running - 1);
+    } catch {
+      threw = true;
+    }
+    assert(threw, "an arena one face too small THROWS (a silent truncation would draw whatever lived there)");
+  }
+
+  // 4. THE SOURCE CONTRACT: the four kernels, the walk order, the atomics rule and the ARENA.
   const mesherSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-mesher.ts"));
   equal(countOf(mesherSrc, /\.toAtomic\(\)/g), 1,
     "exactly ONE buffer is atomic (the census counts): storage(attr, \"uint\", n) declares a plain ptr<storage, u32, read_write> and WGSL has no atomicAdd for that, so the pipeline fails to compile and the dispatch silently writes nothing…");
-  assert(/buildCensusKernel/.test(mesherSrc) && /buildScanKernel/.test(mesherSrc) && /buildEmitKernel/.test(mesherSrc),
-    "…and the mesher is the three kernels the design needs: census (per voxel, atomic counts), scan (ONE thread, the slice table) and emit (per key)");
+  assert(/buildCensusKernel/.test(mesherSrc) && /buildScanKernel/.test(mesherSrc) && /buildBaseKernel/.test(mesherSrc) &&
+    /buildEmitKernel/.test(mesherSrc),
+    "…and the mesher is the FOUR kernels the arena needs: census (per slot+voxel, atomic counts), scan (one thread PER SLOT, the slice table), bases (ONE thread, the per-slot arena offsets) and emit (per slot+key)");
   assert(/\}\)\(\)\.compute\(1\)/.test(mesherSrc),
-    "the scan runs on ONE thread: the prefix sum is sequential by construction, so it is deterministic");
+    "the bases kernel runs on ONE thread: the prefix sum is sequential by construction, so it is deterministic");
   // THE TWO MUTABLES ARE `Var` LOCALS, AND THAT IS A FIXED BUG, not a style choice. The first version kept the
   // scan's running total and the emit kernel's per-key rank in STORAGE CELLS; TSL nodes are lazy, so a value "read"
   // before an assignment was re-evaluated after it, and the whole slice table came out one key late — every look's
   // COUNT right, every slice's CONTENT belonging to its neighbour. Three assertions hold that down: the locals are
-  // `Var`s, the total is written exactly ONCE (after the loop — never read back inside it), and no per-key cursor
+  // `Var`s, the totals are written exactly ONCE (after the loop — never read back inside it), and no per-key cursor
   // buffer exists at all.
   assert(/const running = Var\(uint\(0\)\)/.test(mesherSrc) &&
     /const rank = Var\(uint\(0\)\)/.test(mesherSrc) &&
     /const destination = Var\(uint\(0\)\)/.test(mesherSrc),
     "the scan's accumulator, the emit kernel's rank and the face's destination are all `Var` LOCALS (a WGSL `var`)…");
-  equal(countOf(mesherSrc, /total\.element\(uint\(0\)\)/g), 1,
-    "…the total is written once, AFTER the loop (an accumulator kept in storage is what shifted every slice)…");
+  equal(countOf(mesherSrc, /running\.assign\(/g), 2,
+    "…the scan's running total and the bases kernel's are both plain assignments (an accumulator kept in storage is what shifted every slice)…");
+  assert(/Loop\(KEYS,[\s\S]{0,400}?\}\);\n    totals\.element\(slot\)\.assign\(n\(running\)\);/.test(mesherSrc) &&
+    /Loop\(slots,[\s\S]{0,400}?bases\.element\(uint\(slots\)\)\.assign\(n\(running\)\);/.test(mesherSrc),
+    "…and each is read out only AFTER its loop (the slot total, then the grand total): reading an accumulator inside the loop is what made every slice one key late");
   assert(!/cursorAttr|cursors\.element/.test(mesherSrc),
     "…and no per-key cursor BUFFER is left in the GPU path to keep a rank in (the CPU twin's own `cursor` array is a plain JS local and stays)");
-  assert(/destination\.assign\([\s\S]{0,120}?rank\.assign\(/.test(mesherSrc),
+  assert(/destination\.assign\([\s\S]{0,160}?rank\.assign\(/.test(mesherSrc),
     "…while the destination is SNAPSHOTTED before the rank advances, so the writes use the position that face owns");
   // AND SO IS THE ITERATION'S OWN COORDINATE. The second live run had the counts right and a few faces per slice
   // carrying ANOTHER voxel's coordinates — i.e. the neighbour test and the write disagreed about which voxel was
@@ -7728,17 +7786,46 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     /pad\.element\(n\(add\(n\(center\), uint\(face\.step\)\)\)/.test(mesherSrc) &&
     /writeFaceNodes\(positions, normals, uvs, n\(destination\), n\(walkX\), n\(walkY\), n\(walkZ\), face\)/.test(mesherSrc),
     "…so the cull test, the neighbour test and the write all read those same locals (a raw counter expression in one of them is the bug)");
-  assert(/const key = instanceIndex;/.test(mesherSrc) && /const value = div\(key, uint\(4\)\);/.test(mesherSrc) &&
-    /If\(notEqual\(counts\.element\(key\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
-    "…and emit is ONE THREAD PER KEY: the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once");
+  assert(/const slot = slotOf\(instanceIndex\);/.test(mesherSrc) && /const key = slotKeyIndex\(instanceIndex\);/.test(mesherSrc) &&
+    /If\(notEqual\(counts\.element\(at\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
+    "…and emit is ONE THREAD PER (SLOT, KEY): the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once");
+  // M2c STEP 2a — THE ARENA, and every part of it is one of these five lines. A batch is addressed ENTIRELY from the
+  // thread id (slot = i / per-slot threads), so nothing has to be re-uploaded between chunks; the destination is
+  // ARENA-ABSOLUTE (`bases[slot] + starts[slot][key] + rank`); the offsets come from the `bases` kernel, i.e. the
+  // DEVICE decides them and the CPU never has to know a face count in advance. The `slot` helpers exist so the four
+  // kernels cannot disagree about the numbering — a retyped `KEYS`/`PAD_CELLS` stride is exactly how that drifts.
+  assert(/function slotOf\(thread: U32Node\): U32Node \{\n  return n\(div\(thread, uint\(KEYS\)\)\);/.test(mesherSrc) &&
+    /function slotKey\(thread: U32Node\): U32Node \{\n  return n\(mul\(slotOf\(thread\), uint\(KEYS\)\)\);/.test(mesherSrc) &&
+    /function slotPad\(thread: U32Node\): U32Node \{\n  return n\(mul\(slotOf\(thread\), uint\(PAD_CELLS\)\)\);/.test(mesherSrc),
+    "the slot is DECODED FROM THE THREAD ID, and the per-slot strides live in one helper each (a batch needs no per-chunk state at all)");
+  assert(/\.compute\(slots \* CHUNK_VOLUME\)/.test(mesherSrc) && /\.compute\(slots \* KEYS\)/.test(mesherSrc) &&
+    /\.compute\(slots\)/.test(mesherSrc),
+    "…census is dispatched over `slots * CHUNK_VOLUME`, emit over `slots * KEYS` and the scan over `slots` — one dispatch for the whole batch");
+  assert(/const bases = storage\(baseAttr, "uint", slots \+ 1\);/.test(mesherSrc) &&
+    /destination\.assign\(n\(add\(add\(bases\.element\(slot\), starts\.element\(at\)\), n\(rank\)\)\)\);/.test(mesherSrc),
+    "…and the destination is `bases[slot] + starts[slot][key] + rank` — the ARENA offset, not the slot's own");
+  assert(/bases\.element\(uint\(slots\)\)\.assign\(n\(running\)\);/.test(mesherSrc),
+    "…with the grand total in the buffer's last cell, which is how the caller learns the batch's size without asking per chunk");
+  assert(/export const MESHER_SLOTS = 4;/.test(mesherSrc) &&
+    /constructor\(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput\(\), slots = MESHER_SLOTS\)/.test(mesherSrc),
+    "the slot count is a constructor parameter with a module default (the probe passes the batch width it is testing)");
+  // THE CPU TWIN IS ONE IMPLEMENTATION, NOT TWO: `packFromPad` is the batch packer with a single slot, so the single
+  // and batched paths cannot disagree about the walk, the layout or the slice table.
+  assert(/export function packFromPad\(padded: Uint32Array, capacity = MAX_FACES\): PackedGeometry \{\n  return packBatchFromPad\(\[padded\], capacity\)\[0\];/.test(mesherSrc) &&
+    /function scanSlot\(counts: Uint32Array, base: number\): SlotTable/.test(mesherSrc) &&
+    /cursor\[key\] = table\.base \+ table\.starts\[key\];/.test(mesherSrc),
+    "…and on the CPU `packFromPad` IS `packBatchFromPad([one], capacity)[0]`, with the cursor made absolute by the slot's base — one walk, one layout");
+  assert(/const from = table\.base \* VERTS_PER_FACE \* DRAWN_STRIDE;/.test(mesherSrc) &&
+    /base: table\.base,/.test(mesherSrc),
+    "…and each slot's returned geometry is its own slice of the arena, with `base` saying where that slice really is");
   assert(/const ly = n\(div\(n\(ordinal\), uint\(CHUNK_SIZE \* CHUNK_SIZE\)\)\)/.test(mesherSrc) &&
     /const lz = n\(mod\(n\(div\(n\(ordinal\), uint\(CHUNK_SIZE\)\)\), uint\(CHUNK_SIZE\)\)\)/.test(mesherSrc),
     "the flat loop decodes the WALK ordinal (ly outer, lz middle), not the storage index — the two disagree and only a face-by-face comparison would notice");
-  // The two loops are counted, not pattern-matched: a regex cannot see nesting, but a THIRD `Loop(` would mean one
-  // was added — and a nested `Loop` is the M0 trap (three names every counter `i`, so the inner one shadows the
-  // outer and the walk visits only a diagonal). The emit kernel exists precisely so one flat loop suffices.
-  equal(countOf(mesherSrc, /Loop\(/g), 2,
-    "…and the mesher has exactly TWO loops (the scan's over the keys, the emit's over the walk): a third would mean a NESTED Loop, whose default counter name shadows the outer one (M0's diagonal-only walk)");
+  // The loops are counted, not pattern-matched: a regex cannot see nesting, but a FOURTH `Loop(` would mean one was
+  // added — and a nested `Loop` is the M0 trap (three names every counter `i`, so the inner one shadows the outer and
+  // the walk visits only a diagonal). The three kernels that need a loop need exactly one each.
+  equal(countOf(mesherSrc, /Loop\(/g), 3,
+    "…and the mesher has exactly THREE loops (the scan's over the keys, the bases kernel's over the slots, the emit's over the walk): a fourth would mean a NESTED Loop, whose default counter name shadows the outer one (M0's diagonal-only walk)");
   assert(/FACES\.map\(\(face, index\)/.test(mesherSrc) && /CORNER_UVS/.test(mesherSrc) && /PAD_W/.test(mesherSrc),
     "the face steps, corners and UVs are DERIVED from the shared tables and the pad's strides (a retyped constant is how a port drifts)");
   // M2c: THE DRAWN LAYOUT IS FOUR FLOATS PER VERTEX, and that is three's rule, not a preference — a STORAGE attribute
@@ -7747,7 +7834,7 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   // packed layout into that buffer would desync the drawn vertex layout from its data.
   assert(/export const DRAWN_STRIDE = 4;/.test(mesherSrc),
     "the drawn layout is vec4 positions and normals (three pads a storage vec3 to vec4, which would desync the vertex layout)…");
-  assert(/export interface MesherOutput/.test(mesherSrc) && /constructor\(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput\(\)\)/.test(mesherSrc) &&
+  assert(/export interface MesherOutput/.test(mesherSrc) && /slots = MESHER_SLOTS/.test(mesherSrc) &&
     /get mesherOutput\(\): MesherOutput/.test(mesherSrc),
     "…and the output buffers are INJECTABLE, so the drawing side can own the ones it binds (and the kernels write them)");
   // M2c: THE GEOMETRY IS NON-INDEXED, and that is a USAGE RULE rather than a preference. A buffer's usages are fixed
@@ -7804,6 +7891,17 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "…and the real chunk it copies is DRAWN at its nearest representation (the wrapped index stays the chunk's name only)");
   assert(/const cpuCaseMs = performance\.now\(\) - cpuStart;/.test(probeSrc) && /cpuMs \+= cpuCaseMs;/.test(probeSrc),
     "…and the CPU half is timed ALONE (the first version measured it at log time, i.e. after the awaited GPU readback)");
+  // M2c STEP 2a: THE ARENA IS CHECKED ON THE DEVICE TOO, as its own case in the verdict — several real chunks through
+  // ONE kernel build and ONE output set, compared per slot, with the offsets read back off `base` rather than assumed.
+  assert(/private async checkArena\(real: readonly ProbeCase\[\]\): Promise<string \| null>/.test(probeSrc) &&
+    /const batch = real\.slice\(0, MESHER_SLOTS\);/.test(probeSrc) &&
+    /new GpuChunkMesher\(this\.renderer, output, batch\.length\)/.test(probeSrc),
+    "…and the probe meshes a BATCH of real chunks through one arena with one kernel build…");
+  assert(/const arenaProblem = await this\.checkArena\(real\);/.test(probeSrc) &&
+    /if \(arenaProblem !== null\) \{\n        mismatched\+\+;/.test(probeSrc) && /MESHPROBE arena:/.test(probeSrc),
+    "…reports it as its own line and counts it in the verdict (a broken arena must not be able to hide in a green RESULT)…");
+  assert(/if \(entry\.base !== expected\)/.test(probeSrc) && /expected \+= entry\.faces;/.test(probeSrc),
+    "…and asserts the layout from `base` alone: the offsets must be the RUNNING SUM, so no two chunks can overlap and none can be lost");
   assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
     "`M` starts it, through the same one-edge channel every global chord uses");
   assert(!/KeyM/.test(stripComments(readSource("src/data/globals/binds.ts"))), "…and M is not a gameplay bind");

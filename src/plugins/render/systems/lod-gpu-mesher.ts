@@ -7,10 +7,11 @@
 // IT IS PROVEN AGAINST THE PRODUCTION MESHER, and that is not a formality. `meshChunk` (data/world/mesh.ts) is the
 // reference the whole engine draws with, so this file has THREE halves that must agree:
 //   * the KERNELS (below), which run on the device;
-//   * `packFromPad`, the same walk on the CPU, which is what lets `check:ecs` hold the kernel's logic to `meshChunk`
-//     with no device at all (a GPU-less test of a GPU mesher is only possible if the logic exists on both sides);
+//   * `packBatchFromPad` (+ its single-slot wrapper `packFromPad`), the same walk on the CPU, which is what lets
+//     `check:ecs` hold the kernel's logic to `meshChunk` with no device at all (a GPU-less test of a GPU mesher is
+//     only possible if the logic exists on both sides);
 //   * the `M` probe, which runs the kernel over synthetic patterns and the player's own chunks and compares the
-//     RESULT — every face's four corners, normals and UVs, in order — against `meshChunk`.
+//     RESULT — every face's drawn vertices, normals and UVs, in order — against `meshChunk`.
 //
 // ===== HOW THE PACKED LAYOUT IS PRODUCED WITHOUT A FETCH-ADD =====
 // A chunk's geometry is written per LOOK KEY into a contiguous slice (`geometry.groups` need that), which on the CPU
@@ -29,20 +30,22 @@
 // The cost is 1024 threads × 32³ voxels of guarded tests, and the guard that matters is the first one: a key with a
 // zero count returns immediately, so a real chunk (a handful of non-empty looks) pays a handful of walks.
 //
-// THE THREE KERNELS, and why they cannot be fewer:
-//   1. `census` — one thread per voxel, testing all six faces and `atomicAdd`ing this key's count. The counts are
-//      what the slices are cut from, and the atomics are statements here, which is all a count needs.
-//   2. `scan` — ONE thread, 1024 iterations: the exclusive prefix sum of the counts, written into `starts` and
-//      copied into each key's mutable `cursor`. `total` (the last prefix) is the chunk's face count.
-//   3. `emit` — one thread per key, as above. It reads the counts NON-atomically (a different shader, so the buffer
-//      is simply bound twice in two passes — an atomic binding cannot be read as a plain value in WGSL, which is why
-//      the counts are declared `.toAtomic()` in `census` and plain here).
+// THE KERNELS, and why they cannot be fewer:
+//   1. `census` — one thread per (slot, voxel), testing all six faces and `atomicAdd`ing this key's count. The counts
+//      are what the slices are cut from, and the atomics are statements here, which is all a count needs.
+//   2. `scan` — one thread PER SLOT, 1024 iterations: the exclusive prefix sum of that slot's counts, written into
+//      its `starts` and summed into its total.
+//   3. `bases` — ONE thread over the slots: the exclusive prefix sum of the per-slot totals, i.e. where each slot
+//      begins in the shared ARENA (M2c step 2a). This is what lets the CPU stay ignorant of the face counts.
+//   4. `emit` — one thread per (slot, key), as above. It reads the counts NON-atomically (a different shader, so the
+//      buffer is simply bound twice in two passes — an atomic binding cannot be read as a plain value in WGSL, which
+//      is why the counts are declared `.toAtomic()` in `census` and plain here).
 //
-// WHAT IT DELIBERATELY DOES NOT DO: nothing is read back. The geometry stays in GPU buffers; the `M` probe reads it
-// only to VERIFY it (a 12 KB census in M2a's shape would have been cheaper, but comparing the real bytes is the
-// stronger test), and the drawing side is M2c. The measurement that makes this non-negotiable is in ROADMAP: a
-// dispatch+readback round trip costs 20-30 ms on the user's machine, so anything per-chunk that comes back to the
-// CPU would be slower than the CPU mesher it replaces.
+// WHAT IT DELIBERATELY DOES NOT DO: in production, nothing is read back. The geometry stays in GPU buffers, and the
+// arena means ONE kernel build (not one per chunk) lands MANY chunks in it at offsets the device chose itself. The
+// `M` probe reads it only to VERIFY it, and the drawing side is M2c step 2b/2c. The measurement that makes this
+// non-negotiable is in ROADMAP: a dispatch+readback round trip costs 20-30 ms on the user's machine, so anything
+// per-chunk that comes back to the CPU would be slower than the CPU mesher it replaces.
 import {
   Fn,
   If,
@@ -75,6 +78,12 @@ const KEYS = 256 * 4;
 /** The worst case a chunk can hold: every voxel showing all six faces. The output buffers are sized for it, because
  *  a storage array's length is baked into the kernel (a per-capacity rebuild would compile a pipeline per chunk). */
 const MAX_FACES = CHUNK_VOLUME * 6;
+/** HOW MANY CHUNKS ONE ARENA SERVES (M2c step 2a). A storage array's length is baked into a kernel, so a per-chunk
+ *  output set means a pipeline build per chunk (~200 ms) — the arena exists to make it ONE build for many chunks.
+ *  The slot is DECODED FROM THE THREAD ID (`slot = instanceIndex / <per-slot threads>`), never passed in as state:
+ *  a uniform per chunk would have to be re-uploaded between dispatches inside one frame, and three's upload timing
+ *  there is not something to bet a silent-corruption bug on. */
+export const MESHER_SLOTS = 4;
 
 /** ONE FACE of the shared table, in the form both halves need: the neighbour's offset in the PADDED block (a
  *  constant, because the pad makes every neighbour one step away), the look KIND the mesher assigns it, its index
@@ -100,6 +109,11 @@ const MESHER_FACES: readonly MesherFace[] = FACES.map((face, index) => ({
  *  but it does have to be the SAME on both sides, which is what lets the gate and the probe compare slot by slot. */
 export interface PackedGeometry {
   readonly faces: number;
+  /** WHERE THIS SLOT'S FIRST FACE SITS IN THE ARENA (M2c step 2a). The `positions`/`normals`/`uvs` below are this
+   *  slot's own slice, so their indices start at 0 for face 0 of THIS chunk; `base` is the absolute face index in the
+   *  buffer every slot of the batch shares. One slot in one output set is `base === 0`, and the drawing side needs
+   *  `base` for exactly one thing: `drawRange`/`groups` are arena offsets, not slice offsets. */
+  readonly base: number;
   readonly slots: readonly MeshSlot[];
   /** The DRAWN vertex layout: `VERTS_PER_FACE` vertices per face (non-indexed), `DRAWN_STRIDE` floats each. */
   readonly positions: Float32Array;
@@ -133,34 +147,41 @@ export function countFacesByPad(padded: Uint32Array): Uint32Array {
   return counts;
 }
 
-/** THE KERNELS' WALK, ON THE CPU — `census` + `scan` + `emit` in one function, with the same padded block, the same
- *  face offsets, the same ascending-key slices and the same walk order inside each slice. It exists so the gate can
- *  hold the kernels' logic to `meshChunk` without a device, and it is deliberately a SEPARATE implementation from
- *  anything that reads `meshChunk`'s output: this one walks the input data.
- *
- *  **THE WALK ORDER IS `meshChunk`'s, AND IT IS NOT THE STORAGE ORDER.** `meshChunk` nests `ly` outer, `lz` middle,
- *  `lx` inner while a voxel's storage index is `lx + ly*32 + lz*1024`, so the two disagree: the kernel's flat loop
- *  counter must therefore be decoded as `lx = i % 32`, `lz = (i / 32) % 32`, `ly = i / 1024` (see `walkXyz`), or a
- *  slice's faces come out in a different order than the CPU's. That is invisible to a per-look count and only shows
- *  up when the geometry is compared face by face — which is exactly what the probe and the gate do. */
-export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGeometry {
-  const counts = countFacesByPad(padded);
+/** ONE SLOT'S SLICE TABLE: the per-key counts, their EXCLUSIVE PREFIX SUM (`starts`, relative to the slot) and where
+ *  the slot begins in the ARENA. The kernels build exactly this in two passes (`census` then `scan`), and the CPU
+ *  twin exists so the gate can hold both to `meshChunk` with no device at all. */
+interface SlotTable {
+  readonly counts: Uint32Array;
+  readonly starts: Uint32Array;
+  readonly faces: number;
+  readonly base: number;
+}
+
+/** The scan of ONE slot: `starts` is the prefix sum of `counts`, `base` is the slot's first face in the arena, so the
+ *  absolute destination of a face is `base + starts[key] + rank` — the same expression the emit kernel evaluates. */
+function scanSlot(counts: Uint32Array, base: number): SlotTable {
   const starts = new Uint32Array(KEYS);
-  const cursor = new Uint32Array(KEYS);
-  let total = 0;
+  let running = 0;
   for (let key = 0; key < KEYS; key++) {
-    starts[key] = total;
-    cursor[key] = total;
-    total += counts[key];
+    starts[key] = running;
+    running += counts[key];
   }
-  if (total > capacity) throw new Error(`GPU mesher: ${total} faces exceed the ${capacity}-face capacity`);
-  const vertices = total * VERTS_PER_FACE;
-  const positions = new Float32Array(vertices * DRAWN_STRIDE);
-  const normals = new Float32Array(vertices * DRAWN_STRIDE);
-  const uvs = new Float32Array(vertices * 2);
-  const slots: MeshSlot[] = [];
+  return { counts, starts, faces: running, base };
+}
+
+/** ONE SLOT'S FACES INTO THE ARENA, in the kernels' walk order and layout. The cursor is absolute (`base +
+ *  starts[key]`), which is the whole difference between one output set per chunk and one arena for a batch. */
+function emitSlot(
+  positions: Float32Array,
+  normals: Float32Array,
+  uvs: Float32Array,
+  padded: Uint32Array,
+  table: SlotTable,
+): void {
+  const cursor = new Uint32Array(KEYS);
+  for (let key = 0; key < KEYS; key++) cursor[key] = table.base + table.starts[key];
   for (let key = 0; key < KEYS; key++) {
-    if (counts[key] === 0) continue;
+    if (table.counts[key] === 0) continue;
     const value = key >>> 2;
     const kind = key & 3;
     for (let ly = 0; ly < CHUNK_SIZE; ly++) {
@@ -176,9 +197,72 @@ export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGe
         }
       }
     }
-    slots.push({ key, start: starts[key], count: counts[key] });
   }
-  return { faces: total, slots, positions, normals, uvs, counts, starts };
+}
+
+/** THE KERNELS' WALK, ON THE CPU — `census` + `scan` + `bases` + `emit` in one function, over a BATCH of chunks that
+ *  share one arena, with the same padded blocks, the same face offsets, the same ascending-key slices and the same
+ *  walk order inside each slice. It exists so the gate can hold the kernels' logic to `meshChunk` without a device,
+ *  and it is deliberately a SEPARATE implementation from anything that reads `meshChunk`'s output: this one walks the
+ *  input data.
+ *
+ *  **THE WALK ORDER IS `meshChunk`'s, AND IT IS NOT THE STORAGE ORDER.** `meshChunk` nests `ly` outer, `lz` middle,
+ *  `lx` inner while a voxel's storage index is `lx + ly*32 + lz*1024`, so the two disagree: the kernel's flat loop
+ *  counter must therefore be decoded as `lx = i % 32`, `lz = (i / 32) % 32`, `ly = i / 1024` (see `padCenter`), or a
+ *  slice's faces come out in a different order than the CPU's. That is invisible to a per-look count and only shows
+ *  up when the geometry is compared face by face — which is exactly what the probe and the gate do.
+ *
+ *  **THE ARENA IS THE POINT (M2c step 2a).** Slot `k`'s faces land at `bases[k] + starts[k][key] + rank`, where
+ *  `bases` is the exclusive prefix sum of the slots' face totals — computed on the DEVICE by a fourth kernel, so the
+ *  CPU never has to know how many faces a chunk produced before it can be meshed. `capacity` is the arena's size in
+ *  faces and is the caller's budget (the probe and the gate pass exactly what they need; the rollout's allocator is
+ *  a later step). */
+export function packBatchFromPad(paddeds: readonly Uint32Array[], capacity = MAX_FACES): PackedGeometry[] {
+  const tables: SlotTable[] = [];
+  let total = 0;
+  for (const padded of paddeds) {
+    const table = scanSlot(countFacesByPad(padded), total);
+    total += table.faces;
+    tables.push(table);
+  }
+  if (total > capacity) throw new Error(`GPU mesher: ${total} faces exceed the ${capacity}-face arena`);
+  const vertices = total * VERTS_PER_FACE;
+  const positions = new Float32Array(vertices * DRAWN_STRIDE);
+  const normals = new Float32Array(vertices * DRAWN_STRIDE);
+  const uvs = new Float32Array(vertices * 2);
+  const out: PackedGeometry[] = [];
+  for (let slot = 0; slot < paddeds.length; slot++) {
+    const table = tables[slot];
+    emitSlot(positions, normals, uvs, paddeds[slot], table);
+    const slots: MeshSlot[] = [];
+    for (let key = 0; key < KEYS; key++) {
+      // `start` is RELATIVE TO THIS SLOT (which is what `geometry.addGroup` wants for the slot's own geometry, and
+      // what `compareGeometry` indexes the slot's slice with); `base` is the arena offset, and the two are added
+      // together only when the whole arena is drawn as one geometry.
+      if (table.counts[key] > 0) slots.push({ key, start: table.starts[key], count: table.counts[key] });
+    }
+    // THE SLOT SEES ITS OWN SLICE, starting at its own face 0 — that is what makes it comparable to `meshChunk` and
+    // drawable on its own — while `base` carries where it really is in the shared buffer.
+    const from = table.base * VERTS_PER_FACE * DRAWN_STRIDE;
+    const to = (table.base + table.faces) * VERTS_PER_FACE * DRAWN_STRIDE;
+    out.push({
+      faces: table.faces,
+      base: table.base,
+      slots,
+      positions: positions.subarray(from, to),
+      normals: normals.subarray(from, to),
+      uvs: uvs.subarray(table.base * VERTS_PER_FACE * 2, (table.base + table.faces) * VERTS_PER_FACE * 2),
+      counts: table.counts,
+      starts: table.starts,
+    });
+  }
+  return out;
+}
+
+/** ONE chunk, `base === 0` (the shape everything before M2c step 2a used). A thin wrapper: the batch packer with a
+ *  single slot, so the two can never disagree about the walk or the layout. */
+export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGeometry {
+  return packBatchFromPad([padded], capacity)[0];
 }
 
 /** The walk ordinal of a voxel, in `meshChunk`'s nest order: `ly` outer, `lz` middle, `lx` inner. Returns the flat
@@ -271,32 +355,41 @@ export function createMesherOutput(capacity: number = MAX_FACES): MesherOutput {
   };
 }
 
-/** The GPU mesher: one padded block in, one packed geometry out. With the default output the geometry never leaves the
- *  device except when `run` reads it back for the probe's comparison; with an injected one it lands in buffers the
- *  caller owns, which is how the drawing side consumes it. */
+/** The GPU mesher: a batch of padded blocks in, one ARENA of packed geometry out. With the default output the
+ *  geometry never leaves the device except when `run` reads it back for the probe's comparison; with an injected one
+ *  it lands in buffers the caller owns, which is how the drawing side consumes it. */
 export class GpuChunkMesher {
   private readonly renderer: WebGPURenderer;
+  /** How many chunks one run meshes into the arena — baked into all four kernels (see `MESHER_SLOTS`). */
+  private readonly slots: number;
   private readonly paddedAttr: StorageBufferAttribute;
   private readonly countAttr: StorageBufferAttribute;
   private readonly startAttr: StorageBufferAttribute;
+  /** One total per slot, and the exclusive prefix sum of them PLUS the grand total in the last cell (`slots + 1`) —
+   *  which is why the base buffer is one longer than the others. */
   private readonly totalAttr: StorageBufferAttribute;
+  private readonly baseAttr: StorageBufferAttribute;
   private readonly output: MesherOutput;
   private readonly census: { count: number };
   private readonly scan: { count: number };
+  private readonly bases: { count: number };
   private readonly emit: { count: number };
 
-  constructor(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput()) {
+  constructor(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput(), slots = MESHER_SLOTS) {
     this.renderer = renderer;
     this.output = output;
-    this.paddedAttr = new StorageBufferAttribute(new Uint32Array(PAD_CELLS), 1);
-    this.countAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
-    this.startAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
-    this.totalAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
-    // The kernels are built ONCE per output set: a per-call build would compile a pipeline per chunk, and the
-    // capacity is baked into the storage array lengths anyway.
-    this.census = buildCensusKernel(this.paddedAttr, this.countAttr);
-    this.scan = buildScanKernel(this.countAttr, this.startAttr, this.totalAttr);
-    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, output);
+    this.slots = slots;
+    this.paddedAttr = new StorageBufferAttribute(new Uint32Array(slots * PAD_CELLS), 1);
+    this.countAttr = new StorageBufferAttribute(new Uint32Array(slots * KEYS), 1);
+    this.startAttr = new StorageBufferAttribute(new Uint32Array(slots * KEYS), 1);
+    this.totalAttr = new StorageBufferAttribute(new Uint32Array(slots), 1);
+    this.baseAttr = new StorageBufferAttribute(new Uint32Array(slots + 1), 1);
+    // The kernels are built ONCE per (output set, slot count): a per-call build would compile a pipeline per chunk,
+    // and both the capacity and the slot count are baked into the storage array lengths anyway.
+    this.census = buildCensusKernel(this.paddedAttr, this.countAttr, slots);
+    this.scan = buildScanKernel(this.countAttr, this.startAttr, this.totalAttr, slots);
+    this.bases = buildBaseKernel(this.totalAttr, this.baseAttr, slots);
+    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, this.baseAttr, output, slots);
   }
 
   /** The buffers the geometry went into — the drawing side binds them (a `BufferGeometry` whose attributes ARE these
@@ -305,70 +398,106 @@ export class GpuChunkMesher {
     return this.output;
   }
 
-  /** Mesh one chunk on the GPU and read the geometry back (the probe's half; the drawing side will not read it). */
-  async run(input: ChunkMeshInput): Promise<PackedGeometry> {
-    (this.paddedAttr.array as Uint32Array).set(buildPaddedVoxels(input));
+  /** Mesh up to `slots` chunks into ONE arena and read the result back (the probe's half; the drawing side will not
+   *  read it — it draws the arena with the bases and the tables the kernels wrote). ONE `PackedGeometry` per input,
+   *  each seeing its OWN slice of the arena plus the `base` it really starts at. */
+  async run(inputs: readonly ChunkMeshInput[]): Promise<PackedGeometry[]> {
+    if (inputs.length > this.slots) {
+      throw new Error(`GPU mesher: ${inputs.length} chunk(s) do not fit a ${this.slots}-slot arena`);
+    }
+    const pads = this.paddedAttr.array as Uint32Array;
+    for (let i = 0; i < inputs.length; i++) pads.set(buildPaddedVoxels(inputs[i]), i * PAD_CELLS);
+    // AN UNUSED SLOT MUST BE ZEROED, not left over from the previous batch: AIR is 0 and the census skips it, so a
+    // stale pad would silently emit a chunk that is no longer in the batch.
+    pads.fill(0, inputs.length * PAD_CELLS);
     this.paddedAttr.needsUpdate = true;
-    for (const attr of [this.countAttr, this.totalAttr]) {
+    for (const attr of [this.countAttr, this.startAttr, this.totalAttr, this.baseAttr]) {
       (attr.array as Uint32Array).fill(0);
       attr.needsUpdate = true;
     }
     await this.renderer.computeAsync(this.census as never);
     await this.renderer.computeAsync(this.scan as never);
+    await this.renderer.computeAsync(this.bases as never);
     await this.renderer.computeAsync(this.emit as never);
-    const counts = new Uint32Array(await this.renderer.getArrayBufferAsync(this.countAttr));
-    const starts = new Uint32Array(await this.renderer.getArrayBufferAsync(this.startAttr));
-    const total = new Uint32Array(await this.renderer.getArrayBufferAsync(this.totalAttr))[0];
+    const countsAll = new Uint32Array(await this.renderer.getArrayBufferAsync(this.countAttr));
+    const startsAll = new Uint32Array(await this.renderer.getArrayBufferAsync(this.startAttr));
+    const bases = new Uint32Array(await this.renderer.getArrayBufferAsync(this.baseAttr));
+    const total = bases[this.slots];
     if (total > this.output.capacity) {
-      throw new Error(`GPU mesher: the kernel reported ${total} faces, past the ${this.output.capacity}-face capacity`);
-    }
-    const slots: MeshSlot[] = [];
-    for (let key = 0; key < KEYS; key++) if (counts[key] > 0) slots.push({ key, start: starts[key], count: counts[key] });
-    if (total === 0) {
-      return {
-        faces: 0,
-        slots,
-        positions: new Float32Array(0),
-        normals: new Float32Array(0),
-        uvs: new Float32Array(0),
-        counts,
-        starts,
-      };
+      throw new Error(`GPU mesher: the kernels reported ${total} faces, past the ${this.output.capacity}-face arena`);
     }
     const read = async (attr: StorageBufferAttribute, elements: number): Promise<ArrayBuffer> =>
       this.renderer.getArrayBufferAsync(attr, null, 0, elements * 4);
     const vertices = total * VERTS_PER_FACE;
-    const positions = new Float32Array(await read(this.output.position, vertices * DRAWN_STRIDE));
-    const normals = new Float32Array(await read(this.output.normal, vertices * DRAWN_STRIDE));
-    const uvs = new Float32Array(await read(this.output.uv, vertices * 2));
-    return { faces: total, slots, positions, normals, uvs, counts, starts };
+    const arenaPositions =
+      total === 0 ? new Float32Array(0) : new Float32Array(await read(this.output.position, vertices * DRAWN_STRIDE));
+    const arenaNormals =
+      total === 0 ? new Float32Array(0) : new Float32Array(await read(this.output.normal, vertices * DRAWN_STRIDE));
+    const arenaUvs = total === 0 ? new Float32Array(0) : new Float32Array(await read(this.output.uv, vertices * 2));
+    const out: PackedGeometry[] = [];
+    for (let slot = 0; slot < inputs.length; slot++) {
+      const counts = countsAll.subarray(slot * KEYS, (slot + 1) * KEYS);
+      const starts = startsAll.subarray(slot * KEYS, (slot + 1) * KEYS);
+      const base = bases[slot];
+      const faces = bases[slot + 1] - base;
+      const slots: MeshSlot[] = [];
+      // The slice's `start` is what `geometry.addGroup` wants for THIS slot's own geometry, so it is rebased to the
+      // slot; `base` is the arena offset the drawing side adds when it draws the whole arena instead.
+      for (let key = 0; key < KEYS; key++) {
+        if (counts[key] > 0) slots.push({ key, start: starts[key], count: counts[key] });
+      }
+      const from = base * VERTS_PER_FACE * DRAWN_STRIDE;
+      const to = (base + faces) * VERTS_PER_FACE * DRAWN_STRIDE;
+      out.push({
+        faces,
+        base,
+        slots,
+        positions: arenaPositions.subarray(from, to),
+        normals: arenaNormals.subarray(from, to),
+        uvs: arenaUvs.subarray(base * VERTS_PER_FACE * 2, (base + faces) * VERTS_PER_FACE * 2),
+        counts,
+        starts,
+      });
+    }
+    return out;
   }
 }
 
-/** 1. COUNT: one thread per voxel, all six faces, `atomicAdd` per emitted face. The atomics are STATEMENTS, which
- *  is all a census needs — and `.toAtomic()` is load-bearing: `storage(attr, "uint", n)` declares
+/** 1. COUNT: one thread per (slot, voxel), all six faces, `atomicAdd` per emitted face. The atomics are STATEMENTS,
+ *  which is all a census needs — and `.toAtomic()` is load-bearing: `storage(attr, "uint", n)` declares
  *  `ptr<storage, u32, read_write>`, WGSL has no `atomicAdd` for that, the pipeline then fails to compile and the
- *  dispatch silently writes nothing (the round M0/M1a lost to exactly this). */
-function buildCensusKernel(padded: StorageBufferAttribute, countAttr: StorageBufferAttribute): { count: number } {
-  const pad = storage(padded, "uint", PAD_CELLS);
-  const counts = storage(countAttr, "uint", KEYS).toAtomic();
+ *  dispatch silently writes nothing (the round M0/M1a lost to exactly this).
+ *
+ *  THE SLOT COMES OUT OF THE THREAD ID, and that is the arena's whole mechanism: `i / CHUNK_VOLUME` is the slot and
+ *  `i % CHUNK_VOLUME` the walk ordinal, so a whole batch is meshed by ONE dispatch with nothing to re-upload between
+ *  chunks (see `slotPad`/`slotKey`). A per-chunk uniform would have to be re-sent between dispatches inside one
+ *  frame, which is exactly the kind of state a node graph gives no promise about. */
+function buildCensusKernel(
+  padded: StorageBufferAttribute,
+  countAttr: StorageBufferAttribute,
+  slots: number,
+): { count: number } {
+  const pad = storage(padded, "uint", slots * PAD_CELLS);
+  const counts = storage(countAttr, "uint", slots * KEYS).toAtomic();
   return Fn(() => {
-    const center = padCenter(instanceIndex);
-    const value = pad.element(center);
+    const center = n(add(slotPad(instanceIndex), padCenter(slotOrdinal(instanceIndex))));
+    const key = slotKey(instanceIndex);
+    const value = pad.element(n(center));
     If(notEqual(value, uint(AIR)), () => {
       for (const face of MESHER_FACES) {
-        const neighbour = pad.element(add(center, uint(face.step)));
+        const neighbour = pad.element(n(add(n(center), uint(face.step))));
         If(equal(neighbour, uint(0)), () => {
-          atomicAdd(counts.element(add(mul(value, uint(4)), uint(face.kind))), uint(1));
+          atomicAdd(counts.element(n(add(key, add(mul(value, uint(4)), uint(face.kind))))), uint(1));
         });
       }
     });
-  })().compute(CHUNK_VOLUME) as unknown as { count: number };
+  })().compute(slots * CHUNK_VOLUME) as unknown as { count: number };
 }
 
-/** 2. SCAN: ONE thread, 1024 iterations, the exclusive prefix sum of the counts into `starts` (the slice table).
- *  Sequential by construction, so it is deterministic; 1024 iterations on one thread is nothing next to the work
- *  after it.
+/** 2. SCAN: ONE THREAD PER SLOT, 1024 iterations, the exclusive prefix sum of that slot's counts into its `starts`.
+ *  Sequential by construction, so it is deterministic; 1024 iterations per thread is nothing next to the work after
+ *  it, and the slot dimension costs `slots` threads instead of one. The per-slot TOTAL it leaves behind is what the
+ *  next kernel turns into an arena offset.
  *
  *  THE ACCUMULATOR IS A `Var` (a mutable LOCAL, i.e. a WGSL `var`), NOT A STORAGE CELL — and that is a fixed bug,
  *  not a preference. The first version kept the running total in a one-element storage buffer
@@ -380,24 +509,51 @@ function buildScanKernel(
   countAttr: StorageBufferAttribute,
   startAttr: StorageBufferAttribute,
   totalAttr: StorageBufferAttribute,
+  slots: number,
 ): { count: number } {
   // The counts are read as a PLAIN value here (a different shader, so the buffer is bound twice in two passes):
   // an atomic binding cannot be read as a value in WGSL, and `atomicLoad` is a statement in TSL.
-  const counts = storage(countAttr, "uint", KEYS);
-  const starts = storage(startAttr, "uint", KEYS);
-  const total = storage(totalAttr, "uint", 1);
+  const counts = storage(countAttr, "uint", slots * KEYS);
+  const starts = storage(startAttr, "uint", slots * KEYS);
+  const totals = storage(totalAttr, "uint", slots);
   return Fn(() => {
+    const slot = instanceIndex;
+    const at = slotKey(instanceIndex);
     const running = Var(uint(0));
     Loop(KEYS, ({ i }) => {
       const key = n(i).toUint();
-      starts.element(key).assign(n(running));
-      running.assign(n(add(n(running), counts.element(key))));
+      starts.element(n(add(at, key))).assign(n(running));
+      running.assign(n(add(n(running), counts.element(n(add(at, key))))));
     });
-    total.element(uint(0)).assign(n(running));
+    totals.element(slot).assign(n(running));
+  })().compute(slots) as unknown as { count: number };
+}
+
+/** 3. BASES: ONE thread over the slots — the exclusive prefix sum of the per-slot totals, i.e. where each slot begins
+ *  in the ARENA, with the grand total in the last cell of the buffer. THIS IS THE KERNEL THAT MAKES THE ARENA WORK:
+ *  the CPU does not know how many faces a chunk will produce, and with this pass it does not have to — the offsets
+ *  are decided on the device, per batch, with no round trip to ask.
+ *
+ *  The same `Var` rule as the scan, for the same reason (this would be the third place the same bug was available). */
+function buildBaseKernel(
+  totalAttr: StorageBufferAttribute,
+  baseAttr: StorageBufferAttribute,
+  slots: number,
+): { count: number } {
+  const totals = storage(totalAttr, "uint", slots);
+  const bases = storage(baseAttr, "uint", slots + 1);
+  return Fn(() => {
+    const running = Var(uint(0));
+    Loop(slots, ({ i }) => {
+      const slot = n(i).toUint();
+      bases.element(slot).assign(n(running));
+      running.assign(n(add(n(running), totals.element(slot))));
+    });
+    bases.element(uint(slots)).assign(n(running));
   })().compute(1) as unknown as { count: number };
 }
 
-/** 3. EMIT: ONE THREAD PER KEY. Each thread walks the whole chunk in `meshChunk`'s order and appends the faces of
+/** 4. EMIT: ONE THREAD PER (slot, key). Each thread walks ITS chunk in `meshChunk`'s order and appends the faces of
  *  ITS key with a counter of its own — no atomics, no fetch-add (which TSL cannot give, see the header), and the
  *  slice comes out in walk order. The first guard is the one that makes it cheap: a key with no faces returns at
  *  once.
@@ -406,16 +562,23 @@ function buildScanKernel(
  *  LOCALS (WGSL `var`), the destination is SNAPSHOT BEFORE the rank is incremented, and the writes read the
  *  snapshot. Keeping either of them in a storage cell (the first version kept the rank in a `cursor` buffer and
  *  derived the destination from it) is what shifted every face by one: the destination was re-derived after the
- *  increment, so nothing landed where the slice table said it would. */
+ *  increment, so nothing landed where the slice table said it would.
+ *
+ *  AND THE DESTINATION IS ARENA-ABSOLUTE — `bases[slot] + starts[slot][key] + rank` — which is the whole difference
+ *  between one output set per chunk and one arena for a batch. `bases` is read from the buffer the previous kernel
+ *  wrote, so the emit pass never has to be told where its chunk goes. */
 function buildEmitKernel(
   padded: StorageBufferAttribute,
   countAttr: StorageBufferAttribute,
   startAttr: StorageBufferAttribute,
+  baseAttr: StorageBufferAttribute,
   out: MesherOutput,
+  slots: number,
 ): { count: number } {
-  const pad = storage(padded, "uint", PAD_CELLS);
-  const counts = storage(countAttr, "uint", KEYS);
-  const starts = storage(startAttr, "uint", KEYS);
+  const pad = storage(padded, "uint", slots * PAD_CELLS);
+  const counts = storage(countAttr, "uint", slots * KEYS);
+  const starts = storage(startAttr, "uint", slots * KEYS);
+  const bases = storage(baseAttr, "uint", slots + 1);
   // `VERTS_PER_FACE` vertices per face, not four: the storage array's LENGTH is what TSL types the accessor from, and
   // it has to agree with the attribute three binds and pads (a length left at the old indexed size is exactly the kind
   // of quiet disagreement this whole file is written against).
@@ -423,9 +586,11 @@ function buildEmitKernel(
   const normals = storage(out.normal, "float", out.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const uvs = storage(out.uv, "float", out.capacity * VERTS_PER_FACE * 2);
   return Fn(() => {
-    const key = instanceIndex;
-    const value = div(key, uint(4));
-    const kind = mod(key, uint(4));
+    const slot = slotOf(instanceIndex);
+    const key = slotKeyIndex(instanceIndex);
+    const at = slotKey(instanceIndex);
+    const value = n(div(key, uint(4)));
+    const kind = n(mod(key, uint(4)));
     const rank = Var(uint(0));
     const destination = Var(uint(0));
     // THE WALK'S COORDINATES ARE SNAPSHOTTED PER ITERATION, for the same reason the destination is: a
@@ -440,9 +605,9 @@ function buildEmitKernel(
     const walkZ = Var(uint(0));
     const center = Var(uint(0));
     If(notEqual(value, uint(AIR)), () => {
-      If(notEqual(counts.element(key), uint(0)), () => {
+      If(notEqual(counts.element(at), uint(0)), () => {
         // ONE FLAT LOOP, and its counter IS the walk ordinal: `meshChunk` nests `ly` outer, `lz` middle, `lx` inner,
-        // so the ordinal decodes the other way round from the storage index (see `packFromPad`). (A nested `Loop`
+        // so the ordinal decodes the other way round from the storage index (see `packBatchFromPad`). (A nested `Loop`
         // cannot be used here: three names every counter `i` by default, so the inner one shadows the outer and the
         // walk visits only a diagonal — M0 lost a round to that.)
         Loop(CHUNK_VOLUME, ({ i }) => {
@@ -450,13 +615,13 @@ function buildEmitKernel(
           walkX.assign(n(mod(n(ordinal), uint(CHUNK_SIZE))));
           walkZ.assign(n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE))));
           walkY.assign(n(div(n(ordinal), uint(CHUNK_SIZE * CHUNK_SIZE))));
-          center.assign(n(padCenter(n(ordinal))));
+          center.assign(n(add(slotPad(instanceIndex), padCenter(n(ordinal)))));
           If(equal(pad.element(n(center)), value), () => {
             for (const face of MESHER_FACES) {
               If(equal(uint(face.kind), kind), () => {
                 If(equal(pad.element(n(add(n(center), uint(face.step)))), uint(0)), () => {
                   // Snapshot, THEN advance: the writes below must use the position this face owns.
-                  destination.assign(n(add(n(starts.element(key)), n(rank))));
+                  destination.assign(n(add(add(bases.element(slot), starts.element(at)), n(rank))));
                   rank.assign(n(add(n(rank), uint(1))));
                   writeFaceNodes(positions, normals, uvs, n(destination), n(walkX), n(walkY), n(walkZ), face);
                 });
@@ -466,13 +631,40 @@ function buildEmitKernel(
         });
       });
     });
-  })().compute(KEYS) as unknown as { count: number };
+  })().compute(slots * KEYS) as unknown as { count: number };
 }
 
-/** The padded address of a CENTER voxel, from the flat WALK ordinal (`meshChunk`'s nest order: `ly` outer, `lz`
- *  middle, `lx` inner — see `packFromPad`). Shared by the kernels so the three of them cannot disagree about the
- *  numbering. Every step is erased with `n()` (see `writeFaceNodes`): `div(any, uint)` resolves to a FLOAT overload
- *  by inference, and feeding that float into `mod` fails to typecheck even though the emitted WGSL is u32 math. */
+/** HOW A BATCH IS ADDRESSED — in ONE place, so the four kernels cannot disagree about the numbering.
+ *
+ *  `thread` is the dispatch's `instanceIndex`, and every per-slot expression is derived from it: the SLOT is which
+ *  chunk of the batch this thread belongs to, and the rest is the slot's offset in whichever shared array the caller
+ *  is asking about. That is the arena's contract in four functions — a kernel never receives a chunk index, it
+ *  decodes one. */
+function slotOf(thread: U32Node): U32Node {
+  return n(div(thread, uint(KEYS)));
+}
+/** The per-slot index of the thread's key, for the emit dispatch (`slots * KEYS` threads). */
+function slotKeyIndex(thread: U32Node): U32Node {
+  return n(mod(thread, uint(KEYS)));
+}
+/** The walk ordinal of the thread's voxel, for the census dispatch (`slots * CHUNK_VOLUME` threads). */
+function slotOrdinal(thread: U32Node): U32Node {
+  return n(mod(thread, uint(CHUNK_VOLUME)));
+}
+/** The slot's base in the per-slot key tables (`counts`/`starts`). */
+function slotKey(thread: U32Node): U32Node {
+  return n(mul(slotOf(thread), uint(KEYS)));
+}
+/** The slot's base in the padded blocks. */
+function slotPad(thread: U32Node): U32Node {
+  return n(mul(slotOf(thread), uint(PAD_CELLS)));
+}
+
+/** The padded address of a CENTER voxel INSIDE ONE CHUNK, from the flat WALK ordinal (`meshChunk`'s nest order: `ly`
+ *  outer, `lz` middle, `lx` inner — see `packBatchFromPad`). Shared by the kernels, so they cannot disagree about the
+ *  numbering; the slot's own base is added by the caller (`slotPad`). Every step is erased with `n()` (see
+ *  `writeFaceNodes`): `div(any, uint)` resolves to a FLOAT overload by inference, and feeding that float into `mod`
+ *  fails to typecheck even though the emitted WGSL is u32 math. */
 function padCenter(ordinal: U32Node): U32Node {
   const lx = n(mod(n(ordinal), uint(CHUNK_SIZE)));
   const lz = n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE)));

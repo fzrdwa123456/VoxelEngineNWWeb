@@ -271,6 +271,14 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       identical`, or `MISMATCH` with the first difference in `examples:`. The example names the look, the drawn
       vertex and the corner it came from (`value 1 side face 34: vertex 0 (corner 0) position[1] cpu 0 vs gpu 1`),
       which is enough to tell WHAT the kernel got wrong — a walk-order mistake shows up exactly like that;
+  (c2) **`MESHPROBE arena: …` IS M2c STEP 2a (the shared arena), and it is the line to read for the rollout's
+      numbers.** Several real chunks go through ONE kernel build and ONE output set; the line reports the batch's
+      total faces, each chunk's place in the arena (`real(cx,cy,cz) @base+faces`) and whether every slot matches the
+      CPU mesher with the offsets being the running sum. **The faces-per-chunk figure at the end is the measurement
+      that decides how big the arena may be** — a face costs ~240 B (6 vertices × vec4 position + vec4 normal + vec2
+      uv), so a batch that needed a big arena is a batch an allocator would have to compact or pack. An arena that
+      is too small does not truncate: it THROWS (`do not fit` / `past the — face arena`), which is also worth
+      reporting verbatim;
   (d) **`KERNEL PRODUCED NOTHING`** is its own verdict, and it means the kernels did not run at all: no slice came
       back. `computeAsync` does NOT reject for a WGSL/pipeline error (the trap M0 hit twice), so read
       **`renderer.log`** for the real reason — `debug.log` only carries the symptom. **AND ON A MISMATCH the probe
@@ -278,7 +286,7 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       after the failing case: a node graph's statement order cannot be read off the TypeScript, so that dump is what
       turns "the numbers are right but the bytes are not" into something readable. Send those lines along with the
       `RESULT` line when a mismatch happens;
-  (e) **the milliseconds are the point of the milestone**: the `gpu` number is THREE dispatches plus the readback the
+  (e) **the milliseconds are the point of the milestone**: the `gpu` number is FOUR dispatches plus the readback the
       probe needs for its comparison, and `cpu reference` is the production mesher on this thread, timed alone. The
       probe is deliberately the only place that readback happens: a dispatch+readback round trip measured 20-30 ms on
       this machine, which is why the drawing side must consume the GPU buffers directly. A stall while the probe runs
