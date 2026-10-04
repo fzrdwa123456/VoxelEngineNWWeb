@@ -8057,8 +8057,11 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
   assert(/const cluster = list\.element\(instanceIndex\);/.test(drawSrc) &&
     /const faceSlot = faceSlots\.element\(cluster\);/.test(drawSrc),
     "the compaction's work item is the VISIBLE LIST: a culled cluster is not in it, so it copies nothing at all…");
-  assert(/If\(greaterThanEqual\(face, faces\), \(\) => \{\n        Break\(\);/.test(drawSrc),
-    "…and the walk stops at the cluster's OWN face count with a `Break` — a `Loop` bound is a compile-time number, so the alternative is `capacity × budget` iterations for `visible faces` of real work…");
+  assert(/If\(greaterThanEqual\(face, faces\), \(\) => \{\n        Break\(\);\n      \}\);\n      If\(lessThan\(face, faces\), \(\) => \{/.test(drawSrc),
+    "…and the walk is bounded by the GUARD, not by `Break`: a `Loop` that runs past its own cluster reads another chunk's faces out of the arena and overwrites the next cluster's region (which is what «侧面跑到别的位置» was), so correctness does not depend on the `break` being emitted — the budget is never smaller than a cluster, so nothing is truncated either…");
+  assert(/compactProblem === "" && indirect\[0\] === visibleFaces \* 6/.test(probeSrc) &&
+    /private async checkCompaction\(/.test(probeSrc) && /CULLPROBE compact:/.test(probeSrc),
+    "…and the COMPACTION is verified BY VALUE: the compacted buffer is read back and compared against `arena source + place` component by component, with the first difference reported (that check is how a copy bug is found, because every count stays right)");
   assert(/axis === 1 \? local : n\(mul\(local, n\(step\)\)\)/.test(drawSrc) &&
     /const origin = n\(axis === 0 \? originX : axis === 1 \? originY : originZ\);/.test(drawSrc),
     "…while the placement scales X and Z by the rung's step and leaves Y alone (`(step, 1, step)`, the same scale the stream gives its own far meshes) and adds the cluster's origin…");

@@ -23,7 +23,7 @@
 // A dense `position`/`normal`/`uv` triple in the mesher's own drawn layout (`DRAWN_STRIDE` floats per vertex, six
 // vertices per face), with each cluster's CHUNK-LOCAL vertices placed by its `place` vector — `local * (step, 1,
 // step) + origin` — so one buffer serves a fine chunk and a far rung alike.
-import { Break, Fn, If, Loop, add, greaterThanEqual, instanceIndex, mul, storage, uint } from "three/tsl";
+import { Break, Fn, If, Loop, add, greaterThanEqual, instanceIndex, lessThan, mul, storage, uint } from "three/tsl";
 import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
 import { DRAWN_STRIDE, VERTS_PER_FACE, type MesherOutput } from "./lod-gpu-mesher";
 import { n } from "./lod-gpu-field";
@@ -142,9 +142,17 @@ function buildCompactionKernel(
     const step = place === null ? null : place.element(n(add(at, uint(3))));
     Loop(draw.faceCapacity, ({ i }) => {
       const face = n(i).toUint();
+      // THE GUARD IS WHAT MAKES THE COPY CORRECT; THE `Break` IS ONLY A FAST EXIT. The loop bound is a compile-time
+      // number (the draw budget) and every cluster stops at its OWN face count — and the first version relied on
+      // `Break` alone to do that, which is what the `O` probe's report («侧面跑到别的位置»: faces from elsewhere
+      // appearing inside the copy) pointed at: a `Loop` that runs the full budget reads PAST its cluster in the arena
+      // and writes PAST its own region in the compacted buffer, so neighbours overwrite each other and the winner is
+      // whatever ran last. With the guard, the writes are bounded by `faces` whether the `break` is emitted or not —
+      // and the budget is never smaller than a cluster, so nothing is truncated either.
       If(greaterThanEqual(face, faces), () => {
         Break();
       });
+      If(lessThan(face, faces), () => {
       const source = n(add(base, face));
       const destination = n(add(faceSlot, face));
       for (let v = 0; v < VERTS_PER_FACE; v++) {
@@ -183,6 +191,7 @@ function buildCompactionKernel(
           }
         }
       }
+      });
     });
   })().compute(capacity) as unknown as { count: number };
 }

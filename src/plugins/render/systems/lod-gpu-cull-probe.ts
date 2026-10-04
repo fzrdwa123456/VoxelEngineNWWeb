@@ -15,7 +15,7 @@
 //
 // IT IS A DEBUG PROBE: it owns no component, changes no streaming state, and does nothing unless `N` is pressed.
 import * as THREE from "three/webgpu";
-import type { IndirectStorageBufferAttribute, WebGPURenderer } from "three/webgpu";import { ShowToast } from "../../../data/globals/commands";
+import type { IndirectStorageBufferAttribute, StorageBufferAttribute, WebGPURenderer } from "three/webgpu";import { ShowToast } from "../../../data/globals/commands";
 import { CAMERA3D, RENDERER3D, SCENE3D } from "../../../data/globals/gfx";
 import { KEY_EVENTS, LOCAL_PLAYER, VOXEL, KeyEdgeReader } from "../../../data/globals/resources";
 import { CHUNK_SIZE } from "../../../data/world/chunk";
@@ -23,7 +23,7 @@ import { WORLD_SURFACE_Y, nearestWrap } from "../../../data/world/world";
 import { CHUNK_Y_COUNT, MIN_CHUNK_Y } from "../../../data/world/world";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput } from "../../../data/world/mesh";
 import type { Chunk } from "../../../data/world/chunk";
-import { createMesherOutput, GpuChunkMesher, MESHER_SLOTS } from "./lod-gpu-mesher";
+import { createMesherOutput, DRAWN_STRIDE, GpuChunkMesher, MESHER_SLOTS, VERTS_PER_FACE, type MesherOutput } from "./lod-gpu-mesher";
 import { createCompactedDraw, GpuGeometryCompactor, type CompactedDraw } from "./lod-gpu-draw";
 import { DEFAULT_LOD, inTierCoverage, lodLadder } from "../../../data/world/lod";
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
@@ -162,6 +162,7 @@ export class GpuCullProbeSystem {
         // 5. THE DRAW: an ordinary Mesh whose attributes are the COMPACTED buffers and whose vertex count is the
         //    buffer the device wrote. No `drawRange`, no count from here — `setIndirect` is the whole mechanism.
         const indirectAttr = this.culler.clusterBuffers.indirect;
+        const compactProblem = await this.checkCompaction(output, compacted, set, visible);
         this.showDraw(compacted, indirectAttr, visibleFaces);
         const indirect = new Uint32Array(await this.renderer.getArrayBufferAsync(indirectAttr));
         this.log(
@@ -171,15 +172,15 @@ export class GpuCullProbeSystem {
         );
         this.log(
           `CULLPROBE draw RESULT: ${
-            indirect[0] === visibleFaces * 6 && indirect[1] === 1
-              ? "OK — the indirect buffer holds exactly the visible geometry and ONE instance"
-              : "MISMATCH — the device's draw call disagrees with the visible set"
-          }; cull + compact took ${gpuMs.toFixed(2)}ms (3 cull dispatches + 1 compaction, and the only readback here is this report's)`,
+            compactProblem === "" && indirect[0] === visibleFaces * 6 && indirect[1] === 1
+              ? "OK — the indirect buffer holds exactly the visible geometry and ONE instance, and every compacted vertex is its arena source placed"
+              : `MISMATCH — ${compactProblem !== "" ? compactProblem : "the device's draw call disagrees with the visible set"}`
+          }; cull + compact took ${gpuMs.toFixed(2)}ms (3 cull dispatches + 2 compaction passes, and the readbacks here are this report's)`,
         );
         this.world.commands.send(ShowToast, {
           key:
             "GPU 间接绘制探针: " +
-            (indirect[0] === visibleFaces * 6 ? `已画出 ${visibleFaces} 个面 ✓` : `间接参数不符! ${indirect[0]}`),
+            (compactProblem === "" && indirect[0] === visibleFaces * 6 ? `已画出 ${visibleFaces} 个面 ✓` : `不一致! 见 debug.log`),
           raw: true,
         });
       }
@@ -216,6 +217,70 @@ export class GpuCullProbeSystem {
       out.push({ input, origin: [atX, cy * CHUNK_SIZE, atZ] });
     }
     return out;
+  }
+
+  /** THE COMPACTION, CHECKED BY VALUE — the detector for «侧面跑到别的位置». The selection can be perfect (and the
+   *  `vertexCount` proves it) while the COPY writes the wrong bytes: a `Loop` that runs past its cluster reads another
+   *  chunk's faces out of the arena and overwrites the next cluster's region, so faces from elsewhere turn up inside
+   *  the copy while every count stays right. No count can see that, so this reads the COMPACTED buffer back and
+   *  compares every vertex against its arena source placed by `place` — component by component, normals included —
+   *  and reports the FIRST difference with its cluster, face and vertex. */
+  private async checkCompaction(
+    arena: MesherOutput,
+    draw: CompactedDraw,
+    set: ClusterSet,
+    visible: Uint32Array,
+  ): Promise<string> {
+    const read = async (attr: StorageBufferAttribute, elements: number): Promise<Float32Array> =>
+      new Float32Array(await this.renderer.getArrayBufferAsync(attr, null, 0, elements * 4));
+    const arenaPositions = await read(arena.position, arena.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
+    const arenaNormals = await read(arena.normal, arena.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
+    const compactPositions = await read(draw.position, draw.faceCapacity * VERTS_PER_FACE * DRAWN_STRIDE);
+    const compactNormals = await read(draw.normal, draw.faceCapacity * VERTS_PER_FACE * DRAWN_STRIDE);
+    const slots = this.culler?.clusterBuffers.faceSlot;
+    const faceSlots =
+      slots === undefined ? new Uint32Array(0) : new Uint32Array(await this.renderer.getArrayBufferAsync(slots));
+    let vertices = 0;
+    let wrong = 0;
+    let first = "";
+    for (const cluster of Array.from(visible)) {
+      const base = set.info[cluster * 4];
+      const count = set.info[cluster * 4 + 1];
+      const origin = [set.place[cluster * 4], set.place[cluster * 4 + 1], set.place[cluster * 4 + 2]];
+      const step = set.place[cluster * 4 + 3];
+      const destination = faceSlots[cluster];
+      for (let face = 0; face < count; face++) {
+        for (let v = 0; v < VERTS_PER_FACE; v++) {
+          const src = ((base + face) * VERTS_PER_FACE + v) * DRAWN_STRIDE;
+          const dst = ((destination + face) * VERTS_PER_FACE + v) * DRAWN_STRIDE;
+          vertices++;
+          for (let axis = 0; axis < 3; axis++) {
+            const want = axis === 1 ? arenaPositions[src + 1] + origin[1] : arenaPositions[src + axis] * step + origin[axis];
+            if (compactPositions[dst + axis] !== want) {
+              wrong++;
+              if (first === "") {
+                first =
+                  `cluster ${cluster} face ${face} vertex ${v} position[${axis}]: got ${compactPositions[dst + axis]}, ` +
+                  `expected ${want} (arena ${arenaPositions[src + axis]} + origin ${origin[axis]}, step ${step})`;
+              }
+            }
+            if (compactNormals[dst + axis] !== arenaNormals[src + axis]) {
+              wrong++;
+              if (first === "") {
+                first =
+                  `cluster ${cluster} face ${face} vertex ${v} normal[${axis}]: got ${compactNormals[dst + axis]}, ` +
+                  `expected ${arenaNormals[src + axis]}`;
+              }
+            }
+          }
+        }
+      }
+    }
+    this.log(
+      `CULLPROBE compact: ${visible.length} cluster(s), ${vertices} vertex/vertices checked against the arena — ` +
+        `${wrong === 0 ? "every position and normal is its arena source, placed" : `${wrong} component(s) WRONG; first: ${first}`}`,
+    );
+    return wrong === 0 ? "" : first;
   }
 
   /** Put the compacted buffer in the scene as an ordinary `Mesh`, drawn by the DEVICE's indirect call.
