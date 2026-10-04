@@ -66,6 +66,8 @@ export class GpuCullProbeSystem {
   private culler: GpuClusterCuller | null = null;
   private compactor: GpuGeometryCompactor | null = null;
   private compacted: CompactedDraw | null = null;
+  private drawGeometry: THREE.BufferGeometry | null = null;
+  private drawBuffer: CompactedDraw | null = null;
   private drawn: THREE.Mesh | null = null;
   private boxes: THREE.LineSegments | null = null;
   /** One probe at a time: a second `N` while it runs is ignored (it awaits the GPU). */
@@ -216,21 +218,31 @@ export class GpuCullProbeSystem {
     return out;
   }
 
-  /** Put the compacted buffer in the scene as an ordinary `Mesh`, drawn by the DEVICE's indirect call. The previous
-   *  run's mesh is removed and disposed first; the buffers themselves stay (they are the compactor's). */
+  /** Put the compacted buffer in the scene as an ordinary `Mesh`, drawn by the DEVICE's indirect call.
+   *
+   *  THE GEOMETRY AND THE MATERIAL ARE BUILT ONCE AND REUSED, and that is a FIXED BUG: the first version built a
+   *  fresh geometry per run and disposed the previous one, but `BufferGeometry.dispose()` DESTROYS THE ATTRIBUTES'
+   *  GPU BUFFERS — and those buffers are the compute-written compacted triple plus the cull's INDIRECT buffer, which
+   *  the next run's passes still write into. `renderer.log` said it plainly:
+   *  `[Buffer (unlabeled)] used in submit while destroyed. While calling [Queue].Submit(... computeGroup_...)`.
+   *  A probe may own a geometry; it may NOT own buffers the kernels own. So: the mesh is removed and re-added, the
+   *  BUFFERS live on, and only the tiny JS-side geometry wrapper is replaced when the draw buffer changes. */
   private showDraw(draw: CompactedDraw, indirect: IndirectStorageBufferAttribute, visibleFaces: number): void {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", draw.position);
-    geometry.setAttribute("normal", draw.normal);
-    geometry.setAttribute("uv", draw.uv);
-    // THE ONLY NEW CONCEPT: the draw's size comes from a buffer the compute pass wrote. No `drawRange`, no count.
-    geometry.setIndirect(indirect);
-    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
+    if (this.drawGeometry === null || this.drawBuffer !== draw) {
+      this.drawGeometry = new THREE.BufferGeometry();
+      this.drawGeometry.setAttribute("position", draw.position);
+      this.drawGeometry.setAttribute("normal", draw.normal);
+      this.drawGeometry.setAttribute("uv", draw.uv);
+      // THE ONLY NEW CONCEPT: the draw's size comes from a buffer the compute pass wrote. No `drawRange`, no count.
+      this.drawGeometry.setIndirect(indirect);
+      this.drawGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
+      this.drawBuffer = draw;
+    }
     const material = new THREE.MeshLambertMaterial({ color: 0x7fd4ff });
-    const mesh = new THREE.Mesh(geometry, material);
+    const mesh = new THREE.Mesh(this.drawGeometry, material);
     mesh.name = "gpu-indirect-draw-probe";
     mesh.frustumCulled = false;
-    this.disposeDraw();
+    this.removeDrawMesh();
     this.world.resource(SCENE3D).add(mesh);
     this.drawn = mesh;
     this.log(
@@ -240,11 +252,12 @@ export class GpuCullProbeSystem {
     );
   }
 
-  private disposeDraw(): void {
+  /** Take the MESH out of the scene and dispose only the MATERIAL. The geometry's attributes are the kernels'
+   *  buffers — see `showDraw` — so they are never disposed here. */
+  private removeDrawMesh(): void {
     const mesh = this.drawn;
     if (mesh === null) return;
     this.world.resource(SCENE3D).remove(mesh);
-    mesh.geometry.dispose();
     const material = mesh.material;
     if (Array.isArray(material)) for (const one of material) one.dispose();
     else material.dispose();

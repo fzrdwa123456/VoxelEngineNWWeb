@@ -8076,9 +8076,16 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
     /buildCompactionKernel\(culler, arena, draw, clusterCapacity, "shade"\)/.test(drawSrc) &&
     /await this\.renderer\.computeAsync\(this\.positions as never\);[\s\S]{0,80}?await this\.renderer\.computeAsync\(this\.shade as never\);/.test(drawSrc),
     "…and the copy runs as TWO passes over the same visible list, so neither kernel exceeds the platform's DEFAULT storage-buffer limit (`place` is bound by the position pass only)");
-  assert(/geometry\.setIndirect\(indirect\)/.test(probeSrc) && /visibleFaces \* 6/.test(probeSrc) &&
+  assert(/\.setIndirect\(indirect\)/.test(probeSrc) && /visibleFaces \* 6/.test(probeSrc) &&
     /indirect\[0\] === visibleFaces \* 6/.test(probeSrc),
     "…and the DRAW's size is the buffer the DEVICE wrote (`setIndirect`), checked against the visible set's own face count — the probe reads it only to report, which is the whole distinction this step exists to make…");
+  // AND THE PROBE MAY NOT DISPOSE WHAT THE KERNELS OWN — a FIXED BUG: `BufferGeometry.dispose()` destroys the
+  // ATTRIBUTES' GPU buffers, and those are the compute-written compacted triple plus the cull's indirect buffer, so
+  // the next run's passes submitted into destroyed buffers (`[Buffer (unlabeled)] used in submit while destroyed`).
+  assert(/private drawGeometry: THREE\.BufferGeometry \| null = null;/.test(probeSrc) &&
+    /if \(this\.drawGeometry === null \|\| this\.drawBuffer !== draw\)/.test(probeSrc) &&
+    /private removeDrawMesh\(\): void \{/.test(probeSrc) && !/this\.drawGeometry\.dispose\(\)/.test(probeSrc),
+    "…and the probe REMOVES its mesh instead of disposing its geometry: that geometry's attributes ARE the kernels' buffers, and disposing them destroyed buffers the next run still writes into (the BOXES' own geometry is CPU-built and is still disposed — that one is the probe's)");
   const cullSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-cull.ts"));
   assert(/new IndirectStorageBufferAttribute\(new Uint32Array\(4\), 1\)/.test(cullSrc) &&
     /indirect: IndirectStorageBufferAttribute;/.test(cullSrc),

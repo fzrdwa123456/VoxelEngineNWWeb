@@ -267,6 +267,12 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       CPU reference cannot hide as "both agree". **`slice table BROKEN (…)` is the first thing to report**: it means
       the kernels' per-look slice table is not the prefix sum the counts imply, which shifts every slice's content
       while leaving the counts right (that is exactly what the first live run of this probe showed);
+  (b2) **`MESHPROBE arena decode:` is the ARENA's own diagnostic, and it is the line to send when the arena check
+      fails.** It reports what the census's slot decode evaluates to ON THE DEVICE for thread 0 and for thread
+      `CHUNK_VOLUME`: the first must be slot `0`, and the **second must be slot `1` with a key base of `1024`**. The
+      first live arena run had BOTH chunks' faces in slot 0 (`912 + 214 = 1126`), which is what a slot decode pinned
+      at 0 looks like — and `MISMATCH — 1 of 12 case(s) disagree; first: arena: …` with every per-case line green is
+      exactly what it produces;
   (c) **`MESHPROBE RESULT:` is the verdict** — `OK — N case(s), M faces, every drawn vertex, normal and UV
       identical`, or `MISMATCH` with the first difference in `examples:`. The example names the look, the drawn
       vertex and the corner it came from (`value 1 side face 34: vertex 0 (corner 0) position[1] cpu 0 vs gpu 1`),
@@ -354,6 +360,11 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       `instanceCount` must be `1`. That equality IS the step: nothing on this thread decided how much to draw;
   (c) **`CULLPROBE draw RESULT: OK`** — the indirect buffer holds exactly the visible geometry, with the cull +
       compaction milliseconds. Anything else prints what disagreed;
+  (c2) **AND PRESS `O` TWICE** — the second one is the regression test for a probe bug: `BufferGeometry.dispose()`
+      destroys the attributes' GPU buffers, and those ARE the compute-written compacted buffers, so the first version
+      submitted the next run's compute into destroyed buffers (`renderer.log`:
+      `[Buffer (unlabeled)] used in submit while destroyed`). The mesh is now removed and re-added while the buffers
+      live on, so a second and third `O` must behave exactly like the first, and **`renderer.log` must be empty**;
   (d) **THE COPY MUST LOOK EXACTLY LIKE THE CHUNK 40 BLOCKS BELOW IT** — same silhouette, same holes, same edges.
       Nothing at all, or a scrambled/spiky copy, means the placement (`place`), the arena offsets (`base`/`slice`,
       which the mesher computes on the device) or the indirect count is wrong. Pressing `O` again replaces it;

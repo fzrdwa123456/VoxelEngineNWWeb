@@ -371,10 +371,13 @@ export class GpuChunkMesher {
   private readonly totalAttr: StorageBufferAttribute;
   private readonly baseAttr: StorageBufferAttribute;
   private readonly output: MesherOutput;
+  /** See `readDecode`: eight threads' worth of the census's own decode. */
+  private readonly decodeAttr: StorageBufferAttribute;
   private readonly census: { count: number };
   private readonly scan: { count: number };
   private readonly bases: { count: number };
   private readonly emit: { count: number };
+  private readonly decode: { count: number };
 
   constructor(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput(), slots = MESHER_SLOTS) {
     this.renderer = renderer;
@@ -385,18 +388,31 @@ export class GpuChunkMesher {
     this.startAttr = new StorageBufferAttribute(new Uint32Array(slots * KEYS), 1);
     this.totalAttr = new StorageBufferAttribute(new Uint32Array(slots), 1);
     this.baseAttr = new StorageBufferAttribute(new Uint32Array(slots + 1), 1);
+    this.decodeAttr = new StorageBufferAttribute(new Uint32Array(DECODE_PROBES * 4), 1);
     // The kernels are built ONCE per (output set, slot count): a per-call build would compile a pipeline per chunk,
     // and both the capacity and the slot count are baked into the storage array lengths anyway.
     this.census = buildCensusKernel(this.paddedAttr, this.countAttr, slots);
     this.scan = buildScanKernel(this.countAttr, this.startAttr, this.totalAttr, slots);
     this.bases = buildBaseKernel(this.totalAttr, this.baseAttr, slots);
     this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, this.baseAttr, output, slots);
+    this.decode = buildDecodeKernel(this.decodeAttr);
   }
 
   /** The buffers the geometry went into — the drawing side binds them (a `BufferGeometry` whose attributes ARE these
    *  is drawn straight out of the compute output). */
   get mesherOutput(): MesherOutput {
     return this.output;
+  }
+
+  /** A DIAGNOSTIC, and a small one: what the CENSUS's slot decode actually evaluates to on the device. Four numbers
+   *  per probing thread — the slot and the walk ordinal for thread `t`, and the same two for thread `t +
+   *  CHUNK_VOLUME` — so a batch that mixes its slots up says so in one readback instead of in a face count that is
+   *  right but belongs to the wrong chunk. It exists because the arena's first live run showed exactly that
+   *  (`912 + 214 = 1126` faces, ALL of them in slot 0) and the decode is the only thing between the thread id and the
+   *  counters. */
+  async readDecode(): Promise<Uint32Array> {
+    await this.renderer.computeAsync(this.decode as never);
+    return new Uint32Array(await this.renderer.getArrayBufferAsync(this.decodeAttr));
   }
 
   /** Mesh up to `slots` chunks into ONE arena and read the result back (the probe's half; the drawing side will not
@@ -462,6 +478,28 @@ export class GpuChunkMesher {
     }
     return out;
   }
+}
+
+/** HOW MANY THREADS THE DECODE DIAGNOSTIC PROBES (`readDecode`): each writes the slot and the walk ordinal for its
+ *  own thread id AND for the thread `CHUNK_VOLUME` further on, i.e. the first threads of slot 0 and slot 1. */
+const DECODE_PROBES = 4;
+
+/** THE DECODE, WRITTEN OUT — the census's `slot`, `ordinal`, `pad base` and `key base` for eight thread ids that
+ *  STRADDLE THE SLOT BOUNDARY. It is a probe of the mechanism the arena rests on, and it exists because that
+ *  mechanism was wrong once in a way no count could show: the first live arena run put BOTH chunks' faces in slot 0
+ *  (`912 + 214 = 1126`), i.e. the per-slot key base was 0 for every thread of slot 1, while every count that came
+ *  back was internally consistent. Four numbers per thread make that a reading instead of an inference. */
+function buildDecodeKernel(decodeAttr: StorageBufferAttribute): { count: number } {
+  const out = storage(decodeAttr, "uint", DECODE_PROBES * 4);
+  return Fn(() => {
+    const near = instanceIndex;
+    const far = n(add(instanceIndex, uint(CHUNK_VOLUME)));
+    const at = n(mul(instanceIndex, uint(4)));
+    out.element(at).assign(n(censusSlot(near)));
+    out.element(n(add(at, uint(1)))).assign(n(censusOrdinal(near)));
+    out.element(n(add(at, uint(2)))).assign(n(censusSlot(far)));
+    out.element(n(add(at, uint(3)))).assign(n(censusKey(far)));
+  })().compute(DECODE_PROBES) as unknown as { count: number };
 }
 
 /** 1. COUNT: one thread per (slot, voxel), all six faces, `atomicAdd` per emitted face. The atomics are STATEMENTS,
