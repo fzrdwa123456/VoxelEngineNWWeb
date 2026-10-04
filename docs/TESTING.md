@@ -370,6 +370,13 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       which the mesher computes on the device) or the indirect count is wrong. Pressing `O` again replaces it;
   (e) it is ADDITIVE: the live world still draws through its own path, so a failure here changes nothing about the
       terrain on screen — but `renderer.log` must stay at 0/几十 KB, and a broken shader appears THERE first.
+→ **`P` — THE SAME DRAW WITH CULLING OFF (the Nanite route, step 2)**: press **P** in a world and `O`'s floating copy
+  is drawn with a frustum that contains EVERYTHING, i.e. every cluster visible through the same kernel and the same
+  compaction. It exists to keep two questions apart: **`O` asks "does the GPU draw what it decided to draw", `P` asks
+  "is the geometry itself right"**, and comparing them is how «外观不对» is told apart from «剔除太狠». From the
+  ground, `O` legitimately draws only the part of the copy the frustum keeps (the log says `2 visible = 956 face(s)`
+  of `1199`) while `P` draws all `1199`; if `P` looks right and `O` looks wrong, the DRAW PATH is fine and the
+  question is the culling or the bounds.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

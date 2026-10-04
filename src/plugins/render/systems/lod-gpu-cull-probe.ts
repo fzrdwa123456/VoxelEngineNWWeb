@@ -85,13 +85,19 @@ export class GpuCullProbeSystem {
   step(): void {
     let presses = 0;
     let draws = 0;
+    let all = 0;
     this.keys.drain((edge) => {
       if (!edge.down || edge.repeat) return;
       if (edge.code === "KeyN") presses++;
       if (edge.code === "KeyO") draws++;
+      if (edge.code === "KeyP") all++;
     });
     if (presses > 0 && !this.busy) void this.run();
-    else if (draws > 0 && !this.busy) void this.runDraw();
+    else if (draws > 0 && !this.busy) void this.runDraw(false);
+    // `P`: THE SAME DRAW WITH CULLING SWITCHED OFF — every cluster visible. It exists so the two questions stay
+    // separable: `O` answers "does the GPU draw what it decided to draw", and `P` answers "is the geometry itself
+    // right", with nothing culled in between. Comparing the two is how «外观不对» and «剔除太狠» are told apart.
+    else if (all > 0 && !this.busy) void this.runDraw(true);
   }
 
   /** `O`: THE WHOLE GPU-DRIVEN DRAW, end to end, on ONE batch of real chunks.
@@ -104,7 +110,7 @@ export class GpuCullProbeSystem {
    *  The copy floats 40 blocks up (`place.y`), so it cannot be confused with the chunk it came from: an identical
    *  silhouette 40 blocks higher IS the proof, and a scrambled or empty copy is a failure of the placement, the
    *  offsets or the indirect count. */
-  private async runDraw(): Promise<void> {
+  private async runDraw(ignoreCull: boolean): Promise<void> {
     this.busy = true;
     const started = performance.now();
     const backend = (this.renderer as { backend?: { isWebGPUBackend?: boolean } }).backend;
@@ -132,10 +138,16 @@ export class GpuCullProbeSystem {
           arenaFaces += geometry.faces;
           for (const slice of geometry.slots) {
             const at = set.count * 4;
-            set.bounds[at] = origin[0] + CHUNK_SIZE / 2;
-            set.bounds[at + 1] = origin[1] + 40 + CHUNK_SIZE / 2;
-            set.bounds[at + 2] = origin[2] + CHUNK_SIZE / 2;
-            set.bounds[at + 3] = Math.SQRT2 * CHUNK_SIZE;
+            // PER-CLUSTER BOUNDS, from the slice's OWN vertices — and that is what makes the copy look right when it
+            // is only partly on screen. Giving every slice of a chunk the CHUNK's sphere made visibility
+            // all-or-nothing per chunk, so standing on the ground (where the lower chunk of the column falls out of
+            // the frustum) the copy drew half a chunk and read as «还是有点问题». These bounds come from the arena's
+            // own vertices, so a cluster is exactly as big as the geometry it stands for.
+            const bounds = sliceBounds(geometry, slice.start, slice.count, origin[0], origin[1] + 40, origin[2], 1);
+            set.bounds[at] = bounds[0];
+            set.bounds[at + 1] = bounds[1];
+            set.bounds[at + 2] = bounds[2];
+            set.bounds[at + 3] = bounds[3];
             set.info[at] = geometry.base + slice.start;
             set.info[at + 1] = slice.count;
             set.info[at + 2] = slice.key;
@@ -149,7 +161,7 @@ export class GpuCullProbeSystem {
         }
         // 3. CULL, then 4. COMPACT — the first pass decides what exists, the second copies it.
         this.culler ??= new GpuClusterCuller(this.renderer, CLUSTER_CAPACITY);
-        const planes = this.frustumPlanes();
+        const planes = ignoreCull ? everythingVisible() : this.frustumPlanes();
         const gpuStart = performance.now();
         const visible = await this.culler.cull(set, planes);
         let visibleFaces = 0;
@@ -470,7 +482,7 @@ export class GpuCullProbeSystem {
     return lodLadder(DEFAULT_LOD, worldChunksX(), POSITION.x[this.playerIndex], POSITION.z[this.playerIndex]).length;
   }
 
-  /** The camera's own six planes, flattened into the 24 floats the kernel reads. */
+/** The camera's own six planes, flattened into the 24 floats the kernel reads. */
   private frustumPlanes(): FrustumPlanes {
     this.camera.updateMatrixWorld();
     return float32Of(this.frustumOf());
@@ -566,4 +578,61 @@ function float32Of(frustum: THREE.Frustum): FrustumPlanes {
     out[p * 4 + 3] = plane.constant;
   }
   return out;
+}
+
+  /** A SLICE'S OWN BOUNDING SPHERE, in world space: the min/max of its vertices in the arena's drawn layout, placed by
+ *  the cluster's origin and step (X/Z scaled, Y not — `(step, 1, step)`, the far ring's own scale), plus a small
+ *  margin so a face lying exactly on the boundary is never culled away. Exported for the gate. */
+export function sliceBounds(
+  geometry: { positions: Float32Array },
+  start: number,
+  faces: number,
+  originX: number,
+  originY: number,
+  originZ: number,
+  step: number,
+): [number, number, number, number] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (let face = 0; face < faces; face++) {
+    for (let v = 0; v < VERTS_PER_FACE; v++) {
+      const at = ((start + face) * VERTS_PER_FACE + v) * DRAWN_STRIDE;
+      const x = geometry.positions[at] * step + originX;
+      const y = geometry.positions[at + 1] + originY;
+      const z = geometry.positions[at + 2] * step + originZ;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+  }
+  if (!Number.isFinite(minX)) return [originX, originY, originZ, 0];
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const cz = (minZ + maxZ) / 2;
+  // The sphere CONTAINS the slice's box, plus one block of margin: a cull must never drop a cluster the frustum
+  // touches, and the margin keeps a face lying exactly on a plane from falling through a float comparison.
+  const radius = Math.hypot(maxX - cx, maxY - cy, maxZ - cz) + 1;
+  return [cx, cy, cz, radius];
+}
+
+/** A frustum that CONTAINS EVERYTHING, for `P`: six inward normals with a constant no coordinate can reach. It is a
+ *  real frustum as far as the kernel is concerned — the same test, the same code path — so `P` measures the geometry
+ *  and nothing else. */
+function everythingVisible(): FrustumPlanes {
+  const huge = 1e9;
+  return new Float32Array([
+    1, 0, 0, huge,
+    -1, 0, 0, huge,
+    0, 1, 0, huge,
+    0, -1, 0, huge,
+    0, 0, 1, huge,
+    0, 0, -1, huge,
+  ]);
 }

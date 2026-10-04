@@ -8109,6 +8109,13 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
     "…and that buffer is an `IndirectStorageBufferAttribute` (`STORAGE | INDIRECT`), so the compute pass can write it and the draw can read it — usages are fixed by the FIRST binding, and this one has to declare both…");
   assert(/edge\.code === "KeyO"/.test(probeSrc) && !/KeyO/.test(stripComments(readSource("src/data/globals/binds.ts"))),
     "`O` runs the draw probe through the same one-edge channel, and it is not a gameplay bind");
+  // AND `P` SWITCHES CULLING OFF, deliberately: `O` and `P` are the two halves of "is the geometry right" vs "did the
+  // cull keep the right part", and giving every slice of a chunk the CHUNK's sphere made the first half unanswerable
+  // (standing on the ground the copy lost a whole chunk and read as a bug).
+  assert(/edge\.code === "KeyP"/.test(probeSrc) && /runDraw\(true\)/.test(probeSrc) && /function everythingVisible\(\)/.test(probeSrc),
+    "…and `P` runs the SAME path with a frustum that contains everything, so the geometry can be looked at with nothing culled");
+  assert(/export function sliceBounds\(/.test(probeSrc) && /const bounds = sliceBounds\(geometry, slice\.start, slice\.count,/.test(probeSrc),
+    "…while a cluster's bounds come from its OWN vertices (min/max of the slice in the arena, placed), not from the whole chunk: an all-or-nothing sphere per chunk is what made a partly-visible copy look half missing");
 });
 
 // ===== M3a: the far ring drawn as (look, tier) batches =====
