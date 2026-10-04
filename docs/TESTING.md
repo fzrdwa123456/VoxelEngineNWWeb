@@ -259,11 +259,13 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (a) **a toast** — `网格 GPU 探针: 与 CPU 完全一致 ✓ (N 个面)` — or `不一致! k/14 个用例`, or a failure message.
       Either answer is useful; a mismatch is a kernel bug, not a world bug;
   (b) **one `MESHPROBE <case>:` line per case in `debug.log`**, each with `faces cpu X / gpu Y`, `keys N`,
-      `mismatched keys 0` and the two millisecond readings, e.g.
-      `MESHPROBE checker: faces cpu 98304 / gpu 98304, keys 3, mismatched keys 0 — gpu 27.10ms (3 dispatches +
-      readback), cpu reference 54.00ms`. The synthetic cases also carry a **closed-form** face count:
-      `(closed form ✓)` means the pattern's geometry implies the number the CPU mesher produced, so a wrong CPU
-      reference cannot hide as "both agree";
+      `mismatched keys 0`, the **`slice table ok`** field and the two millisecond readings, e.g.
+      `MESHPROBE checker: faces cpu 98304 / gpu 98304, keys 3, mismatched keys 0 — slice table ok, gpu 27.10ms
+      (3 dispatches + readback), cpu reference 54.00ms`. The synthetic cases also carry a **closed-form** face
+      count: `(closed form ✓)` means the pattern's geometry implies the number the CPU mesher produced, so a wrong
+      CPU reference cannot hide as "both agree". **`slice table BROKEN (…)` is the first thing to report**: it means
+      the kernels' per-look slice table is not the prefix sum the counts imply, which shifts every slice's content
+      while leaving the counts right (that is exactly what the first live run of this probe showed);
   (c) **`MESHPROBE RESULT:` is the verdict** — `OK — 14 case(s), N faces, every corner, normal, UV and index
       identical`, or `MISMATCH` with the first difference in `examples:`. The example names the look and the corner
       (`value 1 side face 34: corner 0 position[1] cpu 0 vs gpu 1`), which is enough to tell WHAT the kernel got

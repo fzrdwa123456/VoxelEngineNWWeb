@@ -58,6 +58,7 @@ import {
   notEqual,
   storage,
   uint,
+  Var,
 } from "three/tsl";
 import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
 import { AIR, CHUNK_SIZE, CHUNK_VOLUME } from "../../../data/world/chunk";
@@ -104,6 +105,12 @@ export interface PackedGeometry {
   readonly normals: Float32Array;
   readonly uvs: Float32Array;
   readonly indices: Uint32Array;
+  /** The SLICE TABLE the kernels used, kept so it can be checked on its own: `starts[key]` must be the prefix sum of
+   *  `counts` below it, and the last prefix must be `faces`. That check exists because the first GPU run produced
+   *  every look's count correctly and every slice's CONTENT one key late — a broken table is much easier to read than
+   *  the geometry difference it causes. */
+  readonly counts: Uint32Array;
+  readonly starts: Uint32Array;
 }
 
 /** The per-key counts of a padded block, in the kernel's own walk (`census`). Split out because the gate drives it
@@ -171,7 +178,7 @@ export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGe
     }
     slots.push({ key, start: starts[key], count: counts[key] });
   }
-  return { faces: total, slots, positions, normals, uvs, indices };
+  return { faces: total, slots, positions, normals, uvs, indices, counts, starts };
 }
 
 /** The walk ordinal of a voxel, in `meshChunk`'s nest order: `ly` outer, `lz` middle, `lx` inner. Returns the flat
@@ -226,7 +233,6 @@ export class GpuChunkMesher {
   private readonly paddedAttr: StorageBufferAttribute;
   private readonly countAttr: StorageBufferAttribute;
   private readonly startAttr: StorageBufferAttribute;
-  private readonly cursorAttr: StorageBufferAttribute;
   private readonly totalAttr: StorageBufferAttribute;
   private readonly positionAttr: StorageBufferAttribute;
   private readonly normalAttr: StorageBufferAttribute;
@@ -241,7 +247,6 @@ export class GpuChunkMesher {
     this.paddedAttr = new StorageBufferAttribute(new Uint32Array(PAD_CELLS), 1);
     this.countAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
     this.startAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
-    this.cursorAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
     this.totalAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
     this.positionAttr = new StorageBufferAttribute(new Float32Array(MAX_FACES * 4 * 3), 1);
     this.normalAttr = new StorageBufferAttribute(new Float32Array(MAX_FACES * 4 * 3), 1);
@@ -250,8 +255,8 @@ export class GpuChunkMesher {
     // The kernels are built ONCE: a per-call build would compile a pipeline per chunk, and the capacity is baked
     // into the storage array lengths anyway.
     this.census = buildCensusKernel(this.paddedAttr, this.countAttr);
-    this.scan = buildScanKernel(this.countAttr, this.startAttr, this.cursorAttr, this.totalAttr);
-    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.cursorAttr, {
+    this.scan = buildScanKernel(this.countAttr, this.startAttr, this.totalAttr);
+    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, {
       position: this.positionAttr,
       normal: this.normalAttr,
       uv: this.uvAttr,
@@ -279,7 +284,16 @@ export class GpuChunkMesher {
     const slots: MeshSlot[] = [];
     for (let key = 0; key < KEYS; key++) if (counts[key] > 0) slots.push({ key, start: starts[key], count: counts[key] });
     if (total === 0) {
-      return { faces: 0, slots, positions: new Float32Array(0), normals: new Float32Array(0), uvs: new Float32Array(0), indices: new Uint32Array(0) };
+      return {
+        faces: 0,
+        slots,
+        positions: new Float32Array(0),
+        normals: new Float32Array(0),
+        uvs: new Float32Array(0),
+        indices: new Uint32Array(0),
+        counts,
+        starts,
+      };
     }
     const read = async (attr: StorageBufferAttribute, elements: number): Promise<ArrayBuffer> =>
       this.renderer.getArrayBufferAsync(attr, null, 0, elements * 4);
@@ -287,7 +301,7 @@ export class GpuChunkMesher {
     const normals = new Float32Array(await read(this.normalAttr, total * 4 * 3));
     const uvs = new Float32Array(await read(this.uvAttr, total * 4 * 2));
     const indices = new Uint32Array(await read(this.indexAttr, total * 6));
-    return { faces: total, slots, positions, normals, uvs, indices };
+    return { faces: total, slots, positions, normals, uvs, indices, counts, starts };
   }
 }
 
@@ -312,39 +326,51 @@ function buildCensusKernel(padded: StorageBufferAttribute, countAttr: StorageBuf
   })().compute(CHUNK_VOLUME) as unknown as { count: number };
 }
 
-/** 2. SCAN: ONE thread, 1024 iterations, the exclusive prefix sum of the counts — into `starts` (the immutable slice
- *  table) and into each key's mutable `cursor`. Sequential by construction, so it is deterministic; 1024 iterations
- *  on one thread is nothing next to the work after it. */
+/** 2. SCAN: ONE thread, 1024 iterations, the exclusive prefix sum of the counts into `starts` (the slice table).
+ *  Sequential by construction, so it is deterministic; 1024 iterations on one thread is nothing next to the work
+ *  after it.
+ *
+ *  THE ACCUMULATOR IS A `Var` (a mutable LOCAL, i.e. a WGSL `var`), NOT A STORAGE CELL — and that is a fixed bug,
+ *  not a preference. The first version kept the running total in a one-element storage buffer
+ *  (`total.element(uint(0)).assign(...)`) and read it back with `const here = total.element(uint(0))`; TSL nodes are
+ *  lazy, so the read was re-evaluated after the assignment and the whole slice table came out one key late. The
+ *  probe's run showed what that looks like: every look's COUNT was right and every slice's CONTENT belonged to its
+ *  neighbour (the top slice held the bottom's faces, and the last slice's data fell off the end of the buffer). */
 function buildScanKernel(
   countAttr: StorageBufferAttribute,
   startAttr: StorageBufferAttribute,
-  cursorAttr: StorageBufferAttribute,
   totalAttr: StorageBufferAttribute,
 ): { count: number } {
   // The counts are read as a PLAIN value here (a different shader, so the buffer is bound twice in two passes):
   // an atomic binding cannot be read as a value in WGSL, and `atomicLoad` is a statement in TSL.
   const counts = storage(countAttr, "uint", KEYS);
   const starts = storage(startAttr, "uint", KEYS);
-  const cursors = storage(cursorAttr, "uint", KEYS);
   const total = storage(totalAttr, "uint", 1);
   return Fn(() => {
+    const running = Var(uint(0));
     Loop(KEYS, ({ i }) => {
       const key = n(i).toUint();
-      const here = total.element(uint(0));
-      starts.element(key).assign(here);
-      cursors.element(key).assign(here);
-      total.element(uint(0)).assign(add(here, counts.element(key)));
+      starts.element(key).assign(n(running));
+      running.assign(n(add(n(running), counts.element(key))));
     });
+    total.element(uint(0)).assign(n(running));
   })().compute(1) as unknown as { count: number };
 }
 
 /** 3. EMIT: ONE THREAD PER KEY. Each thread walks the whole chunk in `meshChunk`'s order and appends the faces of
- *  ITS key with a plain counter — no atomics, no fetch-add (which TSL cannot give, see the header), and the slice
- *  comes out in walk order. The first guard is the one that makes it cheap: a key with no faces returns at once. */
+ *  ITS key with a counter of its own — no atomics, no fetch-add (which TSL cannot give, see the header), and the
+ *  slice comes out in walk order. The first guard is the one that makes it cheap: a key with no faces returns at
+ *  once.
+ *
+ *  TWO `Var`s AND THEIR ORDER ARE THE POINT: the rank inside the slice and the destination being written are mutable
+ *  LOCALS (WGSL `var`), the destination is SNAPSHOT BEFORE the rank is incremented, and the writes read the
+ *  snapshot. Keeping either of them in a storage cell (the first version kept the rank in a `cursor` buffer and
+ *  derived the destination from it) is what shifted every face by one: the destination was re-derived after the
+ *  increment, so nothing landed where the slice table said it would. */
 function buildEmitKernel(
   padded: StorageBufferAttribute,
   countAttr: StorageBufferAttribute,
-  cursorAttr: StorageBufferAttribute,
+  startAttr: StorageBufferAttribute,
   out: {
     readonly position: StorageBufferAttribute;
     readonly normal: StorageBufferAttribute;
@@ -354,7 +380,7 @@ function buildEmitKernel(
 ): { count: number } {
   const pad = storage(padded, "uint", PAD_CELLS);
   const counts = storage(countAttr, "uint", KEYS);
-  const cursors = storage(cursorAttr, "uint", KEYS);
+  const starts = storage(startAttr, "uint", KEYS);
   const positions = storage(out.position, "float", MAX_FACES * 4 * 3);
   const normals = storage(out.normal, "float", MAX_FACES * 4 * 3);
   const uvs = storage(out.uv, "float", MAX_FACES * 4 * 2);
@@ -363,6 +389,8 @@ function buildEmitKernel(
     const key = instanceIndex;
     const value = div(key, uint(4));
     const kind = mod(key, uint(4));
+    const rank = Var(uint(0));
+    const destination = Var(uint(0));
     If(notEqual(value, uint(AIR)), () => {
       If(notEqual(counts.element(key), uint(0)), () => {
         // ONE FLAT LOOP, and its counter IS the walk ordinal: `meshChunk` nests `ly` outer, `lz` middle, `lx` inner,
@@ -379,9 +407,10 @@ function buildEmitKernel(
             for (const face of MESHER_FACES) {
               If(equal(uint(face.kind), kind), () => {
                 If(equal(pad.element(add(center, uint(face.step))), uint(0)), () => {
-                  const at = cursors.element(key);
-                  cursors.element(key).assign(add(at, uint(1)));
-                  writeFaceNodes(positions, normals, uvs, indices, at, lx, ly, lz, face);
+                  // Snapshot, THEN advance: the writes below must use the position this face owns.
+                  destination.assign(n(add(n(starts.element(key)), n(rank))));
+                  rank.assign(n(add(n(rank), uint(1))));
+                  writeFaceNodes(positions, normals, uvs, indices, n(destination), lx, ly, lz, face);
                 });
               });
             }

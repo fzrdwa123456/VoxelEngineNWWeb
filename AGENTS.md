@@ -897,6 +897,21 @@ where it is:
     shows 0, a hole adds six), the multi-value cases FACE BY FACE, and a NON-UNIFORM BORDER — the only kind that
     proves the pad's ±Z transposition, because a uniform plane is symmetric (the mutation test that dropped the
     transposition passed until an asymmetric-border case existed, and now fails).
+  * **THE MUTABLE STATE OF A KERNEL MUST BE A `Var` LOCAL, AND THAT COST A TEST ROUND TO LEARN.** The first GPU run
+    reported every look's COUNT correctly and every slice's CONTENT one key late — the top slice held the bottom's
+    faces, the last slice's data fell off the end — and `renderer.log` was empty, so nothing had failed to compile.
+    The cause: the scan's running total and the emit kernel's per-key rank were kept in STORAGE CELLS
+    (`total.element(uint(0)).assign(...)`, `cursors.element(key).assign(...)`). TSL nodes are LAZY: a value "read"
+    with `const here = buffer.element(i)` is an expression, not a snapshot, so it was re-evaluated after the
+    assignment and the table came out shifted by one key. Both are now `Var`s (mutable WGSL locals), the per-key
+    cursor BUFFER is gone entirely, and the destination is SNAPSHOTTED into a `Var` before the rank advances — the
+    writes then use the position that face owns, whatever order the compiler picks. The gate pins all three: the
+    `Var`s exist, `total.element(uint(0))` appears exactly ONCE (after the loop), and no `cursorAttr`/`cursors.element`
+    remains in the GPU path.
+  * **AND THE PROBE CHECKS THE SLICE TABLE BEFORE THE GEOMETRY (`slice table ok` / `BROKEN` in its per-case line).**
+    `starts[key]` must be the prefix sum of the counts below it and the last prefix the face total — a broken table
+    explains a whole class of content mismatches in one number, which the first run's log had to be
+    reverse-engineered into.
   * **`M`, in a world, runs it and reports.** Synthetic patterns first (empty, uniform solid with air or solid
     neighbours, solid with one AIR voxel, a single block, three value bands, a checkerboard, a patterned border),
     each carrying a CLOSED-FORM face count so the CPU reference itself is checked too; then up to six REAL chunks

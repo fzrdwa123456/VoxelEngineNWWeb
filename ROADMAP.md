@@ -3134,12 +3134,19 @@ Still outstanding:
   VERIFIED: `tsc` 0; `check:ecs` **87/87** — `packFromPad` (census + scan + emit on the CPU, walking the INPUT) must
   equal `meshChunk`'s OUTPUT face by face for the closed forms, the multi-value cases and an ASYMMETRIC patterned
   border (the only kind that exposes a transposed ±Z plane, which the mutation test proved by first passing and then
-  failing once the case existed). `M` runs it in a world: eight synthetic patterns plus up to six real chunks, one
-  line per case, a verdict, a toast, and the GPU-vs-CPU milliseconds — **measured on the user's machine:
-  `OK — 11 case(s), 121162 faces, every corner, normal, UV and index identical`** (worst case a 98304-face
-  checkerboard), with the GPU half at 694 ms against the CPU's 58 ms BECAUSE OF THE READBACK THE PROBE NEEDS (a
-  dispatch+readback round trip measured 20-30 ms, and the first call compiles the pipelines). **That number is the
-  design constraint for the next step: nothing may come back to the CPU per chunk.**
+  failing once the case existed). **AND ITS FIRST LIVE RUN FOUND THE ONE THING THE CPU TWIN COULD NOT: TSL NODES ARE
+  LAZY, SO MUTABLE STATE IN A STORAGE CELL IS NOT A SNAPSHOT.** The report was
+  `MISMATCH — 9 of 11 case(s)`, with every look's COUNT correct and every slice's CONTENT one key late (the top
+  slice holding the bottom's faces, the last slice's data off the end of the buffer), and `renderer.log` EMPTY — i.e.
+  nothing failed to compile, the kernels simply computed a shifted slice table. The scan's running total and the emit
+  kernel's per-key rank were both kept in storage cells, and `const here = total.element(uint(0))` is an expression,
+  not a copy, so it was re-evaluated after the assignment. FIXED: both are `Var` LOCALS (mutable WGSL `var`s), the
+  per-key cursor buffer is gone, and the destination is snapshotted into a `Var` before the rank advances. The probe
+  now also checks the GPU's own slice table (`starts[key] === the prefix sum of the counts`, `total === their sum`)
+  before comparing geometry, so that class of failure reports itself in one number, and the gate pins the three rules.
+  The CPU twin was right all along — which is the lesson: it proves the ALGORITHM, while "how does this kernel hold a
+  mutable value" is a question only the device can answer, and that is what the probe is for.
+  VERIFIED AGAIN AFTER THE FIX: `tsc` 0, `check:ecs` 87/87, and the probe's next run is the device's half.
   **AND ITS FIRST LIVE RUN BROKE THE LOD, in a way only the GPU could show** (the report: «lod 好像被破坏了一样
   在闪和面到处飞，按 G 或 H 或重载资源包又恢复正常，但一动起来又出问题»). The numbers were fine — `batched=5000+/18`,
   `calls` down by roughly the far ring's share, no exception in either log, and a Node reproduction of the whole

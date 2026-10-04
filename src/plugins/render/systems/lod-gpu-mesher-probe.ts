@@ -99,6 +99,21 @@ function syntheticCases(): ProbeCase[] {
   ];
 }
 
+/** Is the GPU's own SLICE TABLE sane? `starts[key]` must be the prefix sum of the counts below it, and the last
+ *  prefix must be the face total. Checked BEFORE the geometry, because a broken table is far easier to read than the
+ *  geometry difference it causes: the first GPU run reported every look's count correctly while every slice's content
+ *  sat one key late (a scan that kept its running total in a storage cell, which TSL re-evaluated). */
+export function checkSliceTable(gpu: PackedGeometry): string | null {
+  let running = 0;
+  for (let key = 0; key < gpu.counts.length; key++) {
+    if (gpu.starts[key] !== running) {
+      return `starts[${key}] = ${gpu.starts[key]} but the counts below it sum to ${running}`;
+    }
+    running += gpu.counts[key];
+  }
+  return running === gpu.faces ? null : `faces ${gpu.faces} but the counts sum to ${running}`;
+}
+
 /** What a geometry comparison found. The slices are keyed by look, because the two halves order their slots
  *  differently (`meshChunk` first-seen, the kernels ascending key) — the engine carries each slot's key, so only the
  *  CONTENT per key is a contract. */
@@ -256,6 +271,7 @@ export class GpuMesherProbeSystem {
         const gpu = await this.mesher.run(probeCase.input);
         const gpuCaseMs = performance.now() - gpuStart;
         gpuMs += gpuCaseMs;
+        const tableProblem = checkSliceTable(gpu);
         const diff = compareGeometry(cpu, gpu);
         const closedForm =
           probeCase.expectedFaces === undefined
@@ -265,14 +281,18 @@ export class GpuMesherProbeSystem {
               : ` (CLOSED FORM SAYS ${probeCase.expectedFaces} — the CPU mesher disagrees with the pattern!)`;
         cases++;
         facesCompared += diff.facesCpu;
-        if (diff.mismatchedKeys > 0 || diff.facesCpu !== diff.facesGpu) {
+        if (tableProblem !== null) {
+          mismatched++;
+          if (examples.length < 8) examples.push(`${probeCase.name}: SLICE TABLE BROKEN — ${tableProblem}`);
+        } else if (diff.mismatchedKeys > 0 || diff.facesCpu !== diff.facesGpu) {
           mismatched++;
           for (const example of diff.examples) if (examples.length < 8) examples.push(`${probeCase.name}: ${example}`);
         }
         this.log(
           `MESHPROBE ${probeCase.name}: faces cpu ${diff.facesCpu} / gpu ${diff.facesGpu}, ` +
             `keys ${diff.keysCompared}, mismatched keys ${diff.mismatchedKeys}${closedForm}` +
-            ` — gpu ${gpuCaseMs.toFixed(2)}ms (3 dispatches + readback), cpu reference ${cpuCaseMs.toFixed(2)}ms`,
+            ` — slice table ${tableProblem === null ? "ok" : `BROKEN (${tableProblem})`}` +
+            `, gpu ${gpuCaseMs.toFixed(2)}ms (3 dispatches + readback), cpu reference ${cpuCaseMs.toFixed(2)}ms`,
         );
       }
       // WHAT A MISMATCH MEANS, said out loud, because "the kernel is broken" and "the kernel did not run" need

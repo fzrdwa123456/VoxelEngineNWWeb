@@ -7701,6 +7701,22 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "…and the mesher is the three kernels the design needs: census (per voxel, atomic counts), scan (ONE thread, the slice table) and emit (per key)");
   assert(/\}\)\(\)\.compute\(1\)/.test(mesherSrc),
     "the scan runs on ONE thread: the prefix sum is sequential by construction, so it is deterministic");
+  // THE TWO MUTABLES ARE `Var` LOCALS, AND THAT IS A FIXED BUG, not a style choice. The first version kept the
+  // scan's running total and the emit kernel's per-key rank in STORAGE CELLS; TSL nodes are lazy, so a value "read"
+  // before an assignment was re-evaluated after it, and the whole slice table came out one key late — every look's
+  // COUNT right, every slice's CONTENT belonging to its neighbour. Three assertions hold that down: the locals are
+  // `Var`s, the total is written exactly ONCE (after the loop — never read back inside it), and no per-key cursor
+  // buffer exists at all.
+  assert(/const running = Var\(uint\(0\)\)/.test(mesherSrc) &&
+    /const rank = Var\(uint\(0\)\)/.test(mesherSrc) &&
+    /const destination = Var\(uint\(0\)\)/.test(mesherSrc),
+    "the scan's accumulator, the emit kernel's rank and the face's destination are all `Var` LOCALS (a WGSL `var`)…");
+  equal(countOf(mesherSrc, /total\.element\(uint\(0\)\)/g), 1,
+    "…the total is written once, AFTER the loop (an accumulator kept in storage is what shifted every slice)…");
+  assert(!/cursorAttr|cursors\.element/.test(mesherSrc),
+    "…and no per-key cursor BUFFER is left in the GPU path to keep a rank in (the CPU twin's own `cursor` array is a plain JS local and stays)");
+  assert(/destination\.assign\([\s\S]{0,120}?rank\.assign\(/.test(mesherSrc),
+    "…while the destination is SNAPSHOTTED before the rank advances, so the writes use the position that face owns");
   assert(/const key = instanceIndex;/.test(mesherSrc) && /const value = div\(key, uint\(4\)\);/.test(mesherSrc) &&
     /If\(notEqual\(counts\.element\(key\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
     "…and emit is ONE THREAD PER KEY: the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once");
@@ -7723,6 +7739,8 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   const probeSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-mesher-probe.ts"));
   assert(/meshChunk\(probeCase\.input\)/.test(probeSrc) && /compareGeometry\(cpu, gpu\)/.test(probeSrc),
     "the probe compares against the PRODUCTION mesher's own output, face by face");
+  assert(/checkSliceTable\(gpu\)/.test(probeSrc) && /SLICE TABLE BROKEN/.test(probeSrc),
+    "…and it checks the kernel's own SLICE TABLE first (a broken table is easier to read than the geometry it breaks)");
   assert(/const cpuCaseMs = performance\.now\(\) - cpuStart;/.test(probeSrc) && /cpuMs \+= cpuCaseMs;/.test(probeSrc),
     "…and the CPU half is timed ALONE (the first version measured it at log time, i.e. after the awaited GPU readback)");
   assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
