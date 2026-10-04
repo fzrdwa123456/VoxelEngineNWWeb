@@ -204,6 +204,19 @@ function firstFaceDifference(cpu: MeshResult, gpu: PackedGeometry, cpuFace: numb
   return null;
 }
 
+/** A built COMPUTE kernel, as much of it as this probe needs: `renderer.debug.onNodeBuilderCreated` hands over the
+ *  builder, and after the first dispatch its `computeShader.code` is the WGSL three actually emitted. That is the
+ *  only way to see a node graph's statement order — two rounds of "the counts are right and the bytes are not" were
+ *  diagnosed from the emitted code, not from the TypeScript that produced it. */
+interface ComputeBuilderLike {
+  readonly compute?: unknown;
+  readonly computeShader?: { readonly code?: string };
+}
+
+/** How many lines of emitted WGSL a failing case dumps into `debug.log` (the kernels unroll every face and corner, so
+ *  the whole thing is a few thousand lines; this is a diagnostic, not a document). */
+const WGSL_DUMP_LINES = 1400;
+
 /** RENDER lane. `M` starts the probe; everything else about it is reported, never acted on. */
 export class GpuMesherProbeSystem {
   private readonly keys: KeyEdgeReader;
@@ -215,6 +228,10 @@ export class GpuMesherProbeSystem {
   /** Built on first use (it allocates ~30 MB of GPU buffers, the worst-case chunk) and kept, so a second `M`
    *  reuses the pipelines. */
   private mesher: GpuChunkMesher | null = null;
+  /** Every COMPUTE builder the renderer has created, in dispatch order (census, scan, emit) — see `dumpEmitWgsl`. */
+  private readonly computeBuilders: ComputeBuilderLike[] = [];
+  private debugHooked = false;
+  private dumped = false;
   /** One probe at a time: a second `M` while it runs is ignored (it awaits the GPU). */
   private busy = false;
   /** `null` until the backend is asked; a non-WebGPU backend turns the probe into a logged no-op. */
@@ -250,6 +267,7 @@ export class GpuMesherProbeSystem {
       return;
     }
     this.mesher ??= new GpuChunkMesher(this.renderer);
+    this.hookComputeBuilders();
     let cases = 0;
     let mismatched = 0;
     let facesCompared = 0;
@@ -273,6 +291,9 @@ export class GpuMesherProbeSystem {
         gpuMs += gpuCaseMs;
         const tableProblem = checkSliceTable(gpu);
         const diff = compareGeometry(cpu, gpu);
+        if ((tableProblem !== null || diff.mismatchedKeys > 0 || diff.facesCpu !== diff.facesGpu) && !this.dumped) {
+          this.dumpEmitWgsl();
+        }
         const closedForm =
           probeCase.expectedFaces === undefined
             ? ""
@@ -322,6 +343,42 @@ export class GpuMesherProbeSystem {
       this.world.commands.send(ShowToast, { key: `网格 GPU 探针失败: ${String((err as Error)?.message ?? err)}`, raw: true });
     } finally {
       this.busy = false;
+    }
+  }
+
+  /** Install the WGSL-capture hook once. `onNodeBuilderCreated` fires for RENDER builders too, so only builders that
+   *  carry a `compute` node are kept — the three that matter here arrive in dispatch order. */
+  private hookComputeBuilders(): void {
+    if (this.debugHooked) return;
+    this.debugHooked = true;
+    const debug = (this.renderer as unknown as { debug?: { onNodeBuilderCreated?: unknown } }).debug;
+    if (debug === undefined) return;
+    (debug as { onNodeBuilderCreated: (builder: ComputeBuilderLike) => void }).onNodeBuilderCreated = (builder) => {
+      if (builder?.compute !== undefined) this.computeBuilders.push(builder);
+    };
+  }
+
+  /** Dump the EMIT kernel's actual WGSL — the last compute builder created is the last kernel dispatched (census,
+   *  scan, emit). Only on a mismatch, and only once: a node graph's statement order cannot be read off the
+   *  TypeScript, and "the counts are right but the bytes are not" is answered by the emitted code. */
+  private dumpEmitWgsl(): void {
+    this.dumped = true;
+    const builder = this.computeBuilders[this.computeBuilders.length - 1];
+    const code = builder?.computeShader?.code;
+    if (code === undefined) {
+      this.log(
+        `MESHPROBE WGSL: unavailable (${this.computeBuilders.length} compute builder(s) captured — the renderer's ` +
+          `debug hook may not be wired)`,
+      );
+      return;
+    }
+    const lines = code.split("\n");
+    this.log(
+      `MESHPROBE WGSL emit kernel: ${lines.length} line(s)` +
+        `${lines.length > WGSL_DUMP_LINES ? `, dumping the first ${WGSL_DUMP_LINES}` : ""}`,
+    );
+    for (let i = 0; i < Math.min(lines.length, WGSL_DUMP_LINES); i++) {
+      this.log(`MESHPROBE WGSL ${String(i).padStart(4, "0")}| ${lines[i]}`);
     }
   }
 

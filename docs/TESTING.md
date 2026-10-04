@@ -272,7 +272,11 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       wrong — a walk-order mistake shows up exactly like that;
   (d) **`KERNEL PRODUCED NOTHING`** is its own verdict, and it means the kernels did not run at all: no slice came
       back. `computeAsync` does NOT reject for a WGSL/pipeline error (the trap M0 hit twice), so read
-      **`renderer.log`** for the real reason — `debug.log` only carries the symptom;
+      **`renderer.log`** for the real reason — `debug.log` only carries the symptom. **AND ON A MISMATCH the probe
+      dumps the emit kernel's EMITTED WGSL once**, as `MESHPROBE WGSL <n>| …` lines (capped at 1400 lines) right
+      after the failing case: a node graph's statement order cannot be read off the TypeScript, so that dump is what
+      turns "the numbers are right but the bytes are not" into something readable. Send those lines along with the
+      `RESULT` line when a mismatch happens;
   (e) **the milliseconds are the point of the milestone**: the `gpu` number is THREE dispatches plus the readback the
       probe needs for its comparison, and `cpu reference` is the production mesher on this thread, timed alone. The
       probe is deliberately the only place that readback happens: a dispatch+readback round trip measured 20-30 ms on

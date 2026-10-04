@@ -907,7 +907,21 @@ where it is:
     cursor BUFFER is gone entirely, and the destination is SNAPSHOTTED into a `Var` before the rank advances — the
     writes then use the position that face owns, whatever order the compiler picks. The gate pins all three: the
     `Var`s exist, `total.element(uint(0))` appears exactly ONCE (after the loop), and no `cursorAttr`/`cursors.element`
-    remains in the GPU path.
+    remains in the GPU path. **ITS SECOND RUN NARROWED IT FURTHER, and the same rule fixed the rest**: the slice table
+    was then correct and every look's count right, but a FEW faces per slice carried another voxel's coordinates —
+    the cull test and the write disagreed about WHICH VOXEL was being meshed, because both were counter-derived
+    expressions re-evaluated at different points. The iteration's own `lx`/`ly`/`lz` **and** its pad address are now
+    `Var`s too, assigned at the TOP of the loop body (as explicit statements, so they run once per iteration whatever
+    three decides about where the declaration lives), and the cull test, the neighbour test and the write all read
+    those locals. The gate pins the three shapes: the locals exist, they are assigned in that order at the top of the
+    loop, and no raw counter expression reaches a test or a write.
+  * **AND WHEN THE NUMBERS ARE RIGHT BUT THE BYTES ARE NOT, THE PROBE DUMPS THE EMITTED WGSL.** `renderer.debug.
+    onNodeBuilderCreated` (r186) hands over every node builder; the probe keeps the ones carrying a `compute` node
+    (the three kernels arrive in dispatch order) and, on the FIRST mismatching case, writes the emit kernel's actual
+    `computeShader.code` into `debug.log` as `MESHPROBE WGSL …` lines (capped at 1400). A node graph's statement
+    order cannot be read off the TypeScript that produced it — two rounds of "the counts are right and the bytes are
+    not" were diagnosed from `renderer.log` being EMPTY plus the shape of the differences, and the dump is what makes
+    the next one a reading rather than an inference.
   * **AND THE PROBE CHECKS THE SLICE TABLE BEFORE THE GEOMETRY (`slice table ok` / `BROKEN` in its per-case line).**
     `starts[key]` must be the prefix sum of the counts below it and the last prefix the face total — a broken table
     explains a whole class of content mismatches in one number, which the first run's log had to be

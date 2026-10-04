@@ -3146,6 +3146,17 @@ Still outstanding:
   before comparing geometry, so that class of failure reports itself in one number, and the gate pins the three rules.
   The CPU twin was right all along — which is the lesson: it proves the ALGORITHM, while "how does this kernel hold a
   mutable value" is a question only the device can answer, and that is what the probe is for.
+  **THE SECOND LIVE RUN CONFIRMED THE TABLE AND NARROWED THE REST TO THE SAME CAUSE.** Every case reported
+  `slice table ok`, every look's count was right, and the mismatches were down from "each slice's face 0, values
+  wildly off" to "a few faces per slice, from position 1-2, off by one coordinate" (`value 1 kind 2 face 2: corner 0
+  position[0] cpu 2 vs gpu 1`, `value 1 kind 0 face 0: corner 0 position[1] cpu 32 vs gpu 1`) — i.e. the counts, the
+  table and MOST faces were correct, while the cull test and the write disagreed about WHICH VOXEL was being meshed.
+  The iteration's coordinates were the last counter-derived expressions left: `lx/ly/lz` and the pad address are now
+  `Var`s assigned at the TOP of the loop (explicit statements, so they run per iteration regardless of where the
+  declaration lands), and every test and write reads those locals. Both probes' diagnostics were also extended: the
+  slice-table check, and — new — a one-off dump of the emit kernel's EMITTED WGSL (`renderer.debug.
+  onNodeBuilderCreated`, r186) on the first mismatch, so a third round of "numbers right, bytes wrong" is answered by
+  reading the generated code instead of inferring it.
   VERIFIED AGAIN AFTER THE FIX: `tsc` 0, `check:ecs` 87/87, and the probe's next run is the device's half.
   **AND ITS FIRST LIVE RUN BROKE THE LOD, in a way only the GPU could show** (the report: «lod 好像被破坏了一样
   在闪和面到处飞，按 G 或 H 或重载资源包又恢复正常，但一动起来又出问题»). The numbers were fine — `batched=5000+/18`,

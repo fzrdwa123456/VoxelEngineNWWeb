@@ -391,6 +391,17 @@ function buildEmitKernel(
     const kind = mod(key, uint(4));
     const rank = Var(uint(0));
     const destination = Var(uint(0));
+    // THE WALK'S COORDINATES ARE SNAPSHOTTED PER ITERATION, for the same reason the destination is: a
+    // counter-derived expression read at two different points is NOT the same value in a node graph. The tests and
+    // the writes must agree about WHICH VOXEL is being meshed — and the second live run showed exactly what happens
+    // when they do not: the per-look COUNTS stayed right (they come from the census kernel) while a few faces per
+    // slice carried another voxel's coordinates, so the slice's content was right in shape and wrong in detail. The
+    // assignments are explicit statements at the TOP of the iteration, so they run once per iteration whatever three
+    // decides about where the declaration lives.
+    const walkX = Var(uint(0));
+    const walkY = Var(uint(0));
+    const walkZ = Var(uint(0));
+    const center = Var(uint(0));
     If(notEqual(value, uint(AIR)), () => {
       If(notEqual(counts.element(key), uint(0)), () => {
         // ONE FLAT LOOP, and its counter IS the walk ordinal: `meshChunk` nests `ly` outer, `lz` middle, `lx` inner,
@@ -399,18 +410,18 @@ function buildEmitKernel(
         // walk visits only a diagonal — M0 lost a round to that.)
         Loop(CHUNK_VOLUME, ({ i }) => {
           const ordinal = n(i).toUint();
-          const lx = n(mod(n(ordinal), uint(CHUNK_SIZE)));
-          const lz = n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE)));
-          const ly = n(div(n(ordinal), uint(CHUNK_SIZE * CHUNK_SIZE)));
-          const center = padCenter(ordinal);
-          If(equal(pad.element(center), value), () => {
+          walkX.assign(n(mod(n(ordinal), uint(CHUNK_SIZE))));
+          walkZ.assign(n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE))));
+          walkY.assign(n(div(n(ordinal), uint(CHUNK_SIZE * CHUNK_SIZE))));
+          center.assign(n(padCenter(n(ordinal))));
+          If(equal(pad.element(n(center)), value), () => {
             for (const face of MESHER_FACES) {
               If(equal(uint(face.kind), kind), () => {
-                If(equal(pad.element(add(center, uint(face.step))), uint(0)), () => {
+                If(equal(pad.element(n(add(n(center), uint(face.step)))), uint(0)), () => {
                   // Snapshot, THEN advance: the writes below must use the position this face owns.
                   destination.assign(n(add(n(starts.element(key)), n(rank))));
                   rank.assign(n(add(n(rank), uint(1))));
-                  writeFaceNodes(positions, normals, uvs, indices, n(destination), lx, ly, lz, face);
+                  writeFaceNodes(positions, normals, uvs, indices, n(destination), n(walkX), n(walkY), n(walkZ), face);
                 });
               });
             }

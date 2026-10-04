@@ -7717,6 +7717,17 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "…and no per-key cursor BUFFER is left in the GPU path to keep a rank in (the CPU twin's own `cursor` array is a plain JS local and stays)");
   assert(/destination\.assign\([\s\S]{0,120}?rank\.assign\(/.test(mesherSrc),
     "…while the destination is SNAPSHOTTED before the rank advances, so the writes use the position that face owns");
+  // AND SO IS THE ITERATION'S OWN COORDINATE. The second live run had the counts right and a few faces per slice
+  // carrying ANOTHER voxel's coordinates — i.e. the neighbour test and the write disagreed about which voxel was
+  // being meshed, because both were counter-derived expressions re-evaluated at different points. `walkX/walkY/
+  // walkZ/center` are assigned at the TOP of each iteration and every test and write reads the VARS.
+  assert(/const walkX = Var\(uint\(0\)\)/.test(mesherSrc) && /const center = Var\(uint\(0\)\)/.test(mesherSrc) &&
+    /walkX\.assign\([\s\S]{0,400}?center\.assign\(/.test(mesherSrc),
+    "…and the iteration's lx/ly/lz AND its pad address are Var locals, assigned at the top of the loop…");
+  assert(/If\(equal\(pad\.element\(n\(center\)\), value\)/.test(mesherSrc) &&
+    /pad\.element\(n\(add\(n\(center\), uint\(face\.step\)\)\)/.test(mesherSrc) &&
+    /writeFaceNodes\(positions, normals, uvs, indices, n\(destination\), n\(walkX\), n\(walkY\), n\(walkZ\), face\)/.test(mesherSrc),
+    "…so the cull test, the neighbour test and the write all read those same locals (a raw counter expression in one of them is the bug)");
   assert(/const key = instanceIndex;/.test(mesherSrc) && /const value = div\(key, uint\(4\)\);/.test(mesherSrc) &&
     /If\(notEqual\(counts\.element\(key\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
     "…and emit is ONE THREAD PER KEY: the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once");
@@ -7741,6 +7752,9 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "the probe compares against the PRODUCTION mesher's own output, face by face");
   assert(/checkSliceTable\(gpu\)/.test(probeSrc) && /SLICE TABLE BROKEN/.test(probeSrc),
     "…and it checks the kernel's own SLICE TABLE first (a broken table is easier to read than the geometry it breaks)");
+  assert(/hookComputeBuilders\(\)/.test(probeSrc) && /onNodeBuilderCreated/.test(probeSrc) &&
+    /computeShader\?\.code/.test(probeSrc) && /MESHPROBE WGSL/.test(probeSrc),
+    "…and on a mismatch it dumps the EMIT kernel's emitted WGSL once (a node graph's statement order is not readable off the TypeScript)");
   assert(/const cpuCaseMs = performance\.now\(\) - cpuStart;/.test(probeSrc) && /cpuMs \+= cpuCaseMs;/.test(probeSrc),
     "…and the CPU half is timed ALONE (the first version measured it at log time, i.e. after the awaited GPU readback)");
   assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
