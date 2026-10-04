@@ -1061,6 +1061,17 @@ where it is:
     culled, so an OVERLAP stays visible) is exactly `Frustum.intersectsSphere`'s. The CPU twin (`cullClustersCpu`) is
     written as the same three steps rather than as a filter, because the slot each survivor lands in is part of what
     must agree.
+  * **THE PADDING IS BOUNDED BY THE COUNT, NOT BY ITS CONTENTS — AND THAT IS A FIXED BUG.** The dispatch covers the
+    whole capacity (the count is a compile-time `compute` size), so the slots past the set are padding. Zeroing them
+    looks like the answer and is not: a zeroed bounding sphere is `(0, 0, 0)` with radius `0`, i.e. a VISIBLE cluster
+    sitting at the WORLD ORIGIN, and the six plane tests admit it whenever the origin is in front of the camera. The
+    first live run of `N` reported `897 cluster(s) … 7324 visible on the GPU, 29 on the CPU`, and
+    **`7324 - 29 = 7295 = 8192 - 897`** — the entire padding, in exactly the runs where the player looked towards the
+    origin, while every other run was green. The kernel now reads the real `count` from a one-cell buffer and
+    `inside` starts at `0`, so only a slot inside the count can become visible; the probe reports a list LONGER than
+    the set as its own diagnosis (`the GPU kept N cluster(s) but the set has only M`) instead of burying it in a
+    negative cull count, and the gate pins the guard, the per-run write and the probe's report. The lesson is worth
+    keeping: **a boundary that only exists on the CPU is a boundary the kernel does not have.**
   * **`N`, in a world, runs it and REPORTS THREE THINGS**: the cluster count and the ladder's rung count (built from
     the REAL `lodLadder` around the player, each cell placed at its nearest torus representation — the wrapped-index
     mistake the M2c probe already reported once), the GPU's visible count against `cullClustersCpu` AND against

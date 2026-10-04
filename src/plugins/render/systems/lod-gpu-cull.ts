@@ -41,8 +41,15 @@ import { StorageBufferAttribute, type WebGPURenderer } from "three/webgpu";
 import { n } from "./lod-gpu-field";
 
 /** HOW MANY CLUSTERS ONE PASS CAN CULL — a compile-time constant because it is a storage array's length and a
- *  `Loop`/`compute` count. The far ring's ladder measures a few thousand cells; the padding's flags stay zero,
- *  which is exactly what "not visible" means, so the cost of padding is one pass over zeros. */
+ *  `Loop`/`compute` count. The far ring's ladder measures a few thousand cells.
+ *
+ *  **THE PADDING IS BOUNDED BY THE COUNT, NOT BY ITS OWN CONTENTS, AND THAT IS A FIXED BUG.** The obvious way to
+ *  make the padding harmless is to zero it — but a zeroed bounding sphere is `(0, 0, 0)` with radius `0`, i.e. a
+ *  perfectly visible cluster sitting at the WORLD ORIGIN, and the six plane tests say "inside" whenever the origin is
+ *  in front of the camera. The first live run of `N` reported exactly that:
+ *  `897 cluster(s) … 7324 visible on the GPU, 29 on the CPU`, and `7324 - 29 = 7295 = 8192 - 897` — the whole
+ *  padding, admitted the moment the player looked towards the origin. It worked in every other run, which is what a
+ *  bug in a boundary looks like. The kernel therefore reads the real `count` and flags anything past it invisible. */
 export const CLUSTER_CAPACITY = 8192;
 
 /** ONE CLUSTER: where its faces are in the arena (`base`, `faces`), what a draw buckets it by (`look`, `lod`) and a
@@ -60,7 +67,9 @@ export interface ClusterSet {
 /** THE SIX PLANES as `(nx, ny, nz, d)`, normals INWARD — 24 floats, three's own convention. */
 export type FrustumPlanes = Float32Array;
 
-/** A zeroed cluster set sized for `capacity`. */
+/** A zeroed cluster set sized for `capacity`. `count` is what bounds the set: the kernels only ever classify the
+ *  first `count` entries, and everything past it is invisible BY THE COUNT rather than by its contents (see
+ *  `CLUSTER_CAPACITY` for the bug that rule comes from). */
 export function createClusterSet(capacity: number = CLUSTER_CAPACITY): {
   count: number;
   bounds: Float32Array;
@@ -109,6 +118,9 @@ export class GpuClusterCuller {
   private readonly boundsAttr: StorageBufferAttribute;
   private readonly infoAttr: StorageBufferAttribute;
   private readonly planeAttr: StorageBufferAttribute;
+  /** HOW MANY OF THE `capacity` SLOTS ARE REAL. One cell, read by the visibility kernel — see `CLUSTER_CAPACITY`
+   *  for why "zero the padding" is not a substitute. */
+  private readonly limitAttr: StorageBufferAttribute;
   private readonly flagAttr: StorageBufferAttribute;
   private readonly slotAttr: StorageBufferAttribute;
   private readonly listAttr: StorageBufferAttribute;
@@ -123,13 +135,14 @@ export class GpuClusterCuller {
     this.boundsAttr = new StorageBufferAttribute(new Float32Array(capacity * 4), 4);
     this.infoAttr = new StorageBufferAttribute(new Uint32Array(capacity * 4), 4);
     this.planeAttr = new StorageBufferAttribute(new Float32Array(24), 4);
+    this.limitAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
     this.flagAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
     this.slotAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
     this.listAttr = new StorageBufferAttribute(new Uint32Array(capacity), 1);
     this.countAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
     // Built ONCE: the capacity is baked into all three kernels' storage lengths, the same rule the mesher follows
     // (a per-call build would compile a pipeline per frame).
-    this.visibility = buildVisibilityKernel(this.planeAttr, this.boundsAttr, this.flagAttr, capacity);
+    this.visibility = buildVisibilityKernel(this.planeAttr, this.boundsAttr, this.limitAttr, this.flagAttr, capacity);
     this.compact = buildCompactKernel(this.flagAttr, this.slotAttr, this.countAttr, capacity);
     this.gather = buildGatherKernel(this.flagAttr, this.slotAttr, this.listAttr, capacity);
   }
@@ -155,9 +168,11 @@ export class GpuClusterCuller {
     bounds.fill(0, set.count * 4);
     (this.infoAttr.array as Uint32Array).set(set.info.subarray(0, set.count * 4));
     (this.planeAttr.array as Float32Array).set(planes.subarray(0, 24));
+    (this.limitAttr.array as Uint32Array)[0] = set.count;
     this.boundsAttr.needsUpdate = true;
     this.infoAttr.needsUpdate = true;
     this.planeAttr.needsUpdate = true;
+    this.limitAttr.needsUpdate = true;
     for (const attr of [this.flagAttr, this.slotAttr, this.countAttr]) {
       (attr.array as Uint32Array).fill(0);
       attr.needsUpdate = true;
@@ -174,15 +189,22 @@ export class GpuClusterCuller {
 
 /** 1. VISIBILITY: one thread per cluster, six plane tests, a 0/1 flag. The planes are UNROLLED in TypeScript (the
  *  loop is over six compile-time constants, like the mesher's face table): a runtime index would work, but the
- *  unrolled form makes the plane count a compile-time fact the shader cannot disagree about. */
+ *  unrolled form makes the plane count a compile-time fact the shader cannot disagree about.
+ *
+ *  THE COUNT GUARD IS LOAD-BEARING, not tidiness: the dispatch covers the whole capacity, and a slot past the count
+ *  holds a zeroed sphere — which is `(0, 0, 0)` with radius `0`, a VISIBLE cluster at the world origin. Leaving it
+ *  out let 7295 padding slots into the list the moment the player looked towards the origin (see
+ *  `CLUSTER_CAPACITY`). So `inside` starts at 0 and only a slot inside the count can become 1. */
 function buildVisibilityKernel(
   planeAttr: StorageBufferAttribute,
   boundsAttr: StorageBufferAttribute,
+  limitAttr: StorageBufferAttribute,
   flagAttr: StorageBufferAttribute,
   capacity: number,
 ): { count: number } {
   const planes = storage(planeAttr, "float", 24);
   const bounds = storage(boundsAttr, "float", capacity * 4);
+  const limit = storage(limitAttr, "uint", 1);
   const flags = storage(flagAttr, "uint", capacity);
   return Fn(() => {
     const at = n(mul(instanceIndex, uint(4)));
@@ -190,19 +212,22 @@ function buildVisibilityKernel(
     const cy = bounds.element(n(add(at, uint(1))));
     const cz = bounds.element(n(add(at, uint(2))));
     const radius = bounds.element(n(add(at, uint(3))));
-    const inside = Var(uint(1));
-    for (let p = 0; p < 6; p++) {
-      const plane = n(uint(p * 4));
-      const distance = n(
-        add(
-          add(mul(planes.element(plane), cx), mul(planes.element(n(add(plane, uint(1)))), cy)),
-          add(mul(planes.element(n(add(plane, uint(2)))), cz), planes.element(n(add(plane, uint(3))))),
-        ),
-      );
-      If(lessThan(distance, n(mul(radius, float(-1)))), () => {
-        inside.assign(uint(0));
-      });
-    }
+    const inside = Var(uint(0));
+    If(lessThan(instanceIndex, limit.element(uint(0))), () => {
+      inside.assign(uint(1));
+      for (let p = 0; p < 6; p++) {
+        const plane = n(uint(p * 4));
+        const distance = n(
+          add(
+            add(mul(planes.element(plane), cx), mul(planes.element(n(add(plane, uint(1)))), cy)),
+            add(mul(planes.element(n(add(plane, uint(2)))), cz), planes.element(n(add(plane, uint(3))))),
+          ),
+        );
+        If(lessThan(distance, n(mul(radius, float(-1)))), () => {
+          inside.assign(uint(0));
+        });
+      }
+    });
     flags.element(instanceIndex).assign(n(inside));
   })().compute(capacity) as unknown as { count: number };
 }

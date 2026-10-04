@@ -8008,6 +8008,19 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
     "…and the total is read out only AFTER the loop");
   assert(/If\(lessThan\(distance, n\(mul\(radius, float\(-1\)\)\)\)/.test(src),
     "…and the sphere test is the CONSERVATIVE one (`distance < -radius`, so an overlap stays visible)");
+  // THE COUNT GUARD IS A FIXED BUG, NOT TIDINESS. The dispatch covers the whole capacity, and a slot past the count
+  // holds a zeroed sphere — which is `(0, 0, 0)` with radius `0`, i.e. a VISIBLE cluster at the WORLD ORIGIN. The
+  // first live run of `N` reported `897 cluster(s) … 7324 visible on the GPU, 29 on the CPU`, and
+  // `7324 - 29 = 7295 = 8192 - 897`: the entire padding, admitted the moment the player looked towards the origin,
+  // while every other run was correct. So `inside` starts at 0 and only a slot inside the count can become 1.
+  assert(/const limit = storage\(limitAttr, "uint", 1\);/.test(src) &&
+    /const inside = Var\(uint\(0\)\);/.test(src) &&
+    /If\(lessThan\(instanceIndex, limit\.element\(uint\(0\)\)\), \(\) => \{\n      inside\.assign\(uint\(1\)\);/.test(src),
+    "…and the visibility kernel reads the REAL COUNT and flags everything past it invisible — zeroing the padding is NOT a substitute, because a zeroed sphere with radius 0 at the origin is a visible cluster");
+  assert(/\(this\.limitAttr\.array as Uint32Array\)\[0\] = set\.count;/.test(src) && /this\.limitAttr\.needsUpdate = true;/.test(src),
+    "…and the caller writes that count per run (a stale one would bound the list by the previous frame's set)");
+  assert(/gpu\.length > set\.count/.test(stripComments(readSource("src/plugins/render/systems/lod-gpu-cull-probe.ts"))),
+    "…while the probe reports a list LONGER than the set as its own diagnosis, rather than burying it in a negative cull count");
   assert(/for \(let p = 0; p < 6; p\+\+\)/.test(src),
     "the six planes are UNROLLED in TypeScript, so the plane count is a compile-time fact the shader cannot disagree about");
   assert(/If\(equal\(flags\.element\(instanceIndex\), uint\(1\)\)/.test(src),

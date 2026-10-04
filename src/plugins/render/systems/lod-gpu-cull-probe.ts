@@ -115,7 +115,12 @@ export class GpuCullProbeSystem {
         // THE LIST ITSELF: same length, and the same cluster at every position (the order is part of the contract —
         // the scan gives survivors their slots in cluster order, on both sides).
         let listProblem = "";
-        if (gpu.length !== cpu.length) {
+        if (gpu.length > set.count) {
+          // IMPOSSIBLE, AND SAID SO FIRST: a list longer than the set is the padding leaking in (the first live run
+          // reported `7324` of `897`, i.e. the whole rest of the buffer — see `CLUSTER_CAPACITY`). Reporting "the GPU
+          // kept more than exists" is the diagnosis; comparing elements would have buried it in a negative cull count.
+          listProblem = `the GPU kept ${gpu.length} cluster(s) but the set has only ${set.count}`;
+        } else if (gpu.length !== cpu.length) {
           listProblem = `the GPU kept ${gpu.length} cluster(s) and the CPU ${cpu.length}`;
         } else {
           for (let i = 0; i < gpu.length; i++) {
@@ -133,7 +138,7 @@ export class GpuCullProbeSystem {
         this.log(
           `CULLPROBE RESULT: ${bad === "" ? "OK" : `MISMATCH — ${bad}`} — the GPU's compacted list is ` +
             `${bad === "" ? "identical to the CPU's, in the same order" : "NOT the CPU's"}; ` +
-            `${set.count - gpu.length} of ${set.count} cluster(s) culled, gpu ${gpuMs.toFixed(2)}ms (3 dispatches + readback)`,
+            `${Math.max(0, set.count - gpu.length)} of ${set.count} cluster(s) culled, gpu ${gpuMs.toFixed(2)}ms (3 dispatches + readback)`,
         );
         this.draw(set, gpu);
         this.world.commands.send(ShowToast, {

@@ -334,6 +334,12 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       the boxes must follow the new camera. A box that stays behind you, or a spot in front with no box, is the thing
       to report (say which, and whether it is at the screen edge — the sphere rule keeps anything the frustum
       TOUCHES, so a box straddling the edge is correct);
+  (d2) **AND FACE THE WORLD ORIGIN AND PRESS `N` AGAIN.** This is the regression test for the padding bug: the
+      cluster set is smaller than the pass's capacity, and the padding sits at block (0,0,0) with radius 0, so a
+      kernel that bounds the set by its CONTENTS rather than by its count admits all of it the moment the origin is
+      on screen. The failure looked like `897 cluster(s) … 7324 visible on the GPU, 29 on the CPU`, with
+      `7324 - 29 = 8192 - 897`. **The three counts must be identical wherever you are standing and wherever you
+      look** — if `gpu` is larger than the cluster count, that is this bug, not a camera problem;
   (e) **`CULLPROBE draw:`** names how many boxes were drawn. A second `N` replaces them (the previous ones are
       removed and disposed).
   Note what it does NOT do: the boxes are NOT the far ring, and nothing draws from the cluster list yet — this step
