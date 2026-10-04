@@ -3,7 +3,7 @@
 // reproduce the GEOMETRY" — with `M`. It runs the kernels in `lod-gpu-mesher.ts` over a set of SYNTHETIC chunk
 // patterns (so it says something on a pristine world, and so the closed-form cases are checkable) and then over the
 // REAL chunks in the player's own column, and compares every one against the production CPU mesher: the face count,
-// every look's slice, and then EVERY face's four corners, normals, UVs and indices, in order.
+// every look's slice, and then EVERY face's six drawn vertices, normals and UVs, in order.
 //
 // IT IS A DEBUG PROBE: it owns no component, changes no streaming state, and does nothing unless `M` is pressed. The
 // CPU half is the slow one and runs on the thread that asked, so a stall for the duration of the probe is expected
@@ -17,7 +17,7 @@ import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult }
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
 import { POSITION } from "../../player/components";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
-import { GpuChunkMesher, createMesherOutput, DRAWN_STRIDE, type PackedGeometry } from "./lod-gpu-mesher";
+import { GpuChunkMesher, createMesherOutput, DRAWN_STRIDE, FACE_CORNERS, VERTS_PER_FACE, type PackedGeometry } from "./lod-gpu-mesher";
 import type { WebGPURenderer } from "three/webgpu";
 import * as THREE from "three/webgpu";
 
@@ -128,9 +128,9 @@ interface GeometryDiff {
   readonly examples: readonly string[];
 }
 
-/** Compare a GPU packed geometry against `meshChunk`'s, face by face and in order. Positions, normals, UVs and
- *  indices are all exact: they are integers (or the faces' own 0/1 constants), so there is no tolerance to argue
- *  about — any difference is a bug in the kernel, the pad or the tables. */
+/** Compare a GPU packed geometry against `meshChunk`'s, face by face and in order. Positions, normals and UVs are all
+ *  exact: they are integers (or the faces' own 0/1 constants), so there is no tolerance to argue about — any
+ *  difference is a bug in the kernel, the pad or the tables. */
 export function compareGeometry(cpu: MeshResult, gpu: PackedGeometry): GeometryDiff {
   const examples: string[] = [];
   let mismatchedKeys = 0;
@@ -175,43 +175,35 @@ export function compareGeometry(cpu: MeshResult, gpu: PackedGeometry): GeometryD
 
 /** The first thing that differs between one CPU face and one GPU face, or null when they are identical.
  *
- *  TWO LAYOUTS, and neither is arbitrary: `meshChunk`'s arrays are PACKED (three floats per vertex), while the kernel
- *  writes the DRAWN layout (`DRAWN_STRIDE` floats per vertex — three pads a storage attribute of `itemSize 3` to
- *  `vec4` before it creates the buffer, so the kernel writes that padding itself and the drawn vertex layout cannot
- *  disagree with it). The comparison reads each side with its own stride.
- *
- *  THE INDICES ARE COMPARED AS A PATTERN, NOT AS VALUES. They address a face's four vertices inside the chunk's own
- *  index buffer, and the two halves lay their slices out in different orders (`meshChunk` first-seen, the kernels
- *  ascending key), so the same face legitimately sits at a different global position in each. What must agree is the
- *  two-triangle pattern relative to the face's OWN first vertex — and the corners, normals and UVs, which are the
- *  real content. (Comparing the raw values reported `index 0 cpu 0 vs gpu 4096` for the same face, at slice position 0
- *  on the CPU and 1024 on the GPU.) */
+ *  TWO VERTEX LAYOUTS, and neither is arbitrary: `meshChunk`'s arrays are PACKED and INDEXED (three floats per
+ *  vertex, `4` vertices per face, `6` indices reusing them), while the kernel writes the DRAWN layout
+ *  (`DRAWN_STRIDE` floats per vertex — three pads a storage attribute of `itemSize 3` to `vec4` before it creates
+ *  the buffer, so the kernel writes that padding itself and the drawn vertex layout cannot disagree with it) with
+ *  `VERTS_PER_FACE = 6` vertices per face and NO index buffer at all (see `lod-gpu-mesher.ts`). The comparison
+ *  therefore walks the six drawn vertices and reads the CPU's vertex through `FACE_CORNERS`, which is exactly the
+ *  two-triangle order both sides emit — so the CPU's index buffer is not read here at all, and one less structure
+ *  can disagree. The comparison reads each side with its own stride. */
 function firstFaceDifference(cpu: MeshResult, gpu: PackedGeometry, cpuFace: number, gpuFace: number): string | null {
-  const gpuVertex = (corner: number, axis: number): number =>
-    gpu.positions[(gpuFace * 4 + corner) * DRAWN_STRIDE + axis];
-  const gpuNormal = (corner: number, axis: number): number =>
-    gpu.normals[(gpuFace * 4 + corner) * DRAWN_STRIDE + axis];
-  for (let c = 0; c < 4; c++) {
+  const gpuVertex = (vertex: number, axis: number): number =>
+    gpu.positions[(gpuFace * VERTS_PER_FACE + vertex) * DRAWN_STRIDE + axis];
+  const gpuNormal = (vertex: number, axis: number): number =>
+    gpu.normals[(gpuFace * VERTS_PER_FACE + vertex) * DRAWN_STRIDE + axis];
+  for (let v = 0; v < VERTS_PER_FACE; v++) {
+    // The CPU vertex this drawn vertex is a copy of: the corner table is shared, so this is the only mapping.
+    const c = FACE_CORNERS[v];
     for (let axis = 0; axis < 3; axis++) {
       const a = cpu.positions[(cpuFace * 4 + c) * 3 + axis];
-      const b = gpuVertex(c, axis);
-      if (a !== b) return `corner ${c} position[${axis}] cpu ${a} vs gpu ${b}`;
+      const b = gpuVertex(v, axis);
+      if (a !== b) return `vertex ${v} (corner ${c}) position[${axis}] cpu ${a} vs gpu ${b}`;
       const na = cpu.normals[(cpuFace * 4 + c) * 3 + axis];
-      const nb = gpuNormal(c, axis);
-      if (na !== nb) return `corner ${c} normal[${axis}] cpu ${na} vs gpu ${nb}`;
+      const nb = gpuNormal(v, axis);
+      if (na !== nb) return `vertex ${v} (corner ${c}) normal[${axis}] cpu ${na} vs gpu ${nb}`;
     }
     for (let axis = 0; axis < 2; axis++) {
       const a = cpu.uvs[(cpuFace * 4 + c) * 2 + axis];
-      const b = gpu.uvs[(gpuFace * 4 + c) * 2 + axis];
-      if (a !== b) return `corner ${c} uv[${axis}] cpu ${a} vs gpu ${b}`;
+      const b = gpu.uvs[(gpuFace * VERTS_PER_FACE + v) * 2 + axis];
+      if (a !== b) return `vertex ${v} (corner ${c}) uv[${axis}] cpu ${a} vs gpu ${b}`;
     }
-  }
-  const cpuFirst = cpuFace * 4;
-  const gpuFirst = gpuFace * 4;
-  for (let i = 0; i < 6; i++) {
-    const a = cpu.indices[cpuFace * 6 + i] - cpuFirst;
-    const b = gpu.indices[gpuFace * 6 + i] - gpuFirst;
-    if (a !== b) return `index pattern ${i} cpu ${a} vs gpu ${b} (relative to the face's first vertex)`;
   }
   return null;
 }
@@ -344,7 +336,7 @@ export class GpuMesherProbeSystem {
       const verdict = !ranAtAll
         ? "KERNEL PRODUCED NOTHING (no slots came back at all: read renderer.log for the WGSL/pipeline error)"
         : mismatched === 0
-          ? `OK — ${cases} case(s), ${facesCompared} faces, every corner, normal, UV and index identical`
+          ? `OK — ${cases} case(s), ${facesCompared} faces, every drawn vertex, normal and UV identical`
           : `MISMATCH — ${mismatched} of ${cases} case(s) disagree; first: ${examples[0] ?? "(no example)"}`;
       this.log(
         `MESHPROBE RESULT: ${verdict}. gpu ${gpuMs.toFixed(1)}ms vs cpu ${cpuMs.toFixed(1)}ms for the same inputs ` +
@@ -429,7 +421,9 @@ export class GpuMesherProbeSystem {
     geometry.setAttribute("position", output.position);
     geometry.setAttribute("normal", output.normal);
     geometry.setAttribute("uv", output.uv);
-    geometry.setIndex(output.index);
+    // NO INDEX BUFFER: the geometry is NON-INDEXED (`VERTS_PER_FACE = 6`), which is deliberate — an index attribute
+    // created by the compute binding would miss `BufferUsage::Index` (the first binding wins the usage) and make the
+    // world's own render pass invalid. See the trap documented in `lod-gpu-mesher.ts`.
     // The chunk's geometry is chunk-local, so the bounds are constant — the same sphere `ChunkGeometry` sets, which is
     // what makes the mesh cullable without reading the (GPU-written) vertices.
     geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(32 / 2, 32 / 2, 32 / 2), Math.SQRT2 * 32);

@@ -3146,16 +3146,33 @@ Still outstanding:
   before comparing geometry, so that class of failure reports itself in one number, and the gate pins the three rules.
   The CPU twin was right all along — which is the lesson: it proves the ALGORITHM, while "how does this kernel hold a
   mutable value" is a question only the device can answer, and that is what the probe is for.
-  **M2c STEP 1 AS LANDED — THE DRAW PATH, ON ONE CHUNK.** The two facts that make a GPU-resident geometry drawable
-  were verified in r186's `WebGPUBackend` before writing anything: `createStorageAttribute` hands a storage attribute
-  `STORAGE | VERTEX`, and `createIndexAttribute` adds `STORAGE` on top of `INDEX` — so the buffer a compute kernel
-  fills is the buffer three binds. The mesher's output layout is therefore **`vec4` positions and normals**
-  (`DRAWN_STRIDE = 4`), because `WebGPUAttributeUtils` pads a storage attribute of `itemSize 3` to `vec4` and REPLACES
-  its array before the GPU buffer exists — a packed kernel would desync layout and data — and the output buffers are
-  INJECTABLE (`MesherOutput`), since a capacity is baked into a kernel and one output set therefore means one kernel
-  build. `M` now draws a floating copy of one real chunk from those buffers, ADDITIVELY (nothing in the live path
-  changes): the chunk's CPU-meshed version is 40 blocks below it, one flat colour per face kind, so "does it render",
-  "does its shape match" and "did the look slices land right" are all answerable by eye.
+  **M2c STEP 1 AS LANDED — THE DRAW PATH, ON ONE CHUNK.** The fact that makes a GPU-resident geometry drawable was
+  verified in r186's `WebGPUBackend` before writing anything: `createStorageAttribute` hands a storage attribute
+  `STORAGE | VERTEX`, so the buffer a compute kernel fills is the buffer three binds. The mesher's output layout is
+  therefore **`vec4` positions and normals** (`DRAWN_STRIDE = 4`), because `WebGPUAttributeUtils` pads a storage
+  attribute of `itemSize 3` to `vec4` and REPLACES its array before the GPU buffer exists — a packed kernel would
+  desync layout and data — and the output buffers are INJECTABLE (`MesherOutput`), since a capacity is baked into a
+  kernel and one output set therefore means one kernel build. `M` now draws a floating copy of one real chunk from
+  those buffers, ADDITIVELY (nothing in the live path changes): the chunk's CPU-meshed version is 40 blocks below it,
+  one flat colour per face kind, so "does it render", "does its shape match" and "did the look slices land right" are
+  all answerable by eye.
+  **AND THE FIRST DRAW OF THAT COPY TOOK THE WHOLE WORLD DOWN — THE GEOMETRY IS NOW NON-INDEXED (`VERTS_PER_FACE = 6`).**
+  The design promised that a failure here could not touch the live path; the device disagreed. `renderer.log` grew to
+  1.78 MB with 2665 copies of `Buffer usage (CopySrc|CopyDst|Vertex|Storage) doesn't include BufferUsage::Index` and an
+  invalid command buffer, and the world stopped drawing. The cause is a rule, not a typo: **a buffer's usages are
+  fixed when it is FIRST created, and whichever binding asks first wins** (`Attributes.update` only creates the buffer
+  while `data.version === undefined`). The compute kernel binds the index `StorageBufferAttribute` as storage first, so
+  it was created with `STORAGE | VERTEX | COPY_SRC | COPY_DST` and NO `INDEX`; the index binding arriving later gets no
+  say, and every frame's draw then failed validation — an invalid command buffer invalidates the whole render pass, not
+  just the offending draw. `createIndexAttribute` DOES add `STORAGE` to `INDEX` when a storage attribute gets there
+  first, so the indexed layout is reachable with a priming draw before the first dispatch — but it depends on binding
+  order for ever, and the alternative costs nothing: a voxel mesh already shares no vertex between faces, so repeating
+  each face's four corners into two triangles (6 vertices instead of 4) removes the index buffer from the design
+  entirely. `out.index` is gone from `MesherOutput`, from the emit kernel, from `PackedGeometry` and from the probe's
+  geometry; the two triangles are the shared `FACE_CORNERS` `[0,1,2,0,2,3]` on BOTH sides, so the probe compares the
+  CPU mesher's indexed vertices through that table and never reads its index buffer, and the gate pins the absence of
+  every index structure plus the six-vertex sizing of all three buffers (including the kernels' own accessor lengths,
+  which were still derived from the old four).
   **STILL TO DO, in order**: (a) a shared arena per rung with a per-chunk region and a base-offset uniform — one kernel
   for every chunk, which is what the injectable output exists to enable; (b) the per-chunk draw metadata the CPU needs
   for `drawRange`/`groups`, which lives on the DEVICE: either a batched readback or a compute-written indirect draw list

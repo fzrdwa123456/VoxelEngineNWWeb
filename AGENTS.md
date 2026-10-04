@@ -934,11 +934,11 @@ where it is:
     accumulators at their reset value rather than rejecting the `await`, so that case is reported as its own
     verdict. The gate pins the ONE `.toAtomic()`, the derived face table, the walk decode and the closed forms; the
     WGSL itself is only verifiable by pressing `M`.
-    **MEASURED on the user's machine**: `OK — 11 case(s), 121162 faces, every corner, normal, UV and index
+    **MEASURED on the user's machine**: `OK — 11 case(s), 121225 faces, every drawn vertex, normal and UV
     identical`, the worst case a 98304-face checkerboard, plus two real chunks; the GPU half cost 694 ms against the
     CPU's 58 ms **because of the READBACK the probe needs and the drawing side will not** (a dispatch+readback round
     trip is 20-30 ms; the first call also compiles the pipelines, ~200 ms).
-  * **WHAT IS NOT DONE: the drawing side does not use these buffers yet.** The far ring still draws through M3a's
+  * **WHAT IS NOT DONE: the LIVE path does not use these buffers yet.** The far ring still draws through M3a's
     `BatchedMesh` buckets, fed from CPU meshes. Wiring the GPU-resident geometry into it — per-look ranges, and
     per-cell visibility because the reserve (P2.00) and the fades (P1.98/99) need it — is the step after this one,
     and it is where the flight-time frame cost should finally move.
@@ -951,15 +951,29 @@ where it is:
     right, and that its silhouette matches the terrain below it. Nothing in the live path changes; a failure leaves
     the world exactly as it is.
   * **THREE GIVES A COMPUTE BUFFER THE USAGES A VERTEX BUFFER NEEDS — verified in r186's `WebGPUBackend` before any
-    of this was written**: `createStorageAttribute` = `STORAGE | VERTEX | COPY_SRC | COPY_DST`, and
-    `createIndexAttribute` adds `STORAGE` on top of `INDEX | COPY_SRC | COPY_DST` for a storage attribute. So the
-    buffer the kernels fill is the buffer three binds — no readback, no CPU copy. **AND THE DRAWN LAYOUT IS `vec4`,
-    NOT `vec3`**: `WebGPUAttributeUtils.createAttribute` pads a STORAGE attribute with `itemSize === 3` to `vec4`
+    of this was written**: `createStorageAttribute` = `STORAGE | VERTEX | COPY_SRC | COPY_DST`. So the buffer the
+    kernels fill is the buffer three binds — no readback, no CPU copy. **AND THE DRAWN LAYOUT IS `vec4`, NOT
+    `vec3`**: `WebGPUAttributeUtils.createAttribute` pads a STORAGE attribute with `itemSize === 3` to `vec4`
     ("WGSL does not support packed vec3 data in storage buffers") and REPLACES the attribute's array with the padded
     copy before the GPU buffer exists — a kernel writing a packed layout into that buffer would desync the vertex
     layout from its data. `DRAWN_STRIDE = 4` (positions with `w = 1`, normals with `w = 0`) is therefore the mesher's
     output layout, and the probe's comparison against `meshChunk` reads the two sides with their own strides (the CPU
     mesher stays packed at three).
+  * **THE GEOMETRY IS NON-INDEXED (`VERTS_PER_FACE = 6`), AND THAT IS A USAGE RULE, NOT A PREFERENCE — it was a live
+    failure.** A buffer's usages are fixed when it is FIRST created and **whichever binding asks first wins**:
+    `Attributes.update(attribute, type)` only creates the buffer while `data.version === undefined`, so the compute
+    kernel binding a `StorageBufferAttribute` creates it as `STORAGE | VERTEX | COPY_SRC | COPY_DST`; the index
+    binding arriving later gets no say. The first M2c draw then failed validation on EVERY frame — `renderer.log`
+    grew to 1.78 MB with 2665 copies of `Buffer usage (CopySrc|CopyDst|Vertex|Storage) doesn't include
+    BufferUsage::Index` and an invalid command buffer, which took the WHOLE world render pass down with it (not just
+    the additive copy) — while the additive design promised a failure could not touch the live path.
+    `createIndexAttribute` DOES add `STORAGE` to `INDEX` when a storage attribute gets there first, so the indexed
+    layout is reachable with a priming draw before the first dispatch, but it depends on binding ORDER for ever;
+    repeating each face's four corners into two triangles cannot hit the trap at all and costs nothing a voxel mesh
+    cares about (faces share no vertices with each other anyway: 6 vertices per face instead of 4). `out.index` is
+    therefore GONE — from `MesherOutput`, from the emit kernel, from `PackedGeometry` and from the probe's geometry
+    (the two triangles are the shared `FACE_CORNERS` `[0,1,2,0,2,3]` on both sides, so the probe compares the CPU's
+    indexed vertices THROUGH that table and never reads its index buffer).
   * **THE OUTPUT BUFFERS ARE INJECTABLE (`MesherOutput`), AND THAT IS THE SHAPE THE ROLLOUT NEEDS.** `GpuChunkMesher`
     takes the buffers the kernels write, because a capacity is baked into a storage array's length and therefore into
     the kernel: one output set = one kernel build. A per-chunk output set would mean a pipeline build per chunk

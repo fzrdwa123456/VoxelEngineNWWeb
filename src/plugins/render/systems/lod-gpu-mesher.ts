@@ -101,10 +101,10 @@ const MESHER_FACES: readonly MesherFace[] = FACES.map((face, index) => ({
 export interface PackedGeometry {
   readonly faces: number;
   readonly slots: readonly MeshSlot[];
+  /** The DRAWN vertex layout: `VERTS_PER_FACE` vertices per face (non-indexed), `DRAWN_STRIDE` floats each. */
   readonly positions: Float32Array;
   readonly normals: Float32Array;
   readonly uvs: Float32Array;
-  readonly indices: Uint32Array;
   /** The SLICE TABLE the kernels used, kept so it can be checked on its own: `starts[key]` must be the prefix sum of
    *  `counts` below it, and the last prefix must be `faces`. That check exists because the first GPU run produced
    *  every look's count correctly and every slice's CONTENT one key late — a broken table is much easier to read than
@@ -154,10 +154,10 @@ export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGe
     total += counts[key];
   }
   if (total > capacity) throw new Error(`GPU mesher: ${total} faces exceed the ${capacity}-face capacity`);
-  const positions = new Float32Array(total * 4 * DRAWN_STRIDE);
-  const normals = new Float32Array(total * 4 * DRAWN_STRIDE);
-  const uvs = new Float32Array(total * 4 * 2);
-  const indices = new Uint32Array(total * 6);
+  const vertices = total * VERTS_PER_FACE;
+  const positions = new Float32Array(vertices * DRAWN_STRIDE);
+  const normals = new Float32Array(vertices * DRAWN_STRIDE);
+  const uvs = new Float32Array(vertices * 2);
   const slots: MeshSlot[] = [];
   for (let key = 0; key < KEYS; key++) {
     if (counts[key] === 0) continue;
@@ -171,14 +171,14 @@ export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGe
           for (const face of MESHER_FACES) {
             if (face.kind !== kind) continue;
             if (padded[center + (face.step | 0)] !== 0) continue;
-            writeFace(positions, normals, uvs, indices, cursor[key]++, lx, ly, lz, face);
+            writeFace(positions, normals, uvs, cursor[key]++, lx, ly, lz, face);
           }
         }
       }
     }
     slots.push({ key, start: starts[key], count: counts[key] });
   }
-  return { faces: total, slots, positions, normals, uvs, indices, counts, starts };
+  return { faces: total, slots, positions, normals, uvs, counts, starts };
 }
 
 /** The walk ordinal of a voxel, in `meshChunk`'s nest order: `ly` outer, `lz` middle, `lx` inner. Returns the flat
@@ -187,46 +187,53 @@ export function walkOrdinal(lx: number, ly: number, lz: number): number {
   return lx + lz * CHUNK_SIZE + ly * CHUNK_SIZE * CHUNK_SIZE;
 }
 
-/** One face into the typed arrays, in the SAME DRAWN LAYOUT the kernel writes (`DRAWN_STRIDE` floats per vertex, with
- *  the fourth component set) and with `meshChunk`'s corner table, UVs and two-triangle index pattern. The face index
- *  is GIVEN: the slice hands them out in walk order. */
+/** One face into the typed arrays, in the SAME DRAWN LAYOUT the kernel writes: `VERTS_PER_FACE` vertices in the
+ *  two-triangle corner order, `DRAWN_STRIDE` floats each, with `meshChunk`'s corner table and UVs. The face index is
+ *  GIVEN: the slice hands them out in walk order. */
 function writeFace(
   positions: Float32Array,
   normals: Float32Array,
   uvs: Float32Array,
-  indices: Uint32Array,
   faceIndex: number,
   lx: number,
   ly: number,
   lz: number,
   face: MesherFace,
 ): void {
-  const first = faceIndex * 4;
-  for (let c = 0; c < 4; c++) {
-    const corner = face.corners[c];
-    const at = (first + c) * DRAWN_STRIDE;
+  for (let v = 0; v < VERTS_PER_FACE; v++) {
+    const corner = face.corners[FACE_CORNERS[v]];
+    const at = (faceIndex * VERTS_PER_FACE + v) * DRAWN_STRIDE;
     positions[at] = lx + corner[0];
     positions[at + 1] = ly + corner[1];
     positions[at + 2] = lz + corner[2];
     positions[at + 3] = 1;
     for (let axis = 0; axis < 3; axis++) normals[at + axis] = MESHER_NORMALS[face.index][axis];
     normals[at + 3] = 0;
-    const u = (first + c) * 2;
-    uvs[u] = face.uvs[c][0];
-    uvs[u + 1] = face.uvs[c][1];
+    const u = (faceIndex * VERTS_PER_FACE + v) * 2;
+    uvs[u] = face.uvs[FACE_CORNERS[v]][0];
+    uvs[u + 1] = face.uvs[FACE_CORNERS[v]][1];
   }
-  const io = faceIndex * 6;
-  indices[io] = first;
-  indices[io + 1] = first + 1;
-  indices[io + 2] = first + 2;
-  indices[io + 3] = first;
-  indices[io + 4] = first + 2;
-  indices[io + 5] = first + 3;
 }
 
 /** The face normals, straight from the shared table (the CPU twin writes them, and the kernel emits the same
  *  literals). */
 const MESHER_NORMALS: readonly (readonly [number, number, number])[] = FACES.map((face) => face.normal);
+
+/** VERTICES PER FACE IN THE DRAWN LAYOUT — SIX, i.e. the geometry is NOT indexed, and that is a WebGPU usage rule
+ *  rather than a preference. **A buffer's usages are fixed when it is first created, and whichever binding asks first
+ *  wins.** A `StorageBufferAttribute` used as an INDEX buffer is first bound by the COMPUTE kernel — which creates it
+ *  with `STORAGE | VERTEX | COPY_SRC | COPY_DST` and NO `INDEX` (`WebGPUBackend.createStorageAttribute`) — and the
+ *  draw then fails validation for ever after: `Buffer usage (CopySrc|CopyDst|Vertex|Storage) doesn't include
+ *  BufferUsage::Index`, once per frame, with the render pass's whole command buffer invalid. That is exactly what a
+ *  live run showed: 2665 repetitions in `renderer.log` and a world that stopped drawing. `createIndexAttribute` DOES
+ *  add `STORAGE` to `INDEX` when a storage attribute gets there first, so an indexed layout is possible — with a
+ *  priming draw before the first dispatch — but the non-indexed form cannot hit the trap at all, and a chunk mesh
+ *  loses nothing by repeating a face's four corners into two triangles (voxel meshes share no vertices across faces
+ *  anyway; the cost is 6 vertices per face instead of 4). */
+export const VERTS_PER_FACE = 6;
+/** The two-triangle corner order of one face: corners 0,1,2 then 0,2,3. Exported because the `M` probe reads the CPU
+ *  mesher's INDEXED vertices through it to compare against these drawn ones. */
+export const FACE_CORNERS: readonly number[] = [0, 1, 2, 0, 2, 3];
 
 /** FLOATS PER VERTEX IN THE DRAWN LAYOUT — FOUR, not three, and that is not padding for its own sake.
  *  `WebGPUAttributeUtils.createAttribute` pads a STORAGE attribute with `itemSize === 3` to `vec4` ("WGSL does not
@@ -239,9 +246,8 @@ export const DRAWN_STRIDE = 4;
 
 /** WHERE THE KERNELS WRITE, and why it is injectable (M2c). The first version owned its buffers, which was enough for a
  *  probe that only compared them; the DRAWING side needs the geometry to live exactly where three will bind it, and
- *  three gives a compute-written buffer the usages a vertex buffer needs (`createStorageAttribute` = `STORAGE |
- *  VERTEX`, and a storage INDEX attribute adds `STORAGE` on top of `INDEX` — both verified in r186's
- *  `WebGPUBackend`) — so the same buffer the kernels fill can be drawn from, with nothing coming back to the CPU.
+ *  three gives a compute-written buffer the usages a VERTEX buffer needs (`createStorageAttribute` = `STORAGE |
+ *  VERTEX`) — so the same buffer the kernels fill can be drawn from, with nothing coming back to the CPU.
  *  `capacity` is baked into the kernels (a storage array's length is compile-time), so one output set = one kernel
  *  build; the production rollout will want ONE set shared by a whole rung with a per-chunk base offset, which is
  *  what this parameter exists to make possible. */
@@ -250,18 +256,18 @@ export interface MesherOutput {
   readonly position: StorageBufferAttribute;
   readonly normal: StorageBufferAttribute;
   readonly uv: StorageBufferAttribute;
-  readonly index: StorageBufferAttribute;
 }
 
 /** A fresh output set: zero-initialised (a WebGPU buffer is, by definition), which the draw path relies on — an
- *  unwritten index slot reads 0, i.e. a degenerate triangle, so a region that is only partly used cannot be seen. */
+ *  unwritten vertex reads as the origin, i.e. a degenerate triangle, so a region that is only partly used cannot be
+ *  seen. */
 export function createMesherOutput(capacity: number = MAX_FACES): MesherOutput {
+  const vertices = capacity * VERTS_PER_FACE;
   return {
     capacity,
-    position: new StorageBufferAttribute(new Float32Array(capacity * 4 * DRAWN_STRIDE), DRAWN_STRIDE),
-    normal: new StorageBufferAttribute(new Float32Array(capacity * 4 * DRAWN_STRIDE), DRAWN_STRIDE),
-    uv: new StorageBufferAttribute(new Float32Array(capacity * 4 * 2), 2),
-    index: new StorageBufferAttribute(new Uint32Array(capacity * 6), 1),
+    position: new StorageBufferAttribute(new Float32Array(vertices * DRAWN_STRIDE), DRAWN_STRIDE),
+    normal: new StorageBufferAttribute(new Float32Array(vertices * DRAWN_STRIDE), DRAWN_STRIDE),
+    uv: new StorageBufferAttribute(new Float32Array(vertices * 2), 2),
   };
 }
 
@@ -325,18 +331,17 @@ export class GpuChunkMesher {
         positions: new Float32Array(0),
         normals: new Float32Array(0),
         uvs: new Float32Array(0),
-        indices: new Uint32Array(0),
         counts,
         starts,
       };
     }
     const read = async (attr: StorageBufferAttribute, elements: number): Promise<ArrayBuffer> =>
       this.renderer.getArrayBufferAsync(attr, null, 0, elements * 4);
-    const positions = new Float32Array(await read(this.output.position, total * 4 * DRAWN_STRIDE));
-    const normals = new Float32Array(await read(this.output.normal, total * 4 * DRAWN_STRIDE));
-    const uvs = new Float32Array(await read(this.output.uv, total * 4 * 2));
-    const indices = new Uint32Array(await read(this.output.index, total * 6));
-    return { faces: total, slots, positions, normals, uvs, indices, counts, starts };
+    const vertices = total * VERTS_PER_FACE;
+    const positions = new Float32Array(await read(this.output.position, vertices * DRAWN_STRIDE));
+    const normals = new Float32Array(await read(this.output.normal, vertices * DRAWN_STRIDE));
+    const uvs = new Float32Array(await read(this.output.uv, vertices * 2));
+    return { faces: total, slots, positions, normals, uvs, counts, starts };
   }
 }
 
@@ -411,10 +416,12 @@ function buildEmitKernel(
   const pad = storage(padded, "uint", PAD_CELLS);
   const counts = storage(countAttr, "uint", KEYS);
   const starts = storage(startAttr, "uint", KEYS);
-  const positions = storage(out.position, "float", out.capacity * 4 * DRAWN_STRIDE);
-  const normals = storage(out.normal, "float", out.capacity * 4 * DRAWN_STRIDE);
-  const uvs = storage(out.uv, "float", out.capacity * 4 * 2);
-  const indices = storage(out.index, "uint", out.capacity * 6);
+  // `VERTS_PER_FACE` vertices per face, not four: the storage array's LENGTH is what TSL types the accessor from, and
+  // it has to agree with the attribute three binds and pads (a length left at the old indexed size is exactly the kind
+  // of quiet disagreement this whole file is written against).
+  const positions = storage(out.position, "float", out.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
+  const normals = storage(out.normal, "float", out.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
+  const uvs = storage(out.uv, "float", out.capacity * VERTS_PER_FACE * 2);
   return Fn(() => {
     const key = instanceIndex;
     const value = div(key, uint(4));
@@ -451,7 +458,7 @@ function buildEmitKernel(
                   // Snapshot, THEN advance: the writes below must use the position this face owns.
                   destination.assign(n(add(n(starts.element(key)), n(rank))));
                   rank.assign(n(add(n(rank), uint(1))));
-                  writeFaceNodes(positions, normals, uvs, indices, n(destination), n(walkX), n(walkY), n(walkZ), face);
+                  writeFaceNodes(positions, normals, uvs, n(destination), n(walkX), n(walkY), n(walkZ), face);
                 });
               });
             }
@@ -475,16 +482,15 @@ function padCenter(ordinal: U32Node): U32Node {
   );
 }
 
-/** One face into the output buffers, as TSL: the same four corners, normals, UVs and index pattern as `writeFace`
- *  above, with every constant taken from the shared tables (`MESHER_FACES`, `MESHER_NORMALS`). Every node goes
- *  through `n()`, the codebase's type eraser, for the reason `lod-gpu-field.ts` documents: TSL's typings are precise
- *  per overload and a port that mixes u32 indices with f32 positions would otherwise be steered into the wrong
- *  overload (uvec4) by inference alone. */
+/** One face into the output buffers, as TSL: `VERTS_PER_FACE` vertices in the two-triangle corner order, the same
+ *  corners, normals and UVs as `writeFace`, with every constant taken from the shared tables (`MESHER_FACES`,
+ *  `MESHER_NORMALS`). Every node goes through `n()`, the codebase's type eraser, for the reason `lod-gpu-field.ts`
+ *  documents: TSL's typings are precise per overload and a port that mixes u32 indices with f32 positions would
+ *  otherwise be steered into the wrong overload (uvec4) by inference alone. */
 function writeFaceNodes(
   positions: unknown,
   normals: unknown,
   uvs: unknown,
-  indices: unknown,
   faceIndex: U32Node,
   lx: U32Node,
   ly: U32Node,
@@ -493,11 +499,10 @@ function writeFaceNodes(
 ): void {
   const slot = (buffer: unknown, index: unknown): { assign(value: unknown): void } =>
     (buffer as { element(i: unknown): { assign(value: unknown): void } }).element(index);
-  const first = n(mul(faceIndex, uint(4)));
-  for (let c = 0; c < 4; c++) {
-    const corner = face.corners[c];
+  for (let v = 0; v < VERTS_PER_FACE; v++) {
+    const corner = face.corners[FACE_CORNERS[v]];
     // The vertex's base in the DRAWN layout (DRAWN_STRIDE floats each: xyz + a w).
-    const base = n(mul(n(add(first, uint(c))), uint(DRAWN_STRIDE)));
+    const base = n(mul(n(add(n(mul(faceIndex, uint(VERTS_PER_FACE))), uint(v))), uint(DRAWN_STRIDE)));
     const axisValues = [lx, ly, lz];
     for (let axis = 0; axis < 3; axis++) {
       slot(positions, n(add(base, uint(axis)))).assign(n(float(n(add(axisValues[axis], n(float(corner[axis])))))));
@@ -506,13 +511,8 @@ function writeFaceNodes(
     // The unused fourth component: 1 for a position (a plain `vec4` transform expects it) and 0 for a normal.
     slot(positions, n(add(base, uint(3)))).assign(n(float(1)));
     slot(normals, n(add(base, uint(3)))).assign(n(float(0)));
-    const u = add(mul(first, uint(2)), uint(c * 2));
-    slot(uvs, u).assign(n(float(face.uvs[c][0])));
-    slot(uvs, n(add(u, uint(1)))).assign(n(float(face.uvs[c][1])));
-  }
-  const io = n(mul(faceIndex, uint(6)));
-  const pattern = [0, 1, 2, 0, 2, 3];
-  for (let t = 0; t < 6; t++) {
-    slot(indices, n(add(io, uint(t)))).assign(n(add(first, uint(pattern[t]))));
+    const u = n(add(n(mul(n(add(n(mul(faceIndex, uint(VERTS_PER_FACE))), uint(v))), uint(2))), uint(0)));
+    slot(uvs, u).assign(n(float(face.uvs[FACE_CORNERS[v]][0])));
+    slot(uvs, n(add(u, uint(1)))).assign(n(float(face.uvs[FACE_CORNERS[v]][1])));
   }
 }

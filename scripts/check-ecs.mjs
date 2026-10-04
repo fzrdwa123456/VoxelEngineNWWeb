@@ -7615,8 +7615,8 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   //   1. `buildPaddedVoxels` answers EXACTLY what `meshChunk`'s own `solidAt` answers — a one-cell solidity border
   //      whose every neighbour is a constant offset away, with the ±Z planes read the transposed way the gatherer
   //      wrote them (reading them the other way is invisible until a block is broken at a chunk border);
-  //   2. the geometry that walk packs equals the production mesher's, FACE BY FACE and in order — corners, normals,
-  //      UVs and indices. Comparing counts alone would not catch a swapped axis, and comparing sets would not catch
+  //   2. the geometry that walk packs equals the production mesher's, FACE BY FACE and in order — every drawn vertex,
+  //      normal and UV. Comparing counts alone would not catch a swapped axis, and comparing sets would not catch
   //      a different walk order inside a slice;
   //   3. the kernels keep the two things that are easy to get wrong and impossible to see: the WALK ORDER
   //      (`meshChunk` nests ly outer/lz middle, which is NOT the storage order) and the single `.toAtomic()`.
@@ -7674,7 +7674,7 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   ];
   for (const [name, input] of multi) {
     assert(mesh.meshChunk(input).faces > 0, `${name}: something is meshed`);
-    equal(agrees(input), "", `${name}: every face's corners, normals, UVs and indices are the production mesher's, in order`);
+    equal(agrees(input), "", `${name}: every face's drawn vertices, normals and UVs are the production mesher's, in order`);
   }
 
   // 3. A NON-UNIFORM BORDER IS THE ONLY KIND THAT PROVES THE PAD'S ±Z TRANSPOSITION: a uniform plane is symmetric,
@@ -7726,7 +7726,7 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "…and the iteration's lx/ly/lz AND its pad address are Var locals, assigned at the top of the loop…");
   assert(/If\(equal\(pad\.element\(n\(center\)\), value\)/.test(mesherSrc) &&
     /pad\.element\(n\(add\(n\(center\), uint\(face\.step\)\)\)/.test(mesherSrc) &&
-    /writeFaceNodes\(positions, normals, uvs, indices, n\(destination\), n\(walkX\), n\(walkY\), n\(walkZ\), face\)/.test(mesherSrc),
+    /writeFaceNodes\(positions, normals, uvs, n\(destination\), n\(walkX\), n\(walkY\), n\(walkZ\), face\)/.test(mesherSrc),
     "…so the cull test, the neighbour test and the write all read those same locals (a raw counter expression in one of them is the bug)");
   assert(/const key = instanceIndex;/.test(mesherSrc) && /const value = div\(key, uint\(4\)\);/.test(mesherSrc) &&
     /If\(notEqual\(counts\.element\(key\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
@@ -7745,13 +7745,29 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   // with `itemSize 3` is padded to `vec4` by `WebGPUAttributeUtils.createAttribute` (WGSL has no packed vec3 in a
   // storage buffer), and the padding REPLACES the attribute's array before the GPU buffer exists. A kernel writing a
   // packed layout into that buffer would desync the drawn vertex layout from its data.
-  assert(/export const DRAWN_STRIDE = 4;/.test(mesherSrc) &&
-    /position: new StorageBufferAttribute\(new Float32Array\(capacity \* 4 \* DRAWN_STRIDE\), DRAWN_STRIDE\)/.test(mesherSrc) &&
-    /normal: new StorageBufferAttribute\(new Float32Array\(capacity \* 4 \* DRAWN_STRIDE\), DRAWN_STRIDE\)/.test(mesherSrc),
-    "the drawn layout is vec4 positions and normals (three pads a storage vec3 to vec4, which would desync the vertex layout)");
+  assert(/export const DRAWN_STRIDE = 4;/.test(mesherSrc),
+    "the drawn layout is vec4 positions and normals (three pads a storage vec3 to vec4, which would desync the vertex layout)…");
   assert(/export interface MesherOutput/.test(mesherSrc) && /constructor\(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput\(\)\)/.test(mesherSrc) &&
     /get mesherOutput\(\): MesherOutput/.test(mesherSrc),
     "…and the output buffers are INJECTABLE, so the drawing side can own the ones it binds (and the kernels write them)");
+  // M2c: THE GEOMETRY IS NON-INDEXED, and that is a USAGE RULE rather than a preference. A buffer's usages are fixed
+  // when it is FIRST created and whichever binding asks first wins: the compute kernel binds a
+  // `StorageBufferAttribute` as storage, which creates it with `STORAGE | VERTEX | COPY_SRC | COPY_DST` and no
+  // `INDEX`, and the draw then fails validation for ever after — `renderer.log` filled with 2665 copies of
+  // `Buffer usage (CopySrc|CopyDst|Vertex|Storage) doesn't include BufferUsage::Index`, an invalid command buffer per
+  // frame, and a world that stopped drawing. Six vertices per face cannot hit it, so the index buffer is GONE from
+  // both halves of the mesher and from the probe's geometry.
+  assert(/export const VERTS_PER_FACE = 6;/.test(mesherSrc) && /export const FACE_CORNERS: readonly number\[\] = \[0, 1, 2, 0, 2, 3\];/.test(mesherSrc),
+    "the drawn geometry repeats each face's four corners into two triangles (VERTS_PER_FACE = 6, the shared corner table)…");
+  assert(!/out\.index|createIndexAttribute|setIndex\(/.test(mesherSrc),
+    "…and NOTHING in the mesher creates or writes an INDEX buffer: a storage attribute is created without `BufferUsage::Index` by whichever binding asks first, so an indexed layout is a per-frame validation error and a frame that never draws");
+  assert(/const vertices = capacity \* VERTS_PER_FACE;/.test(mesherSrc) &&
+    /position: new StorageBufferAttribute\(new Float32Array\(vertices \* DRAWN_STRIDE\), DRAWN_STRIDE\)/.test(mesherSrc) &&
+    /normal: new StorageBufferAttribute\(new Float32Array\(vertices \* DRAWN_STRIDE\), DRAWN_STRIDE\)/.test(mesherSrc) &&
+    /uv: new StorageBufferAttribute\(new Float32Array\(vertices \* 2\), 2\)/.test(mesherSrc) &&
+    /storage\(out\.position, "float", out\.capacity \* VERTS_PER_FACE \* DRAWN_STRIDE\)/.test(mesherSrc) &&
+    /storage\(out\.uv, "float", out\.capacity \* VERTS_PER_FACE \* 2\)/.test(mesherSrc),
+    "…so the three buffers are sized for SIX vertices per face ($VERTS_PER_FACE = 6, and the kernel's own accessor lengths are derived from it too)…");
   const meshSrcPad = stripComments(readSource("src/data/world/mesh.ts"));
   assert(/export function buildPaddedVoxels/.test(meshSrcPad) && /out\[padIndex\(lx, ly, S\)\] = plane\(PLANE\.PZ, lx, ly\)/.test(meshSrcPad),
     "the pad lives NEXT TO the gatherer that lays the planes out (the ±Z transposition has one home)");
@@ -7772,8 +7788,8 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   assert(/createMesherOutput\(capacity\)/.test(probeSrc) && /new GpuChunkMesher\(this\.renderer, output\)/.test(probeSrc) &&
     /geometry\.setAttribute\("position", output\.position\)/.test(probeSrc) &&
     /geometry\.setAttribute\("normal", output\.normal\)/.test(probeSrc) &&
-    /geometry\.setIndex\(output\.index\)/.test(probeSrc),
-    "…and it builds a real BufferGeometry whose attributes ARE the mesher's buffers (no CPU copy anywhere)…");
+    !/geometry\.setIndex/.test(probeSrc),
+    "…and it builds a real BufferGeometry whose attributes ARE the mesher's buffers (no CPU copy anywhere, and NO index buffer — the usage trap the mesher's own comment documents)…");
   assert(/geometry\.addGroup\(slot\.start \* 6, slot\.count \* 6, slot\.key & 3\)/.test(probeSrc) &&
     /world\.resource\(SCENE3D\)\.add\(mesh\)/.test(probeSrc) && /disposeCopy\(\)/.test(probeSrc),
     "…one group per look slice, added to the scene, and the previous copy taken down and disposed");

@@ -254,8 +254,9 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
 → **`M` — THE GPU MESHER PROBE (M2 of the GPU route)**: in a world, press **M** (it is not a bind, like G/H/J/K/L).
   The kernels mesh eight SYNTHETIC chunk patterns and then up to six REAL chunks from the column you are standing in,
   and compare every one against the production CPU mesher — the face count, every look's slice, and then EVERY face's
-  four corners, normals, UVs and index pattern, in order. It is the mesher's half of what `K` does for the terrain
-  field, and it changes nothing in the world (no component, no streaming state). What to check:
+  six drawn vertices, normals and UVs, in order (the geometry is NON-INDEXED: six vertices per face, two triangles
+  repeating the four corners, so there is no index buffer to compare or to bind). It is the mesher's half of what `K`
+  does for the terrain field, and it changes nothing in the world (no component, no streaming state). What to check:
   (a) **a toast** — `网格 GPU 探针: 与 CPU 完全一致 ✓ (N 个面)` — or `不一致! k/14 个用例`, or a failure message.
       Either answer is useful; a mismatch is a kernel bug, not a world bug;
   (b) **one `MESHPROBE <case>:` line per case in `debug.log`**, each with `faces cpu X / gpu Y`, `keys N`,
@@ -266,10 +267,10 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       CPU reference cannot hide as "both agree". **`slice table BROKEN (…)` is the first thing to report**: it means
       the kernels' per-look slice table is not the prefix sum the counts imply, which shifts every slice's content
       while leaving the counts right (that is exactly what the first live run of this probe showed);
-  (c) **`MESHPROBE RESULT:` is the verdict** — `OK — 14 case(s), N faces, every corner, normal, UV and index
-      identical`, or `MISMATCH` with the first difference in `examples:`. The example names the look and the corner
-      (`value 1 side face 34: corner 0 position[1] cpu 0 vs gpu 1`), which is enough to tell WHAT the kernel got
-      wrong — a walk-order mistake shows up exactly like that;
+  (c) **`MESHPROBE RESULT:` is the verdict** — `OK — N case(s), M faces, every drawn vertex, normal and UV
+      identical`, or `MISMATCH` with the first difference in `examples:`. The example names the look, the drawn
+      vertex and the corner it came from (`value 1 side face 34: vertex 0 (corner 0) position[1] cpu 0 vs gpu 1`),
+      which is enough to tell WHAT the kernel got wrong — a walk-order mistake shows up exactly like that;
   (d) **`KERNEL PRODUCED NOTHING`** is its own verdict, and it means the kernels did not run at all: no slice came
       back. `computeAsync` does NOT reject for a WGSL/pipeline error (the trap M0 hit twice), so read
       **`renderer.log`** for the real reason — `debug.log` only carries the symptom. **AND ON A MISMATCH the probe
@@ -287,16 +288,20 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       (`MESHPROBE draw: a floating copy of real(cx,cy,cz) …` in the log names the column). The chunk the CPU meshed is
       40 blocks BELOW it, so three things are checkable by eye at once:
       * **it renders at all** — if nothing appears (or the world's own chunk is unaffected), the storage-buffer →
-        vertex-buffer path did not bind: report it with `renderer.log`;
+        vertex-buffer path did not bind: report it with `renderer.log`. **The world MUST be unaffected either way**:
+        the whole render pass turned invalid the one time an index buffer was bound here (2665 validation errors and a
+        world that stopped drawing), which is why the geometry is non-indexed now — if the screen itself breaks when
+        you press `M`, that is the thing to report first;
       * **its SHAPE matches the terrain under it** — same silhouette, same holes, same overhangs. A scrambled or
         stretched copy means the vertex layout and its data disagree (the `DRAWN_STRIDE` vec4 padding is the thing to
         suspect);
       * **its SLICES landed right** — top faces are GREEN, side faces GREY, bottom faces BROWN. One solid colour
         everywhere means the per-look groups collapsed; a wrong colour pattern means a slice's range is off.
       Pressing `M` again replaces the copy (the previous one is removed and disposed). The copy is purely additive:
-      nothing in the live world draws from it yet, so **a failure here does not mean the world is broken**.
-  Note what it does NOT do yet: the geometry it produces is not drawn. The far ring still draws through its
-  `BatchedMesh` buckets, fed from CPU meshes, so nothing on screen changes when you press `M`.
+      nothing in the live world draws from it yet.
+  Note what it does NOT do yet: the LIVE far ring still draws through its `BatchedMesh` buckets, fed from CPU
+  meshes, so the terrain on screen is unchanged by design — the floating copy above you is the only thing the GPU
+  mesher's own buffers draw.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser
