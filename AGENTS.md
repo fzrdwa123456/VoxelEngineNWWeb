@@ -942,6 +942,36 @@ where it is:
     `BatchedMesh` buckets, fed from CPU meshes. Wiring the GPU-resident geometry into it — per-look ranges, and
     per-cell visibility because the reserve (P2.00) and the fades (P1.98/99) need it — is the step after this one,
     and it is where the flight-time frame cost should finally move.
+  * **M2c STEP 1 — THE GEOMETRY IS NOW DRAWN FROM THE COMPUTE BUFFERS, on ONE real chunk, and it is ADDITIVE.** The
+    drawing side is the one thing this repo cannot test (a pipeline that binds a compute-written buffer is a device
+    question), so `M` now also puts a **floating copy** of one real chunk in the scene, 40 blocks above the chunk the
+    CPU meshed: same column, one flat colour per face KIND (top green, sides grey, bottom brown, via one geometry
+    GROUP per look slice), so the three things to verify are all visible at once — that a `BufferGeometry` whose
+    attributes ARE the mesher's `StorageBufferAttribute`s renders at all, that its slices/material indices land
+    right, and that its silhouette matches the terrain below it. Nothing in the live path changes; a failure leaves
+    the world exactly as it is.
+  * **THREE GIVES A COMPUTE BUFFER THE USAGES A VERTEX BUFFER NEEDS — verified in r186's `WebGPUBackend` before any
+    of this was written**: `createStorageAttribute` = `STORAGE | VERTEX | COPY_SRC | COPY_DST`, and
+    `createIndexAttribute` adds `STORAGE` on top of `INDEX | COPY_SRC | COPY_DST` for a storage attribute. So the
+    buffer the kernels fill is the buffer three binds — no readback, no CPU copy. **AND THE DRAWN LAYOUT IS `vec4`,
+    NOT `vec3`**: `WebGPUAttributeUtils.createAttribute` pads a STORAGE attribute with `itemSize === 3` to `vec4`
+    ("WGSL does not support packed vec3 data in storage buffers") and REPLACES the attribute's array with the padded
+    copy before the GPU buffer exists — a kernel writing a packed layout into that buffer would desync the vertex
+    layout from its data. `DRAWN_STRIDE = 4` (positions with `w = 1`, normals with `w = 0`) is therefore the mesher's
+    output layout, and the probe's comparison against `meshChunk` reads the two sides with their own strides (the CPU
+    mesher stays packed at three).
+  * **THE OUTPUT BUFFERS ARE INJECTABLE (`MesherOutput`), AND THAT IS THE SHAPE THE ROLLOUT NEEDS.** `GpuChunkMesher`
+    takes the buffers the kernels write, because a capacity is baked into a storage array's length and therefore into
+    the kernel: one output set = one kernel build. A per-chunk output set would mean a pipeline build per chunk
+    (~200 ms), so the production rollout must share ONE set per rung and address a chunk's region with a **base
+    offset** — which is why the parameter exists and why the probe (one chunk, one build) is the right first step.
+  * **WHAT M2c STILL NEEDS, in order**: (a) a shared arena per rung with a per-chunk region and a base-offset
+    uniform, so one kernel serves every chunk; (b) the per-chunk draw metadata the CPU needs to set `drawRange` and
+    `groups` — which is where the counts live on the DEVICE, so the choice is between a batched readback and an
+    indirect draw list written by a compute pass (three has `IndirectStorageBufferAttribute` = `STORAGE | INDIRECT`,
+    and `WebGPUBackend._draw` already takes `renderObject.getIndirect()`); (c) then the far ring's stream swaps its
+    CPU meshes for these, keeping the reserve and the fades (per-Mesh `visible` and per-chunk material copies behave
+    exactly as they do today).
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

@@ -9,7 +9,7 @@
 // CPU half is the slow one and runs on the thread that asked, so a stall for the duration of the probe is expected
 // and reported — the same shape M0 has.
 import { ShowToast } from "../../../data/globals/commands";
-import { RENDERER3D } from "../../../data/globals/gfx";
+import { RENDERER3D, SCENE3D } from "../../../data/globals/gfx";
 import { KEY_EVENTS, LOCAL_PLAYER, VOXEL, KeyEdgeReader } from "../../../data/globals/resources";
 import { AIR, CHUNK_SIZE, CHUNK_VOLUME, SOLID, type Chunk } from "../../../data/world/chunk";
 import { CHUNK_Y_COUNT, MIN_CHUNK_Y, type VoxelWorld } from "../../../data/world/world";
@@ -17,8 +17,9 @@ import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult }
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
 import { POSITION } from "../../player/components";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
-import { GpuChunkMesher, type PackedGeometry } from "./lod-gpu-mesher";
+import { GpuChunkMesher, createMesherOutput, DRAWN_STRIDE, type PackedGeometry } from "./lod-gpu-mesher";
 import type { WebGPURenderer } from "three/webgpu";
+import * as THREE from "three/webgpu";
 
 /** The probe touches the GPU and the voxel data (to build the reference input and to hand the kernel the same
  *  bytes); it owns its own buffers. */
@@ -39,6 +40,8 @@ interface ProbeCase {
   /** A face count the pattern's GEOMETRY implies, checked as well: a GPU result that agrees with a wrong CPU
    *  reference would still be wrong, and these are the cases where the answer is known without meshing anything. */
   readonly expectedFaces?: number;
+  /** A real chunk's world origin, for the DRAWING check (`drawCopy`) — synthetic patterns have none. */
+  readonly origin?: readonly [number, number, number];
 }
 
 /** One synthetic input: the voxel bytes the CPU mesher wants (the GPU gets the same data through
@@ -172,20 +175,29 @@ export function compareGeometry(cpu: MeshResult, gpu: PackedGeometry): GeometryD
 
 /** The first thing that differs between one CPU face and one GPU face, or null when they are identical.
  *
+ *  TWO LAYOUTS, and neither is arbitrary: `meshChunk`'s arrays are PACKED (three floats per vertex), while the kernel
+ *  writes the DRAWN layout (`DRAWN_STRIDE` floats per vertex — three pads a storage attribute of `itemSize 3` to
+ *  `vec4` before it creates the buffer, so the kernel writes that padding itself and the drawn vertex layout cannot
+ *  disagree with it). The comparison reads each side with its own stride.
+ *
  *  THE INDICES ARE COMPARED AS A PATTERN, NOT AS VALUES. They address a face's four vertices inside the chunk's own
  *  index buffer, and the two halves lay their slices out in different orders (`meshChunk` first-seen, the kernels
  *  ascending key), so the same face legitimately sits at a different global position in each. What must agree is the
  *  two-triangle pattern relative to the face's OWN first vertex — and the corners, normals and UVs, which are the
- *  real content. (Comparing the raw values reported `index 0 cpu 0 vs gpu 4096` on the gate's first run: the same
- *  face, at slice position 0 on the CPU and 1024 on the GPU.) */
+ *  real content. (Comparing the raw values reported `index 0 cpu 0 vs gpu 4096` for the same face, at slice position 0
+ *  on the CPU and 1024 on the GPU.) */
 function firstFaceDifference(cpu: MeshResult, gpu: PackedGeometry, cpuFace: number, gpuFace: number): string | null {
+  const gpuVertex = (corner: number, axis: number): number =>
+    gpu.positions[(gpuFace * 4 + corner) * DRAWN_STRIDE + axis];
+  const gpuNormal = (corner: number, axis: number): number =>
+    gpu.normals[(gpuFace * 4 + corner) * DRAWN_STRIDE + axis];
   for (let c = 0; c < 4; c++) {
     for (let axis = 0; axis < 3; axis++) {
       const a = cpu.positions[(cpuFace * 4 + c) * 3 + axis];
-      const b = gpu.positions[(gpuFace * 4 + c) * 3 + axis];
+      const b = gpuVertex(c, axis);
       if (a !== b) return `corner ${c} position[${axis}] cpu ${a} vs gpu ${b}`;
       const na = cpu.normals[(cpuFace * 4 + c) * 3 + axis];
-      const nb = gpu.normals[(gpuFace * 4 + c) * 3 + axis];
+      const nb = gpuNormal(c, axis);
       if (na !== nb) return `corner ${c} normal[${axis}] cpu ${na} vs gpu ${nb}`;
     }
     for (let axis = 0; axis < 2; axis++) {
@@ -230,6 +242,8 @@ export class GpuMesherProbeSystem {
   private mesher: GpuChunkMesher | null = null;
   /** Every COMPUTE builder the renderer has created, in dispatch order (census, scan, emit) — see `dumpEmitWgsl`. */
   private readonly computeBuilders: ComputeBuilderLike[] = [];
+  /** The floating drawing copy (`drawCopy`), replaced on every probe run. */
+  private copy: THREE.Mesh | null = null;
   private debugHooked = false;
   private dumped = false;
   /** One probe at a time: a second `M` while it runs is ignored (it awaits the GPU). */
@@ -276,6 +290,7 @@ export class GpuMesherProbeSystem {
     const examples: string[] = [];
     try {
       const all: ProbeCase[] = [...syntheticCases(), ...this.realCases()];
+      let drewCopy = false;
       for (const probeCase of all) {
         // THE CPU HALF IS TIMED ALONE — it is closed before the GPU call, and the GPU half is timed on its own. (The
         // first version printed `performance.now() - cpuStart` at LOG time, i.e. after the await, so every per-case
@@ -315,6 +330,12 @@ export class GpuMesherProbeSystem {
             ` — slice table ${tableProblem === null ? "ok" : `BROKEN (${tableProblem})`}` +
             `, gpu ${gpuCaseMs.toFixed(2)}ms (3 dispatches + readback), cpu reference ${cpuCaseMs.toFixed(2)}ms`,
         );
+        // …AND DRAW ONE OF THEM. Only the first real chunk (the topmost with faces, i.e. the one nearest the
+        // surface), and only once: the point is the DRAW PATH, not a pile of copies.
+        if (!drewCopy && probeCase.origin !== undefined) {
+          drewCopy = true;
+          await this.drawCopy(probeCase, probeCase.input, cpu.faces);
+        }
       }
       // WHAT A MISMATCH MEANS, said out loud, because "the kernel is broken" and "the kernel did not run" need
       // opposite responses — the same distinction M0 had to learn: a WGSL/pipeline error leaves the buffers at their
@@ -382,6 +403,72 @@ export class GpuMesherProbeSystem {
     }
   }
 
+  /** THE DRAWING HALF OF M2, on ONE real chunk (M2c step 1).
+   *
+   *  Everything M2 has proven so far is about NUMBERS: the kernels' geometry equals the CPU mesher's, byte for byte.
+   *  What no test in this repo can answer is whether three DRAWS a `BufferGeometry` whose attributes ARE the buffers a
+   *  compute kernel wrote — the binding facts are in three's source (`createStorageAttribute` hands a storage
+   *  attribute `STORAGE | VERTEX`, and a storage INDEX attribute gets `STORAGE` on top of `INDEX`, both in r186's
+   *  `WebGPUBackend`), but a pipeline that binds them is a device question.
+   *
+   *  So this puts a FLOATING COPY of one real chunk in the scene, drawn ONLY from the GPU-written buffers: same
+   *  column, 40 blocks up, one flat colour per face KIND (top/bottom/side) so the look SLICES are visible too. The
+   *  test is visual and needs no instrumentation — the real chunk meshed by the CPU is right below it, so the copy's
+   *  silhouette must match the terrain under it, with its top faces one colour, its sides another and its bottom a
+   *  third. Nothing in the live path changes: this is additive, and a failure leaves the world exactly as it is. */
+  private async drawCopy(probeCase: ProbeCase, input: ChunkMeshInput, capacityFaces: number): Promise<void> {
+    const origin = probeCase.origin;
+    if (origin === undefined) return;
+    // One output set per probe run: the capacity is baked into the kernels, and the drawing geometry's attribute
+    // lengths have to be the same numbers.
+    const capacity = Math.max(1024, capacityFaces + 256);
+    const output = createMesherOutput(capacity);
+    const mesher = new GpuChunkMesher(this.renderer, output);
+    const gpu = await mesher.run(input);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", output.position);
+    geometry.setAttribute("normal", output.normal);
+    geometry.setAttribute("uv", output.uv);
+    geometry.setIndex(output.index);
+    // The chunk's geometry is chunk-local, so the bounds are constant — the same sphere `ChunkGeometry` sets, which is
+    // what makes the mesh cullable without reading the (GPU-written) vertices.
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(32 / 2, 32 / 2, 32 / 2), Math.SQRT2 * 32);
+    geometry.setDrawRange(0, gpu.faces * 6);
+    // One group per look slice, exactly as the CPU path builds them — with the material INDEX standing in for the
+    // look's KIND, so the three kinds are three colours.
+    for (const slot of gpu.slots) geometry.addGroup(slot.start * 6, slot.count * 6, slot.key & 3);
+    const materials = [
+      new THREE.MeshLambertMaterial({ color: 0x36d13a }), // kind 0: top faces
+      new THREE.MeshLambertMaterial({ color: 0x8a5a2b }), // kind 1: bottom faces
+      new THREE.MeshLambertMaterial({ color: 0xb9b9c4 }), // kind 2: side faces
+    ];
+    const mesh = new THREE.Mesh(geometry, materials);
+    mesh.name = "gpu-mesher-probe-copy";
+    mesh.position.set(origin[0], origin[1] + 40, origin[2]);
+    mesh.updateMatrix();
+    this.disposeCopy();
+    this.world.resource(SCENE3D).add(mesh);
+    this.copy = mesh;
+    this.log(
+      `MESHPROBE draw: a floating copy of ${probeCase.name} (${gpu.faces} faces, ${gpu.slots.length} look slice(s)) ` +
+        `at ${origin[0]}/${origin[1] + 40}/${origin[2]}, drawn ONLY from the compute-written buffers — the chunk's own ` +
+        `CPU-meshed version is 40 blocks below it, and the copy's silhouette must match it (top faces green, sides ` +
+        `grey, bottom brown). A second M replaces it.`,
+    );
+  }
+
+  /** Take the previous floating copy down (geometry and materials included — the geometry owns nothing but the
+   *  mesher's buffers, which are dropped with it). */
+  private disposeCopy(): void {
+    if (this.copy === null) return;
+    this.world.resource(SCENE3D).remove(this.copy);
+    this.copy.geometry.dispose();
+    const material = this.copy.material;
+    if (Array.isArray(material)) for (const one of material) one.dispose();
+    else material.dispose();
+    this.copy = null;
+  }
+
   /** The REAL chunks: the player's own column, top down, the ones that actually have faces. This is the half that
    *  makes the probe a measurement of THIS world rather than of hand-written patterns. */
   private realCases(): ProbeCase[] {
@@ -396,7 +483,7 @@ export class GpuMesherProbeSystem {
       if (chunk === null) continue;
       const input = gatherChunkMeshInput(this.voxel, chunk, cx, cy, cz);
       if (meshChunk(input).faces === 0) continue; // a chunk with nothing to draw proves little
-      out.push({ name: `real(${cx},${cy},${cz})`, input });
+      out.push({ name: `real(${cx},${cy},${cz})`, input, origin: [cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE] });
     }
     if (out.length === 0) this.log("MESHPROBE: no real chunk with faces in the player's column (synthetic cases only)");
     return out;

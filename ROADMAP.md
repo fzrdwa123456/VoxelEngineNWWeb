@@ -3146,6 +3146,22 @@ Still outstanding:
   before comparing geometry, so that class of failure reports itself in one number, and the gate pins the three rules.
   The CPU twin was right all along — which is the lesson: it proves the ALGORITHM, while "how does this kernel hold a
   mutable value" is a question only the device can answer, and that is what the probe is for.
+  **M2c STEP 1 AS LANDED — THE DRAW PATH, ON ONE CHUNK.** The two facts that make a GPU-resident geometry drawable
+  were verified in r186's `WebGPUBackend` before writing anything: `createStorageAttribute` hands a storage attribute
+  `STORAGE | VERTEX`, and `createIndexAttribute` adds `STORAGE` on top of `INDEX` — so the buffer a compute kernel
+  fills is the buffer three binds. The mesher's output layout is therefore **`vec4` positions and normals**
+  (`DRAWN_STRIDE = 4`), because `WebGPUAttributeUtils` pads a storage attribute of `itemSize 3` to `vec4` and REPLACES
+  its array before the GPU buffer exists — a packed kernel would desync layout and data — and the output buffers are
+  INJECTABLE (`MesherOutput`), since a capacity is baked into a kernel and one output set therefore means one kernel
+  build. `M` now draws a floating copy of one real chunk from those buffers, ADDITIVELY (nothing in the live path
+  changes): the chunk's CPU-meshed version is 40 blocks below it, one flat colour per face kind, so "does it render",
+  "does its shape match" and "did the look slices land right" are all answerable by eye.
+  **STILL TO DO, in order**: (a) a shared arena per rung with a per-chunk region and a base-offset uniform — one kernel
+  for every chunk, which is what the injectable output exists to enable; (b) the per-chunk draw metadata the CPU needs
+  for `drawRange`/`groups`, which lives on the DEVICE: either a batched readback or a compute-written indirect draw list
+  (`IndirectStorageBufferAttribute` = `STORAGE | INDIRECT`, and the backend already consumes
+  `renderObject.getIndirect()`); (c) the far ring's stream swapping its CPU meshes for these, with the reserve and the
+  fades intact (per-Mesh `visible` and per-chunk material copies behave exactly as today).
   **THE SECOND LIVE RUN CONFIRMED THE TABLE AND NARROWED THE REST TO THE SAME CAUSE.** Every case reported
   `slice table ok`, every look's count was right, and the mismatches were down from "each slice's face 0, values
   wildly off" to "a few faces per slice, from position 1-2, off by one coordinate" (`value 1 kind 2 face 2: corner 0

@@ -280,8 +280,21 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
   (e) **the milliseconds are the point of the milestone**: the `gpu` number is THREE dispatches plus the readback the
       probe needs for its comparison, and `cpu reference` is the production mesher on this thread, timed alone. The
       probe is deliberately the only place that readback happens: a dispatch+readback round trip measured 20-30 ms on
-      this machine, which is why the drawing side (the next step) must consume the GPU buffers directly. A stall while
-      the probe runs is expected (the CPU half runs on the thread that asked).
+      this machine, which is why the drawing side must consume the GPU buffers directly. A stall while the probe runs
+      is expected (the CPU half runs on the thread that asked).
+  (f) **AND LOOK 40 BLOCKS UP: THE DRAWING CHECK (M2c step 1).** After the last real case the probe puts a
+      **floating copy** of the topmost real chunk in the scene, drawn ONLY from the compute-written buffers
+      (`MESHPROBE draw: a floating copy of real(cx,cy,cz) …` in the log names the column). The chunk the CPU meshed is
+      40 blocks BELOW it, so three things are checkable by eye at once:
+      * **it renders at all** — if nothing appears (or the world's own chunk is unaffected), the storage-buffer →
+        vertex-buffer path did not bind: report it with `renderer.log`;
+      * **its SHAPE matches the terrain under it** — same silhouette, same holes, same overhangs. A scrambled or
+        stretched copy means the vertex layout and its data disagree (the `DRAWN_STRIDE` vec4 padding is the thing to
+        suspect);
+      * **its SLICES landed right** — top faces are GREEN, side faces GREY, bottom faces BROWN. One solid colour
+        everywhere means the per-look groups collapsed; a wrong colour pattern means a slice's range is off.
+      Pressing `M` again replaces the copy (the previous one is removed and disposed). The copy is purely additive:
+      nothing in the live world draws from it yet, so **a failure here does not mean the world is broken**.
   Note what it does NOT do yet: the geometry it produces is not drawn. The far ring still draws through its
   `BatchedMesh` buckets, fed from CPU meshes, so nothing on screen changes when you press `M`.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its

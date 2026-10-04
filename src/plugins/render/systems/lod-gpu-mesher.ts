@@ -154,8 +154,8 @@ export function packFromPad(padded: Uint32Array, capacity = MAX_FACES): PackedGe
     total += counts[key];
   }
   if (total > capacity) throw new Error(`GPU mesher: ${total} faces exceed the ${capacity}-face capacity`);
-  const positions = new Float32Array(total * 4 * 3);
-  const normals = new Float32Array(total * 4 * 3);
+  const positions = new Float32Array(total * 4 * DRAWN_STRIDE);
+  const normals = new Float32Array(total * 4 * DRAWN_STRIDE);
   const uvs = new Float32Array(total * 4 * 2);
   const indices = new Uint32Array(total * 6);
   const slots: MeshSlot[] = [];
@@ -187,8 +187,9 @@ export function walkOrdinal(lx: number, ly: number, lz: number): number {
   return lx + lz * CHUNK_SIZE + ly * CHUNK_SIZE * CHUNK_SIZE;
 }
 
-/** One face into the typed arrays, exactly as `meshChunk`'s `writeFace` does it (same corner table, same UVs, same
- *  two-triangle index pattern). The face index is GIVEN: the slice hands them out in walk order. */
+/** One face into the typed arrays, in the SAME DRAWN LAYOUT the kernel writes (`DRAWN_STRIDE` floats per vertex, with
+ *  the fourth component set) and with `meshChunk`'s corner table, UVs and two-triangle index pattern. The face index
+ *  is GIVEN: the slice hands them out in walk order. */
 function writeFace(
   positions: Float32Array,
   normals: Float32Array,
@@ -203,15 +204,16 @@ function writeFace(
   const first = faceIndex * 4;
   for (let c = 0; c < 4; c++) {
     const corner = face.corners[c];
-    const p = first * 3 + c * 3;
-    positions[p] = lx + corner[0];
-    positions[p + 1] = ly + corner[1];
-    positions[p + 2] = lz + corner[2];
-    const u = first * 2 + c * 2;
+    const at = (first + c) * DRAWN_STRIDE;
+    positions[at] = lx + corner[0];
+    positions[at + 1] = ly + corner[1];
+    positions[at + 2] = lz + corner[2];
+    positions[at + 3] = 1;
+    for (let axis = 0; axis < 3; axis++) normals[at + axis] = MESHER_NORMALS[face.index][axis];
+    normals[at + 3] = 0;
+    const u = (first + c) * 2;
     uvs[u] = face.uvs[c][0];
     uvs[u + 1] = face.uvs[c][1];
-    // The normal is the face's, for all four corners (the CPU writes it the same way).
-    for (let axis = 0; axis < 3; axis++) normals[p + axis] = MESHER_NORMALS[face.index][axis];
   }
   const io = faceIndex * 6;
   indices[io] = first;
@@ -226,42 +228,75 @@ function writeFace(
  *  literals). */
 const MESHER_NORMALS: readonly (readonly [number, number, number])[] = FACES.map((face) => face.normal);
 
-/** The GPU mesher: one padded block in, one packed geometry out (on the device — `run` reads it back only because
- *  the probe compares it). The buffers live as long as the mesher does, so a second chunk costs three dispatches. */
+/** FLOATS PER VERTEX IN THE DRAWN LAYOUT — FOUR, not three, and that is not padding for its own sake.
+ *  `WebGPUAttributeUtils.createAttribute` pads a STORAGE attribute with `itemSize === 3` to `vec4` ("WGSL does not
+ *  support packed vec3 data in storage buffers"), and it does so by REPLACING the attribute's array with a padded
+ *  copy before the GPU buffer is created. A kernel that wrote a packed `vec3` layout would then be writing into a
+ *  vec4 buffer, and the drawn vertex layout would read four floats per vertex — so the mesher writes the padded
+ *  layout itself (`w = 1` for positions, `w = 0` for normals) and the two cannot disagree. The comparison against
+ *  `meshChunk` reads it with this stride; the CPU mesher's own arrays stay packed at three. */
+export const DRAWN_STRIDE = 4;
+
+/** WHERE THE KERNELS WRITE, and why it is injectable (M2c). The first version owned its buffers, which was enough for a
+ *  probe that only compared them; the DRAWING side needs the geometry to live exactly where three will bind it, and
+ *  three gives a compute-written buffer the usages a vertex buffer needs (`createStorageAttribute` = `STORAGE |
+ *  VERTEX`, and a storage INDEX attribute adds `STORAGE` on top of `INDEX` — both verified in r186's
+ *  `WebGPUBackend`) — so the same buffer the kernels fill can be drawn from, with nothing coming back to the CPU.
+ *  `capacity` is baked into the kernels (a storage array's length is compile-time), so one output set = one kernel
+ *  build; the production rollout will want ONE set shared by a whole rung with a per-chunk base offset, which is
+ *  what this parameter exists to make possible. */
+export interface MesherOutput {
+  readonly capacity: number;
+  readonly position: StorageBufferAttribute;
+  readonly normal: StorageBufferAttribute;
+  readonly uv: StorageBufferAttribute;
+  readonly index: StorageBufferAttribute;
+}
+
+/** A fresh output set: zero-initialised (a WebGPU buffer is, by definition), which the draw path relies on — an
+ *  unwritten index slot reads 0, i.e. a degenerate triangle, so a region that is only partly used cannot be seen. */
+export function createMesherOutput(capacity: number = MAX_FACES): MesherOutput {
+  return {
+    capacity,
+    position: new StorageBufferAttribute(new Float32Array(capacity * 4 * DRAWN_STRIDE), DRAWN_STRIDE),
+    normal: new StorageBufferAttribute(new Float32Array(capacity * 4 * DRAWN_STRIDE), DRAWN_STRIDE),
+    uv: new StorageBufferAttribute(new Float32Array(capacity * 4 * 2), 2),
+    index: new StorageBufferAttribute(new Uint32Array(capacity * 6), 1),
+  };
+}
+
+/** The GPU mesher: one padded block in, one packed geometry out. With the default output the geometry never leaves the
+ *  device except when `run` reads it back for the probe's comparison; with an injected one it lands in buffers the
+ *  caller owns, which is how the drawing side consumes it. */
 export class GpuChunkMesher {
   private readonly renderer: WebGPURenderer;
   private readonly paddedAttr: StorageBufferAttribute;
   private readonly countAttr: StorageBufferAttribute;
   private readonly startAttr: StorageBufferAttribute;
   private readonly totalAttr: StorageBufferAttribute;
-  private readonly positionAttr: StorageBufferAttribute;
-  private readonly normalAttr: StorageBufferAttribute;
-  private readonly uvAttr: StorageBufferAttribute;
-  private readonly indexAttr: StorageBufferAttribute;
+  private readonly output: MesherOutput;
   private readonly census: { count: number };
   private readonly scan: { count: number };
   private readonly emit: { count: number };
 
-  constructor(renderer: WebGPURenderer) {
+  constructor(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput()) {
     this.renderer = renderer;
+    this.output = output;
     this.paddedAttr = new StorageBufferAttribute(new Uint32Array(PAD_CELLS), 1);
     this.countAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
     this.startAttr = new StorageBufferAttribute(new Uint32Array(KEYS), 1);
     this.totalAttr = new StorageBufferAttribute(new Uint32Array(1), 1);
-    this.positionAttr = new StorageBufferAttribute(new Float32Array(MAX_FACES * 4 * 3), 1);
-    this.normalAttr = new StorageBufferAttribute(new Float32Array(MAX_FACES * 4 * 3), 1);
-    this.uvAttr = new StorageBufferAttribute(new Float32Array(MAX_FACES * 4 * 2), 1);
-    this.indexAttr = new StorageBufferAttribute(new Uint32Array(MAX_FACES * 6), 1);
-    // The kernels are built ONCE: a per-call build would compile a pipeline per chunk, and the capacity is baked
-    // into the storage array lengths anyway.
+    // The kernels are built ONCE per output set: a per-call build would compile a pipeline per chunk, and the
+    // capacity is baked into the storage array lengths anyway.
     this.census = buildCensusKernel(this.paddedAttr, this.countAttr);
     this.scan = buildScanKernel(this.countAttr, this.startAttr, this.totalAttr);
-    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, {
-      position: this.positionAttr,
-      normal: this.normalAttr,
-      uv: this.uvAttr,
-      index: this.indexAttr,
-    });
+    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, output);
+  }
+
+  /** The buffers the geometry went into — the drawing side binds them (a `BufferGeometry` whose attributes ARE these
+   *  is drawn straight out of the compute output). */
+  get mesherOutput(): MesherOutput {
+    return this.output;
   }
 
   /** Mesh one chunk on the GPU and read the geometry back (the probe's half; the drawing side will not read it). */
@@ -278,8 +313,8 @@ export class GpuChunkMesher {
     const counts = new Uint32Array(await this.renderer.getArrayBufferAsync(this.countAttr));
     const starts = new Uint32Array(await this.renderer.getArrayBufferAsync(this.startAttr));
     const total = new Uint32Array(await this.renderer.getArrayBufferAsync(this.totalAttr))[0];
-    if (total > MAX_FACES) {
-      throw new Error(`GPU mesher: the kernel reported ${total} faces, past the ${MAX_FACES}-face capacity`);
+    if (total > this.output.capacity) {
+      throw new Error(`GPU mesher: the kernel reported ${total} faces, past the ${this.output.capacity}-face capacity`);
     }
     const slots: MeshSlot[] = [];
     for (let key = 0; key < KEYS; key++) if (counts[key] > 0) slots.push({ key, start: starts[key], count: counts[key] });
@@ -297,10 +332,10 @@ export class GpuChunkMesher {
     }
     const read = async (attr: StorageBufferAttribute, elements: number): Promise<ArrayBuffer> =>
       this.renderer.getArrayBufferAsync(attr, null, 0, elements * 4);
-    const positions = new Float32Array(await read(this.positionAttr, total * 4 * 3));
-    const normals = new Float32Array(await read(this.normalAttr, total * 4 * 3));
-    const uvs = new Float32Array(await read(this.uvAttr, total * 4 * 2));
-    const indices = new Uint32Array(await read(this.indexAttr, total * 6));
+    const positions = new Float32Array(await read(this.output.position, total * 4 * DRAWN_STRIDE));
+    const normals = new Float32Array(await read(this.output.normal, total * 4 * DRAWN_STRIDE));
+    const uvs = new Float32Array(await read(this.output.uv, total * 4 * 2));
+    const indices = new Uint32Array(await read(this.output.index, total * 6));
     return { faces: total, slots, positions, normals, uvs, indices, counts, starts };
   }
 }
@@ -371,20 +406,15 @@ function buildEmitKernel(
   padded: StorageBufferAttribute,
   countAttr: StorageBufferAttribute,
   startAttr: StorageBufferAttribute,
-  out: {
-    readonly position: StorageBufferAttribute;
-    readonly normal: StorageBufferAttribute;
-    readonly uv: StorageBufferAttribute;
-    readonly index: StorageBufferAttribute;
-  },
+  out: MesherOutput,
 ): { count: number } {
   const pad = storage(padded, "uint", PAD_CELLS);
   const counts = storage(countAttr, "uint", KEYS);
   const starts = storage(startAttr, "uint", KEYS);
-  const positions = storage(out.position, "float", MAX_FACES * 4 * 3);
-  const normals = storage(out.normal, "float", MAX_FACES * 4 * 3);
-  const uvs = storage(out.uv, "float", MAX_FACES * 4 * 2);
-  const indices = storage(out.index, "uint", MAX_FACES * 6);
+  const positions = storage(out.position, "float", out.capacity * 4 * DRAWN_STRIDE);
+  const normals = storage(out.normal, "float", out.capacity * 4 * DRAWN_STRIDE);
+  const uvs = storage(out.uv, "float", out.capacity * 4 * 2);
+  const indices = storage(out.index, "uint", out.capacity * 6);
   return Fn(() => {
     const key = instanceIndex;
     const value = div(key, uint(4));
@@ -466,13 +496,17 @@ function writeFaceNodes(
   const first = n(mul(faceIndex, uint(4)));
   for (let c = 0; c < 4; c++) {
     const corner = face.corners[c];
-    const p = n(add(n(mul(first, uint(3))), uint(c * 3)));
+    // The vertex's base in the DRAWN layout (DRAWN_STRIDE floats each: xyz + a w).
+    const base = n(mul(n(add(first, uint(c))), uint(DRAWN_STRIDE)));
     const axisValues = [lx, ly, lz];
     for (let axis = 0; axis < 3; axis++) {
-      slot(positions, n(add(p, uint(axis)))).assign(n(float(n(add(axisValues[axis], n(float(corner[axis])))))));
-      slot(normals, n(add(p, uint(axis)))).assign(n(float(MESHER_NORMALS[face.index][axis])));
+      slot(positions, n(add(base, uint(axis)))).assign(n(float(n(add(axisValues[axis], n(float(corner[axis])))))));
+      slot(normals, n(add(base, uint(axis)))).assign(n(float(MESHER_NORMALS[face.index][axis])));
     }
-    const u = n(add(n(mul(first, uint(2))), uint(c * 2)));
+    // The unused fourth component: 1 for a position (a plain `vec4` transform expects it) and 0 for a normal.
+    slot(positions, n(add(base, uint(3)))).assign(n(float(1)));
+    slot(normals, n(add(base, uint(3)))).assign(n(float(0)));
+    const u = add(mul(first, uint(2)), uint(c * 2));
     slot(uvs, u).assign(n(float(face.uvs[c][0])));
     slot(uvs, n(add(u, uint(1)))).assign(n(float(face.uvs[c][1])));
   }

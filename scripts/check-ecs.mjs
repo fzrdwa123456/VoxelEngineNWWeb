@@ -7741,6 +7741,17 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     "…and the mesher has exactly TWO loops (the scan's over the keys, the emit's over the walk): a third would mean a NESTED Loop, whose default counter name shadows the outer one (M0's diagonal-only walk)");
   assert(/FACES\.map\(\(face, index\)/.test(mesherSrc) && /CORNER_UVS/.test(mesherSrc) && /PAD_W/.test(mesherSrc),
     "the face steps, corners and UVs are DERIVED from the shared tables and the pad's strides (a retyped constant is how a port drifts)");
+  // M2c: THE DRAWN LAYOUT IS FOUR FLOATS PER VERTEX, and that is three's rule, not a preference — a STORAGE attribute
+  // with `itemSize 3` is padded to `vec4` by `WebGPUAttributeUtils.createAttribute` (WGSL has no packed vec3 in a
+  // storage buffer), and the padding REPLACES the attribute's array before the GPU buffer exists. A kernel writing a
+  // packed layout into that buffer would desync the drawn vertex layout from its data.
+  assert(/export const DRAWN_STRIDE = 4;/.test(mesherSrc) &&
+    /position: new StorageBufferAttribute\(new Float32Array\(capacity \* 4 \* DRAWN_STRIDE\), DRAWN_STRIDE\)/.test(mesherSrc) &&
+    /normal: new StorageBufferAttribute\(new Float32Array\(capacity \* 4 \* DRAWN_STRIDE\), DRAWN_STRIDE\)/.test(mesherSrc),
+    "the drawn layout is vec4 positions and normals (three pads a storage vec3 to vec4, which would desync the vertex layout)");
+  assert(/export interface MesherOutput/.test(mesherSrc) && /constructor\(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput\(\)\)/.test(mesherSrc) &&
+    /get mesherOutput\(\): MesherOutput/.test(mesherSrc),
+    "…and the output buffers are INJECTABLE, so the drawing side can own the ones it binds (and the kernels write them)");
   const meshSrcPad = stripComments(readSource("src/data/world/mesh.ts"));
   assert(/export function buildPaddedVoxels/.test(meshSrcPad) && /out\[padIndex\(lx, ly, S\)\] = plane\(PLANE\.PZ, lx, ly\)/.test(meshSrcPad),
     "the pad lives NEXT TO the gatherer that lays the planes out (the ±Z transposition has one home)");
@@ -7755,6 +7766,17 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   assert(/hookComputeBuilders\(\)/.test(probeSrc) && /onNodeBuilderCreated/.test(probeSrc) &&
     /computeShader\?\.code/.test(probeSrc) && /MESHPROBE WGSL/.test(probeSrc),
     "…and on a mismatch it dumps the EMIT kernel's emitted WGSL once (a node graph's statement order is not readable off the TypeScript)");
+  // M2c step 1: the probe DRAWS one, from the compute-written buffers only — the one question no test in this repo can
+  // answer (does three bind a storage buffer as a vertex buffer?) and the reason the copy is additive: a failure
+  // leaves the live world exactly as it is.
+  assert(/createMesherOutput\(capacity\)/.test(probeSrc) && /new GpuChunkMesher\(this\.renderer, output\)/.test(probeSrc) &&
+    /geometry\.setAttribute\("position", output\.position\)/.test(probeSrc) &&
+    /geometry\.setAttribute\("normal", output\.normal\)/.test(probeSrc) &&
+    /geometry\.setIndex\(output\.index\)/.test(probeSrc),
+    "…and it builds a real BufferGeometry whose attributes ARE the mesher's buffers (no CPU copy anywhere)…");
+  assert(/geometry\.addGroup\(slot\.start \* 6, slot\.count \* 6, slot\.key & 3\)/.test(probeSrc) &&
+    /world\.resource\(SCENE3D\)\.add\(mesh\)/.test(probeSrc) && /disposeCopy\(\)/.test(probeSrc),
+    "…one group per look slice, added to the scene, and the previous copy taken down and disposed");
   assert(/const cpuCaseMs = performance\.now\(\) - cpuStart;/.test(probeSrc) && /cpuMs \+= cpuCaseMs;/.test(probeSrc),
     "…and the CPU half is timed ALONE (the first version measured it at log time, i.e. after the awaited GPU readback)");
   assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
