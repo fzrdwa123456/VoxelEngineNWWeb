@@ -371,13 +371,13 @@ export class GpuChunkMesher {
   private readonly totalAttr: StorageBufferAttribute;
   private readonly baseAttr: StorageBufferAttribute;
   private readonly output: MesherOutput;
-  /** See `readDecode`: eight threads' worth of the census's own decode. */
-  private readonly decodeAttr: StorageBufferAttribute;
-  private readonly census: { count: number };
+  /** ONE KERNEL PER SLOT, not one kernel over the batch: the slot is baked in as a literal, so nothing about a
+   *  chunk's geometry is derived from a thread id any more (see `buildCensusKernel`). The pipelines are compiled once
+   *  and reused, and `run` dispatches them in order. */
+  private readonly census: { count: number }[];
   private readonly scan: { count: number };
   private readonly bases: { count: number };
-  private readonly emit: { count: number };
-  private readonly decode: { count: number };
+  private readonly emit: { count: number }[];
 
   constructor(renderer: WebGPURenderer, output: MesherOutput = createMesherOutput(), slots = MESHER_SLOTS) {
     this.renderer = renderer;
@@ -388,31 +388,22 @@ export class GpuChunkMesher {
     this.startAttr = new StorageBufferAttribute(new Uint32Array(slots * KEYS), 1);
     this.totalAttr = new StorageBufferAttribute(new Uint32Array(slots), 1);
     this.baseAttr = new StorageBufferAttribute(new Uint32Array(slots + 1), 1);
-    this.decodeAttr = new StorageBufferAttribute(new Uint32Array(DECODE_PROBES * 4), 1);
     // The kernels are built ONCE per (output set, slot count): a per-call build would compile a pipeline per chunk,
     // and both the capacity and the slot count are baked into the storage array lengths anyway.
-    this.census = buildCensusKernel(this.paddedAttr, this.countAttr, slots);
+    this.census = [];
+    this.emit = [];
+    for (let slot = 0; slot < slots; slot++) {
+      this.census.push(buildCensusKernel(this.paddedAttr, this.countAttr, slots, slot));
+      this.emit.push(buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, this.baseAttr, output, slots, slot));
+    }
     this.scan = buildScanKernel(this.countAttr, this.startAttr, this.totalAttr, slots);
     this.bases = buildBaseKernel(this.totalAttr, this.baseAttr, slots);
-    this.emit = buildEmitKernel(this.paddedAttr, this.countAttr, this.startAttr, this.baseAttr, output, slots);
-    this.decode = buildDecodeKernel(this.decodeAttr);
   }
 
   /** The buffers the geometry went into — the drawing side binds them (a `BufferGeometry` whose attributes ARE these
    *  is drawn straight out of the compute output). */
   get mesherOutput(): MesherOutput {
     return this.output;
-  }
-
-  /** A DIAGNOSTIC, and a small one: what the CENSUS's slot decode actually evaluates to on the device. Four numbers
-   *  per probing thread — the slot and the walk ordinal for thread `t`, and the same two for thread `t +
-   *  CHUNK_VOLUME` — so a batch that mixes its slots up says so in one readback instead of in a face count that is
-   *  right but belongs to the wrong chunk. It exists because the arena's first live run showed exactly that
-   *  (`912 + 214 = 1126` faces, ALL of them in slot 0) and the decode is the only thing between the thread id and the
-   *  counters. */
-  async readDecode(): Promise<Uint32Array> {
-    await this.renderer.computeAsync(this.decode as never);
-    return new Uint32Array(await this.renderer.getArrayBufferAsync(this.decodeAttr));
   }
 
   /** Mesh up to `slots` chunks into ONE arena and read the result back (the probe's half; the drawing side will not
@@ -432,10 +423,13 @@ export class GpuChunkMesher {
       (attr.array as Uint32Array).fill(0);
       attr.needsUpdate = true;
     }
-    await this.renderer.computeAsync(this.census as never);
+    // ONE DISPATCH PER SLOT for the two kernels that walk a chunk (`slots` of each), then the single scan and the
+    // single bases pass over all of them. The slot is a literal inside each kernel, so the dispatch order carries no
+    // meaning beyond "all the censuses before the scan, all the emits after the bases".
+    for (let slot = 0; slot < inputs.length; slot++) await this.renderer.computeAsync(this.census[slot] as never);
     await this.renderer.computeAsync(this.scan as never);
     await this.renderer.computeAsync(this.bases as never);
-    await this.renderer.computeAsync(this.emit as never);
+    for (let slot = 0; slot < inputs.length; slot++) await this.renderer.computeAsync(this.emit[slot] as never);
     const countsAll = new Uint32Array(await this.renderer.getArrayBufferAsync(this.countAttr));
     const startsAll = new Uint32Array(await this.renderer.getArrayBufferAsync(this.startAttr));
     const bases = new Uint32Array(await this.renderer.getArrayBufferAsync(this.baseAttr));
@@ -480,28 +474,6 @@ export class GpuChunkMesher {
   }
 }
 
-/** HOW MANY THREADS THE DECODE DIAGNOSTIC PROBES (`readDecode`): each writes the slot and the walk ordinal for its
- *  own thread id AND for the thread `CHUNK_VOLUME` further on, i.e. the first threads of slot 0 and slot 1. */
-const DECODE_PROBES = 4;
-
-/** THE DECODE, WRITTEN OUT — the census's `slot`, `ordinal`, `pad base` and `key base` for eight thread ids that
- *  STRADDLE THE SLOT BOUNDARY. It is a probe of the mechanism the arena rests on, and it exists because that
- *  mechanism was wrong once in a way no count could show: the first live arena run put BOTH chunks' faces in slot 0
- *  (`912 + 214 = 1126`), i.e. the per-slot key base was 0 for every thread of slot 1, while every count that came
- *  back was internally consistent. Four numbers per thread make that a reading instead of an inference. */
-function buildDecodeKernel(decodeAttr: StorageBufferAttribute): { count: number } {
-  const out = storage(decodeAttr, "uint", DECODE_PROBES * 4);
-  return Fn(() => {
-    const near = instanceIndex;
-    const far = n(add(instanceIndex, uint(CHUNK_VOLUME)));
-    const at = n(mul(instanceIndex, uint(4)));
-    out.element(at).assign(n(censusSlot(near)));
-    out.element(n(add(at, uint(1)))).assign(n(censusOrdinal(near)));
-    out.element(n(add(at, uint(2)))).assign(n(censusSlot(far)));
-    out.element(n(add(at, uint(3)))).assign(n(censusKey(far)));
-  })().compute(DECODE_PROBES) as unknown as { count: number };
-}
-
 /** 1. COUNT: one thread per (slot, voxel), all six faces, `atomicAdd` per emitted face. The atomics are STATEMENTS,
  *  which is all a census needs — and `.toAtomic()` is load-bearing: `storage(attr, "uint", n)` declares
  *  `ptr<storage, u32, read_write>`, WGSL has no `atomicAdd` for that, the pipeline then fails to compile and the
@@ -515,22 +487,28 @@ function buildCensusKernel(
   padded: StorageBufferAttribute,
   countAttr: StorageBufferAttribute,
   slots: number,
+  slot: number,
 ): { count: number } {
   const pad = storage(padded, "uint", slots * PAD_CELLS);
   const counts = storage(countAttr, "uint", slots * KEYS).toAtomic();
+  // THE SLOT IS A COMPILE-TIME CONSTANT, and that is a FIXED BUG rather than an optimisation: with one dispatch over
+  // `slots * CHUNK_VOLUME` threads the slot had to be DERIVED from the thread id, and three rounds of "the counts are
+  // right but they belong to the wrong chunk" came out of exactly that derivation. A batch is now `slots` dispatches
+  // of ONE chunk each, so the two addresses are literals in the emitted WGSL and there is nothing left to derive.
+  const padBase = n(uint(slot * PAD_CELLS));
+  const keyBase = n(uint(slot * KEYS));
   return Fn(() => {
-    const center = n(add(censusPad(instanceIndex), padCenter(censusOrdinal(instanceIndex))));
-    const key = censusKey(instanceIndex);
+    const center = n(add(padBase, padCenter(instanceIndex)));
     const value = pad.element(n(center));
     If(notEqual(value, uint(AIR)), () => {
       for (const face of MESHER_FACES) {
         const neighbour = pad.element(n(add(n(center), uint(face.step))));
         If(equal(neighbour, uint(0)), () => {
-          atomicAdd(counts.element(n(add(key, add(mul(value, uint(4)), uint(face.kind))))), uint(1));
+          atomicAdd(counts.element(n(add(keyBase, add(mul(value, uint(4)), uint(face.kind))))), uint(1));
         });
       }
     });
-  })().compute(slots * CHUNK_VOLUME) as unknown as { count: number };
+  })().compute(CHUNK_VOLUME) as unknown as { count: number };
 }
 
 /** 2. SCAN: ONE THREAD PER SLOT, 1024 iterations, the exclusive prefix sum of that slot's counts into its `starts`.
@@ -613,6 +591,7 @@ function buildEmitKernel(
   baseAttr: StorageBufferAttribute,
   out: MesherOutput,
   slots: number,
+  slot: number,
 ): { count: number } {
   const pad = storage(padded, "uint", slots * PAD_CELLS);
   const counts = storage(countAttr, "uint", slots * KEYS);
@@ -624,10 +603,14 @@ function buildEmitKernel(
   const positions = storage(out.position, "float", out.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const normals = storage(out.normal, "float", out.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const uvs = storage(out.uv, "float", out.capacity * VERTS_PER_FACE * 2);
+  // ...and the slot is a compile-time constant here too: the thread IS the key, and the pad base, the key base and
+  // the arena base are all literals. See `buildCensusKernel`.
+  const padBase = n(uint(slot * PAD_CELLS));
+  const keyBase = n(uint(slot * KEYS));
+  const arenaBase = n(uint(slot));
   return Fn(() => {
-    const slot = emitSlot(instanceIndex);
-    const key = emitKey(instanceIndex);
-    const at = emitKeyBase(instanceIndex);
+    const key = instanceIndex;
+    const at = n(add(keyBase, key));
     const value = n(div(key, uint(4)));
     const kind = n(mod(key, uint(4)));
     const rank = Var(uint(0));
@@ -644,7 +627,7 @@ function buildEmitKernel(
     const walkZ = Var(uint(0));
     const center = Var(uint(0));
     If(notEqual(value, uint(AIR)), () => {
-      If(notEqual(counts.element(n(add(at, key))), uint(0)), () => {
+      If(notEqual(counts.element(at), uint(0)), () => {
         // ONE FLAT LOOP, and its counter IS the walk ordinal: `meshChunk` nests `ly` outer, `lz` middle, `lx` inner,
         // so the ordinal decodes the other way round from the storage index (see `packBatchFromPad`). (A nested `Loop`
         // cannot be used here: three names every counter `i` by default, so the inner one shadows the outer and the
@@ -654,13 +637,13 @@ function buildEmitKernel(
           walkX.assign(n(mod(n(ordinal), uint(CHUNK_SIZE))));
           walkZ.assign(n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE))));
           walkY.assign(n(div(n(ordinal), uint(CHUNK_SIZE * CHUNK_SIZE))));
-          center.assign(n(add(emitPad(instanceIndex), padCenter(n(ordinal)))));
+          center.assign(n(add(padBase, padCenter(n(ordinal)))));
           If(equal(pad.element(n(center)), value), () => {
             for (const face of MESHER_FACES) {
               If(equal(uint(face.kind), kind), () => {
                 If(equal(pad.element(n(add(n(center), uint(face.step)))), uint(0)), () => {
                   // Snapshot, THEN advance: the writes below must use the position this face owns.
-                  destination.assign(n(add(add(bases.element(slot), starts.element(n(add(at, key)))), n(rank))));
+                  destination.assign(n(add(add(bases.element(arenaBase), starts.element(at)), n(rank))));
                   rank.assign(n(add(n(rank), uint(1))));
                   writeFaceNodes(positions, normals, uvs, n(destination), n(walkX), n(walkY), n(walkZ), face);
                 });
@@ -670,7 +653,7 @@ function buildEmitKernel(
         });
       });
     });
-  })().compute(slots * KEYS) as unknown as { count: number };
+  })().compute(KEYS) as unknown as { count: number };
 }
 
 /** HOW A BATCH IS ADDRESSED — in ONE place, PER DISPATCH SHAPE, so the kernels cannot mix the two strides up.
@@ -683,51 +666,24 @@ function buildEmitKernel(
  *  addressed memory past the batch (out of range reads answer 0, i.e. AIR), the counts came out a fraction of the
  *  truth (`uniform-solid` reported 1152 faces against the CPU's 6144, `one-block` reported NONE at all) and the
  *  slice table was still SELF-CONSISTENT — `slice table ok`, `keys 3` — so nothing but a face-by-face comparison
- *  could see it. Hence the naming: the `census*` helpers and the `emit*` helpers never appear in the same kernel,
- *  and the two strides are each written down exactly once. */
-function censusSlot(thread: U32Node): U32Node {
-  return n(div(thread, uint(CHUNK_VOLUME)));
-}
-/** The walk ordinal of the thread's voxel, INSIDE ITS OWN chunk. */
-function censusOrdinal(thread: U32Node): U32Node {
-  return n(mod(thread, uint(CHUNK_VOLUME)));
-}
-/** The slot's base in the padded blocks. */
-function censusPad(thread: U32Node): U32Node {
-  return n(mul(censusSlot(thread), uint(PAD_CELLS)));
-}
-/** The slot's base in the per-slot key tables (`counts`/`starts`). */
-function censusKey(thread: U32Node): U32Node {
-  return n(mul(censusSlot(thread), uint(KEYS)));
-}
-/** The slot's base in the per-slot key tables, for the SCAN dispatch — `slots` threads, so the slot IS the thread and
- *  there is no stride to get wrong. Written out for the same reason the other two are: a kernel asks for the family it
- *  belongs to, and `censusKey`/`emitKeyBase` in a `slots`-thread dispatch would both be silently wrong. */
+ *  could see it.
+ *
+ *  AND THAT IS WHY THERE ARE NO `census*`/`emit*` SLOT HELPERS ANY MORE. A second round of the same family followed
+ *  (`912 + 214 = 1126` faces with the slot decode reading CORRECTLY), and the honest conclusion was that ANY
+ *  derivation of a slot from a thread id is a liability this file does not need: the census and the emit are now
+ *  `slots` separate dispatches with the slot baked in as a literal (see `buildCensusKernel`). The stride that used to
+ *  be derived is now a constant in the emitted WGSL, and the class of bug is gone rather than fixed. */
+/** The slot's base in the per-slot key tables, for the SCAN dispatch — `slots` threads, so the slot IS the thread
+ *  and there is no stride to get wrong. */
 function scanKey(thread: U32Node): U32Node {
   return n(mul(thread, uint(KEYS)));
-}
-/** Which chunk of the batch the thread belongs to, for the emit dispatch (`slots * KEYS` threads). */
-function emitSlot(thread: U32Node): U32Node {
-  return n(div(thread, uint(KEYS)));
-}
-/** The thread's key INSIDE ITS OWN slot. */
-function emitKey(thread: U32Node): U32Node {
-  return n(mod(thread, uint(KEYS)));
-}
-/** The slot's base in the per-slot key tables. */
-function emitKeyBase(thread: U32Node): U32Node {
-  return n(mul(emitSlot(thread), uint(KEYS)));
-}
-/** The slot's base in the padded blocks. */
-function emitPad(thread: U32Node): U32Node {
-  return n(mul(emitSlot(thread), uint(PAD_CELLS)));
 }
 
 /** The padded address of a CENTER voxel INSIDE ONE CHUNK, from the flat WALK ordinal (`meshChunk`'s nest order: `ly`
  *  outer, `lz` middle, `lx` inner — see `packBatchFromPad`). Shared by the kernels, so they cannot disagree about the
- *  numbering; the slot's own base is added by the caller (`censusPad`/`emitPad`). Every step is erased with `n()` (see
- *  `writeFaceNodes`): `div(any, uint)` resolves to a FLOAT overload by inference, and feeding that float into `mod`
- *  fails to typecheck even though the emitted WGSL is u32 math. */
+ *  numbering; the slot's own base is added by the caller, as a compile-time literal. Every step is erased with `n()`
+ *  (see `writeFaceNodes`): `div(any, uint)` resolves to a FLOAT overload by inference, and feeding that float into
+ *  `mod` fails to typecheck even though the emitted WGSL is u32 math. */
 function padCenter(ordinal: U32Node): U32Node {
   const lx = n(mod(n(ordinal), uint(CHUNK_SIZE)));
   const lz = n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE)));

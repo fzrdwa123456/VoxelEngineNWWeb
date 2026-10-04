@@ -436,14 +436,6 @@ export class GpuMesherProbeSystem {
     const gpuStart = performance.now();
     const gpu = await mesher.run(batch.map((probeCase) => probeCase.input));
     const gpuMs = performance.now() - gpuStart;
-    // THE DECODE, off the device, BEFORE the comparison: if the batch's slots are crossed, this says so in numbers
-    // (`slot(t)` and `slot(t + CHUNK_VOLUME)` must differ) instead of leaving it to be inferred from a face count.
-    const decode = await mesher.readDecode();
-    this.log(
-      `MESHPROBE arena decode: for thread 0 → slot ${decode[0]}, ordinal ${decode[1]}; ` +
-        `for thread CHUNK_VOLUME → slot ${decode[2]}, key base ${decode[3]}. ` +
-        `A batch needs the SECOND to be 1 (and the key base ${MESHER_KEYS}), or every chunk's faces land in slot 0's counters.`,
-    );
     let bad = 0;
     let firstProblem = "";
     const layout: string[] = [];

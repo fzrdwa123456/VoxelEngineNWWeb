@@ -7796,35 +7796,32 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
   // ALWAYS zero — so every thread returned and the arena was never written. The probe found it the moment `M` was
   // run; the two rounds before it only pressed `N`, which is why "the gate is green" was not the same as "the mesher
   // works".
-  assert(/const slot = emitSlot\(instanceIndex\);/.test(mesherSrc) && /const key = emitKey\(instanceIndex\);/.test(mesherSrc) &&
-    /If\(notEqual\(counts\.element\(n\(add\(at, key\)\)\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
-    "…and emit is ONE THREAD PER (SLOT, KEY): the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once…");
-  assert(/starts\.element\(n\(add\(at, key\)\)\)/.test(mesherSrc) && /bases\.element\(slot\)/.test(mesherSrc) &&
-    !/starts\.element\(at\)/.test(mesherSrc) && !/counts\.element\(at\)/.test(mesherSrc),
-    "…and EVERY per-slot table read carries the key (`at + key`), because `at` is only the slot's base: reading it bare asks for key 0's count and key 0's start, which is the fixed bug described above");
+  assert(/const key = instanceIndex;/.test(mesherSrc) && /const at = n\(add\(keyBase, key\)\);/.test(mesherSrc) &&
+    /If\(notEqual\(counts\.element\(at\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
+    "…and emit is ONE THREAD PER KEY *OF ONE SLOT*: the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once…");
+  // THE SLOT IS A COMPILE-TIME LITERAL, AND THAT IS THE FIX RATHER THAN AN OPTIMISATION. THREE rounds of "the counts
+  // are right but they belong to the wrong chunk" came out of DERIVING the slot from a thread id (first the stride was
+  // mixed, then `+ key` was missing, then the batched counters crossed while the decode read PERFECTLY), so the census
+  // and the emit are now `slots` dispatches of ONE chunk each with the slot baked in as a literal: the pad base, the
+  // key base and the arena base are constants in the emitted WGSL and there is nothing left to derive.
+  assert(/const padBase = n\(uint\(slot \* PAD_CELLS\)\);/.test(mesherSrc) &&
+    /const keyBase = n\(uint\(slot \* KEYS\)\);/.test(mesherSrc) &&
+    /const arenaBase = n\(uint\(slot\)\);/.test(mesherSrc) &&
+    /slots: number,\n  slot: number,\n\): \{ count: number \} \{/.test(mesherSrc),
+    "…with the slot baked in as a LITERAL (pad base, key base and arena base are all constants), so no kernel derives a slot from a thread id any more…");
+  assert(/for \(let slot = 0; slot < slots; slot\+\+\) \{/.test(mesherSrc) &&
+    /this\.census\.push\(buildCensusKernel\(this\.paddedAttr, this\.countAttr, slots, slot\)\)/.test(mesherSrc) &&
+    /for \(let slot = 0; slot < inputs\.length; slot\+\+\) await this\.renderer\.computeAsync\(this\.census\[slot\] as never\);/.test(mesherSrc) &&
+    /for \(let slot = 0; slot < inputs\.length; slot\+\+\) await this\.renderer\.computeAsync\(this\.emit\[slot\] as never\);/.test(mesherSrc),
+    "…and `run` dispatches ONE PER SLOT: every census, then the single scan and bases pass, then every emit");
+  assert(/starts\.element\(at\)/.test(mesherSrc) && /bases\.element\(arenaBase\)/.test(mesherSrc) &&
+    !/censusSlot\(|censusOrdinal\(|censusPad\(|censusKey\(|emitSlot\(|emitKey\(|emitKeyBase\(|emitPad\(/.test(mesherSrc),
+    "…the destination is `bases[slot] + starts[at] + rank` (`at` already carries the slot's key base), and the WHOLE FAMILY of slot-deriving helpers is GONE");
   assert(/function scanKey\(thread: U32Node\): U32Node \{\n  return n\(mul\(thread, uint\(KEYS\)\)\);/.test(mesherSrc) &&
     /const slot = instanceIndex;\n    const at = scanKey\(instanceIndex\);/.test(mesherSrc),
-    "…and the SCAN dispatch has its own third family (the slot IS the thread there), so all three dispatch shapes name their stride instead of sharing one helper");
-  // M2c STEP 2a — THE ARENA, and every part of it is one of these five lines. A batch is addressed ENTIRELY from the
-  // thread id (slot = i / per-slot threads), so nothing has to be re-uploaded between chunks; the destination is
-  // ARENA-ABSOLUTE (`bases[slot] + starts[slot][key] + rank`); the offsets come from the `bases` kernel, i.e. the
-  // DEVICE decides them and the CPU never has to know a face count in advance. The `slot` helpers exist so the four
-  // kernels cannot disagree about the numbering — a retyped `KEYS`/`PAD_CELLS` stride is exactly how that drifts.
-  assert(/function censusSlot\(thread: U32Node\): U32Node \{\n  return n\(div\(thread, uint\(CHUNK_VOLUME\)\)\);/.test(mesherSrc) &&
-    /function censusOrdinal\(thread: U32Node\): U32Node \{\n  return n\(mod\(thread, uint\(CHUNK_VOLUME\)\)\);/.test(mesherSrc) &&
-    /function censusPad\(thread: U32Node\): U32Node \{\n  return n\(mul\(censusSlot\(thread\), uint\(PAD_CELLS\)\)\);/.test(mesherSrc) &&
-    /function censusKey\(thread: U32Node\): U32Node \{\n  return n\(mul\(censusSlot\(thread\), uint\(KEYS\)\)\);/.test(mesherSrc),
-    "the census dispatch's slot is `i / CHUNK_VOLUME`, its walk ordinal is `i % CHUNK_VOLUME`, and BOTH of its addresses come from that one decode…");
-  assert(/function emitSlot\(thread: U32Node\): U32Node \{\n  return n\(div\(thread, uint\(KEYS\)\)\);/.test(mesherSrc) &&
-    /function emitKey\(thread: U32Node\): U32Node \{\n  return n\(mod\(thread, uint\(KEYS\)\)\);/.test(mesherSrc) &&
-    /function emitPad\(thread: U32Node\): U32Node \{\n  return n\(mul\(emitSlot\(thread\), uint\(PAD_CELLS\)\)\);/.test(mesherSrc) &&
-    /function emitKeyBase\(thread: U32Node\): U32Node \{\n  return n\(mul\(emitSlot\(thread\), uint\(KEYS\)\)\);/.test(mesherSrc),
-    "…while the emit dispatch's is `i / KEYS` — the two families are NAMED APART because MIXING THEM is what the first live run of the arena did (the ordinal came from `% CHUNK_VOLUME` and the pad base from `/ KEYS`, so most threads read past the batch and an out-of-range read answers 0, i.e. AIR: `uniform-solid` reported 1152 faces against the CPU's 6144 and `one-block` reported none at all, while the slice table stayed SELF-CONSISTENT and the counts were simply too small)");
-  assert(!/slotOf\(|slotKeyIndex\(|slotOrdinal\(|slotPad\(/.test(mesherSrc),
-    "…and the ambiguous one-family helpers are GONE, so a kernel cannot reach for the wrong stride by name");
-  assert(/\.compute\(slots \* CHUNK_VOLUME\)/.test(mesherSrc) && /\.compute\(slots \* KEYS\)/.test(mesherSrc) &&
-    /\.compute\(slots\)/.test(mesherSrc),
-    "…census is dispatched over `slots * CHUNK_VOLUME`, emit over `slots * KEYS` and the scan over `slots` — one dispatch for the whole batch");
+    "…and the SCAN dispatch keeps its own helper (the slot IS the thread there), so the one dispatch that still spans the batch names its stride");
+  assert(/\.compute\(CHUNK_VOLUME\)/.test(mesherSrc) && /\.compute\(KEYS\)/.test(mesherSrc) && /\.compute\(slots\)/.test(mesherSrc),
+    "…census and emit are dispatched over ONE CHUNK each (`CHUNK_VOLUME` and `KEYS` invocations, the slot a literal) and only the scan spans the batch (`slots` threads)");
   assert(/const bases = storage\(baseAttr, "uint", slots \+ 1\);/.test(mesherSrc) &&
     /bases\.element\(slot\)/.test(mesherSrc) && /starts\.element\(n\(add\(at, key\)\)\)/.test(mesherSrc),
     "…and the destination is `bases[slot] + starts[slot][key] + rank` — the ARENA offset, not the slot's own");
