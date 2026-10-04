@@ -3209,6 +3209,19 @@ Still outstanding:
   it cannot move), each slice really is the arena window its `base` points at — read through the shared buffer, which
   a per-slot comparison cannot see — and an arena one face too small THROWS instead of truncating. `M` does the same
   on the device over up to `MESHER_SLOTS` real chunks and reports `MESHPROBE arena: …`, counted in the verdict.
+  **AND ITS FIRST LIVE RUN FOUND THE STRIDE MIX-UP THE PROBE EXISTS FOR.** The census kernel's walk ordinal came from
+  `i % CHUNK_VOLUME` while its pad base came from `(i / KEYS) * PAD_CELLS`: ONE set of helpers served all three
+  dispatch shapes, and the arena's strides are not the same one (`slots * CHUNK_VOLUME`, `slots`, `slots * KEYS`).
+  Most threads therefore addressed memory past the batch — and an out-of-range storage read answers 0, which is AIR —
+  so the counts came out a fraction of the truth (`uniform-solid` 1152 faces against the CPU's 6144, `one-block` NONE
+  at all, `real(0,4,0)` 184 against 243) while EVERY case still logged `slice table ok` with a plausible `keys N`:
+  the few counts that landed were self-consistent, which is the shape of bug a count can never catch and the reason
+  the probe compares bytes face by face. FIXED by naming the decodes apart (`censusSlot`/`censusOrdinal`/`censusPad`/
+  `censusKey` = `i / CHUNK_VOLUME`; `scanKey` = the thread itself; `emitSlot`/`emitKey`/`emitKeyBase`/`emitPad` =
+  `i / KEYS`), by DELETING the ambiguous helpers so no kernel can reach for the wrong stride, and by pinning all three
+  families plus the absence of the old names in the gate (the CPU twin's `emitSlot` became `writeSlot`, so the two
+  halves cannot shadow each other). The probe's per-case path also returned to `slots = 1`, keeping its timings
+  comparable with the runs before the arena.
   **WHAT STEP 2a DOES NOT DECIDE, and why it is the next question**: how big the arena is and who gets a region.
   A worst-case reservation is impossible — a face is ~240 B in the drawn layout (6 vertices × vec4 position + vec4
   normal + vec2 uv), so a ~5000-chunk far ring would need gigabytes — which is why the measurement matters more than

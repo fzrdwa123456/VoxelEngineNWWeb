@@ -277,7 +277,9 @@ export class GpuMesherProbeSystem {
       this.busy = false;
       return;
     }
-    this.mesher ??= new GpuChunkMesher(this.renderer);
+    // ONE slot for the per-case path: every case is a single chunk, and `slots = 1` keeps these numbers comparable
+    // with the runs from before the arena existed. The ARENA is checked separately, by `checkArena`.
+    this.mesher ??= new GpuChunkMesher(this.renderer, createMesherOutput(), 1);
     this.hookComputeBuilders();
     let cases = 0;
     let mismatched = 0;
@@ -354,7 +356,7 @@ export class GpuMesherProbeSystem {
           : `MISMATCH — ${mismatched} of ${cases} case(s) disagree; first: ${examples[0] ?? "(no example)"}`;
       this.log(
         `MESHPROBE RESULT: ${verdict}. gpu ${gpuMs.toFixed(1)}ms vs cpu ${cpuMs.toFixed(1)}ms for the same inputs ` +
-          `(the CPU half is the PRODUCTION mesher, run once per case; the GPU half is 3 dispatches plus the READBACK ` +
+          `(the CPU half is the PRODUCTION mesher, run once per case; the GPU half is 4 dispatches plus the READBACK ` +
           `the probe needs and the drawing side will not — see ROADMAP on the round trip). ` +
           `examples: ${examples.join(" | ") || "(none)"}`,
       );

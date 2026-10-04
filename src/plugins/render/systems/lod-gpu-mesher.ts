@@ -170,8 +170,9 @@ function scanSlot(counts: Uint32Array, base: number): SlotTable {
 }
 
 /** ONE SLOT'S FACES INTO THE ARENA, in the kernels' walk order and layout. The cursor is absolute (`base +
- *  starts[key]`), which is the whole difference between one output set per chunk and one arena for a batch. */
-function emitSlot(
+ *  starts[key]`), which is the whole difference between one output set per chunk and one arena for a batch.
+ *  (Not named `emitSlot`: that is the KERNEL-side slot decode, and the two live in the same file.) */
+function writeSlot(
   positions: Float32Array,
   normals: Float32Array,
   uvs: Float32Array,
@@ -233,7 +234,7 @@ export function packBatchFromPad(paddeds: readonly Uint32Array[], capacity = MAX
   const out: PackedGeometry[] = [];
   for (let slot = 0; slot < paddeds.length; slot++) {
     const table = tables[slot];
-    emitSlot(positions, normals, uvs, paddeds[slot], table);
+    writeSlot(positions, normals, uvs, paddeds[slot], table);
     const slots: MeshSlot[] = [];
     for (let key = 0; key < KEYS; key++) {
       // `start` is RELATIVE TO THIS SLOT (which is what `geometry.addGroup` wants for the slot's own geometry, and
@@ -470,7 +471,7 @@ export class GpuChunkMesher {
  *
  *  THE SLOT COMES OUT OF THE THREAD ID, and that is the arena's whole mechanism: `i / CHUNK_VOLUME` is the slot and
  *  `i % CHUNK_VOLUME` the walk ordinal, so a whole batch is meshed by ONE dispatch with nothing to re-upload between
- *  chunks (see `slotPad`/`slotKey`). A per-chunk uniform would have to be re-sent between dispatches inside one
+ *  chunks (see `censusPad`/`censusKey`). A per-chunk uniform would have to be re-sent between dispatches inside one
  *  frame, which is exactly the kind of state a node graph gives no promise about. */
 function buildCensusKernel(
   padded: StorageBufferAttribute,
@@ -480,8 +481,8 @@ function buildCensusKernel(
   const pad = storage(padded, "uint", slots * PAD_CELLS);
   const counts = storage(countAttr, "uint", slots * KEYS).toAtomic();
   return Fn(() => {
-    const center = n(add(slotPad(instanceIndex), padCenter(slotOrdinal(instanceIndex))));
-    const key = slotKey(instanceIndex);
+    const center = n(add(censusPad(instanceIndex), padCenter(censusOrdinal(instanceIndex))));
+    const key = censusKey(instanceIndex);
     const value = pad.element(n(center));
     If(notEqual(value, uint(AIR)), () => {
       for (const face of MESHER_FACES) {
@@ -518,7 +519,7 @@ function buildScanKernel(
   const totals = storage(totalAttr, "uint", slots);
   return Fn(() => {
     const slot = instanceIndex;
-    const at = slotKey(instanceIndex);
+    const at = scanKey(instanceIndex);
     const running = Var(uint(0));
     Loop(KEYS, ({ i }) => {
       const key = n(i).toUint();
@@ -586,9 +587,9 @@ function buildEmitKernel(
   const normals = storage(out.normal, "float", out.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const uvs = storage(out.uv, "float", out.capacity * VERTS_PER_FACE * 2);
   return Fn(() => {
-    const slot = slotOf(instanceIndex);
-    const key = slotKeyIndex(instanceIndex);
-    const at = slotKey(instanceIndex);
+    const slot = emitSlot(instanceIndex);
+    const key = emitKey(instanceIndex);
+    const at = emitKeyBase(instanceIndex);
     const value = n(div(key, uint(4)));
     const kind = n(mod(key, uint(4)));
     const rank = Var(uint(0));
@@ -615,7 +616,7 @@ function buildEmitKernel(
           walkX.assign(n(mod(n(ordinal), uint(CHUNK_SIZE))));
           walkZ.assign(n(mod(n(div(n(ordinal), uint(CHUNK_SIZE))), uint(CHUNK_SIZE))));
           walkY.assign(n(div(n(ordinal), uint(CHUNK_SIZE * CHUNK_SIZE))));
-          center.assign(n(add(slotPad(instanceIndex), padCenter(n(ordinal)))));
+          center.assign(n(add(emitPad(instanceIndex), padCenter(n(ordinal)))));
           If(equal(pad.element(n(center)), value), () => {
             for (const face of MESHER_FACES) {
               If(equal(uint(face.kind), kind), () => {
@@ -634,35 +635,59 @@ function buildEmitKernel(
   })().compute(slots * KEYS) as unknown as { count: number };
 }
 
-/** HOW A BATCH IS ADDRESSED — in ONE place, so the four kernels cannot disagree about the numbering.
+/** HOW A BATCH IS ADDRESSED — in ONE place, PER DISPATCH SHAPE, so the kernels cannot mix the two strides up.
  *
- *  `thread` is the dispatch's `instanceIndex`, and every per-slot expression is derived from it: the SLOT is which
- *  chunk of the batch this thread belongs to, and the rest is the slot's offset in whichever shared array the caller
- *  is asking about. That is the arena's contract in four functions — a kernel never receives a chunk index, it
- *  decodes one. */
-function slotOf(thread: U32Node): U32Node {
-  return n(div(thread, uint(KEYS)));
+ *  THERE ARE TWO THREAD LAYOUTS AND THEY DO NOT SHARE A STRIDE, which is exactly the mistake this comment exists to
+ *  prevent: `census` is dispatched over `slots * CHUNK_VOLUME` (one thread per VOXEL) while `scan` and `emit` are
+ *  dispatched over `slots` and `slots * KEYS` (one thread per SLOT and per (slot, key)). A slot is therefore
+ *  `i / CHUNK_VOLUME` in one and `i / KEYS` in the other, and the FIRST LIVE RUN OF THE ARENA MIXED THEM: the census
+ *  took its walk ordinal from `i % CHUNK_VOLUME` and its pad base from `(i / KEYS) * PAD_CELLS`, so most threads
+ *  addressed memory past the batch (out of range reads answer 0, i.e. AIR), the counts came out a fraction of the
+ *  truth (`uniform-solid` reported 1152 faces against the CPU's 6144, `one-block` reported NONE at all) and the
+ *  slice table was still SELF-CONSISTENT — `slice table ok`, `keys 3` — so nothing but a face-by-face comparison
+ *  could see it. Hence the naming: the `census*` helpers and the `emit*` helpers never appear in the same kernel,
+ *  and the two strides are each written down exactly once. */
+function censusSlot(thread: U32Node): U32Node {
+  return n(div(thread, uint(CHUNK_VOLUME)));
 }
-/** The per-slot index of the thread's key, for the emit dispatch (`slots * KEYS` threads). */
-function slotKeyIndex(thread: U32Node): U32Node {
-  return n(mod(thread, uint(KEYS)));
-}
-/** The walk ordinal of the thread's voxel, for the census dispatch (`slots * CHUNK_VOLUME` threads). */
-function slotOrdinal(thread: U32Node): U32Node {
+/** The walk ordinal of the thread's voxel, INSIDE ITS OWN chunk. */
+function censusOrdinal(thread: U32Node): U32Node {
   return n(mod(thread, uint(CHUNK_VOLUME)));
 }
+/** The slot's base in the padded blocks. */
+function censusPad(thread: U32Node): U32Node {
+  return n(mul(censusSlot(thread), uint(PAD_CELLS)));
+}
 /** The slot's base in the per-slot key tables (`counts`/`starts`). */
-function slotKey(thread: U32Node): U32Node {
-  return n(mul(slotOf(thread), uint(KEYS)));
+function censusKey(thread: U32Node): U32Node {
+  return n(mul(censusSlot(thread), uint(KEYS)));
+}
+/** The slot's base in the per-slot key tables, for the SCAN dispatch — `slots` threads, so the slot IS the thread and
+ *  there is no stride to get wrong. Written out for the same reason the other two are: a kernel asks for the family it
+ *  belongs to, and `censusKey`/`emitKeyBase` in a `slots`-thread dispatch would both be silently wrong. */
+function scanKey(thread: U32Node): U32Node {
+  return n(mul(thread, uint(KEYS)));
+}
+/** Which chunk of the batch the thread belongs to, for the emit dispatch (`slots * KEYS` threads). */
+function emitSlot(thread: U32Node): U32Node {
+  return n(div(thread, uint(KEYS)));
+}
+/** The thread's key INSIDE ITS OWN slot. */
+function emitKey(thread: U32Node): U32Node {
+  return n(mod(thread, uint(KEYS)));
+}
+/** The slot's base in the per-slot key tables. */
+function emitKeyBase(thread: U32Node): U32Node {
+  return n(mul(emitSlot(thread), uint(KEYS)));
 }
 /** The slot's base in the padded blocks. */
-function slotPad(thread: U32Node): U32Node {
-  return n(mul(slotOf(thread), uint(PAD_CELLS)));
+function emitPad(thread: U32Node): U32Node {
+  return n(mul(emitSlot(thread), uint(PAD_CELLS)));
 }
 
 /** The padded address of a CENTER voxel INSIDE ONE CHUNK, from the flat WALK ordinal (`meshChunk`'s nest order: `ly`
  *  outer, `lz` middle, `lx` inner — see `packBatchFromPad`). Shared by the kernels, so they cannot disagree about the
- *  numbering; the slot's own base is added by the caller (`slotPad`). Every step is erased with `n()` (see
+ *  numbering; the slot's own base is added by the caller (`censusPad`/`emitPad`). Every step is erased with `n()` (see
  *  `writeFaceNodes`): `div(any, uint)` resolves to a FLOAT overload by inference, and feeding that float into `mod`
  *  fails to typecheck even though the emitted WGSL is u32 math. */
 function padCenter(ordinal: U32Node): U32Node {

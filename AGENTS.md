@@ -1014,6 +1014,22 @@ where it is:
     window its `base` points at (read through the shared buffer, which a per-slot comparison could not see) — plus
     that an arena one face too small THROWS rather than truncating. `M` runs the same thing on the device over up to
     `MESHER_SLOTS` real chunks, reports it as `MESHPROBE arena: …` and counts it in the verdict.
+  * **AND THE ARENA'S FIRST LIVE RUN FOUND A REAL BUG THE GATE COULD NOT — THE TWO DISPATCH STRIDES MIXED.** There
+    are THREE thread layouts and they do not share a stride: `census` is dispatched over `slots * CHUNK_VOLUME` (one
+    thread per VOXEL), the scan over `slots` (the slot IS the thread), and `emit` over `slots * KEYS` (one thread per
+    (slot, key)). The first version served all three from ONE set of helpers, so the census took its walk ordinal
+    from `i % CHUNK_VOLUME` and its pad base from `(i / KEYS) * PAD_CELLS`: most threads addressed memory past the
+    batch, and **an out-of-range storage read answers 0, which is AIR**. The report was `MISMATCH — 10 of 12
+    case(s)`: `uniform-solid` 1152 faces against the CPU's 6144, `one-block` NONE at all, `real(0,4,0)` 184 against
+    243 — while EVERY case still logged `slice table ok` and a plausible `keys N`, because the tiny counts that did
+    land were self-consistent. **That is the shape of bug a count can never catch, and it is exactly why the probe
+    compares bytes face by face instead of numbers.** FIXED by naming the decodes apart
+    (`censusSlot`/`censusOrdinal`/`censusPad`/`censusKey` = `i / CHUNK_VOLUME`;
+    `scanKey` = the thread itself; `emitSlot`/`emitKey`/`emitKeyBase`/`emitPad` = `i / KEYS`), by DELETING the
+    ambiguous helpers so no kernel can reach for the wrong stride, and by pinning both families and the absence of the
+    old names in the gate (the CPU twin's own `emitSlot` was renamed `writeSlot` so the two halves cannot shadow each
+    other either). The probe's per-case path also went back to `slots = 1`, so its timings stay comparable with the
+    runs from before the arena.
   * **WHAT M2c STILL NEEDS, in order**: (a) the ARENA'S ALLOCATION POLICY — how big it is, how a chunk gets a region
     as the ring moves, and what happens when it is full. The region CANNOT be reserved worst-case: ~180-240 B per
     face (6 vertices × vec4 position + vec4 normal + vec2 uv) against a far ring of ~5000 chunks would be gigabytes,
