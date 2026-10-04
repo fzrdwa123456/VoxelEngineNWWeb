@@ -7789,9 +7789,19 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     /pad\.element\(n\(add\(n\(center\), uint\(face\.step\)\)\)/.test(mesherSrc) &&
     /writeFaceNodes\(positions, normals, uvs, n\(destination\), n\(walkX\), n\(walkY\), n\(walkZ\), face\)/.test(mesherSrc),
     "…so the cull test, the neighbour test and the write all read those same locals (a raw counter expression in one of them is the bug)");
+  // AND THE KEY IS PART OF EVERY PER-SLOT ADDRESS — `at` IS ONLY THE SLOT'S BASE, and reading the table at `at`
+  // without `+ key` is a FIXED BUG that a count can never catch. The first live run after the arena landed reported
+  // `faces cpu 6144 / gpu 6144` (the census and the scan were perfect) with `mismatched keys 3` and EVERY value on the
+  // GPU reading 0: the emit guard was asking for KEY 0's count, and key 0 is `(value 0 = AIR, kind 0)`, whose count is
+  // ALWAYS zero — so every thread returned and the arena was never written. The probe found it the moment `M` was
+  // run; the two rounds before it only pressed `N`, which is why "the gate is green" was not the same as "the mesher
+  // works".
   assert(/const slot = emitSlot\(instanceIndex\);/.test(mesherSrc) && /const key = emitKey\(instanceIndex\);/.test(mesherSrc) &&
-    /If\(notEqual\(counts\.element\(at\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
-    "…and emit is ONE THREAD PER (SLOT, KEY): the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once");
+    /If\(notEqual\(counts\.element\(n\(add\(at, key\)\)\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
+    "…and emit is ONE THREAD PER (SLOT, KEY): the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once…");
+  assert(/starts\.element\(n\(add\(at, key\)\)\)/.test(mesherSrc) && /bases\.element\(slot\)/.test(mesherSrc) &&
+    !/starts\.element\(at\)/.test(mesherSrc) && !/counts\.element\(at\)/.test(mesherSrc),
+    "…and EVERY per-slot table read carries the key (`at + key`), because `at` is only the slot's base: reading it bare asks for key 0's count and key 0's start, which is the fixed bug described above");
   assert(/function scanKey\(thread: U32Node\): U32Node \{\n  return n\(mul\(thread, uint\(KEYS\)\)\);/.test(mesherSrc) &&
     /const slot = instanceIndex;\n    const at = scanKey\(instanceIndex\);/.test(mesherSrc),
     "…and the SCAN dispatch has its own third family (the slot IS the thread there), so all three dispatch shapes name their stride instead of sharing one helper");
@@ -7816,7 +7826,7 @@ check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CP
     /\.compute\(slots\)/.test(mesherSrc),
     "…census is dispatched over `slots * CHUNK_VOLUME`, emit over `slots * KEYS` and the scan over `slots` — one dispatch for the whole batch");
   assert(/const bases = storage\(baseAttr, "uint", slots \+ 1\);/.test(mesherSrc) &&
-    /destination\.assign\(n\(add\(add\(bases\.element\(slot\), starts\.element\(at\)\), n\(rank\)\)\)\);/.test(mesherSrc),
+    /bases\.element\(slot\)/.test(mesherSrc) && /starts\.element\(n\(add\(at, key\)\)\)/.test(mesherSrc),
     "…and the destination is `bases[slot] + starts[slot][key] + rank` — the ARENA offset, not the slot's own");
   assert(/bases\.element\(uint\(slots\)\)\.assign\(n\(running\)\);/.test(mesherSrc),
     "…with the grand total in the buffer's last cell, which is how the caller learns the batch's size without asking per chunk");
@@ -8052,9 +8062,20 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
     "the compaction's work item is the VISIBLE LIST: a culled cluster is not in it, so it copies nothing at all…");
   assert(/If\(greaterThanEqual\(face, faces\), \(\) => \{\n        Break\(\);/.test(drawSrc),
     "…and the walk stops at the cluster's OWN face count with a `Break` — a `Loop` bound is a compile-time number, so the alternative is `capacity × budget` iterations for `visible faces` of real work…");
-  assert(/axis === 1 \? local : n\(mul\(local, step\)\)/.test(drawSrc) &&
-    /dstPosition\.element\(dst\)\.assign\(n\(add\(scaled, axis === 0 \? originX/.test(drawSrc),
+  assert(/axis === 1 \? local : n\(mul\(local, n\(step\)\)\)/.test(drawSrc) &&
+    /const origin = n\(axis === 0 \? originX : axis === 1 \? originY : originZ\);/.test(drawSrc),
     "…while the placement scales X and Z by the rung's step and leaves Y alone (`(step, 1, step)`, the same scale the stream gives its own far meshes) and adds the cluster's origin…");
+  // THE COPY IS SPLIT IN TWO, AND THAT IS A HARD PLATFORM LIMIT, NOT A STYLE CHOICE: WebGPU's
+  // `maxStorageBuffersPerShaderStage` DEFAULTS TO 8, and one kernel doing the whole copy binds TEN (the first live run
+  // of `O`: `The number of storage buffers (10) in the Compute stage exceeds the maximum per-stage limit (8)` →
+  // `Compute pipeline creation failed` → an invalid command buffer, which takes more than itself down). The adapter
+  // advertised 16 — but fitting the DEFAULT is what a portable engine does, so the position pass binds six and the
+  // shade pass seven, and `place` is bound by the position pass ALONE (a normal and a UV do not depend on it).
+  assert(/what === "position" \? storage\(buffers\.place, "float", capacity \* 4\) : null/.test(drawSrc) &&
+    /buildCompactionKernel\(culler, arena, draw, clusterCapacity, "position"\)/.test(drawSrc) &&
+    /buildCompactionKernel\(culler, arena, draw, clusterCapacity, "shade"\)/.test(drawSrc) &&
+    /await this\.renderer\.computeAsync\(this\.positions as never\);[\s\S]{0,80}?await this\.renderer\.computeAsync\(this\.shade as never\);/.test(drawSrc),
+    "…and the copy runs as TWO passes over the same visible list, so neither kernel exceeds the platform's DEFAULT storage-buffer limit (`place` is bound by the position pass only)");
   assert(/geometry\.setIndirect\(indirect\)/.test(probeSrc) && /visibleFaces \* 6/.test(probeSrc) &&
     /indirect\[0\] === visibleFaces \* 6/.test(probeSrc),
     "…and the DRAW's size is the buffer the DEVICE wrote (`setIndirect`), checked against the visible set's own face count — the probe reads it only to report, which is the whole distinction this step exists to make…");

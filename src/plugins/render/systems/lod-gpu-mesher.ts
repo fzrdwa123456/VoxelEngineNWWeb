@@ -606,7 +606,7 @@ function buildEmitKernel(
     const walkZ = Var(uint(0));
     const center = Var(uint(0));
     If(notEqual(value, uint(AIR)), () => {
-      If(notEqual(counts.element(at), uint(0)), () => {
+      If(notEqual(counts.element(n(add(at, key))), uint(0)), () => {
         // ONE FLAT LOOP, and its counter IS the walk ordinal: `meshChunk` nests `ly` outer, `lz` middle, `lx` inner,
         // so the ordinal decodes the other way round from the storage index (see `packBatchFromPad`). (A nested `Loop`
         // cannot be used here: three names every counter `i` by default, so the inner one shadows the outer and the
@@ -622,7 +622,7 @@ function buildEmitKernel(
               If(equal(uint(face.kind), kind), () => {
                 If(equal(pad.element(n(add(n(center), uint(face.step)))), uint(0)), () => {
                   // Snapshot, THEN advance: the writes below must use the position this face owns.
-                  destination.assign(n(add(add(bases.element(slot), starts.element(at)), n(rank))));
+                  destination.assign(n(add(add(bases.element(slot), starts.element(n(add(at, key)))), n(rank))));
                   rank.assign(n(add(n(rank), uint(1))));
                   writeFaceNodes(positions, normals, uvs, n(destination), n(walkX), n(walkY), n(walkZ), face);
                 });

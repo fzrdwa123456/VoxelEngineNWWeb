@@ -53,11 +53,21 @@ export function createCompactedDraw(faceCapacity: number): CompactedDraw {
   };
 }
 
-/** The device half: one kernel, one thread per cluster slot, copying the visible ones' faces out of the arena. */
+/** The device half: TWO kernels over the same visible list, and the split is a hard platform limit rather than a
+ *  design choice — **WebGPU's `maxStorageBuffersPerShaderStage` defaults to 8**, and one kernel doing the whole copy
+ *  binds ten (list, info, place, faceSlot, and the arena's and the draw's three buffers each). The first live run
+ *  failed exactly there:
+ *  `The number of storage buffers (10) in the Compute stage exceeds the maximum per-stage limit (8)` →
+ *  `Compute pipeline creation failed` → an invalid command buffer, which takes more than itself down. The adapter
+ *  advertised 16, so requesting a higher limit would have worked ON THIS MACHINE — but a default limit is what a
+ *  portable engine should fit, so the copy is SPLIT instead: the POSITION pass binds six, the SHADE pass (normal +
+ *  UV, neither of which the placement touches) binds seven. Two dispatches over the same list cost one extra pass
+ *  over the visible clusters and nothing else. */
 export class GpuGeometryCompactor {
   private readonly renderer: WebGPURenderer;
   private readonly draw: CompactedDraw;
-  private readonly compact: { count: number };
+  private readonly positions: { count: number };
+  private readonly shade: { count: number };
 
   constructor(
     renderer: WebGPURenderer,
@@ -68,7 +78,8 @@ export class GpuGeometryCompactor {
   ) {
     this.renderer = renderer;
     this.draw = draw;
-    this.compact = buildCompactionKernel(culler, arena, draw, clusterCapacity);
+    this.positions = buildCompactionKernel(culler, arena, draw, clusterCapacity, "position");
+    this.shade = buildCompactionKernel(culler, arena, draw, clusterCapacity, "shade");
   }
 
   get drawBuffers(): CompactedDraw {
@@ -76,10 +87,11 @@ export class GpuGeometryCompactor {
   }
 
   /** Run it. NO READBACK AND NO RESULT: the CPU does not need to know what happened — the indirect buffer the DRAW
-   *  reads is written by the cull's own pass, and this one only fills the vertices. The `await` is the renderer's
-   *  dispatch submission, not a copy back to this thread. */
+   *  reads is written by the cull's own pass, and these two only fill the vertices. The `await`s are the renderer's
+   *  dispatch submissions, not copies back to this thread. */
   async run(): Promise<void> {
-    await this.renderer.computeAsync(this.compact as never);
+    await this.renderer.computeAsync(this.positions as never);
+    await this.renderer.computeAsync(this.shade as never);
   }
 }
 
@@ -100,11 +112,11 @@ function buildCompactionKernel(
   arena: MesherOutput,
   draw: CompactedDraw,
   capacity: number,
+  what: "position" | "shade",
 ): { count: number } {
   const buffers = culler.clusterBuffers;
   const list = storage(buffers.list, "uint", capacity);
   const info = storage(buffers.info, "uint", capacity * 4);
-  const place = storage(buffers.place, "float", capacity * 4);
   const faceSlots = storage(buffers.faceSlot, "uint", capacity);
   const srcPosition = storage(arena.position, "float", arena.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const srcNormal = storage(arena.normal, "float", arena.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
@@ -112,6 +124,9 @@ function buildCompactionKernel(
   const dstPosition = storage(draw.position, "float", draw.faceCapacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const dstNormal = storage(draw.normal, "float", draw.faceCapacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const dstUv = storage(draw.uv, "float", draw.faceCapacity * VERTS_PER_FACE * 2);
+  // `place` is bound by the POSITION pass only: the placement moves a vertex and scales X/Z, and neither a normal nor
+  // a UV depends on it. That is also what keeps each pass under the binding limit.
+  const place = what === "position" ? storage(buffers.place, "float", capacity * 4) : null;
   return Fn(() => {
     const cluster = list.element(instanceIndex);
     const at = n(mul(cluster, uint(4)));
@@ -121,10 +136,10 @@ function buildCompactionKernel(
     // The cluster's PLACE: where its chunk-local vertices belong in the world, and the rung's step. X and Z are
     // scaled, Y is not — a far chunk's super voxel is `step` blocks wide and one block tall, which is exactly how the
     // stream scales its own meshes (`(step, 1, step)`).
-    const originX = place.element(at);
-    const originY = place.element(n(add(at, uint(1))));
-    const originZ = place.element(n(add(at, uint(2))));
-    const step = place.element(n(add(at, uint(3))));
+    const originX = place === null ? null : place.element(at);
+    const originY = place === null ? null : place.element(n(add(at, uint(1))));
+    const originZ = place === null ? null : place.element(n(add(at, uint(2))));
+    const step = place === null ? null : place.element(n(add(at, uint(3))));
     Loop(draw.faceCapacity, ({ i }) => {
       const face = n(i).toUint();
       If(greaterThanEqual(face, faces), () => {
@@ -136,26 +151,36 @@ function buildCompactionKernel(
         // The vertex's place in each buffer, in the DRAWN layout (`DRAWN_STRIDE` floats per vertex).
         const fromVertex = n(add(n(mul(source, uint(VERTS_PER_FACE))), uint(v)));
         const toVertex = n(add(n(mul(destination, uint(VERTS_PER_FACE))), uint(v)));
-        const from = n(mul(fromVertex, uint(DRAWN_STRIDE)));
-        const to = n(mul(toVertex, uint(DRAWN_STRIDE)));
-        for (let axis = 0; axis < 3; axis++) {
-          const src = n(add(from, uint(axis)));
-          const dst = n(add(to, uint(axis)));
-          const local = srcPosition.element(src);
-          const scaled = axis === 1 ? local : n(mul(local, step));
-          dstPosition.element(dst).assign(n(add(scaled, axis === 0 ? originX : axis === 1 ? originY : originZ)));
-          // The normal is copied, NOT scaled: a far chunk's faces stay axis-aligned, and its normals are already the
-          // six unit axes the mesher wrote.
-          dstNormal.element(dst).assign(srcNormal.element(src));
-        }
-        // The unused fourth components: `w = 1` for a position (a plain `vec4` transform expects it) and `w = 0` for
-        // a normal — the mesher's own convention, carried through so the draw's layout is identical to its arena's.
-        dstPosition.element(n(add(to, uint(3)))).assign(n(1));
-        dstNormal.element(n(add(to, uint(3)))).assign(n(0));
-        const fromUv = n(mul(fromVertex, uint(2)));
-        const toUv = n(mul(toVertex, uint(2)));
-        for (let axis = 0; axis < 2; axis++) {
-          dstUv.element(n(add(toUv, uint(axis)))).assign(srcUv.element(n(add(fromUv, uint(axis)))));
+        if (what === "position") {
+          const from = n(mul(fromVertex, uint(DRAWN_STRIDE)));
+          const to = n(mul(toVertex, uint(DRAWN_STRIDE)));
+          for (let axis = 0; axis < 3; axis++) {
+            const src = n(add(from, uint(axis)));
+            const dst = n(add(to, uint(axis)));
+            const local = n(srcPosition.element(src));
+            const scaled = axis === 1 ? local : n(mul(local, n(step)));
+            const origin = n(axis === 0 ? originX : axis === 1 ? originY : originZ);
+            dstPosition.element(dst).assign(n(add(scaled, origin)));
+          }
+          // The unused fourth component: `w = 1` for a position (a plain `vec4` transform expects it), the mesher's
+          // own convention, carried through so the draw's layout is identical to its arena's.
+          dstPosition.element(n(add(to, uint(3)))).assign(n(1));
+        } else {
+          const from = n(mul(fromVertex, uint(DRAWN_STRIDE)));
+          const to = n(mul(toVertex, uint(DRAWN_STRIDE)));
+          for (let axis = 0; axis < 3; axis++) {
+            const src = n(add(from, uint(axis)));
+            const dst = n(add(to, uint(axis)));
+            // The normal is copied, NOT scaled: a far chunk's faces stay axis-aligned, and its normals are already the
+            // six unit axes the mesher wrote.
+            dstNormal.element(dst).assign(srcNormal.element(src));
+          }
+          dstNormal.element(n(add(to, uint(3)))).assign(n(0));
+          const fromUv = n(mul(fromVertex, uint(2)));
+          const toUv = n(mul(toVertex, uint(2)));
+          for (let axis = 0; axis < 2; axis++) {
+            dstUv.element(n(add(toUv, uint(axis)))).assign(srcUv.element(n(add(fromUv, uint(axis)))));
+          }
         }
       }
     });

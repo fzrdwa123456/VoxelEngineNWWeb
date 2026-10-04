@@ -1087,8 +1087,7 @@ where it is:
     The draw itself is ONE `Mesh` whose `position`/`normal`/`uv` attributes ARE the compacted buffers (written by
     compute, exactly as M2c step 1 proved three binds them) with `geometry.setIndirect(buffer)` and NO `drawRange`
     and NO count from this thread — the first draw in this engine whose size the CPU does not know.
-  * **WHY A COMPACTION COPY RATHER THAN ONE INSTANCE PER CLUSTER**: instancing would avoid the copy and cost a
-    hand-written node material (the position fetched out of a storage buffer), a FIXED per-instance vertex count —
+  * **WHY A COMPACTION COPY RATHER THAN ONE INSTANCE PER CLUSTER**: instancing would avoid the copy and cost a    hand-written node material (the position fetched out of a storage buffer), a FIXED per-instance vertex count —
     one indirect draw has one `vertexCount`, so every instance would run to the LARGEST cluster and collapse the
     leftovers into degenerate triangles, burning work proportional to the worst cluster instead of the average one —
     and the placement in the shader that the compaction bakes in for free. The copy is bounded by WHAT IS VISIBLE
@@ -1096,6 +1095,15 @@ where it is:
     materials. `check:ecs` pins the compaction's work item being the visible list, the `Break` that stops each thread
     at its own face count, the `(step, 1, step)` placement, the `IndirectStorageBufferAttribute` usage declaration
     (`STORAGE | INDIRECT`, because the first binding wins) and the probe's `vertexCount === visible × 6` check.
+  * **AND THE COPY RUNS AS TWO PASSES, BECAUSE OF A HARD PLATFORM LIMIT: `maxStorageBuffersPerShaderStage` DEFAULTS TO
+    8.** One kernel doing the whole copy binds TEN (the visible list, `info`, `place`, `faceSlot`, and the arena's and
+    the draw's three buffers each), and the first live run of `O` failed exactly there — `The number of storage buffers
+    (10) in the Compute stage exceeds the maximum per-stage limit (8)` → `Compute pipeline creation failed` → an
+    invalid command buffer, which takes more than itself down (look in `renderer.log`, not `debug.log`, for that
+    class). The adapter advertised 16, so `requiredLimits` would have worked on this machine — but **fitting the
+    DEFAULT is what a portable engine does**, so the POSITION pass binds six and the SHADE pass seven, over the same
+    visible list, with `place` bound by the position pass alone (a normal and a UV do not depend on it). Two
+    dispatches cost one extra pass and nothing else.
   * **WHAT THE ROUTE STILL NEEDS, in order**: (a) the LOD CUT on the GPU (the rung ladder is a quadtree, so "draw
     this cluster or its four children" is a per-cluster error test — no offline simplifier, the parent is the same
     terrain re-meshed coarser, which is the one place a voxel world is CHEAPER than Nanite's DAG); (b) geometry
@@ -1104,6 +1112,15 @@ where it is:
     policy); (c) per-LOOK buckets for the compacted buffer, so the far ring's palette materials come back (today the
     probe draws the copy with ONE material); (d) HZB occlusion, last, because a heightfield world gains least from
     it.
+  * **AND BEYOND THAT, A CLUSTER IS ADDRESSED AS `at + key` — NEVER `at`, AND THAT IS A SECOND FIXED BUG.** `at` is
+    the SLOT'S BASE (`emitKeyBase`), so reading `counts`/`starts` at `at` asks for KEY 0's count and KEY 0's start.
+    Key 0 is `(value 0 = AIR, kind 0)`, whose count is ALWAYS zero — so every emit thread returned at the guard and
+    the arena was never written, while the census and the scan (which index `at + key` correctly) kept reporting
+    perfect counts. The probe's report was `faces cpu 6144 / gpu 6144`, `keys 3`, `slice table ok`, `mismatched keys 3`
+    and every GPU value `0`, i.e. **the exact shape of bug a COUNT can never catch**, and the fix is two `+ key`s. It
+    had been in the tree since the arena landed and was only found when `M` was finally run again: the two rounds in
+    between tested `N` alone. **THE LESSON IS ABOUT THE TESTING, NOT THE KERNEL: a change to the MESHER's kernels has
+    to be signed off by `M`, and "check:ecs is green" says nothing about the device.**
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it
