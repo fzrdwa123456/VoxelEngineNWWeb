@@ -251,31 +251,33 @@ a step exactly every 32 blocks would be a generator bug at a chunk seam, not a r
       frame waits on (streaming, meshing, uploads, submission). Report both lines together with what you were
       doing — **standing still vs flying fast** is the experiment that separates them: a frame time that only
       climbs while flying is the streaming path, not the drawing.
-→ **`M` — THE GPU MESHER PROBE (M2a of the GPU route)**: in a world, press **M** (it is not a bind, like G/H/J/K/L).
-  The kernel meshes eight SYNTHETIC chunk patterns and then up to six REAL chunks from the column you are standing
-  in, and compares every one against the production CPU mesher — per look: the face COUNT and two order-independent
-  signatures of the faces' data. It is the mesher's half of what `K` does for the terrain field, and it changes
-  nothing in the world (no component, no streaming state). What to check:
+→ **`M` — THE GPU MESHER PROBE (M2 of the GPU route)**: in a world, press **M** (it is not a bind, like G/H/J/K/L).
+  The kernels mesh eight SYNTHETIC chunk patterns and then up to six REAL chunks from the column you are standing in,
+  and compare every one against the production CPU mesher — the face count, every look's slice, and then EVERY face's
+  four corners, normals, UVs and index pattern, in order. It is the mesher's half of what `K` does for the terrain
+  field, and it changes nothing in the world (no component, no streaming state). What to check:
   (a) **a toast** — `网格 GPU 探针: 与 CPU 完全一致 ✓ (N 个面)` — or `不一致! k/14 个用例`, or a failure message.
       Either answer is useful; a mismatch is a kernel bug, not a world bug;
   (b) **one `MESHPROBE <case>:` line per case in `debug.log`**, each with `faces cpu X / gpu Y`, `keys N`,
       `mismatched keys 0` and the two millisecond readings, e.g.
-      `MESHPROBE checker: faces cpu 98304 / gpu 98304, keys 2, mismatched keys 0 — gpu 0.42ms, cpu reference 6.10ms`.
-      The synthetic cases also carry a **closed-form** face count: `(closed form ✓)` means the pattern's geometry
-      implies the number the CPU mesher produced, so a wrong CPU reference cannot hide as "both agree";
-  (c) **`MESHPROBE RESULT:` is the verdict** — `OK — 14 case(s), N faces, every look's count and both signatures
-      identical`, or `MISMATCH` with the first differing look key in `examples:`. A mismatch line names the look
-      (`value 1 side: cpu 1024 face(s) sum … xor … vs gpu …`), which is enough to tell WHICH faces the kernel got
-      wrong;
-  (d) **`KERNEL PRODUCED NOTHING`** is its own verdict, and it means the kernel did not run at all: every census
-      came back empty. `computeAsync` does NOT reject for a WGSL/pipeline error (the same trap M0 hit twice), so
-      read **`renderer.log`** for the real reason — `debug.log` only carries the symptom;
-  (e) **the milliseconds are the point of the milestone**: the `gpu` number is dispatch + a 12 KB readback for a
-      whole chunk, and `cpu reference` is the production mesher on this thread. On the user's machine the CPU half
-      is ~ms per chunk while the GPU half is a fraction of it — that ratio, not the toast, is what M2 is bought
-      with. A stall while the probe runs is expected (the CPU half runs on the thread that asked).
-  Note what it does NOT do yet: it writes no geometry, so nothing on screen changes. Producing the vertices ON the
-  GPU and drawing them from there is M2b.
+      `MESHPROBE checker: faces cpu 98304 / gpu 98304, keys 3, mismatched keys 0 — gpu 27.10ms (3 dispatches +
+      readback), cpu reference 54.00ms`. The synthetic cases also carry a **closed-form** face count:
+      `(closed form ✓)` means the pattern's geometry implies the number the CPU mesher produced, so a wrong CPU
+      reference cannot hide as "both agree";
+  (c) **`MESHPROBE RESULT:` is the verdict** — `OK — 14 case(s), N faces, every corner, normal, UV and index
+      identical`, or `MISMATCH` with the first difference in `examples:`. The example names the look and the corner
+      (`value 1 side face 34: corner 0 position[1] cpu 0 vs gpu 1`), which is enough to tell WHAT the kernel got
+      wrong — a walk-order mistake shows up exactly like that;
+  (d) **`KERNEL PRODUCED NOTHING`** is its own verdict, and it means the kernels did not run at all: no slice came
+      back. `computeAsync` does NOT reject for a WGSL/pipeline error (the trap M0 hit twice), so read
+      **`renderer.log`** for the real reason — `debug.log` only carries the symptom;
+  (e) **the milliseconds are the point of the milestone**: the `gpu` number is THREE dispatches plus the readback the
+      probe needs for its comparison, and `cpu reference` is the production mesher on this thread, timed alone. The
+      probe is deliberately the only place that readback happens: a dispatch+readback round trip measured 20-30 ms on
+      this machine, which is why the drawing side (the next step) must consume the GPU buffers directly. A stall while
+      the probe runs is expected (the CPU half runs on the thread that asked).
+  Note what it does NOT do yet: the geometry it produces is not drawn. The far ring still draws through its
+  `BatchedMesh` buckets, fed from CPU meshes, so nothing on screen changes when you press `M`.
 → **`H` — THE TRIANGLE WIREFRAME (P1.96)**: press H in a world and EVERY chunk mesh becomes a wireframe of its
   real triangle edges (not the block grid — the mesher emits two triangles per face, so a flat ground shows the
   diagonal of every quad). Fly up and look at a rung boundary: the finer rung's triangles are dense, the coarser

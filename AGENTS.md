@@ -856,12 +856,13 @@ where it is:
   every `gpu=` number in the logs is unavailable. Paired with `--force_high_performance_gpu` (above) and Windows'
   per-app Graphics setting, this line is how "is the discrete card actually being used" is answered — the same
   question that made the pending GPU milestones look like they were not working.
-* **M2a — THE MESHER'S DECISION RUNS ON THE GPU, AND `M` PROVES IT AGAINST `meshChunk`
+* **M2 — THE CHUNK MESHER RUNS ON THE GPU, AND `M` HOLDS IT TO `meshChunk` FACE BY FACE
   (`plugins/render/systems/lod-gpu-mesher.ts`, `lod-gpu-mesher-probe.ts`, `data/world/mesh.ts`'s padded block).**
   The chunk pipeline is CPU-bound — measured: `gpu=` 2-4 ms inside a 20-30 ms frame, with 11 worker cores busy on
-  the fine ring while the main thread does the far ring — and M2 is where meshing moves off the CPU. This is its
-  first milestone, and it answers the one question everything after it rests on: **can a compute kernel decide
-  every face exactly like `meshChunk`?**
+  the fine ring while the MAIN THREAD meshes the far ring at ~0.83 ms per chunk — and this is where meshing leaves
+  the CPU. Three kernels: `census` (one thread per voxel, `atomicAdd` per emitted face), `scan` (ONE thread, 1024
+  iterations: the counts' exclusive prefix sum into `starts` and each key's mutable `cursor`) and `emit` (one thread
+  per key, which writes the vertices and indices).
   * **THE PAD IS WHAT MAKES THE KERNEL SIMPLE (`buildPaddedVoxels`).** Culling a face needs the SOLIDITY one step
     outside the chunk, and on the CPU that is a branch: inside → the voxel array, boundary → one of six neighbour
     planes, whose ±Z pair is TRANSFORMED on purpose (`lx * S + ly`) and whose transposition is a bug that only
@@ -869,31 +870,49 @@ where it is:
     voxels inside a ONE-CELL SOLIDITY BORDER, where every neighbour is a constant offset away (`FACES`'s `dir` in
     pad strides). The pad therefore lives NEXT TO the gatherer that lays the planes out — one home for the
     transposition — and the kernel never mentions a plane.
-  * **IT IS A CENSUS, NOT A TRIANGLE BUFFER, AND THE REASON IS A REAL CONSTRAINT.** Per look key the kernel
-    accumulates a COUNT and an order-independent SIGNATURE (FNV-1a over the face's voxel origin and its constant
-    half: table index, four corner offsets, four UVs). That is enough to hold every emitted face's data to the
-    production mesher's — while needing no output geometry, no write cursor and no compaction, because three's TSL
-    does not expose an atomic fetch-add: `atomicAdd` is built by `atomicFunc`, which wraps `.toStack()`, so it is a
-    STATEMENT whose value cannot be used in an expression, and the CPU version's `cursor[slot]++` has no parallel
-    equivalent. **M2b owns the placement**, and it is also where the geometry has to become GPU-RESIDENT (a
-    `BatchedMesh.addGeometry` copies from CPU memory, so writing vertices and reading them back would keep the
-    round trip M2 exists to remove) — i.e. M2b and the far ring's indirect draw are one step, not two.
-  * **`censusOfMesh` READS THE ARRAYS, `censusOfPad` WALKS THE INPUT, `M` COMPARES THE GPU TO BOTH.** The first is
-    the CPU half of the contract (it rebuilds each face's value list from the positions/normals/UVs the production
-    mesher wrote, so a wrong corner or UV moves the signature); the second mirrors the kernel exactly, which is
-    what lets the GATE hold the kernel's logic to `meshChunk` with no device at all. A trap is recorded in
-    `censusOfMesh`: **the voxel origin is NOT the minimum corner** — a face whose four corners all sit on one side
-    (the top face's `y` is `+1` everywhere) has its min corner one step away — and using it made every
-    non-negative-axis face sign a different voxel, which the gate reported as four differing keys with IDENTICAL
-    counts.
+  * **ONE THREAD PER KEY IS HOW THE PACKED LAYOUT EXISTS AT ALL, and it is a consequence of a TSL limitation.** A
+    slice has to be contiguous per look (`geometry.groups` need that), and the CPU gets that from `cursor[slot]++`.
+    A parallel kernel's usual answer is an atomic fetch-add whose RETURN value is the destination — and TSL has no
+    such thing: `atomicAdd` is built by `atomicFunc`, which wraps the node in `.toStack()`, so it is a STATEMENT.
+    So `emit` gives each KEY its own thread and appends with a plain read/increment of that key's own cursor. Two
+    properties fall out for free: the faces inside a slice come out in WALK ORDER (so the comparison against the CPU
+    can be exact rather than order-insensitive) and the output is DETERMINISTIC. The cost is 1024 threads × 32³
+    guarded tests, and the first guard is what makes it cheap — a key with no faces returns immediately, so a real
+    chunk (a handful of non-empty looks) pays a handful of walks. The counts are read non-atomically in `scan`/`emit`
+    (a different shader, so the buffer is simply bound twice in two passes): an atomic binding cannot be read as a
+    value in WGSL, and `atomicLoad` is a statement too.
+  * **THE WALK ORDER IS `meshChunk`'s, AND IT IS NOT THE STORAGE ORDER.** `meshChunk` nests `ly` outer, `lz` middle,
+    `lx` inner while a voxel's storage index is `lx + ly*32 + lz*1024`, so a kernel's flat loop counter decodes as
+    `lx = i % 32`, `lz = (i / 32) % 32`, `ly = i / 1024` — NOT the other way round. That mistake gives IDENTICAL
+    per-look counts and a different face order inside every slice, so only a face-by-face comparison sees it; the
+    gate caught it and now pins the decode, and the mutation test that swapped the two axes fails the comparison.
+  * **THE INDICES ARE A PATTERN, NOT VALUES.** They address a face's vertices inside the chunk's own index buffer,
+    and the two halves order their slices differently (first-seen vs ascending key), so the same face legitimately
+    sits at a different global position in each. What must agree is the two-triangle pattern relative to the face's
+    OWN first vertex, plus the corners, normals and UVs — the content. (Comparing raw values reported
+    `index 0 cpu 0 vs gpu 4096` for the same face, which is what the gate's first packed run said.)
+  * **`check:ecs` HOLDS THE KERNELS' LOGIC TO `meshChunk` WITH NO DEVICE**, through `packFromPad` — census + scan +
+    emit in one function, deliberately a separate implementation (it walks the INPUT; the gate's comparison reads
+    `meshChunk`'s OUTPUT). It checks the closed forms (a solid block in air shows 6 × 32², one with solid neighbours
+    shows 0, a hole adds six), the multi-value cases FACE BY FACE, and a NON-UNIFORM BORDER — the only kind that
+    proves the pad's ±Z transposition, because a uniform plane is symmetric (the mutation test that dropped the
+    transposition passed until an asymmetric-border case existed, and now fails).
   * **`M`, in a world, runs it and reports.** Synthetic patterns first (empty, uniform solid with air or solid
     neighbours, solid with one AIR voxel, a single block, three value bands, a checkerboard, a patterned border),
     each carrying a CLOSED-FORM face count so the CPU reference itself is checked too; then up to six REAL chunks
     from the player's column. One line per case, a RESULT line with the GPU-vs-CPU milliseconds, and a toast. A
     backend without compute turns it into a logged no-op, and — the M0 lesson — a WGSL/pipeline error leaves the
     accumulators at their reset value rather than rejecting the `await`, so that case is reported as its own
-    verdict. The gate pins the three `.toAtomic()` calls, the face table being derived from `FACES`/`CORNER_UVS`,
-    the u32 index arithmetic and the closed forms; the WGSL itself is only verifiable by pressing `M`.
+    verdict. The gate pins the ONE `.toAtomic()`, the derived face table, the walk decode and the closed forms; the
+    WGSL itself is only verifiable by pressing `M`.
+    **MEASURED on the user's machine**: `OK — 11 case(s), 121162 faces, every corner, normal, UV and index
+    identical`, the worst case a 98304-face checkerboard, plus two real chunks; the GPU half cost 694 ms against the
+    CPU's 58 ms **because of the READBACK the probe needs and the drawing side will not** (a dispatch+readback round
+    trip is 20-30 ms; the first call also compiles the pipelines, ~200 ms).
+  * **WHAT IS NOT DONE: the drawing side does not use these buffers yet.** The far ring still draws through M3a's
+    `BatchedMesh` buckets, fed from CPU meshes. Wiring the GPU-resident geometry into it — per-look ranges, and
+    per-cell visibility because the reserve (P2.00) and the fades (P1.98/99) need it — is the step after this one,
+    and it is where the flight-time frame cost should finally move.
 * **`K` IS THE GPU SAMPLER PROBE (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`).** The LOD's
   sampling is the engine's one CPU wall: a coarse super voxel takes the max/min height over `step × step` fine
   columns, so a rung-6 column costs ~290 ms ON THE MAIN THREAD and the whole six-rung ladder ~71 s of it

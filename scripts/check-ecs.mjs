@@ -7604,21 +7604,26 @@ check("the LOD sampler (M1): the far ring samples on the GPU, and WAITS rather t
     "…and every material (tinted variants and the checker included) takes its map from that cache");
 });
 
-// ===== M2a: the mesher's DECISION as a compute kernel, held to the production CPU mesher =====
-console.log("\n--- M2a: the GPU mesher decides every face like `meshChunk` ---");
+// ===== M2: the mesher ON the GPU, held to the production CPU mesher =====
+console.log("\n--- M2: the GPU mesher writes `meshChunk`'s geometry ---");
 
-check("M2a: the padded block IS the culling rule, and the GPU census IS the CPU mesher's", () => {
-  // WHAT THIS CAN AND CANNOT TEST. There is no device here, so the kernel itself cannot run — but its LOGIC can,
-  // because it is a walk over the padded block with the offsets in `FACES`, and that walk exists on the CPU too
-  // (`censusOfPad`, the kernel's twin). So the gate proves the two things the kernel rests on:
+check("M2: the packed geometry is `meshChunk`'s, and the kernels' walk is the CPU's", () => {
+  // WHAT THIS CAN AND CANNOT TEST. There is no device here, so the kernels cannot run — but their LOGIC can, because
+  // it is a walk over the padded block with the offsets in `FACES`, and that walk exists on the CPU too
+  // (`packFromPad`, the kernels' twin: census + scan + emit in one function). So the gate proves what the kernels
+  // rest on:
   //   1. `buildPaddedVoxels` answers EXACTLY what `meshChunk`'s own `solidAt` answers — a one-cell solidity border
   //      whose every neighbour is a constant offset away, with the ±Z planes read the transposed way the gatherer
-  //      wrote them (reading them the other way is a bug that only shows at a chunk border);
-  //   2. the census that walk produces equals the census of the PRODUCTION mesher's output, for patterns whose
-  //      answer is also known in closed form.
+  //      wrote them (reading them the other way is invisible until a block is broken at a chunk border);
+  //   2. the geometry that walk packs equals the production mesher's, FACE BY FACE and in order — corners, normals,
+  //      UVs and indices. Comparing counts alone would not catch a swapped axis, and comparing sets would not catch
+  //      a different walk order inside a slice;
+  //   3. the kernels keep the two things that are easy to get wrong and impossible to see: the WALK ORDER
+  //      (`meshChunk` nests ly outer/lz middle, which is NOT the storage order) and the single `.toAtomic()`.
   // What stays unverified until the user presses `M` is the WGSL itself — the same position M0 was in, and the
   // reason the probe reports a verdict rather than asserting one.
   const mesher = load("plugins/render/systems/lod-gpu-mesher.js");
+  const { compareGeometry } = load("plugins/render/systems/lod-gpu-mesher-probe.js");
   const mesh = load("data/world/mesh.js");
   const { CHUNK_SIZE, CHUNK_VOLUME, AIR, SOLID } = load("data/world/chunk.js");
 
@@ -7635,16 +7640,11 @@ check("M2a: the padded block IS the culling rule, and the GPU census IS the CPU 
     if (planeSolid) planes.fill(1);
     return { uniform: false, uniformValue: AIR, blocks, planes };
   };
-  const censusOf = (input) => {
-    const cpu = mesher.censusOfMesh(mesh.meshChunk(input));
-    const pad = mesher.censusOfPad(mesh.buildPaddedVoxels(input));
-    return { cpu, pad };
+  const packed = (input) => mesher.packFromPad(mesh.buildPaddedVoxels(input));
+  const agrees = (input) => {
+    const diff = compareGeometry(mesh.meshChunk(input), packed(input));
+    return diff.facesCpu === diff.facesGpu && diff.mismatchedKeys === 0 ? "" : `${diff.mismatchedKeys} key(s): ${diff.examples[0] ?? ""}`;
   };
-  const same = (a, b) =>
-    a.total === b.total &&
-    a.counts.every((v, i) => v === b.counts[i]) &&
-    a.sum.every((v, i) => v === b.sum[i]) &&
-    a.xor.every((v, i) => v === b.xor[i]);
 
   // 1. THE CLOSED FORMS, where the culling rule's answer is arithmetic and nothing else.
   const S = CHUNK_SIZE;
@@ -7656,13 +7656,13 @@ check("M2a: the padded block IS the culling rule, and the GPU census IS the CPU 
     ["solid with one AIR voxel (the hole's six faces add)", synthetic((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? AIR : SOLID), false), 6 * S * S + 6],
   ];
   for (const [name, input, faces] of cases) {
-    const { cpu, pad } = censusOf(input);
-    equal(cpu.total, faces, `${name}: the CPU mesher emits the closed-form count`);
-    equal(pad.total, faces, `…and the walk over the PADDED block agrees (${name})`);
+    equal(mesh.meshChunk(input).faces, faces, `${name}: the CPU mesher emits the closed-form count`);
+    equal(packed(input).faces, faces, `…and the packed walk agrees (${name})`);
   }
 
-  // 2. THE MULTI-VALUE CASES, where slots, kinds and the signature all matter: a wrong corner, normal or UV
-  //    changes the signature, and a wrong cull changes the count.
+  // 2. THE MULTI-VALUE CASES, where slices, kinds, corners, normals and UVs all matter. This is the assertion that
+  //    would have caught a swapped walk axis (it did: the first version of `packFromPad` walked the STORAGE order,
+  //    which gives identical counts and a different face order inside every slice).
   const multi = [
     ["three value bands", synthetic((_lx, ly) => (ly < 8 ? 1 : ly < 16 ? 2 : ly < 24 ? 3 : AIR), false)],
     ["checkerboard", synthetic((lx, ly, lz) => ((lx + ly + lz) % 2 === 0 ? 1 : AIR), false)],
@@ -7673,74 +7673,62 @@ check("M2a: the padded block IS the culling rule, and the GPU census IS the CPU 
     }, false)],
   ];
   for (const [name, input] of multi) {
-    const { cpu, pad } = censusOf(input);
-    assert(cpu.total > 0, `${name}: something is meshed`);
-    assert(same(cpu, pad), `${name}: the padded walk's census equals the production mesher's (count, sum AND xor per look)`);
+    assert(mesh.meshChunk(input).faces > 0, `${name}: something is meshed`);
+    equal(agrees(input), "", `${name}: every face's corners, normals, UVs and indices are the production mesher's, in order`);
   }
 
-  // 3. AND THE PAD IS THE *ONLY* DIFFERENCE: a border that disagrees with `meshChunk`'s neighbour planes must change
-  //    the census the same way on both sides. **A NON-UNIFORM BORDER IS THE ONLY KIND THAT PROVES IT**: a uniform
-  //    plane is symmetric, so a transposed ±Z read is invisible with all-air or all-solid planes (the mutation test
-  //    that dropped the transposition passed until this case existed — the same trap `makeSolidAt`'s comment
-  //    records for the production mesher).
-  const patterned = () => {
-    const input = synthetic((lx, ly) => (ly < 16 ? SOLID : AIR), false);
-    const S2 = CHUNK_SIZE;
-    for (let a = 0; a < S2; a++) {
-      for (let b = 0; b < S2; b++) {
-        // ASYMMETRIC on purpose: a pattern symmetric in (a, b) survives a transposed read, which is exactly how
-        // the first version of this case passed a deliberately broken pad.
+  // 3. A NON-UNIFORM BORDER IS THE ONLY KIND THAT PROVES THE PAD'S ±Z TRANSPOSITION: a uniform plane is symmetric,
+  //    so a transposed read survives it (the mutation test that dropped the transposition passed until this case
+  //    existed, and now fails — `makeSolidAt`'s comment records the same trap for the production mesher).
+  {
+    const input = synthetic((_lx, ly) => (ly < 16 ? SOLID : AIR), false);
+    for (let a = 0; a < S; a++) {
+      for (let b = 0; b < S; b++) {
+        // ASYMMETRIC on purpose: a pattern symmetric in (a, b) survives a transposed read too.
         const on = (a * 5 + b * 3) % 7 < 2 ? 1 : 0;
-        input.planes[0 * S2 * S2 + a * S2 + b] = on; // +X
-        input.planes[1 * S2 * S2 + a * S2 + b] = on; // -X
-        input.planes[2 * S2 * S2 + a * S2 + b] = on; // +Y
-        input.planes[3 * S2 * S2 + a * S2 + b] = on; // -Y
-        input.planes[4 * S2 * S2 + a * S2 + b] = on; // +Z, laid out as (a, b) = (lx, ly)
-        input.planes[5 * S2 * S2 + a * S2 + b] = on; // -Z
+        for (let plane = 0; plane < 6; plane++) input.planes[plane * S * S + a * S + b] = on;
       }
     }
-    return input;
-  };
-  const checkerBorder = patterned();
-  {
-    const { cpu, pad } = censusOf(checkerBorder);
-    assert(cpu.total > 0, "a checkerboard border culls a different set of faces");
-    assert(same(cpu, pad), "…and the padded walk follows a NON-UNIFORM border exactly (this is what catches a transposed ±Z plane)");
+    assert(mesh.meshChunk(input).faces > 0, "a patterned border culls a different set of faces");
+    equal(agrees(input), "", "…and the packed walk follows a NON-UNIFORM border exactly (this is what catches a transposed ±Z plane)");
   }
-  const borderA = synthetic(() => SOLID, false); // air on all six sides: the whole 6 × 32² shell is drawn
-  const borderB = synthetic(() => SOLID, true); // solid on all six sides: nothing is drawn at all
-  assert(!same(censusOf(borderA).cpu, censusOf(borderB).cpu), "the neighbour planes really decide the shell's faces");
-  assert(
-    same(censusOf(borderA).cpu, censusOf(borderA).pad) && same(censusOf(borderB).cpu, censusOf(borderB).pad),
-    "…and the padded walk follows them in both extremes",
-  );
 
-  // 4. THE SOURCE CONTRACT: what the kernel must keep doing, and the two traps that already cost a test round each.
+  // 4. THE SOURCE CONTRACT: the three kernels, the walk order, and the atomics rule.
   const mesherSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-mesher.ts"));
-  equal(countOf(mesherSrc, /\.toAtomic\(\)/g), 3,
-    "all three accumulators are ATOMIC (storage(attr, \"uint\", n) declares a plain ptr<storage, u32, read_write>, which has no atomicAdd — the pipeline then fails to compile and the dispatch silently writes nothing)");
-  assert(/atomicAdd\(counts\.element\(key\), uint\(1\)\)/.test(mesherSrc), "…and the face count is incremented per emitted face");
-  assert(/FACES\.map\(\(face, index\)/.test(mesherSrc) && /CORNER_UVS/.test(mesherSrc),
-    "the kernel's face table is DERIVED from the shared FACES/CORNER_UVS data (a retyped corner is how a port drifts)");
-  assert(/PAD_W/.test(mesherSrc) && !/face\.dir\[1\] \* 32/.test(mesherSrc),
-    "…and its neighbour offsets are pad strides, not hand-written 32s");
-  assert(/\)\.compute\(CHUNK_VOLUME\)/.test(mesherSrc) && /const lx = mod\(idx, uint\(CHUNK_SIZE\)\)/.test(mesherSrc),
-    "one thread per voxel, in meshChunk's own (lx + ly*32 + lz*1024) numbering");
-  assert(/uint\(/ .test(mesherSrc) && !/Loop\(/.test(mesherSrc),
-    "…and every index node is u32 with no `Loop` counter in sight (an i32 counter mixed into u32 arithmetic does not compile at all — M0's trap)");
+  equal(countOf(mesherSrc, /\.toAtomic\(\)/g), 1,
+    "exactly ONE buffer is atomic (the census counts): storage(attr, \"uint\", n) declares a plain ptr<storage, u32, read_write> and WGSL has no atomicAdd for that, so the pipeline fails to compile and the dispatch silently writes nothing…");
+  assert(/buildCensusKernel/.test(mesherSrc) && /buildScanKernel/.test(mesherSrc) && /buildEmitKernel/.test(mesherSrc),
+    "…and the mesher is the three kernels the design needs: census (per voxel, atomic counts), scan (ONE thread, the slice table) and emit (per key)");
+  assert(/\}\)\(\)\.compute\(1\)/.test(mesherSrc),
+    "the scan runs on ONE thread: the prefix sum is sequential by construction, so it is deterministic");
+  assert(/const key = instanceIndex;/.test(mesherSrc) && /const value = div\(key, uint\(4\)\);/.test(mesherSrc) &&
+    /If\(notEqual\(counts\.element\(key\), uint\(0\)\), \(\) => \{/.test(mesherSrc),
+    "…and emit is ONE THREAD PER KEY: the slice is appended with a plain counter (no fetch-add — TSL's atomicAdd is a statement), and a key with no faces returns at once");
+  assert(/const ly = n\(div\(n\(ordinal\), uint\(CHUNK_SIZE \* CHUNK_SIZE\)\)\)/.test(mesherSrc) &&
+    /const lz = n\(mod\(n\(div\(n\(ordinal\), uint\(CHUNK_SIZE\)\)\), uint\(CHUNK_SIZE\)\)\)/.test(mesherSrc),
+    "the flat loop decodes the WALK ordinal (ly outer, lz middle), not the storage index — the two disagree and only a face-by-face comparison would notice");
+  // The two loops are counted, not pattern-matched: a regex cannot see nesting, but a THIRD `Loop(` would mean one
+  // was added — and a nested `Loop` is the M0 trap (three names every counter `i`, so the inner one shadows the
+  // outer and the walk visits only a diagonal). The emit kernel exists precisely so one flat loop suffices.
+  equal(countOf(mesherSrc, /Loop\(/g), 2,
+    "…and the mesher has exactly TWO loops (the scan's over the keys, the emit's over the walk): a third would mean a NESTED Loop, whose default counter name shadows the outer one (M0's diagonal-only walk)");
+  assert(/FACES\.map\(\(face, index\)/.test(mesherSrc) && /CORNER_UVS/.test(mesherSrc) && /PAD_W/.test(mesherSrc),
+    "the face steps, corners and UVs are DERIVED from the shared tables and the pad's strides (a retyped constant is how a port drifts)");
   const meshSrcPad = stripComments(readSource("src/data/world/mesh.ts"));
-  assert(/export function buildPaddedVoxels/.test(meshSrcPad) && /out\[padIndex\(lz, ly, S\)\]|out\[padIndex\(lx, ly, S\)\]/.test(meshSrcPad),
+  assert(/export function buildPaddedVoxels/.test(meshSrcPad) && /out\[padIndex\(lx, ly, S\)\] = plane\(PLANE\.PZ, lx, ly\)/.test(meshSrcPad),
     "the pad lives NEXT TO the gatherer that lays the planes out (the ±Z transposition has one home)");
 
-  // 5. THE PROBE: the production mesher is the reference, `M` is the trigger, and it must not pretend to work on a
-  //    backend without compute (a logged no-op, exactly like the M0 probe and the M1 sampler).
+  // 5. THE PROBE: the production mesher is the reference, `M` is the trigger, a backend without compute is a logged
+  //    no-op, and the timing must not flatter the GPU (the per-case CPU number is closed BEFORE the GPU await).
   const probeSrc = stripComments(readSource("src/plugins/render/systems/lod-gpu-mesher-probe.ts"));
-  assert(/meshChunk\(probeCase\.input\)/.test(probeSrc) && /censusOfMesh\(mesh\)/.test(probeSrc),
-    "the probe compares against the PRODUCTION mesher's own output, per case");
+  assert(/meshChunk\(probeCase\.input\)/.test(probeSrc) && /compareGeometry\(cpu, gpu\)/.test(probeSrc),
+    "the probe compares against the PRODUCTION mesher's own output, face by face");
+  assert(/const cpuCaseMs = performance\.now\(\) - cpuStart;/.test(probeSrc) && /cpuMs \+= cpuCaseMs;/.test(probeSrc),
+    "…and the CPU half is timed ALONE (the first version measured it at log time, i.e. after the awaited GPU readback)");
   assert(/edge\.code === "KeyM"/.test(probeSrc) && /this\.keys\.drain/.test(probeSrc),
     "`M` starts it, through the same one-edge channel every global chord uses");
   assert(!/KeyM/.test(stripComments(readSource("src/data/globals/binds.ts"))), "…and M is not a gameplay bind");
-  assert(/isWebGPUBackend !== true/.test(probeSrc) || /backend\?\.isWebGPUBackend === true/.test(probeSrc),
+  assert(/backend\?\.isWebGPUBackend === true/.test(probeSrc),
     "…and a backend without compute turns it into a logged no-op rather than a silent lie");
   assert(/expectedFaces/.test(probeSrc) && /CLOSED FORM SAYS/.test(probeSrc),
     "…and the synthetic cases carry a closed-form face count to check the CPU reference itself against");

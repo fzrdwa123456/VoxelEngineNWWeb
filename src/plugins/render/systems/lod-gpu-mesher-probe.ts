@@ -1,34 +1,33 @@
-// ===== M2a'S PROBE: DOES THE GPU MESHER DECIDE EVERY FACE LIKE `meshChunk`? =====
-// The M0 probe answered "can the GPU reproduce the FIELD" with `K`; this answers the next question the GPU route
-// depends on — "can it reproduce the MESHER" — with `M`. It runs the kernel in `lod-gpu-mesher.ts` over a set of
-// SYNTHETIC chunk patterns (so it says something on a pristine world, and so the closed-form cases are checkable)
-// and then over the REAL chunks in the player's own column, compares the per-look census against the production
-// CPU mesher for each, and writes one line per case plus a verdict to `debug.log`, with a toast for the summary.
+// ===== THE `M` PROBE: DOES THE GPU MESHER PRODUCE `meshChunk`'S GEOMETRY, BYTE FOR BYTE? =====
+// The M0 probe answered "can the GPU reproduce the FIELD" with `K`; this answers the mesher's question — "can it
+// reproduce the GEOMETRY" — with `M`. It runs the kernels in `lod-gpu-mesher.ts` over a set of SYNTHETIC chunk
+// patterns (so it says something on a pristine world, and so the closed-form cases are checkable) and then over the
+// REAL chunks in the player's own column, and compares every one against the production CPU mesher: the face count,
+// every look's slice, and then EVERY face's four corners, normals, UVs and indices, in order.
 //
-// IT IS A DEBUG PROBE: it owns no component, changes no streaming state, and does nothing unless `M` is pressed.
-// The CPU half is the slow one (~ms per chunk), and it runs on the thread that asked, so a stall for the duration
-// of the probe is expected and reported — the same shape M0 has.
+// IT IS A DEBUG PROBE: it owns no component, changes no streaming state, and does nothing unless `M` is pressed. The
+// CPU half is the slow one and runs on the thread that asked, so a stall for the duration of the probe is expected
+// and reported — the same shape M0 has.
 import { ShowToast } from "../../../data/globals/commands";
 import { RENDERER3D } from "../../../data/globals/gfx";
 import { KEY_EVENTS, LOCAL_PLAYER, VOXEL, KeyEdgeReader } from "../../../data/globals/resources";
 import { AIR, CHUNK_SIZE, CHUNK_VOLUME, SOLID, type Chunk } from "../../../data/world/chunk";
 import { CHUNK_Y_COUNT, MIN_CHUNK_Y, type VoxelWorld } from "../../../data/world/world";
-import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput } from "../../../data/world/mesh";
+import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
 import { worldChunksX, worldChunksZ } from "../../../data/world/size";
 import { POSITION } from "../../player/components";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
-import { GpuChunkMesher, censusOfMesh, compareCensus } from "./lod-gpu-mesher";
+import { GpuChunkMesher, type PackedGeometry } from "./lod-gpu-mesher";
 import type { WebGPURenderer } from "three/webgpu";
 
-/** The probe touches the GPU and nothing the world models: it reads the voxel data (to build the reference input
- *  and to hand the kernel the same bytes) and the renderer, and it owns its own buffers. */
+/** The probe touches the GPU and the voxel data (to build the reference input and to hand the kernel the same
+ *  bytes); it owns its own buffers. */
 export const MESH_PROBE_ACCESS: SystemAccess = {
   readsExternal: ["renderer3d", "voxelBlocks"],
   writesExternal: ["gpuMesherBuffers"],
 };
 
-/** How many of the player's own chunks the probe meshes both ways. Six is enough to cover a column's shapes
- *  (surface, interior, bedrock) without making the CPU reference the slow half of the measurement. */
+/** How many of the player's own chunks the probe meshes both ways. */
 const REAL_CHUNKS = 6;
 
 /** A synthetic chunk's voxel value at a local coordinate. */
@@ -37,8 +36,8 @@ type Pattern = (lx: number, ly: number, lz: number) => number;
 interface ProbeCase {
   readonly name: string;
   readonly input: ChunkMeshInput;
-  /** A face count the pattern's GEOMETRY implies, checked as well: a census that agrees with a wrong CPU mesher
-   *  would still be wrong, and these are the cases where the answer is known without meshing anything. */
+  /** A face count the pattern's GEOMETRY implies, checked as well: a GPU result that agrees with a wrong CPU
+   *  reference would still be wrong, and these are the cases where the answer is known without meshing anything. */
   readonly expectedFaces?: number;
 }
 
@@ -58,16 +57,15 @@ function syntheticInput(pattern: Pattern, planeSolid: boolean): ChunkMeshInput {
   return { uniform: false, uniformValue: AIR, blocks, planes };
 }
 
-/** The cases, ordered cheap-first so a failure shows up before the 100k-face one. The closed forms are the shape
- *  of the culling rule: a solid block in air shows its whole shell (6 × 32²), a solid block with solid neighbours
- *  on five sides shows only its top (32²), and so on. */
+/** The cases, ordered cheap-first so a failure shows up before the 100k-face one. The closed forms are the shape of
+ *  the culling rule: a solid block in air shows its whole shell (6 × 32²), one with solid neighbours on five sides
+ *  shows only its top, and so on. `checker` is the worst case the buffers are sized for. */
 function syntheticCases(): ProbeCase[] {
   const S = CHUNK_SIZE;
   return [
     { name: "empty-air", input: syntheticInput(() => AIR, false), expectedFaces: 0 },
     { name: "uniform-solid", input: syntheticInput(() => SOLID, false), expectedFaces: 6 * S * S },
     { name: "top-only", input: syntheticInput(() => SOLID, true), expectedFaces: 0 },
-    // Solid everywhere with an AIR neighbour on top only: the top layer's faces, and nothing else.
     {
       name: "floor-top",
       input: (() => {
@@ -78,28 +76,13 @@ function syntheticCases(): ProbeCase[] {
       })(),
       expectedFaces: S * S,
     },
-    // Three values stacked in 8-voxel bands, air above: multi-value, multi-kind (top + sides).
-    {
-      name: "layers",
-      input: syntheticInput((_lx, ly) => (ly < 8 ? 1 : ly < 16 ? 2 : ly < 24 ? 3 : AIR), false),
-    },
-    // One block in the middle of an air chunk: the closed form is its six faces.
+    { name: "layers", input: syntheticInput((_lx, ly) => (ly < 8 ? 1 : ly < 16 ? 2 : ly < 24 ? 3 : AIR), false) },
     { name: "one-block", input: syntheticInput((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? 4 : AIR), false), expectedFaces: 6 },
-    // A solid chunk with a one-voxel hole and air planes: the shell plus the hole's six faces.
-    {
-      name: "hole",
-      input: (() => {
-        const input = syntheticInput((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? AIR : SOLID), false);
-        return input;
-      })(),
-      expectedFaces: 6 * S * S + 6,
-    },
-    // The dense case: a checkerboard emits a face wherever a neighbour differs, so it is the worst case for the
-    // culling rule AND the largest face count the kernel will see here.
+    { name: "hole", input: syntheticInput((lx, ly, lz) => (lx === 16 && ly === 16 && lz === 16 ? AIR : SOLID), false), expectedFaces: 6 * S * S + 6 },
     { name: "checker", input: syntheticInput((lx, ly, lz) => ((lx + ly + lz) % 2 === 0 ? 1 : AIR), false) },
-    // A NON-UNIFORM BORDER, which is the only kind that exercises the pad's own ±Z transposition: a uniform plane
-    // is symmetric, so the kernel would read it the same either way. (The gate proved the transposition matters by
-    // mutation; this case is what carries it to the GPU.)
+    // A NON-UNIFORM BORDER, which is the only kind that exercises the pad's own ±Z transposition: a uniform plane is
+    // symmetric, so the kernel would read it the same either way. (The gate caught that by mutation; this case is
+    // what carries it to the GPU.)
     {
       name: "patterned-border",
       input: (() => {
@@ -116,6 +99,96 @@ function syntheticCases(): ProbeCase[] {
   ];
 }
 
+/** What a geometry comparison found. The slices are keyed by look, because the two halves order their slots
+ *  differently (`meshChunk` first-seen, the kernels ascending key) — the engine carries each slot's key, so only the
+ *  CONTENT per key is a contract. */
+interface GeometryDiff {
+  readonly keysCompared: number;
+  readonly mismatchedKeys: number;
+  readonly facesCpu: number;
+  readonly facesGpu: number;
+  readonly examples: readonly string[];
+}
+
+/** Compare a GPU packed geometry against `meshChunk`'s, face by face and in order. Positions, normals, UVs and
+ *  indices are all exact: they are integers (or the faces' own 0/1 constants), so there is no tolerance to argue
+ *  about — any difference is a bug in the kernel, the pad or the tables. */
+export function compareGeometry(cpu: MeshResult, gpu: PackedGeometry): GeometryDiff {
+  const examples: string[] = [];
+  let mismatchedKeys = 0;
+  let keysCompared = 0;
+  const gpuSlotOf = new Map<number, { start: number; count: number }>();
+  for (const slot of gpu.slots) gpuSlotOf.set(slot.key, { start: slot.start, count: slot.count });
+  for (const slot of cpu.slots) {
+    keysCompared++;
+    const mine = gpuSlotOf.get(slot.key);
+    gpuSlotOf.delete(slot.key);
+    if (mine === undefined) {
+      mismatchedKeys++;
+      if (examples.length < 6) examples.push(`value ${slot.key >>> 2} kind ${slot.key & 3}: missing on the GPU`);
+      continue;
+    }
+    if (mine.count !== slot.count) {
+      mismatchedKeys++;
+      if (examples.length < 6) {
+        examples.push(`value ${slot.key >>> 2} kind ${slot.key & 3}: cpu ${slot.count} face(s) vs gpu ${mine.count}`);
+      }
+      continue;
+    }
+    for (let i = 0; i < slot.count; i++) {
+      const cpuFace = slot.start + i;
+      const gpuFace = mine.start + i;
+      const problem = firstFaceDifference(cpu, gpu, cpuFace, gpuFace);
+      if (problem !== null) {
+        mismatchedKeys++;
+        if (examples.length < 6) {
+          examples.push(`value ${slot.key >>> 2} kind ${slot.key & 3} face ${i}: ${problem}`);
+        }
+        break;
+      }
+    }
+  }
+  for (const [key] of gpuSlotOf) {
+    mismatchedKeys++;
+    if (examples.length < 6) examples.push(`value ${key >>> 2} kind ${key & 3}: only on the GPU`);
+  }
+  return { keysCompared, mismatchedKeys, facesCpu: cpu.faces, facesGpu: gpu.faces, examples };
+}
+
+/** The first thing that differs between one CPU face and one GPU face, or null when they are identical.
+ *
+ *  THE INDICES ARE COMPARED AS A PATTERN, NOT AS VALUES. They address a face's four vertices inside the chunk's own
+ *  index buffer, and the two halves lay their slices out in different orders (`meshChunk` first-seen, the kernels
+ *  ascending key), so the same face legitimately sits at a different global position in each. What must agree is the
+ *  two-triangle pattern relative to the face's OWN first vertex — and the corners, normals and UVs, which are the
+ *  real content. (Comparing the raw values reported `index 0 cpu 0 vs gpu 4096` on the gate's first run: the same
+ *  face, at slice position 0 on the CPU and 1024 on the GPU.) */
+function firstFaceDifference(cpu: MeshResult, gpu: PackedGeometry, cpuFace: number, gpuFace: number): string | null {
+  for (let c = 0; c < 4; c++) {
+    for (let axis = 0; axis < 3; axis++) {
+      const a = cpu.positions[(cpuFace * 4 + c) * 3 + axis];
+      const b = gpu.positions[(gpuFace * 4 + c) * 3 + axis];
+      if (a !== b) return `corner ${c} position[${axis}] cpu ${a} vs gpu ${b}`;
+      const na = cpu.normals[(cpuFace * 4 + c) * 3 + axis];
+      const nb = gpu.normals[(gpuFace * 4 + c) * 3 + axis];
+      if (na !== nb) return `corner ${c} normal[${axis}] cpu ${na} vs gpu ${nb}`;
+    }
+    for (let axis = 0; axis < 2; axis++) {
+      const a = cpu.uvs[(cpuFace * 4 + c) * 2 + axis];
+      const b = gpu.uvs[(gpuFace * 4 + c) * 2 + axis];
+      if (a !== b) return `corner ${c} uv[${axis}] cpu ${a} vs gpu ${b}`;
+    }
+  }
+  const cpuFirst = cpuFace * 4;
+  const gpuFirst = gpuFace * 4;
+  for (let i = 0; i < 6; i++) {
+    const a = cpu.indices[cpuFace * 6 + i] - cpuFirst;
+    const b = gpu.indices[gpuFace * 6 + i] - gpuFirst;
+    if (a !== b) return `index pattern ${i} cpu ${a} vs gpu ${b} (relative to the face's first vertex)`;
+  }
+  return null;
+}
+
 /** RENDER lane. `M` starts the probe; everything else about it is reported, never acted on. */
 export class GpuMesherProbeSystem {
   private readonly keys: KeyEdgeReader;
@@ -124,7 +197,8 @@ export class GpuMesherProbeSystem {
   private readonly log: (line: string) => void;
   private readonly voxel: VoxelWorld;
   private readonly playerIndex: number;
-  /** Built on first use (it allocates ~170 KB of GPU buffers) and kept: a second `M` reuses the pipeline. */
+  /** Built on first use (it allocates ~30 MB of GPU buffers, the worst-case chunk) and kept, so a second `M`
+   *  reuses the pipelines. */
   private mesher: GpuChunkMesher | null = null;
   /** One probe at a time: a second `M` while it runs is ignored (it awaits the GPU). */
   private busy = false;
@@ -170,44 +244,50 @@ export class GpuMesherProbeSystem {
     try {
       const all: ProbeCase[] = [...syntheticCases(), ...this.realCases()];
       for (const probeCase of all) {
+        // THE CPU HALF IS TIMED ALONE — it is closed before the GPU call, and the GPU half is timed on its own. (The
+        // first version printed `performance.now() - cpuStart` at LOG time, i.e. after the await, so every per-case
+        // "cpu reference" number was really cpu+gpu: the RESULT line's totals were right and the per-case ones were
+        // not, which is exactly the kind of number a probe must not lie about.)
         const cpuStart = performance.now();
-        const mesh = meshChunk(probeCase.input);
-        const cpuCensus = censusOfMesh(mesh);
-        cpuMs += performance.now() - cpuStart;
+        const cpu = meshChunk(probeCase.input);
+        const cpuCaseMs = performance.now() - cpuStart;
+        cpuMs += cpuCaseMs;
         const gpuStart = performance.now();
-        const gpuCensus = await this.mesher.run(probeCase.input);
-        gpuMs += performance.now() - gpuStart;
-        const diff = compareCensus(cpuCensus, gpuCensus);
+        const gpu = await this.mesher.run(probeCase.input);
+        const gpuCaseMs = performance.now() - gpuStart;
+        gpuMs += gpuCaseMs;
+        const diff = compareGeometry(cpu, gpu);
         const closedForm =
           probeCase.expectedFaces === undefined
             ? ""
-            : probeCase.expectedFaces === cpuCensus.total
+            : probeCase.expectedFaces === cpu.faces
               ? " (closed form ✓)"
               : ` (CLOSED FORM SAYS ${probeCase.expectedFaces} — the CPU mesher disagrees with the pattern!)`;
         cases++;
-        facesCompared += diff.totalCpu;
-        if (diff.mismatchedKeys > 0 || diff.totalCpu !== diff.totalGpu) {
+        facesCompared += diff.facesCpu;
+        if (diff.mismatchedKeys > 0 || diff.facesCpu !== diff.facesGpu) {
           mismatched++;
           for (const example of diff.examples) if (examples.length < 8) examples.push(`${probeCase.name}: ${example}`);
         }
         this.log(
-          `MESHPROBE ${probeCase.name}: faces cpu ${diff.totalCpu} / gpu ${diff.totalGpu}, ` +
+          `MESHPROBE ${probeCase.name}: faces cpu ${diff.facesCpu} / gpu ${diff.facesGpu}, ` +
             `keys ${diff.keysCompared}, mismatched keys ${diff.mismatchedKeys}${closedForm}` +
-            ` — gpu ${(performance.now() - gpuStart).toFixed(2)}ms, cpu reference ${(performance.now() - cpuStart).toFixed(2)}ms`,
+            ` — gpu ${gpuCaseMs.toFixed(2)}ms (3 dispatches + readback), cpu reference ${cpuCaseMs.toFixed(2)}ms`,
         );
       }
       // WHAT A MISMATCH MEANS, said out loud, because "the kernel is broken" and "the kernel did not run" need
-      // opposite responses — the same distinction M0 had to learn: a WGSL/pipeline error leaves the accumulators
-      // at their reset value (all zeros), and `computeAsync` does NOT reject for it.
+      // opposite responses — the same distinction M0 had to learn: a WGSL/pipeline error leaves the buffers at their
+      // reset value (no slots at all), and `computeAsync` does NOT reject for it.
       const ranAtAll = facesCompared > 0 || mismatched === 0;
       const verdict = !ranAtAll
-        ? "KERNEL PRODUCED NOTHING (every census came back empty: read renderer.log for the WGSL/pipeline error)"
+        ? "KERNEL PRODUCED NOTHING (no slots came back at all: read renderer.log for the WGSL/pipeline error)"
         : mismatched === 0
-          ? `OK — ${cases} case(s), ${facesCompared} faces, every look's count and both signatures identical`
+          ? `OK — ${cases} case(s), ${facesCompared} faces, every corner, normal, UV and index identical`
           : `MISMATCH — ${mismatched} of ${cases} case(s) disagree; first: ${examples[0] ?? "(no example)"}`;
       this.log(
         `MESHPROBE RESULT: ${verdict}. gpu ${gpuMs.toFixed(1)}ms vs cpu ${cpuMs.toFixed(1)}ms for the same inputs ` +
-          `(the CPU half is the PRODUCTION mesher, run once per case; the GPU half is dispatch + a 12 KB readback). ` +
+          `(the CPU half is the PRODUCTION mesher, run once per case; the GPU half is 3 dispatches plus the READBACK ` +
+          `the probe needs and the drawing side will not — see ROADMAP on the round trip). ` +
           `examples: ${examples.join(" | ") || "(none)"}`,
       );
       this.log(`MESHPROBE done in ${(performance.now() - started).toFixed(0)}ms`);
