@@ -118,6 +118,12 @@ function buildCompactionKernel(
   const list = storage(buffers.list, "uint", capacity);
   const info = storage(buffers.info, "uint", capacity * 4);
   const faceSlots = storage(buffers.faceSlot, "uint", capacity);
+  /** HOW MANY OF `list` ARE REAL. The list's padding is ZERO, and zero is a legitimate cluster index — so a walk
+   *  over the whole capacity re-processes cluster 0, and when cluster 0 was CULLED its `faceSlot` is 0, i.e. the same
+   *  slot as the first VISIBLE cluster: the culled chunk's faces overwrite the visible ones. That is a FIXED BUG and
+   *  it only showed up when something WAS culled (standing on the ground; flying, all clusters are visible and the
+   *  padding rewrites cluster 0 onto itself, which is harmless). */
+  const visible = storage(buffers.count, "uint", 1);
   const srcPosition = storage(arena.position, "float", arena.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const srcNormal = storage(arena.normal, "float", arena.capacity * VERTS_PER_FACE * DRAWN_STRIDE);
   const srcUv = storage(arena.uv, "float", arena.capacity * VERTS_PER_FACE * 2);
@@ -128,11 +134,14 @@ function buildCompactionKernel(
   // a UV depends on it. That is also what keeps each pass under the binding limit.
   const place = what === "position" ? storage(buffers.place, "float", capacity * 4) : null;
   return Fn(() => {
-    const cluster = list.element(instanceIndex);
-    const at = n(mul(cluster, uint(4)));
-    const base = info.element(at);
-    const faces = info.element(n(add(at, uint(1))));
-    const faceSlot = faceSlots.element(cluster);
+    // THE VISIBLE COUNT BOUNDS THE WORK ITEMS, and that is the guard described above: a thread past the count has no
+    // cluster to copy (its `list` entry is the padding's zero, which would mean "cluster 0").
+    If(lessThan(instanceIndex, visible.element(uint(0))), () => {
+      const cluster = list.element(instanceIndex);
+      const at = n(mul(cluster, uint(4)));
+      const base = info.element(at);
+      const faces = info.element(n(add(at, uint(1))));
+      const faceSlot = faceSlots.element(cluster);
     // The cluster's PLACE: where its chunk-local vertices belong in the world, and the rung's step. X and Z are
     // scaled, Y is not — a far chunk's super voxel is `step` blocks wide and one block tall, which is exactly how the
     // stream scales its own meshes (`(step, 1, step)`).
@@ -194,6 +203,7 @@ function buildCompactionKernel(
         }
       }
       });
+    });
     });
   })().compute(capacity) as unknown as { count: number };
 }

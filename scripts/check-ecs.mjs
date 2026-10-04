@@ -8067,6 +8067,15 @@ check("the visibility pass: the three passes, the CPU twin, and the probe's two 
   // is never smaller than a cluster, so nothing is truncated.
   assert(/If\(lessThan\(face, faces\), \(\) => \{/.test(drawSrc) && !/Break/.test(drawSrc),
     "…and the walk's only bound is the GUARD: `Break` is not used anywhere in the compaction (it broke early on the device and left the buffer holding the previous run's vertices), and correctness does not need it");
+  // AND THE WORK ITEMS ARE BOUNDED BY THE VISIBLE COUNT — the other half of the same story, and the one the user's
+  // "flying is fine, standing on the ground is broken" pinned down exactly: `list`'s PADDING IS ZERO, zero is a
+  // legitimate cluster index, and a CULLED cluster 0 has `faceSlot` 0 — the same slot as the first VISIBLE cluster.
+  // Walking the whole capacity therefore overwrote the visible faces with a culled chunk's, which is invisible when
+  // nothing is culled (the padding then rewrites cluster 0 onto itself).
+  assert(/const visible = storage\(buffers\.count, "uint", 1\);/.test(drawSrc) &&
+    /If\(lessThan\(instanceIndex, visible\.element\(uint\(0\)\)\), \(\) => \{/.test(drawSrc) &&
+    /count: StorageBufferAttribute;/.test(src) && /count: this\.countAttr,/.test(src),
+    "…and a thread past the VISIBLE COUNT does nothing: the compacted buffer must never be written by a cluster the cull rejected (its slot is the first visible cluster's)");
   assert(/compactProblem === "" && indirect\[0\] === visibleFaces \* 6/.test(probeSrc) &&
     /private async checkCompaction\(/.test(probeSrc) && /CULLPROBE compact:/.test(probeSrc),
     "…and the COMPACTION is verified BY VALUE: the compacted buffer is read back and compared against `arena source + place` component by component, with the first difference reported (that check is how a copy bug is found, because every count stays right)");

@@ -173,14 +173,20 @@ export class GpuClusterCuller {
   }
 
   /** The buffers the DRAW binds: `list` names the surviving clusters in order, `info`/`place` describe them,
-   *  `faceSlot` says where each cluster's faces go in a compacted buffer, and `indirect` is the draw call the
-   *  device wrote for itself. NOTHING HERE COMES BACK TO THE CPU. */
+   *  `faceSlot` says where each cluster's faces go in a compacted buffer, `count` is HOW MANY of `list` are real,
+   *  and `indirect` is the draw call the device wrote for itself. NOTHING HERE COMES BACK TO THE CPU.
+   *
+   *  `count` MATTERS TO THE DRAW AND IS NOT A CONVENIENCE: `list`'s padding is ZERO, and zero is a legitimate
+   *  cluster index, so a consumer that walks `capacity` slots without reading the count re-processes cluster 0 —
+   *  whose `faceSlot` is 0 when it was CULLED, i.e. the same slot as the first visible cluster. That is exactly how
+   *  a culled chunk's faces came to overwrite the visible ones in the compaction. */
   get clusterBuffers(): {
     list: StorageBufferAttribute;
     info: StorageBufferAttribute;
     bounds: StorageBufferAttribute;
     place: StorageBufferAttribute;
     faceSlot: StorageBufferAttribute;
+    count: StorageBufferAttribute;
     indirect: IndirectStorageBufferAttribute;
   } {
     return {
@@ -189,6 +195,7 @@ export class GpuClusterCuller {
       bounds: this.boundsAttr,
       place: this.placeAttr,
       faceSlot: this.faceSlotAttr,
+      count: this.countAttr,
       indirect: this.indirectAttr,
     };
   }
