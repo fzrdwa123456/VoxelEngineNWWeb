@@ -6,6 +6,10 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
+# WASM 构建产物（由 npm run wasm:build 生成）
+wasm/collision/target/
+src/host/browser/wasm/
+
 # 开发期的游戏数据（运行时会写 settings/logs/saves；示例包是拷进来的产物，不是用户数据）
 game/
 

@@ -60,11 +60,9 @@ function checkerMaterial(state: ChunkMaterialState): THREE.MeshLambertMaterial {
  *  A `Texture` whose image has not arrived yet is uploaded by three as a 1×1 UNINITIALISED texture
  *  (`WebGPUTextureUtils.createDefaultTexture`), i.e. BLACK, and WebGPU zero-initialises it. Building a fresh
  *  `TextureLoader().load(url)` for every material therefore makes every new material draw pure black until its
- *  data lands; the LOD view multiplies that by resolving EVERY look for EVERY rung at once when `G` is pressed,
- *  which painted whole rungs black (the reported «按 G 之后部分区域变成黑色，有时被刷掉»: the patches vanish when
- *  the images finish, not when anything re-meshes). Sharing the texture means a tinted material reuses the
- *  image that was loaded and uploaded when the chunk first appeared, so there is nothing to wait for — and one
- *  GPU copy of a PNG instead of one per (look, tier). */
+ *  data lands, so every new material drew pure black until its image arrived. Sharing the texture means a
+ *  material reuses the image that was loaded and uploaded when the chunk first appeared, so there is nothing
+ *  to wait for — and one GPU copy of a PNG instead of one per look. */
 function textureFor(state: ChunkMaterialState, url: string): THREE.Texture {
   const hit = state.textures.get(url);
   if (hit !== undefined) return hit;
@@ -78,70 +76,26 @@ function textureFor(state: ChunkMaterialState, url: string): THREE.Texture {
   return texture;
 }
 
-/** THE LOD VIEW'S TINT FOR A **COLOUR-ONLY** LOOK — and why it is not a plain multiply.
- *
- *  `G` says "which rung is this chunk" by tinting its material. A TEXTURED look simply takes the tint as its
- *  `color`, so the texture keeps its own brightness and gains the hue — which is why grass and dirt tint
- *  correctly. A colour-only look has no texture to carry the detail, so it used to be `block colour × tint`,
- *  and THREE multiplies in LINEAR space: two mid-dark colours give the PRODUCT of their luminances (grey stone
- *  `#8a8a8a` is ≈ 0.25 linear, a rung tint 0.1-1.0 per channel, so the result lands around 0.03-0.25 with the
- *  hue barely readable). That is the reported bug («按 G 之后部分区域变成黑色，有时又不变色；不显示颜色就正常»), and
- *  it is worst for the far ring, whose bulk is a colour-only look (see `layerValues` in chunk-stream.ts).
- *
- *  So the tint is applied as the rung colour's HUE and SATURATION at the BLOCK'S OWN LIGHTNESS: the region
- *  still says which rung it is, at the brightness that block always had. `getHSL`/`setHSL` both default to the
- *  working (linear) space, so the lightness is preserved rather than round-tripped through sRGB.
- *
- *  (The OTHER black-region report — patches that appear only under `G` and vanish on their own — was a different
- *  cause: a brand-new `Texture` per material, which three draws as a 1×1 black until its image arrives. See
- *  `textureFor`.) */
-function tintedLook(base: string, tint: string): THREE.Color {
-  const colour = new THREE.Color(base);
-  const tintHsl = { h: 0, s: 0, l: 0 };
-  new THREE.Color(tint).getHSL(tintHsl);
-  const baseHsl = { h: 0, s: 0, l: 0 };
-  colour.getHSL(baseHsl);
-  return new THREE.Color().setHSL(tintHsl.h, tintHsl.s, baseHsl.l);
-}
-
 /** The material for one look. `spec` omitted = the engine's checker (the mesher's own fallback and what a
  *  caller with no groups gets). Cached per SPEC KEY in the CHUNK_MATERIAL resource: a GPU object belongs to
- *  the world, and one material per look is shared by every chunk that shows it.
- *
- *  `tint` is the LOD VIEW's colour for the mesh's tier (P1.94, the `G` key): a textured look keeps its texture
- *  and takes the hue, and a colour-only look takes the hue at its own brightness (`tintedLook` — a plain
- *  multiply turned those regions black). It is part of the cache key, so a tinted world holds one extra
- *  material per (look, tier) — not one per chunk — and the UNTINTED cache entries are untouched: the toggle can
- *  always be turned back off. */
-export function getChunkMaterial(
-  state: ChunkMaterialState,
-  spec?: ChunkFaceSpec,
-  tint?: string | null,
-): THREE.Material {
+ *  the world, and one material per look is shared by every chunk that shows it. */
+export function getChunkMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material {
   if (!spec) {
     if (!state.material) state.material = checkerMaterial(state);
-    if (!tint) return state.material;
-    const key = `\u0000${tint}`;
-    const hit = state.materials.get(key);
-    if (hit) return hit;
-    const tinted = checkerMaterial(state);
-    tinted.color = new THREE.Color(tint);
-    state.materials.set(key, tinted);
-    return tinted;
+    return state.material;
   }
-  const key = tint ? `${spec.key}\u0000${tint}` : spec.key;
-  const hit = state.materials.get(key);
+  const hit = state.materials.get(spec.key);
   if (hit) return hit;
   const made =
     spec.texture !== null
       ? new THREE.MeshLambertMaterial({
           map: textureFor(state, spec.texture),
-          color: new THREE.Color(tint ?? "#ffffff"),
+          color: new THREE.Color("#ffffff"),
         })
       : new THREE.MeshLambertMaterial({
-          color: tint ? tintedLook(spec.color ?? "#ffffff", tint) : new THREE.Color(spec.color ?? "#ffffff"),
+          color: new THREE.Color(spec.color ?? "#ffffff"),
         });
-  state.materials.set(key, made);
+  state.materials.set(spec.key, made);
   return made;
 }
 

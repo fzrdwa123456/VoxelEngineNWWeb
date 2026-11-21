@@ -159,13 +159,6 @@ fn list_packs(state: State<'_, AppState>) -> packs::PackListing {
 }
 
 #[tauri::command]
-fn show_window(window: tauri::WebviewWindow) -> bool {
-    let ok = window.show().is_ok();
-    let _ = window.set_focus();
-    ok
-}
-
-#[tauri::command]
 fn focus_window(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
@@ -272,7 +265,6 @@ pub fn run() {
             boot_report,
             preload_packs,
             list_packs,
-            show_window,
             focus_window,
             quit_app,
             set_window_mode,

@@ -53,15 +53,58 @@ const SKIN = 1e-3;
 /** Scratch body dimensions for the entity being resolved (avoids 5-argument calls) */
 const dims = { halfWidth: 0, height: 0, eyeHeight: 0 };
 
+/** The Rust/WASM kernel, as this side needs it. Structural on purpose: a plugin may not import `host/`.
+ *  DATA IN, DATA OUT: one call per tick carries every body and the block grid they are resolved against. */
+export interface WasmCollisionKernel {
+  resolveBatch(
+    poses: Float64Array,
+    ox: number,
+    oy: number,
+    oz: number,
+    nx: number,
+    ny: number,
+    nz: number,
+    solid: Uint8Array,
+  ): Float64Array | null;
+}
+
+/** A mutable box the composition root fills when the async kernel lands. `kernel = null` = the TS path. */
+export interface CollisionKernelHolder {
+  kernel: WasmCollisionKernel | null;
+}
+
+/** Bodies as the kernel packs them: start xyz, target xyz, half, height, eye, vy (see wasm/collision/src/lib.rs). */
+const POSE_STRIDE = 10;
+/** Results per body: x, y, z, vy, onGround. */
+const RESULT_STRIDE = 5;
+/** Blocks of margin around the swept AABBs: the skin can push a body one block past the segment's box. */
+const REGION_MARGIN = 2;
+/** Largest block grid handed to the kernel in one tick. Above it the TS sweep runs instead — only a teleport,
+ *  or bodies scattered across the map, can get there, and copying a huge box to answer a few queries would be
+ *  the slow way round. */
+const REGION_MAX_VOXELS = 1 << 18;
+
 export class CollisionSystem {
   private readonly voxel: VoxelWorld;
+  /** THE BATCH SCRATCH: rows being resolved, their packed poses and the block grid. Reused every tick and only
+   *  ever grown (one buffer, no per-tick garbage — the point of the data-in/data-out shape). */
+  private readonly batchRows: number[] = [];
+  private poses = new Float64Array(0);
+  private grid = new Uint8Array(0);
 
-  constructor(private readonly world: World) {
+  constructor(
+    private readonly world: World,
+    /** The WASM kernel, when the platform has one. Absent/null = the TS implementation below, which the
+     *  Node gate and a failed WASM load both use. */
+    private readonly kernel: CollisionKernelHolder | null = null,
+  ) {
     this.voxel = world.resource(VOXEL);
   }
 
   step(): void {
     const rows = this.world.query(CONTROL, POSITION, MOTION, BODY, PREV_POSITION).indices;
+    const kernel = this.kernel?.kernel ?? null;
+    if (kernel !== null && this.resolveBatch(kernel, rows)) return;
     for (let row = 0; row < rows.length; row++) {
       const index = rows[row];
       if (CONTROL.data[index]!.mode === "spectator") continue;
@@ -72,7 +115,106 @@ export class CollisionSystem {
     }
   }
 
-  /** Re-apply this tick's displacement in sub-steps, resolving each axis against the blocks */
+  /** THE DOD PATH — gather, one call, scatter.
+   *
+   *  GATHER: every non-spectator body's swept AABB, unioned into ONE block region, and that region copied out of
+   *  the voxel world into a flat byte grid. CALL: the kernel resolves all bodies against that grid in a single
+   *  crossing (two typed arrays in, one out — no callback, no per-body call). SCATTER: the 5 numbers per body go
+   *  back into the SoA columns.
+   *
+   *  Returns false when this tick cannot take the path — the region is larger than the budget (a teleport, or
+   *  bodies spread across the map) or the kernel rejected the answer — and the caller then runs the TS sweep,
+   *  which is the same algorithm, so behaviour does not depend on which path served the tick. */
+  private resolveBatch(kernel: WasmCollisionKernel, rows: readonly number[]): boolean {
+    const batch = this.batchRows;
+    batch.length = 0;
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let z0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
+    let z1 = Number.NEGATIVE_INFINITY;
+    for (let r = 0; r < rows.length; r++) {
+      const index = rows[r];
+      if (CONTROL.data[index]!.mode === "spectator") continue;
+      batch.push(index);
+      const half = BODY.halfWidth[index];
+      const height = BODY.height[index];
+      const eye = BODY.eyeHeight[index];
+      // The sweep spans start -> target; the body box and the skin can reach one block past either end.
+      const loX = Math.min(PREV_POSITION.x[index], POSITION.x[index]) - half;
+      const hiX = Math.max(PREV_POSITION.x[index], POSITION.x[index]) + half;
+      const loY = Math.min(PREV_POSITION.y[index], POSITION.y[index]) - eye;
+      const hiY = Math.max(PREV_POSITION.y[index], POSITION.y[index]) - eye + height;
+      const loZ = Math.min(PREV_POSITION.z[index], POSITION.z[index]) - half;
+      const hiZ = Math.max(PREV_POSITION.z[index], POSITION.z[index]) + half;
+      if (loX < x0) x0 = loX;
+      if (hiX > x1) x1 = hiX;
+      if (loY < y0) y0 = loY;
+      if (hiY > y1) y1 = hiY;
+      if (loZ < z0) z0 = loZ;
+      if (hiZ > z1) z1 = hiZ;
+    }
+    const n = batch.length;
+    if (n === 0) return true;
+
+    const bx0 = Math.floor(x0) - REGION_MARGIN;
+    const by0 = Math.floor(y0) - REGION_MARGIN;
+    const bz0 = Math.floor(z0) - REGION_MARGIN;
+    const nx = Math.floor(x1) - bx0 + 1 + REGION_MARGIN;
+    const ny = Math.floor(y1) - by0 + 1 + REGION_MARGIN;
+    const nz = Math.floor(z1) - bz0 + 1 + REGION_MARGIN;
+    const voxels = nx * ny * nz;
+    if (voxels <= 0 || voxels > REGION_MAX_VOXELS) return false;
+
+    if (this.poses.length < n * POSE_STRIDE) this.poses = new Float64Array(n * POSE_STRIDE);
+    if (this.grid.length < voxels) this.grid = new Uint8Array(voxels);
+    const poses = this.poses;
+    for (let k = 0; k < n; k++) {
+      const index = batch[k];
+      const o = k * POSE_STRIDE;
+      poses[o] = PREV_POSITION.x[index];
+      poses[o + 1] = PREV_POSITION.y[index];
+      poses[o + 2] = PREV_POSITION.z[index];
+      poses[o + 3] = POSITION.x[index];
+      poses[o + 4] = POSITION.y[index];
+      poses[o + 5] = POSITION.z[index];
+      poses[o + 6] = BODY.halfWidth[index];
+      poses[o + 7] = BODY.height[index];
+      poses[o + 8] = BODY.eyeHeight[index];
+      poses[o + 9] = MOTION.data[index]!.vy;
+    }
+
+    const grid = this.grid;
+    this.voxel.fillSolidRegion(bx0, by0, bz0, nx, ny, nz, grid);
+    const answer = kernel.resolveBatch(
+      poses.subarray(0, n * POSE_STRIDE),
+      bx0,
+      by0,
+      bz0,
+      nx,
+      ny,
+      nz,
+      grid.subarray(0, voxels),
+    );
+    if (answer === null || answer.length !== n * RESULT_STRIDE) return false;
+
+    for (let k = 0; k < n; k++) {
+      const index = batch[k];
+      const o = k * RESULT_STRIDE;
+      POSITION.x[index] = answer[o];
+      POSITION.y[index] = answer[o + 1];
+      POSITION.z[index] = answer[o + 2];
+      const motion = MOTION.data[index]!;
+      motion.vy = answer[o + 3];
+      motion.onGround = answer[o + 4] !== 0;
+    }
+    return true;
+  }
+
+  /** Re-apply this tick's displacement in sub-steps, resolving each axis against the blocks.
+   *  THE FALLBACK: the Node gate (no WebAssembly host), a failed kernel load, or a region too large for the
+   *  data-in/data-out path. Same algorithm as the kernel — change both together. */
   private resolve(index: number, motion: MotionC, body: typeof dims): void {
     const dx = POSITION.x[index] - PREV_POSITION.x[index];
     const dy = POSITION.y[index] - PREV_POSITION.y[index];

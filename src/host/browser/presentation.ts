@@ -26,7 +26,6 @@ export function createChunkMeshCache(group: THREE.Group): ChunkMeshCache {
     empty: new Set(),
     inFlight: new Set(),
     wantedKeys: null,
-    farKeys: null,
     lastPcx: Number.NaN,
     lastPcz: Number.NaN,
   };
@@ -45,6 +44,16 @@ export function createUiMount(): HTMLElement {
   stage.style.cssText = "position:fixed;inset:0;overflow:hidden;z-index:1;";
   document.body.appendChild(stage);
   return stage;
+}
+
+/** Drop the STATIC boot splash written in `index.html`. It exists so the window has something to show while
+ *  the JS bundle, the shell preload and the plugin install are still running; by the time this is called the
+ *  engine's own loading screen is already in the DOM, so the swap is invisible. */
+export function removeBootSplash(): void {
+  const splash = document.getElementById("boot-splash");
+  if (splash === null) return;
+  splash.classList.add("boot-splash-out");
+  setTimeout(() => splash.remove(), 200);
 }
 
 export function createIconBake(): IconBakeState {

@@ -20,7 +20,7 @@
         "minHeight": 240,
         "resizable": true,
         "center": true,
-        "visible": false,
+        "visible": true,
         "backgroundColor": "#000000",
         "focus": true,
         "dragDropEnabled": false

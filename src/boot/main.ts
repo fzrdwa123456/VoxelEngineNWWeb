@@ -2,9 +2,8 @@ import * as THREE from "three/webgpu";
 import { NULL_ENTITY, World } from "../core/world";
 import { HUMANOID_BODY, INVENTORY_SLOTS, spawnPlayer } from "../plugins/player/components";
 import { createFont, createFrameCap, createFrameProbe, createInputDiagnostics, createInputIntentLog, createInputState, createInputTiming, createKeyEventLog, createKeyMap, createLocale, createLoopState, createPickerState, createScale, createToastState, createUiModalState, FRAME_PROBE, LOOP_STATE, type LoopMode, LOADING_STATE, createLoadingState, DEBUG_LOG, DELAYED_INTENTS, createDelayedIntents, F3_PANEL, FONT, FPS_CAP, INPUT_DIAGNOSTICS, INPUT_INTENTS, INPUT_STATE, INPUT_TIMING, KEY_EVENTS, KEYMAP, LOCALE, canControl, isMenuUi, isModalUi, INVENTORY_WIDGETS, LOCAL_PLAYER, PICKER_STATE, POINTER, TOAST, UI_MODAL, UI_SCALE, VIEWPORT, VOXEL, createPointer, createViewport, paceFrame, pacingTargetHz, refreshHzFromMilliHz, type InputDiagnostics } from "../data/globals/resources";
-import { DEFAULT_LOD } from "../data/world/lod";
-import { createFadeOptions, createWorldSize, FADE_OPTIONS, WORLD_SIZE, type WorldSizeState } from "../data/globals/resources";
-import { SetFadeOption, SetFpsCap, SetVsync, SetWorldSize, ShowToast } from "../data/globals/commands";
+import { createFadeOptions, FADE_OPTIONS } from "../data/globals/resources";
+import { SetFadeOption, SetFpsCap, SetVsync, ShowToast } from "../data/globals/commands";
 import { Teleport } from "../plugins/player/commands";
 // (every import of "../plugins/player/systems/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/player/systems/controller" was dead after P1.18b: the plugin owns it now)
@@ -63,7 +62,7 @@ import { PointerLock } from "../host/browser/pointerlock";
 import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS } from "../data/assets/i18n";
 import { loadUIScaleMode, getUIScaleMode } from "../data/globals/uiscale";
 import { loadFont, getFontId } from "../data/globals/fonts";
-import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, showWindow, shellInfo, queryDisplayRefreshMilliHz, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, writeSettings, getWindowMode, setWindowMode, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
+import { preloadShell, bootReport, cursorBoot, cursorTrace, initShell, logDebug, shellInfo, queryDisplayRefreshMilliHz, isDiagLogEnabled, setDiagLogEnabled, winFocused, winWindowMoving, windowSessionActiveNow, quitApp, onWinFocus, onWinBlur, onWinGeometry, onCaptureLost, readSettings, writeSettings, getWindowMode, setWindowMode, onWindowModeChange, type WindowMode } from "../host/desktop/shell";
 import { shellState, SHELL_STATE } from "../data/globals/shell";
 import { startRawInput } from "../host/browser/rawinput";
 import { installWindowGuards } from "../host/browser/window-guards";
@@ -124,6 +123,8 @@ import type { PluginHost } from "../core/plugin/host";
 // The render plugin's MESHER type (a `host/` object the root builds and hands in as a host instance).
 import type { ChunkMeshFactory, MeshWorkerPool } from "../plugins/render";
 import { createMeshWorkerPool } from "../host/browser/mesh-pool";
+import { loadWasmKernel } from "../host/browser/wasm-kernel";
+import type { CollisionKernelHolder } from "../plugins/player/systems/collision";
 // (the diagnostics, world, player, input and content-default plugins are DISCOVERED now: each folder owns a
 //  `plugin.ts` that builds it from the host's instances — see `boot/plugin-catalog.ts` and P1.18b.)
 import { createMainMenu, createPauseMenu, createUiViews } from "../plugins/ui";
@@ -133,6 +134,11 @@ import { createMainMenu, createPauseMenu, createUiViews } from "../plugins/ui";
 // Pixel font (Fusion Pixel, OFL open source): proportional font for general UI, monospace for F3/count panels
 import "@fontsource/fusion-pixel-12px-proportional-sc";
 import "@fontsource/fusion-pixel-12px-monospaced-sc";
+
+// Startup timing: this line runs AFTER every static import above has been evaluated — that evaluation is what
+// delays the first paint of the static splash — so boot.log reads: html loaded -> module start -> shell
+// preloaded -> packs installed. Everything is navigation-relative milliseconds.
+bootReport(`engine module start @${Math.round(performance.now())}ms`);
 
 // ===== Tauri: the synchronous preload (the ONE startup-order change in this port) =====
 // The NW.js build had nothing to wait for here: require("node:fs") is synchronous and nw.Window was
@@ -178,11 +184,13 @@ function resolveEnabledPacks(snap: PackSnapshotPayload): string[] {
 
 try {
   await preloadShell();
+  bootReport(`shell preloaded @${Math.round(performance.now())}ms`);
   // THE STARTUP INSTALL IS THE SAME PATH A RELOAD TAKES (P1.49ab): rescan -> install, and the snapshot is
   // KEPT.
   try {
     lastGoodSnapshot = await rescanPacks();
     logDebug(installPacks(lastGoodSnapshot, resolveEnabledPacks(lastGoodSnapshot)));
+    bootReport(`packs installed @${Math.round(performance.now())}ms`);
   } catch (packErr) {
     logDebug(`PACKS preload failed (engine fallbacks only): ${String(packErr)}`);
   }
@@ -239,7 +247,7 @@ logDebug(
  *  label/slider is only refreshed when its panel opens, so the file and the screen then disagree until the next
  *  launch. That is what `justSet` is for: the two settings the frame pacing owns (both are read by the loop
  *  every frame, so both must go through the barrier). */
-const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolean; fadeChunks?: boolean; worldXZ?: number } = {}): void => {
+const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolean; fadeChunks?: boolean } = {}): void => {
     // Read-modify-write merge, avoids clobbering other settings (windowMode etc.)
   const s = readSettings();
   s.language = getLang();
@@ -252,8 +260,6 @@ const saveSettings = (justSet: { cap?: number; vsync?: boolean; fadeLod?: boolea
   // the one the render lane is reading, so a save must never write something else (P2.01).
   s.fadeLod = justSet.fadeLod ?? fadeOptions.lod;
   s.fadeChunks = justSet.fadeChunks ?? fadeOptions.chunks;
-  // …and the world size (P2.02): the value in force, handed in when it arrives through a command.
-  s.worldXZ = justSet.worldXZ ?? worldSize.chunksX;
   s.fpsCap = justSet.cap ?? world.resource(FPS_CAP).cap;
   // The vertical-sync switch is a setting like the rest now (P1.86): it used to live in its own
   // `config/vsync.json`, which no settings check ever validated, and it only took effect at the next launch.
@@ -285,16 +291,11 @@ const canvasHost = document.getElementById("app")!;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
-// No fog: the scene is deliberately unfogged so the whole streamed world stays visible. The
-// trade-off is that the rim of the LOD ladder (its outermost rung, up to 7168 blocks out — see
-// data/world/lod.ts) is visible as the edge of the world: it is the FAR PLANE below that decides how
-// much of it is drawn at all. The main-menu panorama is a separate scene and is unaffected either way.
+// No fog: the scene is deliberately unfogged so the whole streamed world stays visible. The far plane below
+// decides how much of it is drawn at all. The main-menu panorama is a separate scene and is unaffected either way.
 
-// THE CAMERA'S NEAR/FAR PLANES ARE PART OF THE LOD'S RANGE (P2.04). `far` is the back face of the view
-// frustum: anything beyond it is not drawn AND is culled away as a whole object, so a ladder that reaches
-// further than `far` is built, paid for and never seen — which is exactly what the six-rung ladder did to
-// its own outermost rung while this was 5000 (rung 6 reaches 7168, rung 5 3584). `far` is 12000 now, i.e.
-// past the ladder's 7168-block reach (and its ~10138-block corner).
+// THE CAMERA'S NEAR/FAR PLANES. `far` is the back face of the view frustum: anything beyond it is not drawn
+// AND is culled away as a whole object, so it must sit past the streamed window's reach. `far` is 12000.
 // `near` is what the DEPTH BUFFER's precision hinges on, and it may NOT grow — the limit is NOT the 0.3
 // half-width of the body, it is where the FRUSTUM reaches a wall you are touching. That wall is 0.3 blocks
 // to the SIDE, so it only enters the picture at a depth of `0.3 / tan(halfFovH)` — ≈0.22 with a 16:9 window
@@ -316,11 +317,9 @@ const renderer = new THREE.WebGPURenderer({
 });
 // NOTE: the renderer is CONSTRUCTED here (every system that needs its canvas resolves it in its own
 // constructor) but INITIALISED in the boot driver at the bottom of this file, together with
-// `setSize`/`appendChild`/`showWindow`. That is deliberate and it is the whole reason the startup
-// screen can exist: `await renderer.init()` is the longest single step of the startup, and it used to
-// run BEFORE `showWindow()` — so the window stayed hidden through the GPU handshake, the world
-// generation and the first chunk meshes, and the user watched nothing. Nothing between here and the
-// driver draws: the first frame the loop runs is a `load` frame, which pumps the ui lane only.
+// `setSize` and `appendChild`. `await renderer.init()` is the longest single step of the startup, which is
+// why it runs behind the loading screen. Nothing between here and the driver draws: the first frame the
+// loop runs is a `load` frame, which pumps the ui lane only.
 
 // ===== Presentation state the ECS systems take as constructor dependencies =====
 // (Declared here rather than next to the loop because every system resolves what it needs in its
@@ -366,18 +365,11 @@ const frameCap = createFrameCap(
   shellInfo().displayRefreshMilliHz,
 );
 world.insertResource(FPS_CAP, frameCap);
-// The APPEARANCE FADE (P2.01 → P2.05): ONE switch, and it answers for EVERY chunk — real chunks and every LOD
-// rung alike (a chunk appeared → fade in, it left → fade out). P2.01/P2.04 split it per ring and then restricted
-// it to the outermost rung, which turned out to be a distinction the player has no reason to make. A resource,
-// because `chunk-stream` reads it every step; the settings panel sends SetFadeOption to change it.
+// The APPEARANCE FADE (P2.01 → P2.05): ONE switch, and it answers for EVERY chunk (a chunk appeared → fade in,
+// it left → fade out). A resource, because `chunk-stream` reads it every step; the settings panel sends
+// SetFadeOption to change it.
 const fadeOptions = createFadeOptions(readSettings().fadeLod, readSettings().fadeChunks);
 world.insertResource(FADE_OPTIONS, fadeOptions);
-// THE WORLD SIZE (P2.02): the lap the noise, the torus and the LOD rings share. A resource, because the
-// world-entry driver reads it to decide whether the lap has to change before it builds a world; the world-type
-// panel changes it through `SetWorldSize`. ONE number in the file (`worldXZ`, in chunks) for both axes, so a
-// hand-edited file cannot ask for a rectangular world the UI has no way to show.
-const worldSize: WorldSizeState = createWorldSize(readSettings().worldXZ);
-world.insertResource(WORLD_SIZE, worldSize);
 /** Does any modal surface own the mouse right now? */
 const uiOpen = (): boolean => isModalUi(uiModal);
 /** A MENU is open (not counting the inventory, which the inventory key must still be able to toggle) */
@@ -428,6 +420,25 @@ adoptViewport(viewport);
 world.insertResource(DEBUG_LOG, { forward: (q: InputDiagnostics) => dbgFwd.forward(q), line: logDebug });
 world.insertResource(UI_MODAL, uiModal);
 world.insertResource(VOXEL, voxel);
+// ===== THE WASM COLLISION KERNEL =====
+// Loaded here, right after the voxel world exists. The kernel takes DATA, not a predicate: the collision system
+// copies the tick's block region (`voxel.fillSolidRegion`) and hands it in with the bodies, so nothing has to be
+// kept in sync between the two sides. The holder is filled ASYNCHRONOUSLY: the player plugin is installed with
+// it in hand, and the collision system reads `holder.kernel` every tick — so a slow or failed load simply keeps
+// the TS path.
+const wasmCollision: CollisionKernelHolder = { kernel: null };
+void loadWasmKernel()
+  .then((kernel) => {
+    wasmCollision.kernel = kernel;
+    const line = `WASM collision kernel ready: abi=0x${kernel.abiVersion.toString(16)}`;
+    logDebug(line);
+    bootReport(line);
+  })
+  .catch((err: unknown) => {
+    const line = `WASM collision kernel unavailable: ${String((err as Error)?.message ?? err)}`;
+    logDebug(line);
+    bootReport(line);
+  });
 // ===== Presentation resources: the three.js / GPU / DOM objects, owned by the world =====
 // These were CONSTRUCTOR DEPENDENCIES: the scene, the camera, the renderer, the frame-time sampler, the
 // canvas host, the UI mount root and the chunk-mesh group used to be handed to each system that needed
@@ -679,6 +690,7 @@ const pluginHost: PluginHost = {
     keybindEntries,
     chunkMeshFactory,
     meshPool,
+    wasmCollision,
     mouseCapture: { capture: (dom: HTMLElement) => captureMouse(dom), release: releaseMouse },
     // The F3 DEBUG PANEL widget: it belongs to the ui plugin's HUD VIEW, whose construction is the root's
     // (spawning is a structural change, and `diagnostics` reads the handles before the plugins are built), so
@@ -914,21 +926,7 @@ const onSetFade = (which: "lod" | "chunks", on: boolean): void => {
   saveSettings(which === "lod" ? { fadeLod: on } : { fadeChunks: on });
   logDebug(
     `FADE ${which === "lod" ? "all chunks" : "chunks (retired switch)"} ${on ? "on" : "off"}` +
-      `${on ? "" : " — nothing fades; the reserve still covers every swap"}`,
-  );
-};
-
-/** THE WORLD SIZE (P2.02): chosen in the world-type panel, applied by the world-entry driver on the NEXT entry
- *  (no restart) — the lap cannot change under a world that is already streaming, so this only stores the choice
- *  and the entry does the reset when it builds. Same shape as the fades: the command writes the resource the
- *  driver reads, and the file is written here with the value HANDED in (never read back before the barrier). */
-const onSetWorldSize = (chunks: number): void => {
-  world.commands.send(SetWorldSize, { chunksX: chunks });
-  saveSettings({ worldXZ: chunks });
-  const blocks = createWorldSize(chunks).chunksX * 32;
-  logDebug(
-    `WORLD SIZE set to ${chunks} chunks (${blocks} blocks around) — applies on the next world entry ` +
-      `(the half-lap is what an LOD ring may reach: ${blocks / 2} blocks)`,
+      `${on ? "" : " — nothing fades"}`,
   );
 };
 
@@ -1037,9 +1035,6 @@ const enterWorld = createWorldEntry({
   loop,
   player,
   spawn: SPAWN,
-  // The LOD policy in force: the entry reports how many RUNGS the world it is building actually gets (the lap
-  // caps the ladder — P2.03). It is the same object the render plugin builds its stream with.
-  lod: DEFAULT_LOD,
   setLoopMode,
   hideMainMenu: () => mainMenu.hide(),
   showPauseMenu: () => menu.show(),
@@ -1085,8 +1080,6 @@ const mainMenu = createMainMenu(world, {
   onToggleDiagLog,
   onSetFade,
   isFadeOn: (which: "lod" | "chunks") => (which === "lod" ? fadeOptions.lod : fadeOptions.chunks),
-  getWorldSize: () => worldSize.chunksX,
-  onSetWorldSize,
   getWindowMode,
   onSetWindowMode,
   onSetPacks,
@@ -1149,8 +1142,7 @@ if (startedPlugins.failed.length > 0) {
   logDebug(`PLUGIN start failures: [${startedPlugins.failed.map((f) => `${f.id}: ${f.error}`).join("; ")}]`);
 }
 // NOTE: the spawn window (chunkStream.prime + warmUp) is generated and MESHED by the boot driver at
-// the bottom of this file, not here: it is one of the startup stages the loading screen covers, and
-// doing it before `showWindow()` was half of why the startup looked like a hang.
+// the bottom of this file, not here: it is one of the startup stages the loading screen covers.
 
 // Window leaves the foreground (minimized/switched away/clicking another window): hand the mouse back and,
 // while the player was actually playing, raise the pause menu. Re-focus does NOT take the mouse back
@@ -1504,9 +1496,7 @@ function frameProbe(): void {
   const frames = probe.n > 0 ? probe.n : 1;
   probe.callsPerFrame = probe.drawCallRawSum / frames;
   probe.trisPerFrame = probe.triangleRawSum / frames;
-  // M3a: how much of the far ring is drawn through (look, tier) batches. `calls` should fall by roughly this
-  // factor once the ring has settled — an instance is a chunk-look that no longer costs a call of its own.
-  const batches = world.hasResource(RENDER_HANDLES) ? world.resource(RENDER_HANDLES).chunkStream.batchStats : null;
+  // FRAME line: calls/tris per frame plus the live attribute count.
   logDebug(
     `FRAME n=${probe.n} avg=${(probe.n > 0 ? probe.sum / probe.n : 0).toFixed(2)}ms max=${probe.max.toFixed(1)}ms ` +
       `gpu=${perf.gpuMs === null ? "?" : perf.gpuMs.toFixed(1)}ms ` +
@@ -1515,7 +1505,6 @@ function frameProbe(): void {
       `calls=${probe.callsPerFrame.toFixed(0)} callsMax=${probe.drawCallMax} ` +
       `tris=${(probe.trisPerFrame / 1000).toFixed(0)}k ` +
       `renders=${info.render.calls} attrs=${info.memory.attributes} ` +
-      (batches !== null ? `batched=${batches.instances}/${batches.buckets} ` : "") +
       `mode=${loop.mode} locked=${input.locked ? 1 : 0} ` +
       `pf=[${pf.join(" ")}] px=${probe.pxN > 0 ? `${probe.pxMin.toFixed(1)}/${(probe.pxSum / probe.pxN).toFixed(1)}/${probe.pxMax.toFixed(1)}` : "-"} (${probe.pxN})`,
   );

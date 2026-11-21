@@ -1,7 +1,7 @@
 // ===== Chunk streaming: keep the chunks around the player generated, meshed and placed =====
 // Runs in the RENDER lane (presentation only: it never touches entity state).
 //
-// DRAWING A TORUS IN FLAT SPACE. The world wraps in X/Z (voxel/world.ts), so the same chunk
+// DRAWING A TORUS IN FLAT SPACE. The world wraps in X/Z (data/world/world.ts), so the same chunk
 // identity can be drawn at several positions. Each mesh is keyed by its WRAPPED identity and
 // placed at the representation nearest the player (nearestWrap), which makes the horizon
 // seamless in every direction without ever teleporting the player. The visible window is
@@ -13,7 +13,7 @@
 // of stalling. Chunks whose mesh came out empty (uniform solid, which is what the default
 // generator produces) are remembered in the cache's `empty` set and never retried — that cache assumes
 // static terrain; an editable world must invalidate it on write. The cache itself (the parent group and
-// both sets) is the CHUNK_MESHES resource rather than a private field: see ecs/presentation.ts.
+// both sets) is the CHUNK_MESHES resource rather than a private field: see data/globals/gfx.ts.
 import * as THREE from "three/webgpu";
 import { CHUNK_SIZE } from "../../../data/world/chunk";
 import {
@@ -30,8 +30,6 @@ import { POSITION } from "../../player/components";
 import { CHUNK_MATERIAL, CHUNK_MESHES, type ChunkFaceSpec, type ChunkMaterialState, type ChunkMeshCache, type ChunkMeshEntry } from "../../../data/globals/gfx";
 import { FADE_OPTIONS, LOCAL_PLAYER, VOXEL, type FadeOptions } from "../../../data/globals/resources";
 import { gatherChunkMeshInput, meshChunk, type ChunkMeshInput, type MeshResult } from "../../../data/world/mesh";
-import { buildLodMeshInput, fineBase, inTierAnnulus, inTierHole, lodLadder, tierOfStep, tierTint, type LodPolicy, type LodSampledGrid, type LodTier } from "../../../data/world/lod";
-import { FarBatches, type FarBatchHandle } from "./far-batches";
 import { KEY_EVENTS, KeyEdgeReader } from "../../../data/globals/resources";
 import { entityIndex, type SystemAccess, type World } from "../../../core/world";
 
@@ -49,29 +47,19 @@ export const RENDER_RADIUS_CHUNKS = 8;
 /** Meshes built per frame, so the initial fill spreads over frames instead of stalling.
  *  Air chunks bail out immediately, so a high value mostly costs cheap early-outs. */
 const MESH_BUDGET_PER_FRAME = 24;
-/** FAR-RING build budget per frame (P1.93), in COST UNITS rather than chunks, because the two kinds of far
- *  chunk cost 10× different amounts (measured: 0.33 ms for a uniform one — the sampler plus the mesher's
- *  shell early-out — against 3.0 ms for one that produces a mesh). A uniform chunk costs 1 unit, a
- *  materialised one `LOD_MESH_COST` units, so the frame is capped at roughly 6 ms either way: 18 uniform
- *  chunks, or 2 of the expensive ones, or a mix. The whole far ring is ~1.1 s of work, so it fills in as the
- *  player looks around instead of during the loading screen. */
-const LOD_BUDGET_PER_FRAME = 18;
-/** What a far chunk that produces geometry counts against that budget (see above). */
-const LOD_MESH_COST = 9;
 /** How long a chunk that APPEARS takes to fade in (P1.98). ~13 frames at 60fps: long enough to read as a fade
  *  rather than a pop, short enough that a walking player never sees a translucent wall. */
 export const FADE_IN_MS = 220;
 /** How long a chunk that LEAVES the window takes to fade out (P1.99). A little LONGER than the fade in on
- *  purpose: where the two meet (a coarse chunk leaving as the fine one that replaces it arrives) the leaving
- *  mesh must still be there while the arriving one is still nearly invisible, or the seam shows a one-frame
- *  gap of sky between them. */
+ *  purpose: where the two meet the leaving mesh must still be there while the arriving one is still nearly
+ *  invisible, or the seam shows a one-frame gap of sky. */
 export const FADE_OUT_MS = 260;
 /** How many meshes may be fading OUT at once. A NORMAL move retires a whole STRIP of the window rather than a
  *  handful — the window is a square, so crossing one chunk column drops ~15 columns × 8 Y chunks, measured at
- *  ~250 meshes with both rings — so this cap sits above that and is there for the MASS unload: a teleport into a
- *  world (the whole previous window, thousands of meshes) would otherwise hold every one of those GPU buffers
- *  alive for a fade nobody can see, since they are all hundreds of blocks away and behind the camera. Past this
- *  many, the rest are removed at once, exactly as they always were. */
+ *  ~250 meshes — so this cap sits above that and is there for the MASS unload: a teleport into a world (the
+ *  whole previous window, thousands of meshes) would otherwise hold every one of those GPU buffers alive for a
+ *  fade nobody can see, since they are all hundreds of blocks away and behind the camera. Past this many, the
+ *  rest are removed at once, exactly as they always were. */
 const FADE_OUT_MAX = 512;
 /** Looks re-resolved per frame after a PACK RELOAD (P1.18i). MUCH higher than the meshing budget because the
  *  work is not comparable: a re-mesh reads a 32^3 neighbourhood and rewrites every vertex buffer, while a
@@ -94,10 +82,8 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number, number]> = [
 ];
 
 /** Scratch transform, so placing the whole window (a `place` per chunk on every column crossing) allocates
- *  nothing: `Matrix4.compose` reads them immediately and `BatchedMesh.setMatrixAt` copies the result. */
+ *  nothing: `Matrix4.compose` reads them immediately. */
 const _placePosition = new THREE.Vector3();
-const _placeScale = new THREE.Vector3();
-const _placeRotation = new THREE.Quaternion();
 
 /** The chunk mesher, INJECTED rather than imported (the layer rule in check:ecs): a chunk geometry owns
  *  three.js buffers and the material is a GPU object, so the PLATFORM builds them and the composition root
@@ -105,9 +91,7 @@ const _placeRotation = new THREE.Quaternion();
  *  keeps this file free of a host import. */
 export interface ChunkMeshFactory {
   createGeometry(): ChunkMeshEntry["geom"];
-  /** `tint` is the DEBUG VIEW's colour for this mesh's LOD tier (null = the real look). A host that ignores
-   *  it draws the world normally, which is what a test factory does. */
-  getMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec, tint?: string | null): THREE.Material;
+  getMaterial(state: ChunkMaterialState, spec?: ChunkFaceSpec): THREE.Material;
 }
 
 /** ONE finished meshing job, as this lane sees it (P1.18h). Declared here for the same reason the factory is:
@@ -127,28 +111,6 @@ export interface MeshWorkerPool {
   readonly inFlight: number;
   readonly workers: number;
 }
-
-/** WHERE A FAR CHUNK'S HEIGHT GRID COMES FROM (M1 of the GPU route). The CPU path (`null`) samples on this thread
- *  inside `buildLodMeshInput`; a GPU sampler (plugins/render/systems/lod-gpu-sampler.ts) answers from the batch it
- *  read back, and the two are interchangeable because the shape is `LodSampledGrid` either way.
- *
- *  `gridFor` MUST NOT BLOCK and MUST NOT sample on this thread: `null` means "not ready yet", and the caller leaves
- *  that chunk unbuilt for this frame — it stays in `farWanted`, so a later frame asks again. The sampler owns the
- *  wait (and its own CPU fallback), because only it knows whether a batch is in flight or the backend has no
- *  compute at all. Declared here, on the consumer's side, for the same reason `MeshWorkerPool` is: the
- *  implementation is a GPU object this file may not import. */
-export interface LodGridSource {
-  gridFor(step: number, cx: number, cz: number): LodSampledGrid | null;
-}
-
-/** A FAR CHUNK THAT IS WAITING FOR ITS GRID (`buildFar`'s answer, and the reason it is a sentinel rather than 0):
- *  it costs the frame's far budget NOTHING — no CPU was spent and no mesh was built — and the loop spends a small
- *  WAIT budget on it instead (see `LOD_WAIT_PER_FRAME`). */
-const FAR_NOT_READY = -1;
-/** How many not-ready far chunks one frame may walk past (M1). A column's grid arrives one or two frames after it is
- *  requested, so this only bites on the first frames of a window move, when the sampler has not answered for the
- *  whole ring yet. It is a SCAN budget, not a work budget: a miss costs one map lookup. */
-const LOD_WAIT_PER_FRAME = 64;
 
 /** Default so a drive-by test — and the Node gate, which drives `prime`/`needsWarmUp` on a stub voxel —
  *  can construct this system without a GPU: a geometry that is never drawn and a material that never
@@ -170,80 +132,41 @@ const NO_MESH: ChunkMeshFactory = {
 };
 
 export class ChunkStreamSystem {
-  /** The world's chunk-mesh cache (ecs/presentation.ts): the parent group every mesh is added to, the
+  /** The world's chunk-mesh cache (data/globals/gfx.ts): the parent group every mesh is added to, the
    *  meshes themselves and the "no geometry" set. It used to be three private fields plus a THREE.Group
    *  handed in as a constructor argument — the cache is GPU state that outlives a frame, so the world
    *  owns it. Resolved in the constructor BODY (iron rule 6). */
   private readonly cache: ChunkMeshCache;
-  /** The ONE material every chunk mesh shares (CHUNK_MATERIAL, ecs/presentation.ts): a GPU object, so the
-   *  world owns it instead of chunkmesh.ts keeping a module-level `let` */
+  /** The material cache (CHUNK_MATERIAL): a GPU object, so the world owns it instead of chunkmesh.ts
+   *  keeping a module-level `let` */
   private readonly material: ChunkMaterialState;
-  /** Column offsets ordered near-first, so the ground under the player appears first. With no LOD this is the
-   *  whole window and never changes; with LOD it is REBUILT per window position (`buildLadder`), because rung 1's
-   *  range is cropped onto the second rung's grid. */
+  /** Column offsets ordered near-first, so the ground under the player appears first. The window is a
+   *  fixed square around the player's column, so this is built ONCE. */
   private offsets: ReadonlyArray<readonly [number, number]>;
-  /** THE LADDER IN FORCE (P2.03): one entry per rung the world's lap can hold, with the cells it draws and the
-   *  ones it only builds (its reserve). REBUILT whenever the window moves (`buildLadder`): the cells are aligned
-   *  to the WORLD so they never shift under the player, but the ranges that cover the window are measured from
-   *  the window's own centre, and a rung's two ends fall asymmetrically whenever that centre is off its grid. */
-  private tiers: ReadonlyArray<{
-    readonly step: number;
-    readonly hole: number;
-    readonly reach: number;
-    readonly draw: ReadonlyArray<readonly [number, number]>;
-    readonly reserve: ReadonlyArray<readonly [number, number]>;
-  }>;
-  /** The SAME ladder as `tiers`, in `lod.ts`'s own shape: the ranges the visibility test and the reserve logic
-   *  ask about (a rung's hole, its coverage, whether a cell is inside them). Kept beside the key lists because
-   *  the keys are what the build budget walks and the ranges are what a frame QUERIES. */
-  private ladder: readonly LodTier[] = [];
-  /** The window centre `ladder`/`offsets` were built for, so a query about a DIFFERENT position (the entry's
-   *  `needsWarmUp` asks about the spawn before anything has stepped) builds it rather than reading an empty
-   *  window — an empty window answers "nothing to build", which would enter a world with no loading screen and
-   *  no primed chunks (`prime` lives inside that branch). */
-  private ladderCentre: readonly [number, number] | null = null;
-  /** The LOD VIEW (P1.94): `G` tints every mesh by its tier. Its own cursor into the key-edge log, like every
-   *  other consumer of a global chord (ui.picker, ui.navigation) — the DOM listeners are `player.input`'s. */
+  /** The debug view's key reader (H/J): its own cursor into the key-edge log, like every other consumer of
+   *  a global chord — the DOM listeners are `player.input`'s. */
   private readonly keys: KeyEdgeReader;
-  private lodTint = false;
-  /** `H` draws the meshes as TRIANGLE WIREFRAME (P1.96) — the same material switch, one flag further. */
+  /** `H` draws the meshes as TRIANGLE WIREFRAME (P1.96) — the material switch. */
   private wireframe = false;
-  /** `L` SWITCHES THE FAR RING'S BATCHING OFF AND ON (M3a) — the A/B switch for the one thing a GPU-side
-   *  change cannot be gate-tested for: whether the batches DRAW. With it off every far chunk is an ordinary mesh
-   *  again (the code path that shipped before M3a), so "the far ring is missing/misplaced" can be told apart from
-   *  "batches do not render at all" in one keypress — and the draw-call count in the FRAME line moves with it. */
-  private batchingEnabled = true;
-  /** THE FAR RING'S LOOK QUEUE (P1.97). A chain change cannot mark the far ring through the WORLD: it is
-   *  procedural and holds no chunk in the voxel map (P1.93), so `VoxelWorld.markAllStale()` never names it and
-   *  every already-loaded far chunk kept the previous chain's materials — new textures only appeared once a
-   *  far chunk was built or rebuilt. `markFarStale()` fills this from the MESH CACHE instead, and the same
-   *  budgeted restyle pass drains it. */
-  private readonly farStale = new Set<string>();
-  /** M3a: the far ring drawn as (look, tier) BATCHES. `batches` is created lazily (the first settled far chunk
-   *  creates it), and `batched` maps a chunk key to the instances it owns — the two are the single source of
-   *  truth for "is this chunk batched", which is why they live beside the fades rather than in the cache. */
-  private batches: FarBatches | null = null;
-  private readonly batched = new Map<string, FarBatchHandle>();
   /** THE APPEARANCE FADES (P1.98/P1.99): the chunks that are fading in or out right now.
    *
    *  IN: a chunk that APPEARS (a first build — never an edit, see `rebuild`) gets a per-chunk copy of its
    *  material, transparent at 0 opacity, and the copy is ramped to 1 and swapped back for the SHARED one.
    *  OUT: a chunk that LEAVES the window keeps its mesh in the scene and is ramped 1 → 0, and only then are
    *  the mesh, its geometry and the copies taken down — removing it on the frame it left is exactly the pop
-   *  the fade exists to hide (and at the ring boundary it left on the same frame the fine chunk replacing it
-   *  started fading in).
+   *  the fade exists to hide.
    *
-   *  Per-chunk copies are needed because the chunk materials are shared per (look, tier) by the material
-   *  cache, and there are only ever a bounded number of these alive. `key` is kept so a chunk that comes
-   *  BACK while it is still fading out can take its own dying mesh down (`killDying`) instead of leaving two
-   *  meshes for one chunk in the scene for the length of a fade. */
+   *  Per-chunk copies are needed because the chunk materials are shared per look by the material cache, and
+   *  there are only ever a bounded number of these alive. `key` is kept so a chunk that comes BACK while it
+   *  is still fading out can take its own dying mesh down (`killDying`) instead of leaving two meshes for one
+   *  chunk in the scene for the length of a fade. */
   private readonly fading: Array<{ key: string; entry: ChunkMeshEntry; clones: THREE.Material[]; elapsed: number; out: boolean }> =
     [];
   /** `J` switches the fade off (P1.98) — for A/B comparing "pop" against "fade", and for a machine where the
-   *  blending costs something. SESSION-ONLY: it is the master switch over both tiers and never writes the
-   *  settings file (the `lod`/`chunks` options in the settings panel are the persisted choice — P2.01). */
+   *  blending costs something. SESSION-ONLY: it never writes the settings file (the `fadeLod` option in the
+   *  settings panel is the persisted choice — P2.01). */
   private fadeEnabled = true;
-  /** The persisted per-tier fade choice, read every step (a RESOURCE, because the tick reads it — P2.01). */
+  /** The persisted fade choice, read every step (a RESOURCE, because the tick reads it — P2.01). */
   private readonly fadeOptions: FadeOptions;
   /** Row of the local player in the POSITION columns (resolved once — the player is never respawned) */
   private readonly index: number;
@@ -270,13 +193,6 @@ export class ChunkStreamSystem {
   private set lastPcz(v: number) {
     this.cache.lastPcz = v;
   }
-  /** The far ring's wanted keys (P1.93). null when LOD is off, which is the single-fine-window shape. */
-  private get farWanted(): Set<string> | null {
-    return this.cache.farKeys;
-  }
-  private set farWanted(v: Set<string> | null) {
-    this.cache.farKeys = v;
-  }
 
   constructor(
     private readonly world: World,
@@ -285,14 +201,6 @@ export class ChunkStreamSystem {
     /** The worker pool, when the platform has one (P1.18h). Absent = every mesh is built on this thread,
      *  which is exactly what the engine did before, and what the Node gate still does. */
     private readonly pool: MeshWorkerPool | null = null,
-    /** THE FAR RING (P1.93 — data/world/lod.ts): absent = the engine's original single FINE window, which is
-     *  the shape the worker/streaming tests drive. Present = the window becomes a fine ring plus a coarse ring
-     *  drawn from the same terrain at `step` fine chunks per coarse one. Injected like the pool is: "does this
-     *  install do LOD" is a capability of the composition, not something a system decides for itself. */
-    private readonly lod: LodPolicy | null = null,
-    /** WHERE THE FAR RING'S HEIGHT GRIDS COME FROM (M1 of the GPU route). Absent = sample on this thread, which is
-     *  what the engine did before M1 and what the Node gate still does; the shipped game passes the GPU sampler. */
-    private readonly sampler: LodGridSource | null = null,
   ) {
     this.index = entityIndex(world.resource(LOCAL_PLAYER));
     this.voxel = world.resource(VOXEL);
@@ -300,46 +208,24 @@ export class ChunkStreamSystem {
     this.material = world.resource(CHUNK_MATERIAL);
     // The per-tier fade choice (P2.01): a resource, because this system reads it every step.
     this.fadeOptions = world.resource(FADE_OPTIONS);
-    // THE FINE WINDOW when there is no LOD at all: the original square, built once.
+    // The window: a fixed square around the player's column, ordered near-first, built once.
     const offsets: Array<[number, number]> = [];
-    if (this.lod === null) {
-      for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
-        for (let dz = -RENDER_RADIUS_CHUNKS; dz <= RENDER_RADIUS_CHUNKS; dz++) {
-          offsets.push([dx, dz]);
-        }
+    for (let dx = -RENDER_RADIUS_CHUNKS; dx <= RENDER_RADIUS_CHUNKS; dx++) {
+      for (let dz = -RENDER_RADIUS_CHUNKS; dz <= RENDER_RADIUS_CHUNKS; dz++) {
+        offsets.push([dx, dz]);
       }
-      offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
     }
+    offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
     this.offsets = offsets;
-    this.tiers = [];
 
     this.keys = new KeyEdgeReader(world.resource(KEY_EVENTS));
-  }
-
-  /** THE LAYER VALUES THE FAR RING WRITES, asked EVERY TIME a coarse chunk is built — deliberately NOT cached in
-   *  the constructor, which is where this went wrong: the render plugin is CONSTRUCTED before the content plugin
-   *  has numbered the palette from the pack chain (`debug.log`: `RENDER meshing` at 184 ms, `PALETTE 7 block(s)
-   *  numbered` at 186 ms), so a value captured here came from `FALLBACK_PALETTE` — whose `stone` is 3, while in
-   *  the real palette 3 is `default` (a green, COLOUR-ONLY block). The far ring was therefore drawn with the
-   *  wrong look across its whole bulk, and under the LOD view's tint a colour-only look went black (see
-   *  `tintedLook` in host/browser/chunkmesh.ts) — the user's «部分区域变成黑色». A value that names NO block is
-   *  worse still: it draws the engine's magenta/black checker, i.e. a large pure-black patch.
-   *
-   *  The cost of asking is three `indexOf` calls over a handful of ids, per coarse chunk built — nothing next to
-   *  the mesh it feeds — and it is correct for every order a pack may ship, and after any reload. */
-  private layerValues(): { readonly stone: number; readonly dirt: number; readonly grass: number } {
-    const stone = this.voxel.valueOf("stone") || 1;
-    const dirt = this.voxel.valueOf("dirt") || stone;
-    return { stone, dirt, grass: this.voxel.valueOf("grass") || dirt };
   }
 
   /** Generate (without meshing) every chunk in the window around a world position. Called once
    *  before the loop starts, so collision has real blocks on the very first tick. */
   prime(x: number, z: number): void {
-    // …and the SAME alignment: `prime` fills the world for the window `step()` will mesh, so a raw column here
-    // would generate one set of chunks and mesh another (with LOD, every odd column did exactly that).
-    const pcx = fineBase(this.lod, Math.floor(x / CHUNK_SIZE));
-    const pcz = fineBase(this.lod, Math.floor(z / CHUNK_SIZE));
+    const pcx = Math.floor(x / CHUNK_SIZE);
+    const pcz = Math.floor(z / CHUNK_SIZE);
     for (const [dx, dz] of this.offsets) {
       for (let cy = MIN_CHUNK_Y; cy < MIN_CHUNK_Y + CHUNK_Y_COUNT; cy++) {
         this.voxel.ensureChunk(pcx + dx, cy, pcz + dz);
@@ -347,86 +233,10 @@ export class ChunkStreamSystem {
     }
   }
 
-  /** REBUILD THE LADDER for the window at `(pcx, pcz)` (fine chunk columns — the window's own centre).
-   *
-   *  Why this is not just a constructor's job (P2.03): a rung's cells are aligned to the WORLD (a coarse cell
-   *  must not move as the player walks, or the far terrain would crawl), but the RANGES that cover the window
-   *  are measured from the window's centre, and the two ends of a rung fall asymmetrically whenever that centre
-   *  is not on the rung's own grid. Those ranges change as the player crosses a column, so they are recomputed
-   *  here — a handful of integers per rung, next to the key sets the move already builds. */
-  private buildLadder(pcx: number, pcz: number): void {
-    if (this.lod === null) {
-      this.tiers = [];
-      this.ladder = [];
-      return;
-    }
-    const ladder = lodLadder(this.lod, worldChunksX(), pcx * CHUNK_SIZE, pcz * CHUNK_SIZE);
-    this.ladder = ladder;
-    this.ladderCentre = [pcx, pcz];
-    const nearFirst = (a: readonly [number, number], b: readonly [number, number]) =>
-      Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1]));
-    const tiers: Array<{
-      step: number;
-      hole: number;
-      reach: number;
-      draw: ReadonlyArray<readonly [number, number]>;
-      reserve: ReadonlyArray<readonly [number, number]>;
-    }> = [];
-    for (const tier of ladder) {
-      const draw: Array<[number, number]> = [];
-      const reserve: Array<[number, number]> = [];
-      // RUNG 1 IS THE FINE RING: its cells are `wanted` (real 32³ chunks), not coarse keys — a `1:` key would
-      // be a procedural copy of a chunk the world already has, drawn in the same place.
-      if (tier.step === 1) {
-        tiers.push({ step: tier.step, hole: tier.hole, reach: tier.reach, draw, reserve });
-        continue;
-      }
-      // The cells are the two ranges INTERSECTED (a rung with a hole on one axis only cannot happen — the
-      // recursion crops both axes together — but intersecting keeps the loop honest whatever the ladder says).
-      for (let cx = tier.x.lo; cx < tier.x.hi; cx++) {
-        for (let cz = tier.z.lo; cz < tier.z.hi; cz++) {
-          if (inTierAnnulus(tier, cx, cz)) draw.push([cx, cz]);
-          else if (inTierHole(tier, cx, cz)) reserve.push([cx, cz]);
-        }
-      }
-      draw.sort(nearFirst);
-      reserve.sort(nearFirst);
-      tiers.push({ step: tier.step, hole: tier.hole, reach: tier.reach, draw, reserve });
-    }
-    this.tiers = tiers;
-    // THE FINE RING is rung 1: its own ranges, so the fine window and the coarse rings cannot disagree about
-    // where the window ends (that boundary is where the P1.94 empty column lived).
-    const fine = ladder[0];
-    const offsets: Array<[number, number]> = [];
-    for (let dx = fine.x.lo; dx < fine.x.hi; dx++) {
-      for (let dz = fine.z.lo; dz < fine.z.hi; dz++) {
-        offsets.push([dx, dz]);
-      }
-    }
-    offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
-    this.offsets = offsets;
-  }
-
-  /** Make sure the ladder and the window's `offsets` describe the window at `(pcx, pcz)`. Cheap when they
-   *  already do (two integer comparisons), so every reader may ask. */
-  private ensureLadder(pcx: number, pcz: number): void {
-    if (this.lod === null) return;
-    if (this.ladderCentre !== null && this.ladderCentre[0] === pcx && this.ladderCentre[1] === pcz) return;
-    this.buildLadder(pcx, pcz);
-  }
-
   /** Chunks in the window whose mesh has not been DECIDED yet — neither built nor known to be empty
    *  (a uniform chunk has no visible face and is never retried, so "no mesh" is a real answer). */
   pendingCount(): number {
     if (this.wanted === null) {
-      // BEFORE the first step there is no window yet — and with LOD the OFFSETS are built per position too
-      // (`ensureLadder`), so answering from an empty window would tell every caller "there is no work": a
-      // driver's load bar, `warmUp` and the gate's fill loops all ask this question first, and a false "nothing
-      // to do" is a world that streams in over the next hundred frames instead of behind the screen.
-      this.ensureLadder(
-        fineBase(this.lod, Math.floor(POSITION.x[this.index] / CHUNK_SIZE)),
-        fineBase(this.lod, Math.floor(POSITION.z[this.index] / CHUNK_SIZE)),
-      );
       return this.offsets.length * CHUNK_Y_COUNT;
     }
     let pending = 0;
@@ -445,11 +255,8 @@ export class ChunkStreamSystem {
    *  Asked about the POSITION being entered, not about the current window: `wanted` may still describe
    *  where the player stood last. */
   needsWarmUp(x: number, z: number): boolean {
-    // The same ALIGNMENT the window builder uses (see step): a warm-up asked about a different column set than
-    // the one it will build would answer "everything is decided" and skip the screen for a cold window.
-    const pcx = fineBase(this.lod, Math.floor(x / CHUNK_SIZE));
-    const pcz = fineBase(this.lod, Math.floor(z / CHUNK_SIZE));
-    this.ensureLadder(pcx, pcz); // …and the ladder/offsets that answer it must be THIS window's
+    const pcx = Math.floor(x / CHUNK_SIZE);
+    const pcz = Math.floor(z / CHUNK_SIZE);
     const wanted = this.wantedKeys(pcx, pcz);
     for (const key of wanted) {
       if (!this.cache.meshes.has(key) && !this.cache.empty.has(key)) return true;
@@ -496,36 +303,20 @@ export class ChunkStreamSystem {
     // interval), which is what makes the fade independent of the frame rate and testable in the gate.
     this.advanceFades(deltaMs);
 
-    // G, H, J AND L: THE DEBUG VIEWS (P1.94/P1.96/P1.98/M3a). The edges are published by `player.input` and every
-    // consumer keeps its own cursor, so a second consumer costs the log nothing. Handled HERE because this
-    // system owns the meshes and their materials — the toggles ARE material changes, and no other system may
-    // touch a mesh. One drain for all four, and an ODD number of presses flips (a repeat or a key release is
-    // ignored).
-    let tintPresses = 0;
+    // H AND J: THE DEBUG VIEWS (P1.96/P1.98). The edges are published by `player.input` and every consumer
+    // keeps its own cursor, so a second consumer costs the log nothing. Handled HERE because this system owns
+    // the meshes and their materials — the toggles ARE material changes, and no other system may touch a
+    // mesh. One drain for both, and an ODD number of presses flips (a repeat or a key release is ignored).
     let wirePresses = 0;
     let fadePresses = 0;
-    let batchPresses = 0;
     this.keys.drain((edge) => {
       if (!edge.down || edge.repeat) return;
-      if (edge.code === "KeyG") tintPresses++;
-      else if (edge.code === "KeyH") wirePresses++;
+      if (edge.code === "KeyH") wirePresses++;
       else if (edge.code === "KeyJ") fadePresses++;
-      else if (edge.code === "KeyL") batchPresses++;
     });
-    if ((tintPresses & 1) === 1) {
-      this.lodTint = !this.lodTint;
-      this.refreshMaterials();
-    }
     if ((wirePresses & 1) === 1) {
       this.wireframe = !this.wireframe;
       this.refreshMaterials();
-    }
-    if ((batchPresses & 1) === 1) {
-      // See `batchingEnabled`: with it off the far ring is drawn exactly as it was before M3a (one mesh per chunk),
-      // which is what makes "the batches do not draw" a distinguishable failure from "the far ring is wrong".
-      this.batchingEnabled = !this.batchingEnabled;
-      if (this.batchingEnabled) this.promoteAllFar();
-      else this.demoteAllFar();
     }
     if ((fadePresses & 1) === 1) {
       this.fadeEnabled = !this.fadeEnabled;
@@ -534,31 +325,22 @@ export class ChunkStreamSystem {
       if (!this.fadeEnabled) this.finishAllFades();
     }
 
-    // THE FINE WINDOW IS COARSE-ALIGNED (P1.94 — measured bug). `fineBase` rounds the player's column DOWN to
-    // the coarse grid the far ring's inner hole is built on; without it every odd column left one fine column
-    // owned by neither ring (a 32-block-wide, full-depth hole) and one owned by both. With no LOD it is the
-    // identity, so the single-window path is unchanged.
-    const pcx = fineBase(this.lod, Math.floor(POSITION.x[this.index] / CHUNK_SIZE));
-    const pcz = fineBase(this.lod, Math.floor(POSITION.z[this.index] / CHUNK_SIZE));
+    const pcx = Math.floor(POSITION.x[this.index] / CHUNK_SIZE);
+    const pcz = Math.floor(POSITION.z[this.index] / CHUNK_SIZE);
     const moved = pcx !== this.lastPcx || pcz !== this.lastPcz;
     this.lastPcx = pcx;
     this.lastPcz = pcz;
 
-    // …and THE LADDER follows the window: the rungs' cells do not move, but which of them cover the window do
-    // (see `buildLadder`). Before the key sets, because they are built FROM it.
-    this.ensureLadder(pcx, pcz);
-
     if (moved || this.wanted === null) {
       this.wanted = this.wantedKeys(pcx, pcz);
-      this.farWanted = this.farKeys(pcx, pcz);
       this.unloadOutside(this.wanted);
     }
 
     // Block edits are rebuilt FIRST and unbudgeted: the player must see the block they just
     // changed. One edit touches at most a handful of chunks (the owner plus any border
-    // neighbour), and input is rate-limited in ecs/systems/interaction.ts, so this cannot flood
-    // a frame. THEY STAY ON THIS THREAD even with a pool: a worker round trip would put the mesh a frame or
-    // two behind the click, and this is the one path where the player is watching one block.
+    // neighbour), and input is rate-limited, so this cannot flood a frame. THEY STAY ON THIS THREAD even with
+    // a pool: a worker round trip would put the mesh a frame or two behind the click, and this is the one
+    // path where the player is watching one block.
     for (const key of this.voxel.takeDirty()) this.rebuild(key);
 
     // A PACK RELOAD marks every loaded chunk stale (P1.49ab): the LOOKS a chunk resolves come from the block
@@ -570,13 +352,11 @@ export class ChunkStreamSystem {
     // depends on the VOXELS alone (every uv is a per-face constant), so the geometry is still correct — only
     // the look → material list it stores has to be resolved again, which is what ChunkGeometry.restyle does in
     // place. That is the difference between a reload costing a few thousand chunk meshes and costing a few
-    // thousand lookups: the mesh, its buffers and its groups all stay exactly where they are. A non-bulk reason
-    // to mark a chunk stale (a future change that moves vertices) must re-mesh instead — see ROADMAP P1.18i.
+    // thousand lookups: the mesh, its buffers and its groups all stay exactly where they are.
     //
     // The reload DRIVER normally drains this whole queue behind the loading screen (`restyleStale`), so this
     // batch is what is left for a reload that was not driven (a gate, or a world with no screen up).
     this.restyleNext();
-
 
     let budget = MESH_BUDGET_PER_FRAME;
     for (const key of this.wanted) {
@@ -586,38 +366,9 @@ export class ChunkStreamSystem {
       if (!this.queueBuild(key)) break;
     }
 
-    // THE FAR RING (P1.93): a separate budget, spent in COST UNITS (see LOD_BUDGET_PER_FRAME), and it NEVER
-    // goes to the pool — a coarse chunk is procedural (data/world/lod.ts samples the height field; the world
-    // is not read at all), so there is nothing to hand a worker and nothing to transfer back. It also costs
-    // the world NOTHING: no chunk is generated for it, so a far ring 3× the fine ring's width adds no voxel
-    // memory at all.
-    //
-    // WITH THE GPU SAMPLER (M1) a column whose heights have not been read back yet answers `FAR_NOT_READY`: it
-    // costs no budget, does not count as progress, and is simply retried next frame (the key is still in
-    // `farWanted`). The WAIT budget bounds how many of those one frame walks past, so a sampler that is behind
-    // cannot turn the loop into a scan of the whole ring.
-    if (this.farWanted !== null) {
-      let far = LOD_BUDGET_PER_FRAME;
-      let waits = 0;
-      for (const key of this.farWanted) {
-        if (far <= 0 || waits >= LOD_WAIT_PER_FRAME) break;
-        if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
-        const cost = this.buildFar(key);
-        if (cost === FAR_NOT_READY) waits++;
-        else far -= cost;
-      }
-    }
-
     if (moved) {
       for (const entry of this.cache.meshes.values()) this.place(entry);
     }
-
-    // …and decide which of the coarse chunks under the fine ring are needed THIS frame (P2.00). Last, because it
-    // reads the state the whole step produced: the window (which columns the fine ring owns now), whether the
-    // fine chunks of a covered column are all there (the build loops above may have finished them) and whether
-    // any of them is still fading (a fade is a translucent chunk — the reserve must stay visible under it, or
-    // the player would look through the fading fine mesh at the sky).
-    this.refreshFarVisibility();
   }
 
   /** Apply what the workers finished. The IN-FLIGHT SET IS THE VALIDITY TOKEN: a key that is no longer in it
@@ -644,7 +395,7 @@ export class ChunkStreamSystem {
     if (entry) {
       if (entry.geom.apply(this.voxel, result) > 0) {
         // A dig or a place can change WHICH LOOKS this chunk shows, so the material list follows the rebuild.
-        entry.mesh.material = this.materialsFor(entry.geom, entry.step);
+        entry.mesh.material = this.materialsFor(entry.geom);
         return;
       }
       this.cache.group.remove(entry.mesh);
@@ -668,60 +419,19 @@ export class ChunkStreamSystem {
       return;
     }
     const parts = key.split(",");
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, 1));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
     mesh.matrixAutoUpdate = false;
-    // A POOL result is always a FINE chunk: the far ring is procedural and never goes to a worker.
     const fresh: ChunkMeshEntry = {
       mesh,
       geom,
       cx: Number(parts[0]),
       cy: Number(parts[1]),
       cz: Number(parts[2]),
-      step: 1,
     };
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, fresh);
     this.place(fresh);
     this.beginFade(key, fresh); // a chunk that APPEARED fades in (P1.98)
-  }
-
-  /** How many rungs the ladder in force has (P2.03) — the LAP caps it (`lodLadder`), so the entry can report
-   *  the truth instead of the number the policy asked for. */
-  get lodTiers(): number {
-    return this.tiers.length;
-  }
-
-  /** THE WORLD SIZE CHANGED (P2.02): drop every mesh, every "decided" answer and the window bookkeeping.
-   *
-   *  Called by the world-entry driver, before the new world is primed, and only when the size actually moved.
-   *  It is the render half of `VoxelWorld.reset`: a mesh belongs to the OLD lap (its key is a wrapped identity,
-   *  its geometry was generated from the old period), so nothing here may survive — the next `step()` decides
-   *  the whole window again and the warm-up rebuilds it behind the loading screen.
-   *
-   *  `wanted = null` is what makes `needsWarmUp` answer "yes, there is work": the driver asks it BEFORE it
-   *  builds, so this is also what puts the loading screen up for the new world instead of showing the old
-   *  terrain for a frame. */
-  resetForNewWorld(): void {
-    for (const entry of this.cache.meshes.values()) {
-      this.cache.group.remove(entry.mesh);
-      entry.geom.dispose();
-    }
-    this.cache.meshes.clear();
-    this.cache.empty.clear();
-    this.cache.inFlight.clear();
-    for (const fade of this.fading) for (const clone of fade.clones) clone.dispose();
-    this.fading.length = 0;
-    this.farStale.clear();
-    // M3a: the far ring's batches die with the world — their instance buffers are as stale as the meshes (a key
-    // is a wrapped identity, so "column 5" means a different place in a different lap).
-    this.batches?.dispose();
-    this.batches = null;
-    this.batched.clear();
-    this.wanted = null;
-    this.farWanted = null;
-    // The LADDER goes too: the lap decides how many rungs fit, so the one built for the old world is not even
-    // the right SHAPE any more, and `ladderCentre = null` is what makes the next query rebuild it.
-    this.ladderCentre = null;
   }
 
   /** Hand one chunk to a worker. False = the pool is saturated (or there is none): the caller stops asking
@@ -745,22 +455,14 @@ export class ChunkStreamSystem {
 
   /** The reload path (a chain change): re-resolve this chunk's LOOKS in place. Nothing is meshed, so there is
    *  no pool to consult and nothing to fail — a chunk with no mesh has nothing to restyle (it is either in
-   *  `empty`, or undecided and therefore already covered by the streaming budget below).
-   *
-   *  A BATCHED chunk is DEMOTED, restyled and promoted again (M3a): a bucket is keyed by (look, tier), and this
-   *  is exactly the moment those looks change — so the chunk has to move to another bucket. The three steps are
-   *  cheap (an instance out, one look resolution, an instance in) and they keep the reload's invariant, "every
-   *  mesh has its looks re-resolved", true for the batched half of the ring as well.) */
+   *  `empty`, or undecided and therefore already covered by the streaming budget below). */
   private restyle(key: string): void {
     const entry = this.cache.meshes.get(key);
     if (!entry) return;
-    const wasBatched = this.batched.has(key);
-    if (wasBatched) this.demoteFar(key);
     entry.geom.restyle(this.voxel);
     // The material CACHE was dropped by the reload (see the pack driver), so these come back from the new
     // chain's textures. `groups` is untouched: a slot index still means the same material index.
-    entry.mesh.material = this.materialsFor(entry.geom, entry.step);
-    if (wasBatched) this.promoteFar(key, entry);
+    entry.mesh.material = this.materialsFor(entry.geom);
   }
 
   /** Re-resolve up to `limit` of the chunks a chain change marked STALE, and answer how many the queue handed
@@ -769,42 +471,17 @@ export class ChunkStreamSystem {
    *  (`restyleStale`). Public for the same reason `prime`/`warmUp` are: the gate drives it directly.
    *
    *  It meshes NOTHING and asks the pool for NOTHING — that is the whole point of the restyle path (P1.18i) —
-   *  so the only cost is one look resolution per material group of a chunk that is already on screen.
-   *
-   *  BOTH QUEUES, ONE BUDGET (P1.97): the world's stale chunks (the fine ring) AND this system's own far-ring
-   *  queue. They are two independent sources of meshes, and a chain change invalidates both. */
+   *  so the only cost is one look resolution per material group of a chunk that is already on screen. */
   restyleNext(limit: number = RESTYLE_BUDGET_PER_FRAME): number {
     const batch = this.voxel.takeStale(limit);
     for (const key of batch) this.restyle(key);
-    // The far ring's queue, with whatever is left of the budget. Deleting from a Set while iterating it is safe.
-    for (const key of this.farStale) {
-      if (batch.length >= limit) break;
-      this.farStale.delete(key);
-      this.restyle(key);
-      batch.push(key);
-    }
     return batch.length;
   }
 
-  /** EVERYTHING a chain change invalidated: the world's chunks plus the far ring. The reload's invariant is
-   *  "every mesh in CHUNK_MESHES has its looks re-resolved", and the far ring is the second source of meshes in
-   *  there — the one the world knows nothing about. */
+  /** EVERYTHING a chain change invalidated: the world's stale chunks. The reload's invariant is
+   *  "every mesh in CHUNK_MESHES has its looks re-resolved". */
   get restylePending(): number {
-    return this.voxel.staleCount + this.farStale.size;
-  }
-
-  /** Mark every FAR-RING mesh for a look re-resolution (P1.97 — the pack reload calls this next to
-   *  `VoxelWorld.markAllStale`). Answers how many. A far entry's mesh is re-resolved by the same `restyle` the
-   *  fine ring uses: the geometry keeps its `(value, kind)` slots, so only the look → material list changes —
-   *  nothing is meshed, nothing is generated, nothing is handed to a worker. */
-  markFarStale(): number {
-    let n = 0;
-    for (const [key, entry] of this.cache.meshes) {
-      if (entry.step <= 1) continue; // 1 = a real chunk, which the WORLD's queue already covers
-      this.farStale.add(key);
-      n++;
-    }
-    return n;
+    return this.voxel.staleCount;
   }
 
   /** DRAIN THE WHOLE STALE QUEUE FOR A CALLER THAT CAN YIELD (P1.18i) — the pack reload driver, which runs this
@@ -823,7 +500,7 @@ export class ChunkStreamSystem {
     yieldTo: () => Promise<void>,
     onProgress?: (done: number, total: number) => void,
   ): Promise<void> {
-    const total = this.restylePending; // the world's chunks AND the far ring (P1.97)
+    const total = this.restylePending;
     let last = -1;
     for (let guard = 0; guard < RESTYLE_DRAIN_BATCHES; guard++) {
       const left = this.restylePending;
@@ -869,57 +546,16 @@ export class ChunkStreamSystem {
     return out;
   }
 
-  /** THE LADDER's wanted keys (P1.93/P2.03), in each rung's COARSE columns, ordered rung by rung and
-   *  near-first inside a rung.
-   *
-   *  The key is `"<step>:<cx>,<cy>,<cz>"`: the prefix is what keeps a coarse identity from EVER being confused
-   *  with a finer one. That matters because every rung lives in the same `meshes`/`empty` maps, while the
-   *  world's dirty keys (`takeDirty`, `markDirty`) are fine keys in fine units — an edit must never be able to
-   *  name a coarse entry, because a coarse chunk is procedural and has nothing to rebuild (see lod.ts).
-   *
-   *  Empty when LOD is off, which is what keeps the single-window path byte-for-byte what it was.
-   *
-   *  INSIDE A RUNG, THE DRAWN ANNULUS COMES FIRST, THEN THE RESERVE (P2.00). Both are in the same set and the
-   *  build budget walks it in order, so a world entry fills the ring the player can SEE first (the reserve is
-   *  invisible and only needed once the window starts to move — and a column spends the whole width of its rung
-   *  in the reserve before it is needed). */
-  private farKeys(pcx: number, pcz: number): Set<string> {
-    const out = new Set<string>();
-    if (this.lod === null) return out;
-    for (const tier of this.tiers) {
-      if (tier.draw.length === 0) continue; // rung 1 IS the fine ring: it has no coarse keys
-      const period = worldChunksX() / tier.step; // the torus in this rung's columns
-      const ccx = Math.floor(pcx / tier.step);
-      const ccz = Math.floor(pcz / tier.step);
-      const wrap = (v: number): number => ((v % period) + period) % period;
-      for (const offsets of [tier.draw, tier.reserve]) {
-        for (const [dx, dz] of offsets) {
-          const cx = wrap(ccx + dx);
-          const cz = wrap(ccz + dz);
-          for (let cy = MIN_CHUNK_Y + CHUNK_Y_COUNT - 1; cy >= MIN_CHUNK_Y; cy--) {
-            out.add(`${tier.step}:${cx},${cy},${cz}`);
-          }
-        }
-      }
-    }
-    return out;
-  }
-
   private unloadOutside(wanted: Set<string>): void {
-    const far = this.farWanted;
     for (const [key, entry] of this.cache.meshes) {
-      if (wanted.has(key) || (far !== null && far.has(key))) continue;
-      // A BATCHED chunk comes out of its batches FIRST (M3a): the fade-out below needs a mesh it can give its own
-      // material copies to, and a bucket is one material for every instance in it.
-      this.demoteFar(key);
+      if (wanted.has(key)) continue;
       this.cache.meshes.delete(key);
       this.cache.empty.delete(key);
       // A job for a chunk that left the window is dropped when it comes back (`drain` checks this set).
       this.cache.inFlight.delete(key);
       // THE MESH IS NOT REMOVED HERE (P1.99): it leaves the CACHE (so nothing treats the chunk as loaded, and
       // the streaming budget may rebuild it) while it stays in the SCENE, fading out. Removing it on this frame
-      // is the pop the fade exists to hide — and at the ring boundary the mesh that leaves is the coarse one the
-      // fine chunk replacing it has only just started to fade in behind.
+      // is the pop the fade exists to hide.
       if (!this.beginFadeOut(key, entry)) this.removeMesh(entry);
     }
   }
@@ -944,7 +580,7 @@ export class ChunkStreamSystem {
     if (entry) {
       if (entry.geom.rebuild(this.voxel, entry.cx, entry.cy, entry.cz) > 0) {
         // A dig or a place can change WHICH LOOKS this chunk shows, so the material list follows the rebuild.
-        entry.mesh.material = this.materialsFor(entry.geom, entry.step);
+        entry.mesh.material = this.materialsFor(entry.geom);
         return;
       }
       this.cache.group.remove(entry.mesh);
@@ -957,8 +593,7 @@ export class ChunkStreamSystem {
     if (this.wanted?.has(key)) this.build(key);
   }
 
-  /** A FINE chunk's mesh, built on this thread. (Fine keys only: `rebuild`/`queueBuild`/`drain` all speak in
-   *  fine identities, while a far entry is `"<step>:cx,cy,cz"` and never reaches this path.) */
+  /** A chunk's mesh, built on this thread. */
   private build(key: string): void {
     const parts = key.split(",");
     const cx = Number(parts[0]);
@@ -979,180 +614,30 @@ export class ChunkStreamSystem {
       return;
     }
 
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, 1));
+    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom));
     mesh.matrixAutoUpdate = false;
-    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step: 1 };
+    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz };
     this.cache.group.add(mesh);
     this.cache.meshes.set(key, entry);
     this.place(entry);
     this.beginFade(key, entry); // a chunk that APPEARED fades in (P1.98)
   }
 
-  /** A COARSE chunk's mesh (P1.93/P2.03 — any rung of the ladder). Procedural: `buildLodMeshInput` needs the
-   *  column's sampled height grid and nothing else — it reads NO world chunk, allocates no voxel data and hands
-   *  nothing to a worker. The grid comes from the injected `LodGridSource` (the GPU sampler, M1) or, without one,
-   *  from `buildLodMeshInput`'s own CPU sampling (what the engine did before M1). The result is applied through the
-   *  same geometry path a worker's result takes, so a coarse mesh and a fine one are indistinguishable to the draw
-   *  — the only difference is `step` (read from the KEY, so one function serves every rung), which the placement
-   *  turns into the mesh's scale and the material factory into the tier's tint.
-   *  Returns what the chunk cost the frame's far budget: `LOD_MESH_COST` when it produced geometry, 1 when it was
-   *  uniform (or produced no face) — the 10× difference the budget is spent in — or `FAR_NOT_READY` when the GPU
-   *  has not answered for this column yet, in which case nothing was built and nothing was spent. */
-  private buildFar(key: string): number {
-    if (this.lod === null) return 0;
-    const colon = key.indexOf(":");
-    const step = Number(key.slice(0, colon));
-    const parts = key.slice(colon + 1).split(",");
-    const cx = Number(parts[0]);
-    const cy = Number(parts[1]);
-    const cz = Number(parts[2]);
-
-    this.killDying(key); // a coarse chunk that came back while its ghost was still fading out (P1.99)
-
-    // THE HEIGHT GRID (M1). A `null` answer means the sampler has not read this column back yet: leave the chunk
-    // unbuilt and let the next frame ask again — building nothing is CORRECT here, and cheaper than the 290 ms a
-    // step-32 column costs on this thread. (The sampler answers from the CPU itself if it keeps missing a column,
-    // so this is a delay, never a hole: see lod-gpu-sampler.ts.)
-    let grid: LodSampledGrid | null = null;
-    if (this.sampler !== null) {
-      grid = this.sampler.gridFor(step, cx, cz);
-      if (grid === null) return FAR_NOT_READY;
-    }
-
-    // …and the layer values IN THE PALETTE IN FORCE, asked here rather than cached at construction (see
-    // `layerValues`: the cache was taken before the palette existed, and the far ring's "stone" was a look of its
-    // own — a colour-only block, which the LOD view's tint then turned black).
-    const layers = this.layerValues();
-    const input = buildLodMeshInput(
-      step,
-      cx,
-      cy,
-      cz,
-      layers.stone,
-      layers.dirt,
-      layers.grass,
-      grid ?? undefined,
-    );
-    const result = meshChunk(input);
-    const geom = this.mesh.createGeometry();
-    if (geom.apply(this.voxel, result) === 0) {
-      geom.dispose();
-      this.cache.empty.add(key);
-      return 1;
-    }
-    const mesh = new THREE.Mesh(geom.geometry, this.materialsFor(geom, step));
-    mesh.matrixAutoUpdate = false;
-    const entry: ChunkMeshEntry = { mesh, geom, cx, cy, cz, step };
-    this.cache.group.add(mesh);
-    this.cache.meshes.set(key, entry);
-    this.place(entry);
-    // A coarse chunk that APPEARED fades in too (P1.98) — and the moment its fade ends it is handed to the
-    // (look, tier) BATCH (M3a), which is what takes the far ring from one draw call per chunk to one per look.
-    // When the fade is switched off there is nothing to wait for, so it is batched right away.
-    if (!this.beginFade(key, entry)) this.promoteFar(key, entry);
-    return LOD_MESH_COST;
-  }
-
   /** The materials this chunk needs, one per LOOK group (P1.46). No specs means the geometry was built with
    *  the engine checker (the mesher emits groups only when it knows a block). Shared per spec key by the
-   *  CHUNK_MATERIAL resource, so chunks showing the same blocks reuse the same GPU materials.
-   *  `step` is the chunk's LOD tier: with the debug view on, the tier's colour is handed to the factory (which
-   *  keys its cache by it), so a tinted world costs one extra material per (look, tier) — not one per chunk. */
-  private materialsFor(geom: ChunkMeshEntry["geom"], step: number): THREE.Material | THREE.Material[] {
-    const tint = this.lodTint ? tierTint(step) : null;
+   *  CHUNK_MATERIAL resource, so chunks showing the same blocks reuse the same GPU materials. */
+  private materialsFor(geom: ChunkMeshEntry["geom"]): THREE.Material | THREE.Material[] {
     if (geom.specs.length === 0) {
-      return this.debugged(this.mesh.getMaterial(this.material, undefined, tint));
+      return this.debugged(this.mesh.getMaterial(this.material));
     }
-    return geom.specs.map((spec) => this.debugged(this.mesh.getMaterial(this.material, spec, tint)));
-  }
-
-  /** THE ONE LOOK OF A BATCH (M3a): a bucket is one material, so this is `materialsFor` for a single spec — the
-   *  same cache and the same tint/wireframe rules, which is what keeps a batched far chunk looking exactly like
-   *  an unbatched one. */
-  private materialFor(step: number, spec: ChunkFaceSpec): THREE.Material {
-    const tint = this.lodTint ? tierTint(step) : null;
-    return this.debugged(this.mesh.getMaterial(this.material, spec, tint));
-  }
-
-  /** How many (look, tier) buckets and instances the far ring is drawn with (M3a) — reported by the FRAME line
-   *  as `batched=instances/buckets`, so "is the batching actually carrying the ring" is a read number. */
-  get batchStats(): { readonly buckets: number; readonly instances: number; readonly batchedChunks: number } {
-    const stats = this.batches?.stats ?? { buckets: 0, instances: 0 };
-    return { ...stats, batchedChunks: this.batched.size };
-  }
-
-  private ensureBatches(): FarBatches {
-    if (this.batches === null) this.batches = new FarBatches(this.cache.group);
-    return this.batches;
-  }
-
-  /** HAND A SETTLED FAR CHUNK TO ITS BATCHES (M3a). Called when the chunk exists AND is opaque (its fade-in
-   *  ended, or the fade is switched off) — never while it is translucent, because a batch has one material and
-   *  therefore no per-instance opacity (see far-batches.ts). The individual mesh is taken OUT of the scene but
-   *  KEPT (its geometry is what a demote re-attaches), so this is reversible at any moment. */
-  private promoteFar(key: string, entry: ChunkMeshEntry): void {
-    if (!this.batchingEnabled || entry.step <= 1 || this.batched.has(key)) return;
-    // …AND ONLY WHILE THE CHUNK IS STILL IN THE WINDOW. The two callers are "a far chunk was built without a
-    // fade" and "its fade-in ended", and the second can fire for a chunk that LEFT while it was fading in (its
-    // fade is dropped when the leaving fade takes the mesh over): promoting that one would put a chunk nobody
-    // wants back on screen, from a batch that outlives the cache entry. The identity check makes that impossible.
-    if (this.cache.meshes.get(key) !== entry) return;
-    const handle = this.ensureBatches().add(
-      entry.step,
-      entry.geom.geometry,
-      entry.geom.specs,
-      (() => {
-        const resolved = this.materialsFor(entry.geom, entry.step);
-        return Array.isArray(resolved) ? resolved : [resolved];
-      })(),
-      (out) => this.entryMatrix(entry, out),
-    );
-    if (handle === null) return;
-    this.batched.set(key, handle);
-    this.batches!.setVisible(handle, entry.mesh.visible);
-    this.cache.group.remove(entry.mesh);
-  }
-
-  /** Take EVERY far chunk back out of its batches (`L` switching batching off): the `L` key's half of the A/B —
-   *  the far ring then draws exactly as it did before M3a. */
-  private demoteAllFar(): void {
-    for (const key of [...this.batched.keys()]) this.demoteFar(key);
-  }
-
-  /** …and hand every SETTLED far chunk back (`L` switching it on again). A chunk that is mid-fade is left alone:
-   *  it is promoted when its fade ends, which is the one rule that keeps a batch's single material honest. */
-  private promoteAllFar(): void {
-    const fadingIn = new Set<string>();
-    for (const fade of this.fading) if (!fade.out) fadingIn.add(fade.key);
-    for (const [key, entry] of this.cache.meshes) {
-      if (entry.step <= 1 || fadingIn.has(key)) continue;
-      this.promoteFar(key, entry);
-    }
-  }
-
-  /** Take a FAR CHUNK BACK OUT OF ITS BATCHES (M3a) — before it is faded out or removed, so the ordinary
-   *  per-chunk path (which owns the fade's material copies) has its mesh again. */
-  private demoteFar(key: string): void {
-    const handle = this.batched.get(key);
-    if (handle === undefined) return;
-    this.batched.delete(key);
-    this.batches?.remove(handle);
-    const entry = this.cache.meshes.get(key);
-    if (entry !== undefined) {
-      // …and it must be VISIBLE to fade out: its `visible` flag is whatever `refreshFarVisibility` last decided
-      // for a batched chunk (which is now the batch's business), and a leaving chunk that popped out invisible
-      // would be the very pop P1.99 exists to hide. Re-adding is unconditional (`Object3D.add` detaches a child
-      // from any previous parent first, and a stub group in the gate answers `add` with a no-op).
-      entry.mesh.visible = true;
-      this.cache.group.add(entry.mesh);
-    }
+    return geom.specs.map((spec) => this.debugged(this.mesh.getMaterial(this.material, spec)));
   }
 
   /** Apply the debug view's material switches. They are set on the material the CACHE hands back — shared per
-   *  (look, tier), which is what makes ONE key press switch every chunk at once — and they are applied on
-   *  EVERY resolution rather than only on the key press, so a pack reload (which drops that cache and builds
-   *  fresh materials) cannot silently lose the view. `wireframe` is three.js's triangle wireframe: the mesher
-   *  emits triangles, so what you see is the mesh's real triangle edges, not the block grid. */
+   *  look, which is what makes ONE key press switch every chunk at once — and they are applied on EVERY
+   *  resolution rather than only on the key press, so a pack reload (which drops that cache and builds fresh
+   *  materials) cannot silently lose the view. `wireframe` is three.js's triangle wireframe: the mesher emits
+   *  triangles, so what you see is the mesh's real triangle edges, not the block grid. */
   private debugged(material: THREE.Material): THREE.Material {
     // `wireframe` lives on the CONCRETE materials (lambert/basic), not on the `Material` base the factory is
     // typed with, so it is set through a cast and a material without one is simply left alone.
@@ -1170,25 +655,23 @@ export class ChunkStreamSystem {
   }
 
   /** Re-resolve every entry's material IN PLACE after a debug toggle: the geometry is untouched, so this is a
-   *  material swap per chunk — exactly as cheap as the pack reload's restyle. A BATCHED chunk's material lives on
-   *  its bucket (one per look, tier), so the buckets are re-resolved through the same look cache (M3a). */
+   *  material swap per chunk — exactly as cheap as the pack reload's restyle. */
   private refreshMaterials(): void {
     for (const entry of this.cache.meshes.values()) {
-      entry.mesh.material = this.materialsFor(entry.geom, entry.step);
+      entry.mesh.material = this.materialsFor(entry.geom);
     }
-    this.batches?.refreshMaterials((step, spec) => this.materialFor(step, spec));
   }
 
   /** START A CHUNK'S FADE IN (P1.98). Called when a mesh is created for the first time — NEVER from `rebuild`,
    *  which is the edit the player is watching (a dug block must change instantly, P1.18i).
    *
-   *  The chunk's materials are shared per (look, tier), so a per-chunk opacity needs a COPY: the copies are made
-   *  from the very materials `materialsFor` just resolved (so a `G` tint or an `H` wireframe comes along), given
-   *  `transparent` + 0 opacity, and swapped back for the shared ones when the fade ends. `depthWrite` stays ON:
-   *  the chunk keeps occluding itself correctly (depth-tested), so a fading chunk never shows its own back
-   *  faces — the only thing it blends with is what is already drawn behind it. */
+   *  The chunk's materials are shared per look, so a per-chunk opacity needs a COPY: the copies are made from
+   *  the very materials `materialsFor` just resolved (so an `H` wireframe comes along), given `transparent` +
+   *  0 opacity, and swapped back for the shared ones when the fade ends. `depthWrite` stays ON: the chunk keeps
+   *  occluding itself correctly (depth-tested), so a fading chunk never shows its own back faces — the only
+   *  thing it blends with is what is already drawn behind it. */
   private beginFade(key: string, entry: ChunkMeshEntry): boolean {
-    if (!this.fadeOn(entry.step)) return false;
+    if (!this.fadeOn()) return false;
     return this.pushFade(key, entry, false);
   }
 
@@ -1202,29 +685,22 @@ export class ChunkStreamSystem {
    *  (see `unloadOutside`): the chunk is no longer wanted, so nothing may treat it as loaded, while its pixels
    *  are still on screen for the length of the fade. `removeMesh` is the other half of the bargain. */
   private beginFadeOut(key: string, entry: ChunkMeshEntry): boolean {
-    if (!this.fadeOn(entry.step)) return false;
+    if (!this.fadeOn()) return false;
     let leaving = 0;
     for (const fade of this.fading) if (fade.out) leaving++;
     if (leaving >= FADE_OUT_MAX) return false;
     return this.pushFade(key, entry, true);
   }
 
-  /** Does this chunk fade right now? ONE answer for EVERY chunk (P2.05 — the user's request, and it retires the
-   *  per-rung rule of P2.01/P2.04): a mesh that APPEARS fades in and one that LEAVES fades out, whether it is a
-   *  real 32³ chunk of the fine ring or a coarse cell of any LOD rung. Which rung a chunk belongs to is an
-   *  implementation detail of the window, not something the player should have to reason about — and the reserve
-   *  (P2.00) makes it safe: a coarse cell stays drawn until the finer chunks over it are BUILT AND OPAQUE, so a
-   *  translucent chunk never uncovers the sky, it only lets the coarser level show through while it arrives.
-   *
-   *  `fadeEnabled` is the `J` key's SESSION-ONLY master switch (it never writes the file) and `lod` is the
-   *  persisted switch; an edit never fades (see `beginFade`, P1.18i). */
-  private fadeOn(_step: number): boolean {
+  /** Does a chunk fade right now? `fadeEnabled` is the `J` key's SESSION-ONLY master switch (it never writes
+   *  the file) and `fadeOptions.lod` is the persisted switch; an edit never fades (see `beginFade`, P1.18i). */
+  private fadeOn(): boolean {
     return this.fadeEnabled && this.fadeOptions.lod;
   }
 
   /** The shared half of both directions: the per-chunk copies, `transparent`, and the fade entry. */
   private pushFade(key: string, entry: ChunkMeshEntry, out: boolean): boolean {
-    const resolved = this.materialsFor(entry.geom, entry.step);
+    const resolved = this.materialsFor(entry.geom);
     const shared = Array.isArray(resolved) ? resolved : [resolved];
     const clones = shared.map((material) => {
       const copy = material.clone();
@@ -1293,18 +769,13 @@ export class ChunkStreamSystem {
 
   /** End ONE fade: put the SHARED material back on the mesh (an IN fade), or take the mesh down (an OUT one),
    *  and free the copies either way. `keepMaterial` false leaves whatever the mesh holds — the caller used it
-   *  when it already replaced or removed the material itself.
-   *
-   *  AN IN FADE THAT ENDS HANDS THE CHUNK TO ITS BATCHES (M3a): that is the moment it became opaque, so the
-   *  batch's single-material constraint is satisfied. (`keepMaterial` false means someone else already replaced
-   *  the material, which is also "settled" — the `J` switch and a pack reload both land here.) */
+   *  when it already replaced or removed the material itself. */
   private dropFade(index: number, keepMaterial = false): void {
     const fade = this.fading[index];
     this.fading.splice(index, 1);
     if (fade.out) this.removeMesh(fade.entry);
-    else if (keepMaterial) fade.entry.mesh.material = this.materialsFor(fade.entry.geom, fade.entry.step);
+    else if (keepMaterial) fade.entry.mesh.material = this.materialsFor(fade.entry.geom);
     for (const clone of fade.clones) clone.dispose();
-    if (!fade.out) this.promoteFar(this.keyOf(fade.entry), fade.entry);
   }
 
   /** End every fade at once (the `J` switch turning the effect off): the ones that were arriving reach full
@@ -1313,170 +784,12 @@ export class ChunkStreamSystem {
     for (let i = this.fading.length - 1; i >= 0; i--) this.dropFade(i, true);
   }
 
-  /** Geometry is chunk-local, so the mesh sits at the chunk origin of its nearest copy.
-   *
-   *  A FAR entry is placed in COARSE units — its `cx`/`cz` count `step` fine chunks each, its geometry's
-   *  super voxels are `step` blocks across — so the origin is scaled by `step` in X/Z AND the mesh gets
-   *  `scale = (step, 1, step)`. That one scale is what turns a 32×32 super-voxel face into a `32·step`-block
-   *  face; every normal stays axis-aligned, so nothing else has to know. Y is never decimated, so `cy` and the
-   *  vertical extent are the same units in both rings.
-   *
-   *  A BATCHED far chunk (M3a) has no mesh in the scene: the same transform goes into its instances' matrices,
-   *  which is how each chunk of a batch keeps its own place (and its own torus wrap). */
+  /** Geometry is chunk-local, so the mesh sits at the chunk origin of its nearest copy. */
   private place(entry: ChunkMeshEntry): void {
-    const handle = this.batched.get(this.keyOf(entry));
-    if (handle !== undefined) {
-      this.batches?.setMatrix(handle, (out) => this.entryMatrix(entry, out));
-      return;
-    }
-    const step = entry.step;
-    const pcx = step === 1 ? this.lastPcx : Math.floor(this.lastPcx / step);
-    const pcz = step === 1 ? this.lastPcz : Math.floor(this.lastPcz / step);
-    const rx = nearestWrap(entry.cx, pcx, worldChunksX() / step);
-    const rz = nearestWrap(entry.cz, pcz, worldChunksZ() / step);
-    entry.mesh.position.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
-    entry.mesh.scale.set(step, 1, step);
+    const rx = nearestWrap(entry.cx, this.lastPcx, worldChunksX());
+    const rz = nearestWrap(entry.cz, this.lastPcz, worldChunksZ());
+    _placePosition.set(rx * CHUNK_SIZE, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE);
+    entry.mesh.position.copy(_placePosition);
     entry.mesh.updateMatrix();
-  }
-
-  /** The world matrix a chunk's drawing sits at, without touching a mesh: the batched path needs the same
-   *  transform the unbatched one computes (see `place`), and `out` is a scratch matrix so a window move does not
-   *  allocate one per chunk. */
-  private entryMatrix(entry: ChunkMeshEntry, out: THREE.Matrix4): void {
-    const step = entry.step;
-    const pcx = step === 1 ? this.lastPcx : Math.floor(this.lastPcx / step);
-    const pcz = step === 1 ? this.lastPcz : Math.floor(this.lastPcz / step);
-    const rx = nearestWrap(entry.cx, pcx, worldChunksX() / step);
-    const rz = nearestWrap(entry.cz, pcz, worldChunksZ() / step);
-    _placePosition.set(rx * CHUNK_SIZE * step, entry.cy * CHUNK_SIZE, rz * CHUNK_SIZE * step);
-    _placeScale.set(step, 1, step);
-    out.compose(_placePosition, _placeRotation, _placeScale);
-  }
-
-  /** The cache key of an entry, for the two lookups that only have the entry (`place`, `refreshFarVisibility`).
-   *  Fine keys are `cx,cy,cz` and far ones `<step>:cx,cy,cz` (see `build`/`buildFar`), i.e. exactly this. */
-  private keyOf(entry: ChunkMeshEntry): string {
-    return entry.step === 1
-      ? `${entry.cx},${entry.cy},${entry.cz}`
-      : `${entry.step}:${entry.cx},${entry.cy},${entry.cz}`;
-  }
-
-  /** WHICH COARSE CHUNKS ARE DRAWN (P2.00). A coarse chunk the fine ring covers is the READY RESERVE: it is
-   *  drawn only while the fine chunks of its column are not all there yet, and hidden the moment they are.
-   *
-   *  The swap is what removes the seam flash. Walking, the fine ring's trailing column leaves and its coarse
-   *  chunk — built long before, while it was still hidden — is drawn in the SAME frame; the reverse at the
-   *  leading edge is a coarse chunk staying up a little longer, until the fine chunks that replace it are
-   *  built AND opaque. Both directions keep terrain on screen the whole time, which is the property three
-   *  reference implementations get from nesting their levels (see `isFarBuildColumn`).
-   *
-   *  Cheap enough to run every frame: only the covered columns need the test (a column outside the fine ring is
-   *  always drawn), and the answer is memoised per column, so one column costs 4 × `CHUNK_Y_COUNT` lookups plus
-   *  four fade-set probes. */
-  private refreshFarVisibility(): void {
-    if (this.lod === null || this.tiers.length <= 1) return;
-    // The COLUMN identities with a chunk mid-FADE-IN, in ONE pass over the fades and keyed BY THE RUNG the
-    // chunk belongs to: a rung's reserve must stay on screen while the FINER chunk that covers it is still
-    // translucent, or the player looks through the fading mesh at the sky. Keyed by rung because the answer is
-    // always asked of the rung immediately inside (`finerColumnFading`) — a chunk's own fade never holds its
-    // OWN reserve up, which is the difference between a hidden reserve and a coarse surface drawn over real
-    // terrain for the length of a fade (the gate's "NONE of them is drawn" assertion caught exactly that).
-    const fading = new Map<number, Set<string>>();
-    for (const fade of this.fading) {
-      if (fade.out) continue;
-      const colon = fade.key.indexOf(":");
-      const step = colon >= 0 ? Number(fade.key.slice(0, colon)) : 1;
-      const parts = (colon >= 0 ? fade.key.slice(colon + 1) : fade.key).split(",");
-      let columns = fading.get(step);
-      if (columns === undefined) {
-        columns = new Set<string>();
-        fading.set(step, columns);
-      }
-      columns.add(`${parts[0]},${parts[2]}`);
-    }
-    const decided = new Map<string, boolean>();
-    for (const [key, entry] of this.cache.meshes) {
-      if (entry.step <= 1) continue;
-      const handle = this.batched.get(key);
-      /** One chunk's visibility, wherever its pixels come from: a batched chunk has no mesh in the scene, so the
-       *  same decision goes to its instances (M3a — which is why a batch kept the per-instance visibility flag). */
-      const show = (visible: boolean): void => {
-        if (handle !== undefined) this.batches?.setVisible(handle, visible);
-        else entry.mesh.visible = visible;
-      };
-      const tier = tierOfStep(this.ladder, entry.step);
-      if (tier === null) continue;
-      const period = worldChunksX() / entry.step;
-      const ccx = Math.floor(this.lastPcx / entry.step);
-      const ccz = Math.floor(this.lastPcz / entry.step);
-      const rx = nearestWrap(entry.cx, ccx, period);
-      const rz = nearestWrap(entry.cz, ccz, period);
-      // OUTSIDE ITS HOLE the rung is simply drawn: nothing finer covers it.
-      if (!inTierHole(tier, rx - ccx, rz - ccz)) {
-        show(true);
-        continue;
-      }
-      // INSIDE IT, the chunk is the READY RESERVE (P2.00): drawn only while the chunks of the rung INSIDE this
-      // one are missing — and until they are opaque, because a translucent chunk over nothing is the sky showing
-      // through it. One memo per column covers all `CHUNK_Y_COUNT` chunks of it.
-      const memoKey = `${entry.step}:${rx},${rz}`;
-      let ready = decided.get(memoKey);
-      if (ready === undefined) {
-        ready = !this.finerColumnFading(entry.step, rx, rz, fading) && this.finerColumnDecided(entry.step, rx, rz);
-        decided.set(memoKey, ready);
-      }
-      show(!ready);
-    }
-  }
-
-  /** Is a chunk of the rung IMMEDIATELY INSIDE this one — the 2×2 cells of the next finer rung that cover
-   *  `(ccx, ccz)` — still FADING IN? A fade is a translucent chunk, so the coarser chunk under it must stay on
-   *  screen; hiding the reserve the moment the finer geometry exists would show the sky through it. */
-  private finerColumnFading(step: number, ccx: number, ccz: number, fading: Map<number, Set<string>>): boolean {
-    const finer = step > 2 ? step / 2 : 1;
-    const columns = fading.get(finer);
-    if (columns === undefined) return false;
-    const [fx, fz] = this.finerCells(finer, ccx, ccz);
-    for (let dx = 0; dx < 2; dx++) {
-      for (let dz = 0; dz < 2; dz++) {
-        if (columns.has(`${fx[dx]},${fz[dz]}`)) return true;
-      }
-    }
-    return false;
-  }
-
-  /** The 2×2 cells of the rung INSIDE `step` that cover the cell `(ccx, ccz)`, as WRAPPED identities in that
-   *  rung's own cell space. A coarse cell is twice as wide on each axis, so its children are the cells
-   *  `2·cc` and `2·cc + 1` — measured in the FINER rung's space and wrapped by the FINER rung's period, which
-   *  is what a key holds (wrapping by the fine period instead left the ring's children unmatchable at the torus
-   *  seam: a rung-3 reserve stayed drawn for ever just outside the wrap). */
-  private finerCells(finer: number, ccx: number, ccz: number): [number[], number[]] {
-    const wrap = (v: number): number => {
-      const period = worldChunksX() / finer;
-      return ((v % period) + period) % period;
-    };
-    return [
-      [wrap(ccx * 2), wrap(ccx * 2 + 1)],
-      [wrap(ccz * 2), wrap(ccz * 2 + 1)],
-    ];
-  }
-
-  /** Are the chunks of the RUNGS INSIDE this one — the 2×2 cells of the next finer rung that cover
-   *  `(ccx, ccz)`, over the whole Y range — all DECIDED (built, or known to be empty: the cache's own contract,
-   *  and an empty chunk never becomes a mesh later)? `false` means the area still has a hole in it, so the
-   *  coarser chunk that covers it must stay on screen. */
-  private finerColumnDecided(step: number, ccx: number, ccz: number): boolean {
-    const finer = step > 2 ? step / 2 : 1;
-    const [fx, fz] = this.finerCells(finer, ccx, ccz);
-    for (let dx = 0; dx < 2; dx++) {
-      for (let dz = 0; dz < 2; dz++) {
-        for (let cy = MIN_CHUNK_Y; cy < MIN_CHUNK_Y + CHUNK_Y_COUNT; cy++) {
-          const key = finer === 1 ? `${fx[dx]},${cy},${fz[dz]}` : `${finer}:${fx[dx]},${cy},${fz[dz]}`;
-          if (this.cache.meshes.has(key) || this.cache.empty.has(key)) continue;
-          return false;
-        }
-      }
-    }
-    return true;
   }
 }

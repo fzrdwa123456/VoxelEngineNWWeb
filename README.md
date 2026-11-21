@@ -1,12 +1,12 @@
 # VoxelEngineTauri
 
-VoxelEngine 的 **Tauri v2** 版。壳从 NW.js 换成了 Tauri（Windows 上是 WebView2），前端同时完成了
-**微内核插件化**改造：TypeScript + three.js WebGPU + 手写 ECS，**12 个插件各带自己的数据、各自构造并声明
-自己的系统**，加一个功能 = 加一个 `plugins/<id>/` 文件夹（不需要改装配根的任何名单）。
+VoxelEngine 的 **Tauri v2** 版。壳从 NW.js 换成了 Tauri（Windows 上是 WebView2），前端按
+**DOD（数据导向）**组织：TypeScript + three.js WebGPU + 手写 ECS（列存组件、批处理系统），
+功能按 `plugins/<id>/` 文件夹分装，每个文件夹自带自己的数据与系统声明。
 
 > 逐文件的移植对照在 **[docs/PORT-TAURI.md](docs/PORT-TAURI.md)**；
 > **架构与编程思想的正式说明在 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
-> （微内核插件化架构 + DOD：层次与职责、依赖方向、扩展点、六条 DOD 规则、现状欠账）。
+> （DOD + 分层：层次与职责、依赖方向、扩展点、六条 DOD 规则、现状欠账）。
 > 改代码前要读的规则、当前目录表与铁律在 `AGENTS.md`；计划与欠账在 `ROADMAP.md`；
 > 手测清单在 `docs/TESTING.md`。
 

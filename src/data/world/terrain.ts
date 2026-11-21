@@ -12,27 +12,25 @@
 // on two independently built worlds.
 //
 // TORUS-PERIODIC BY CONSTRUCTION (this is the part that is easy to get wrong). X/Z is a torus whose lap is
-// `terrainPeriod()` blocks (P2.02: it used to be a hard-coded 1024 and is now the world-size setting — see
-// data/world/size.ts), so block (0, z) and block (lap, z) are THE SAME PLACE. A height field sampled from a
-// plain (unwrapped) hash would put a cliff there: the renderer draws the far side of the torus next to the near
-// side (`nearestWrap`), so the seam is visible, not theoretical. The lattice index of every noise octave is
-// therefore taken MODULO the number of cells in one lap, which makes the field exactly periodic —
-// `terrainHeight(x) === terrainHeight(x + lap)` holds analytically, not approximately. Every octave's cell size
-// must DIVIDE the lap for that to work, which is why they are powers of two and why a legal world size is a
-// multiple of 512 blocks (size.ts: the coarsest octave is 512 blocks); the gate asserts both facts — including
-// for a non-default size.
+// `terrainPeriod()` blocks (32 chunks = 1024 blocks, see data/world/world.ts), so block (0, z) and block
+// (lap, z) are THE SAME PLACE. A height field sampled from a plain (unwrapped) hash would put a cliff there:
+// the renderer draws the far side of the torus next to the near side (`nearestWrap`), so the seam is visible,
+// not theoretical. The lattice index of every noise octave is therefore taken MODULO the number of cells in one
+// lap, which makes the field exactly periodic — `terrainHeight(x) === terrainHeight(x + lap)` holds
+// analytically, not approximately. Every octave's cell size must DIVIDE the lap for that to work, which is why
+// they are powers of two; the gate asserts both facts.
 //
 // COST. One height per 32x32 column grid per chunk in the surface band, and the band is bounded
 // (TERRAIN_MIN_Y..TERRAIN_MAX_Y), so a chunk above or below it is filled UNIFORMLY and this module is never
 // called for it — that is what keeps a tall build range cheap (see generateChunk's fast paths).
-import { worldPeriodBlocks } from "./size";
 
-/** The noise's lattice period in BLOCKS: one lap of the torus. It IS the world's period now (P2.02), read from
- *  `data/world/size.ts` — the one number both this module and world.ts agree on, without either importing the
- *  other (`world.ts` imports THIS one). `check:ecs` asserts the field is periodic over exactly this lap for
- *  every legal world size, and that every octave's cell size divides it. */
+/** The noise's lattice period in BLOCKS: one lap of the torus. */
+const TERRAIN_PERIOD_BLOCKS = 32 * 32;
+
+/** The noise's lattice period in BLOCKS: one lap of the torus. `check:ecs` asserts the field is periodic over
+ *  exactly this lap, and that every octave's cell size divides it. */
 export function terrainPeriod(): number {
-  return worldPeriodBlocks();
+  return TERRAIN_PERIOD_BLOCKS;
 }
 
 /** The seed. A constant, so a world is reproducible; change it and the whole torus is a different world. */
@@ -44,8 +42,7 @@ export const TERRAIN_BASE_Y = 128;
 /** How far the coarse "region" term moves a whole area up or down (blocks). */
 const REGION_AMPLITUDE = 12;
 /** The REGION term's lattice cell, in blocks: the coarsest thing in the field (a whole area rises or falls
- *  together). It is the reason a legal world size is a multiple of 512 blocks (`data/world/size.ts`), and it is
- *  part of `TERRAIN_NOISE` below because the GPU copy of the field needs it too. */
+ *  together). Its size divides the lap, which is what keeps the field exactly periodic. */
 const REGION_CELL = 512;
 /** How far the octave stack makes the ground roll around that level (blocks). */
 const HILL_AMPLITUDE = 20;
@@ -67,27 +64,9 @@ const OCTAVES: readonly (readonly [number, number])[] = [
 const OCTAVE_WEIGHT = 1.75; // 1 + 0.5 + 0.25: what the weights add up to, so the result stays in [0, 1)
 
 /** THE TWO SEEDS, and why they are named rather than inlined: the region term uses `TERRAIN_SEED` and the hill
- *  stack uses a DIFFERENT one, and `hills` adds yet another offset per octave. Inlining the hill seed (which is
- *  what the first version of the GPU probe did NOT do — it passed the bare seed and produced a field up to 20
- *  blocks off, caught by the probe on its first run) is exactly the mistake this constant exists to prevent. */
+ *  stack uses a DIFFERENT one, and `hills` adds yet another offset per octave. Inlining the hill seed would
+ *  produce a field up to 20 blocks off. */
 const HILL_SEED = TERRAIN_SEED + 0x51ed270b;
-
-/** THE FIELD, AS DATA (M0 of the GPU route, `plugins/render/systems/lod-gpu-probe.ts`). A second implementation of
- *  this function — the GPU sampler that the LOD's sampling cost needs — must be BUILT from these numbers rather
- *  than typed out again, or the two drift and the coarse surface stops agreeing with the real chunks it has to
- *  meet. The probe's TSL reads THIS object, and the gate asserts it is the only place those numbers come from. */
-export const TERRAIN_NOISE = {
-  seed: TERRAIN_SEED,
-  hillSeed: HILL_SEED,
-  baseY: TERRAIN_BASE_Y,
-  regionAmplitude: REGION_AMPLITUDE,
-  hillAmplitude: HILL_AMPLITUDE,
-  octaveWeight: OCTAVE_WEIGHT,
-  octaves: OCTAVES,
-  regionCell: REGION_CELL,
-  minY: TERRAIN_MIN_Y,
-  maxY: TERRAIN_MAX_Y,
-} as const;
 
 /** 2^32 as a reciprocal: an integer hash's low 32 bits -> [0, 1) with one multiply. */
 const INV_U32 = 2.3283064365386963e-10;

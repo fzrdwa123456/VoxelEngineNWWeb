@@ -21,29 +21,10 @@ export interface RenderHandles {
       yieldTo: () => Promise<void>,
       onProgress?: (done: number, total: number) => void,
     ): Promise<void>;
-    /** Mark the FAR RING's meshes for a look re-resolution and answer how many (P1.97). A chain change has to
-     *  call this NEXT TO `VoxelWorld.markAllStale()`: the far ring is procedural and holds no chunk in the
-     *  world, so the world's queue can never name it. */
-    markFarStale(): number;
-    /** How much look work is queued in total — the world's stale chunks PLUS the far ring (P1.97). The reload
-     *  bar counts it, so it has to see both. */
+    /**
+     * How much look work is queued in total — the world's stale chunks. The reload bar counts it.
+     */
     readonly restylePending: number;
-    /** The world SIZE changed (P2.02): drop every mesh and every "decided" answer, so the next step rebuilds
-     *  the whole window for the new lap. Called by the world-entry driver, before it primes, and only when the
-     *  size actually moved. */
-    resetForNewWorld(): void;
-    /** HOW MANY LOD RUNGS the world in force actually got (P2.03): the ladder is capped by the lap, so a small
-     *  world builds fewer rungs than the policy asks for — and the entry says so, instead of leaving the player
-     *  to wonder why "6" looks like "2". */
-    readonly lodTiers: number;
-    /** M3a: how many far chunks are drawn through (look, tier) BATCHES, and how many buckets that is. The FRAME
-     *  line prints it (`batched=instances/buckets`), so "is the batching actually carrying the ring, and did the
-     *  draw calls fall by that much" is something the log answers rather than something to trust. */
-    readonly batchStats: {
-      readonly buckets: number;
-      readonly instances: number;
-      readonly batchedChunks: number;
-    };
   };
   /** The MENU frame drives this too (`menuFrame`): the background own step, once per ui frame. */
   readonly menuBackground: { step(): void };

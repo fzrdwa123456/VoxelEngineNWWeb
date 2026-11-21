@@ -129,13 +129,11 @@ export function bakeBlockIcon(
       canvas.height = size;
       const ctx = canvas.getContext("2d");
       if (!ctx) return null;
-            // WebGPU readback aligns bytesPerRow to 256; non-aligned sizes have row padding — strip it row by row
-      const rowBytes = size * 4;
-      const paddedRowBytes = Math.ceil(rowBytes / 256) * 256;
-      const clamped = new Uint8ClampedArray(rowBytes * size);
-      for (let y = 0; y < size; y++) {
-        clamped.set(pixels.subarray(y * paddedRowBytes, y * paddedRowBytes + rowBytes), y * rowBytes);
-      }
+      // `pixels` is ALREADY tightly packed: three's readback (WebGPUTextureUtils.copyTextureToBuffer)
+      // strips WebGPU's 256-byte row padding itself. Stripping it a second time shears every row and the
+      // icon comes out as diagonal garbage — which is exactly what the previously hand-rolled loop did.
+      const clamped = new Uint8ClampedArray(size * size * 4);
+      clamped.set(pixels.subarray(0, size * size * 4) as unknown as ArrayLike<number>);
       ctx.putImageData(new ImageData(clamped, size, size), 0, 0);
       const url = canvas.toDataURL("image/png");
       bake.cache.set(key, url);

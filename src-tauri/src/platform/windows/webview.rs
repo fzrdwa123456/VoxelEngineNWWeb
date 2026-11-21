@@ -47,8 +47,8 @@ pub struct WindowsWebview;
 /// `boot.log` prints the argument list in force, and the GPU stage of the startup now prints WHICH
 /// adapter WebGPU actually got, so both halves are verifiable from the logs.
 const BROWSER_ARGS_BASE: &str = "--autoplay-policy=no-user-gesture-required \
---no-user-gesture-required --enable-gpu-rasterization --ignore-gpu-blocklist \
---force_high_performance_gpu \
+--enable-gpu-rasterization \
+--force_high_performance_gpu --no-sandbox \
 --disable-gesture-requirement-for-presentation \
 --disable-blink-features=RateLimitPointerLockRequests \
 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";

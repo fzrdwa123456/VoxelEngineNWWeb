@@ -9,7 +9,6 @@
 
 import { defineResource, type Entity, type Resource } from "../../core/world";
 import type { VoxelWorld } from "../world/world";
-import { DEFAULT_WORLD_CHUNKS, sanitizeWorldChunks } from "../world/size";
 
 /** The local player's entity. Kept as a resource so "the player" is greppable data rather than a
  *  constructor argument hard-wired into five systems. */
@@ -560,15 +559,24 @@ export function pacingTargetHz(cap: number, vsync: boolean, refreshHz: number): 
 /** The frame-pacing decision as a PURE function: given the accumulator, this vblank's delta and the target
  *  rate, does this vblank DRAW, and what is the accumulator afterwards?
  *
- *  It is the same sum the loop has always used (`acc += delta; if (acc < budget) skip; acc %= budget`),
- *  extracted so it can be asserted — the arithmetic is where "locked to 60" quietly turns into "one
- *  duplicated frame every few seconds" when the target is a rounded rate the panel does not have.
+ *  `acc` IS CREDIT: the time that has not been turned into a frame yet. A draw spends exactly ONE budget and
+ *  the remainder is CARRIED, never reduced modulo the budget — that is the whole difference between 60fps
+ *  and 36fps the moment the callback stream is lumpy.
+ *
+ *  WHY NOT `acc %= budget` (measured): one callback can cover several budgets, because Chromium schedules
+ *  frames around input — a mouse-wheel burst arrives as two quick callbacks then one late one (`raf=61/s`
+ *  with deltas ≈ 8/8/33ms). The modulo threw away every frame that callback did not draw, so the loop
+ *  settled on every-other-vblank: `FRAME avg=28.24ms` (36fps) while `gpu=2.7ms`, `calls/tris` were flat and
+ *  `stalls=0` — the wheel changes nothing in the game (nothing reads it, see `rawinput.rs`), only the
+ *  cadence. Carrying the remainder conserves credit, so the same 8/8/33 stream draws ~58 frames a second
+ *  instead of 39 (simulated over 61 real callbacks). The price is that two draws can land inside one panel
+ *  refresh once in a while, which a ~3ms GPU absorbs; it is bounded by the callbacks themselves, since a
+ *  callback still draws at most once.
  *
  *  **KNOWN LIMIT, MEASURED (P1.86)**: a draw can only happen on a callback, and with the display-rate limit
- *  lifted Chromium delivers roughly 1.8 callbacks per panel refresh (`raf=108/s` while drawing 57/s). A target
- *  EQUAL to the panel rate therefore lands at ~57 fps with a repeated frame every ~20th refresh: waiting for
- *  the full period lands on the callback AFTER it. A rate well below the callback rate (a 30 cap) is EXACT
- *  (measured avg 33.05-33.63ms), and an exact 60 needs a real vblank reference (DWM's `qpcVBlank`, which
+ *  lifted Chromium delivers roughly 1.8 callbacks per panel refresh (`raf=108/s` while drawing 57/s). The
+ *  RATE now averages the target instead of drifting below it, but the PLACEMENT of a frame still follows the
+ *  callbacks: an exact 60 needs a real vblank reference (DWM's `qpcVBlank`, which
  *  `platform/windows/display.rs` already talks to) rather than a callback-counted one. **Do not "fix" this
  *  with a fudge factor**: a 4% early budget was measured and changed nothing (16.2-18.6ms frames either way). */
 export function paceFrame(acc: number, delta: number, targetHz: number): { draw: boolean; acc: number } {
@@ -576,7 +584,7 @@ export function paceFrame(acc: number, delta: number, targetHz: number): { draw:
   const budget = 1 / targetHz;
   const next = acc + delta;
   if (next < budget) return { draw: false, acc: next };
-  return { draw: true, acc: next % budget };
+  return { draw: true, acc: next - budget };
 }
 
 /** The same rule, for a value that arrives at RUNTIME (the SetFpsCap command): the factory sanitises
@@ -606,21 +614,16 @@ export function canControl(devices: InputState, ui: UiModalState): boolean {
 }
 
 // ===== The APPEARANCE FADE, as a setting (P2.01 → P2.05) =====
-// A chunk that APPEARS fades in and one that LEAVES fades out (P1.98/P1.99). Since P2.00 that is no longer
-// needed to hide a seam — every rung keeps a READY RESERVE in its hole, so a cell is replaced by geometry that
-// is already there — which makes the fade a LOOK, and a look belongs in the settings panel.
-// THE LOOK IS UNIFORM NOW (P2.05): ONE switch, and it answers for EVERY chunk — real 32³ chunks of the fine
-// ring and coarse cells of any LOD rung alike. P2.01/P2.04 split it per ring ("the far ring" / "the real
-// chunks", then "the outermost rung only"), which turned out to be a distinction the player has no reason to
-// make: a chunk either appeared or left. Nothing about the reserve changes — a coarse cell still stays drawn
-// until the finer chunks over it are BUILT AND OPAQUE, so a translucent chunk never uncovers the sky.
+// A chunk that APPEARS fades in and one that LEAVES fades out (P1.98/P1.99). ONE switch answers for EVERY chunk:
+// a chunk either appeared or left, and the fade is a LOOK, so it belongs in the settings panel.
+// `lod` is the KEY's historical name (the settings file keeps it); the VALUE now means "every chunk".
 // `chunks` is the OLD second switch: no longer read by anything (the row that set it is gone from the panel),
 // kept in the shape so an older `settings.json` loads, is not reported as repaired, and keeps its value.
 // The value is read by `chunk-stream` every step, so it lives in a RESOURCE (see the note above): a UI callback
 // may not assign one, so the panel sends `SetFadeOption`. The `J` key is still a SESSION-ONLY master switch over
 // it (it never touches the file) — handy for A/B while playing.
 export interface FadeOptions {
-  /** EVERY chunk fades in when it appears and out when it leaves (real chunks and every LOD rung) */
+  /** EVERY chunk fades in when it appears and out when it leaves */
   lod: boolean;
   /** @deprecated the pre-P2.05 fine-ring switch; accepted from the file and otherwise ignored */
   chunks: boolean;
@@ -632,26 +635,6 @@ export const FADE_OPTIONS = defineResource<FadeOptions>("fadeOptions");
  *  consulted. */
 export function createFadeOptions(lod: unknown = true, chunks: unknown = false): FadeOptions {
   return { lod: lod !== false, chunks: chunks === true };
-}
-
-// ===== The WORLD SIZE (P2.02) =====
-// How far you can walk before the world repeats, in CHUNKS per side (see data/world/size.ts for why it is a
-// choice at all: it is what bounds how far a distance LOD may reach before the lap shows the same terrain
-// twice). A RESOURCE rather than a plain setting, because the world-entry driver reads the value IN FORCE to
-// decide whether the lap has to change before it builds anything; the panel changes it through `SetWorldSize`,
-// and the file is written by the caller (config is not world state).
-export interface WorldSizeState {
-  /** The lap along X, in chunks (a legal multiple of `WORLD_CHUNKS_STEP`) */
-  chunksX: number;
-  /** The lap along Z, in chunks */
-  chunksZ: number;
-}
-export const WORLD_SIZE = defineResource<WorldSizeState>("worldSize");
-
-/** Sanitising factory, the same rule every config value follows: an unusable file value becomes the default
- *  lap, and a legal one is snapped into the domain. */
-export function createWorldSize(chunksX: unknown = DEFAULT_WORLD_CHUNKS, chunksZ: unknown = chunksX): WorldSizeState {
-  return { chunksX: sanitizeWorldChunks(chunksX), chunksZ: sanitizeWorldChunks(chunksZ) };
 }
 
 // ===== Configuration resources: the settings that are read ON THE TICK =====

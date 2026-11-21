@@ -6,26 +6,11 @@ import type { World } from "../../core/world";
 import { SLOT_RESOURCES } from "../../core/extension/slots";
 import { CameraViewSystem, CAMERA_VIEW_ACCESS } from "./systems/camera";
 import { ChunkStreamSystem, type ChunkMeshFactory, type MeshWorkerPool, CHUNK_STREAM_ACCESS } from "./systems/chunk-stream";
-// The far ring's POLICY is data (`data/world/lod.ts`), and the plugin is where the shipped choice is made: the
-// stream's own default is "no LOD" (the shape the tests drive), the game gets the ring.
-import { DEFAULT_LOD, type LodPolicy } from "../../data/world/lod";
 // The host builds the mesher (it is a `host/` object), so it needs the factory type: re-exported here rather
 // than reached for through `./systems/...`, which is this plugin own business.
 export type { ChunkMeshFactory, MeshWorkerPool };
 import { MenuBackgroundSystem } from "./systems/menu-background";
 import { BlockOutlineSystem, OUTLINE_ACCESS } from "./systems/outline";
-// M0 of the GPU route: the sampler probe (`K`), a debug tool that compares a GPU port of the terrain field
-// against the CPU reference. It changes no streaming state — it reports.
-import { LodGpuProbeSystem, LOD_PROBE_ACCESS } from "./systems/lod-gpu-probe";
-// M1 of the GPU route: the PRODUCTION sampler. The stream asks it for a far column's height grids; it answers from
-// a GPU batch (or from the CPU when the backend has no compute), so the far ring stops costing 71 s of main thread.
-import { LodGpuSamplerSystem, LOD_SAMPLE_ACCESS } from "./systems/lod-gpu-sampler";
-// M2a of the GPU route: the MESHER's decision as a compute kernel, proven against the production CPU mesher by a
-// probe (`M`) — the step before the geometry can be produced on the GPU instead of on this thread.
-import { GpuMesherProbeSystem, MESH_PROBE_ACCESS } from "./systems/lod-gpu-mesher-probe";
-// The NANITE ROUTE's first step: the GPU visibility pass (`N` proves it against two CPU references, and draws the
-// survivors it kept). The CPU stops deciding what to draw, which is the whole point of the route.
-import { GpuCullProbeSystem, CULL_PROBE_ACCESS } from "./systems/lod-gpu-cull-probe";
 import { definePlugin } from "../../core/plugin/descriptor";
 import {
   BLOCK_OUTLINE,
@@ -46,36 +31,18 @@ export interface RenderWiring {
   /** The platform's meshing WORKER POOL (P1.18h), when it has one: absent = mesh on this thread, which is
    *  what the gate and a worker-less environment do. */
   readonly pool?: MeshWorkerPool | null;
-  /** THE FAR RING (P1.93). Omitted = the plugin's own default (`DEFAULT_LOD`): the shipped game draws a fine
-   *  ring plus a coarse one. `null` = the single fine window the engine had before, which is what a test that
-   *  wants the old window shape passes. */
-  readonly lod?: LodPolicy | null;
-  /** Where the LOD probe writes its report (`host/` owns the log file, so the root hands the sink in — the same
-   *  shape the boot drivers use). Absent = the probe still runs and reports through the toast only. */
+  /** Where a probe or a wiring step writes its report (`host/` owns the log file, so the root hands the sink in
+   *  — the same shape the boot drivers use). */
   readonly log?: (line: string) => void;
 }
 
 /** The render lane's systems, constructed here. */
 export function createRenderSystems(w: RenderWiring) {
-  // M1: the sampler is built FIRST because the chunk stream takes it as its grid source (`LodGridSource`), and it
-  // has to exist before the stream can ask for a column. It resolves the renderer itself (iron rule 6), so the
-  // order here is about the dependency, not about the GPU.
-  const lodSampler = new LodGpuSamplerSystem(w.world, w.log ?? (() => {}));
   return {
-    chunkStream: new ChunkStreamSystem(
-      w.world,
-      w.mesh,
-      w.pool ?? null,
-      w.lod === undefined ? DEFAULT_LOD : w.lod,
-      lodSampler.source,
-    ),
+    chunkStream: new ChunkStreamSystem(w.world, w.mesh, w.pool ?? null),
     cameraView: new CameraViewSystem(w.world),
     outline: new BlockOutlineSystem(w.world),
     menuBg: new MenuBackgroundSystem(w.world),
-    lodProbe: new LodGpuProbeSystem(w.world, w.log ?? (() => {})),
-    lodSampler,
-    mesherProbe: new GpuMesherProbeSystem(w.world, w.log ?? (() => {})),
-    cullProbe: new GpuCullProbeSystem(w.world, w.log ?? (() => {})),
   };
 }
 
@@ -116,47 +83,6 @@ export function createRenderPlugin(w: RenderWiring) {
   stage: "render",
   ...OUTLINE_ACCESS,
   run: () => s.outline.render(),
-    });
-    api.system({
-  // M1 of the GPU route: the production sampler. One pump per frame — it walks the stream's far key set (which it
-  // READS, so the schedule places it after `chunk.stream`, the system that publishes it) and fires one dispatch.
-  name: "lod.gpu.sample",
-  stage: "render",
-  ...LOD_SAMPLE_ACCESS,
-  // DECLARED, because the two share a target (`chunkMeshes`) and the conflict rule refuses to guess: the sampler's
-  // work list IS the key set the stream writes, so it must run AFTER it (registration order is not a dependency).
-  after: ["chunk.stream"],
-  run: () => s.lodSampler.step(),
-    });
-    api.system({
-  // M0 of the GPU route: `K` starts the sampler probe. Registered AFTER the stream so the schedule's snapshot
-  // of the render batch stays stable, and it shares no component with anything — it reads the renderer and
-  // writes its own buffers, so it lands beside the other producers.
-  name: "lod.gpu.probe",
-  stage: "render",
-  ...LOD_PROBE_ACCESS,
-  run: () => s.lodProbe.step(),
-    });
-    api.system({
-  // M2a of the GPU route: `M` starts the MESHER probe. Its own target (`gpuMesherBuffers`) keeps it out of the
-  // sampler probe's way, and it reads the voxel data only to build the reference input — the same shape as the
-  // M0 probe, one milestone further along.
-  name: "lod.gpu.meshProbe",
-  stage: "render",
-  ...MESH_PROBE_ACCESS,
-  run: () => s.mesherProbe.step(),
-    });
-    api.system({
-  // THE NANITE ROUTE's visibility pass: `N` runs it. It reads the camera (to build the frustum planes the kernel
-  // and the CPU reference share) and writes only its own buffers plus its own boxes, so it lands beside the other
-  // probes and touches nothing the live draw reads.
-  name: "lod.gpu.cullProbe",
-  stage: "render",
-  ...CULL_PROBE_ACCESS,
-  // DECLARED, because the camera has a writer: the planes must be the pose this frame was drawn with, so the probe
-  // runs after `cameraView.render` (registration order is not a dependency — the schedule refuses to guess).
-  after: ["cameraView.render"],
-  run: () => s.cullProbe.step(),
     });
     api.system({
   // Ordered by what it READS: it consumes the camera and the chunk meshes, so the schedule itself

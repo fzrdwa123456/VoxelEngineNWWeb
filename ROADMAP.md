@@ -844,7 +844,7 @@ Still outstanding:
   the pure functions over data (`raycast.ts`, the `VoxelWorld` methods, `recipeStyle`, `t()`) are the data
   model's own accessors, not lane behaviour. `check:ecs` stays at **56** groups (its `SOURCES` list gained
   the four new modules) because nothing it pins changed meaning.
-- **P1.17 — the tree is a microkernel + plugins + DOD layout: `core/`, `plugins/`, `host/`, `data/`,
+- **P1.17 — the tree is a strict-layer + plugins + DOD layout: `core/`, `plugins/`, `host/`, `data/`,
   `shared/`, `boot/`.** `DONE`. P1.15/P1.16 had got data and behaviour into separate FOLDERS; what was
   still missing was the layer that says WHO MAY SEE WHOM. The tree is now: `core/` = the mechanism with no
   game vocabulary (`data/` = the DOD substrate: entity handles, `defineComponent` SOA columns,

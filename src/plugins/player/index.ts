@@ -11,7 +11,7 @@ import { definePlugin } from "../../core/plugin/descriptor";
 import type { World } from "../../core/world";
 import { SelectSlot, SwapSlots, Teleport } from "./commands";
 import { BlockInteractionSystem, INTERACTION_ACCESS } from "./systems/interaction";
-import { COLLISION_ACCESS, CollisionSystem } from "./systems/collision";
+import { COLLISION_ACCESS, CollisionSystem, type CollisionKernelHolder } from "./systems/collision";
 import { CONTROLLER_ACCESS, PlayerControllerSystem } from "./systems/controller";
 import { INPUT_ACCESS, PlayerInputSystem, type MouseCapture } from "./systems/input";
 import { MOVEMENT_ACCESS, PlayerMovementSystem } from "./systems/movement";
@@ -47,6 +47,8 @@ export interface PlayerWiring {
   readonly log: (line: string) => void;
   readonly inWorld: () => boolean;
   readonly mouse: MouseCapture;
+  /** The WASM collision kernel, when the platform has one (filled asynchronously by the root). */
+  readonly collisionKernel?: CollisionKernelHolder | null;
 }
 
 /** The six fixed-lane systems this plugin owns, constructed here. */
@@ -56,7 +58,7 @@ export function createPlayerSystems(w: PlayerWiring) {
     snapshot: new PositionSnapshotSystem(w.world),
     controller: new PlayerControllerSystem(w.world),
     movement: new PlayerMovementSystem(w.world),
-    collision: new CollisionSystem(w.world),
+    collision: new CollisionSystem(w.world, w.collisionKernel ?? null),
     interaction: new BlockInteractionSystem(w.world),
   };
 }

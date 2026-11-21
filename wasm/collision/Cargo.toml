@@ -1,0 +1,20 @@
+[package]
+name = "voxel-collision-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A `cdylib` for wasm32-unknown-unknown emits the raw .wasm; `wasm-bindgen` then turns it into a web module
+# (ESM glue + .d.ts), and `wasm-opt` (Binaryen) shrinks it. Both steps live in `scripts/build-wasm.mjs`.
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+wasm-bindgen = "0.2.130"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1

@@ -23,9 +23,9 @@ VoxelEngine — a Minecraft-style first-person voxel sandbox on **Tauri v2** (a 
 with a three.js WebGPU renderer, packaged as a portable Windows directory. This checkout is the Tauri
 port of `VoxelEngineNWWeb`; the NW.js original lives in its own checkout and is not touched from here.
 
-The code is organized as a **microkernel + plugins** tree (`core/` mechanism, `plugins/` features,
-`host/` the outside world) with a **data-oriented (DOD)** programming model (columns, hot/cold split,
-zero allocation on the hot path, structure changes only at a barrier). Both are written out in
+The code is organized around a **data-oriented (DOD)** programming model (columns, hot/cold split,
+zero allocation on the hot path, structure changes only at a barrier) inside a strict layer tree
+(`core/` mechanism, `plugins/` features, `host/` the outside world). Both are written out in
 `docs/ARCHITECTURE.md`, and the two sections right after the directory map below are the short version.
 
 **Current world state: a NOISE-TERRAIN, EDITABLE voxel world exists, streamed as a LADDER of LOD rungs
@@ -53,7 +53,7 @@ height field makes "where does the player stand" a question.
 
 ```
 src/
-├── core/                  the microkernel: mechanism only (no game vocabulary)
+├── core/                  the core: mechanism only (no game vocabulary)
 │   ├── data/                the DOD substrate: entity.ts (handles), component.ts (defineComponent ->
 │   │                        SOA columns / defineRecord -> cold records), query.ts (cached sparse-set
 │   │                        intersection), store.ts (columns + structuralVersion), resource.ts
@@ -148,12 +148,15 @@ constant, a resource's shape) → `data/`; a pure helper with no state → `shar
 `plugins/ui/systems/reconcile.ts` touches the document (a view spawns widget trees and registers action
 ids, it does not write styles).
 
-## Architecture — microkernel + plugins
+## Architecture — DOD + strict layers
 
-The name of this architecture is **microkernel (+ plugin) architecture**: a core that only knows
-MECHANISM, and features that are contributed into it. `plugins/` is no longer a layout: the mechanism is `core/extension/*` + `core/plugin/*`, every folder
-under `plugins/` opts in with a `plugin.ts`, and the composition root names NO plugin by hand
-(P1.18 built the registry; P1.18b moved the systems' construction into the plugins).
+The architecture is **data-oriented (DOD)** first: data is laid out by how it is READ (SOA columns,
+hot/cold split, zero allocation on the hot path, structure changes only at a barrier), and every
+behaviour is a system scanning those columns. On top of that the tree is strictly layered: a core that
+only knows MECHANISM, and features that are contributed into it. The mechanism is
+`core/extension/*` + `core/plugin/*`, every folder under `plugins/` opts in with a `plugin.ts`, and the
+composition root names NO plugin by hand (P1.18 built the registry; P1.18b moved the systems'
+construction into the plugins).
 
 **The three layers, and who may see whom.**
 
@@ -361,9 +364,11 @@ asserted. Three consequences worth knowing:
   compositor's vblank wait and Chromium's frame-rate limit are the BROWSER'S DEFAULTS again (P1.90): both
   experiments that lifted them are out of the launch arguments, because they cost the default mode more than
   the option was worth (see the launch-argument note above).
-  **AND THE SYNCS ARE NOT ALL EQUAL (measured)**: a target equal to the panel rate lands at ~57fps rather than
-  60, because the unthrottled callback rate (~1.8 per panel refresh) does not divide into the panel's rate —
-  see `paceFrame`'s note. `--disable-gpu-vsync` is deliberately NOT in the launch arguments either (it made the
+  **AND THE SYNCS ARE NOT ALL EQUAL (measured)**: a target equal to the panel rate lands near it rather than
+  exactly on it, because the unthrottled callback rate (~1.8 per panel refresh) does not divide into the
+  panel's rate — and a lumpy stream (Chromium reschedules frames around input) used to lock to
+  every-other-vblank, the 36fps the wheel produced until `paceFrame` carried the remainder instead of
+  discarding it — see `paceFrame`'s note. `--disable-gpu-vsync` is deliberately NOT in the launch arguments either (it made the
   synced case submit between vblanks, i.e. the judder), so presents stay vblank-locked and the compositor shows
   the newest frame once per refresh. An exact 60 needs a vblank clock; do not paper over it with a fudge factor
   (a 4% early budget was measured and changed nothing).

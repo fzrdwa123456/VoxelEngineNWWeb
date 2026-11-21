@@ -15,11 +15,13 @@ import { createPlayerPlugin, type PlayerWiring } from "./index";
 
 export function createPlugin(host: PluginHost): DiscoveredPlugin {
   const mouse = host.instances.mouseCapture as PlayerWiring["mouse"];
+  const collisionKernel = host.instances.wasmCollision as PlayerWiring["collisionKernel"];
   const built = createPlayerPlugin({
     world: host.world,
     log: host.log,
     inWorld: host.inWorld,
     mouse,
+    collisionKernel: collisionKernel ?? null,
   });
   // What the root DRIVES: the raw-input device layer feeds it, the frame loop drains it, the win-focus
   // handlers read its lock state, and `ui.navigation` takes/gives the capture through it.

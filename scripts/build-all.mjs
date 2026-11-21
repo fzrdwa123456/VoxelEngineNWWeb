@@ -28,6 +28,7 @@ function step(label, cmd, args, cwd = ROOT) {
   return r.status === 0;
 }
 
+step("wasm:build (the collision kernel)", process.execPath, [path.join(ROOT, "scripts", "build-wasm.mjs")]);
 step("tsc --noEmit (strict, zero errors)", process.execPath, [TSC_BIN, "--noEmit", "-p", "tsconfig.json"]);
 step("check:ecs (ECS gate, ends with RESULT: OK)", process.execPath, [path.join(ROOT, "scripts", "check-ecs.mjs")]);
 

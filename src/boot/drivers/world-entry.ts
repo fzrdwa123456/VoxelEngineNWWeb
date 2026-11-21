@@ -3,9 +3,7 @@
 // warm-up -> screen down -> mode "game" -> capture), and the root now only supplies what it owns - the
 // loop state, the menus, the pointer lock, the window queries and the spawn point.
 import { RENDER_HANDLES } from "../../data/globals/render-handles";
-import { VOXEL, WORLD_SIZE } from "../../data/globals/resources";
-import { setWorldChunks, worldPeriodBlocks } from "../../data/world/size";
-import type { LodPolicy } from "../../data/world/lod";
+import { VOXEL } from "../../data/globals/resources";
 import { Teleport } from "../../plugins/player/commands";
 import { HUMANOID_BODY } from "../../plugins/player/components";
 import { WORLD_MAX_Y } from "../../data/world/world";
@@ -24,9 +22,6 @@ export interface WorldEntryDeps {
   readonly loop: LoopState;
   readonly player: Entity;
   readonly spawn: { readonly x: number; readonly y: number; readonly z: number };
-  /** The LOD policy in force, so the entry can say how many rungs the world it is building actually got
-   *  (the LAP caps the ladder — see `lodLadder`). */
-  readonly lod: LodPolicy;
   readonly setLoopMode: (mode: "load" | "game" | "menu") => void;
   readonly hideMainMenu: () => void;
   readonly showPauseMenu: () => void;
@@ -54,32 +49,6 @@ export function createWorldEntry(deps: WorldEntryDeps): (mode: string) => Promis
  *  A RE-entry into a window that is still built skips the screen entirely (see `needsWarmUp`). */
 const enterWorld = async (mode: string): Promise<void> => {
   const entryStart = performance.now();
-  // ===== THE WORLD SIZE FIRST, AND BEFORE ANYTHING IS ASKED (P2.02) =====
-  // The lap is the world-size setting, and changing it invalidates EVERY chunk and EVERY mesh (a key is a
-  // wrapped identity, so "column 5" means a different place in a different lap). So: set the period, throw the
-  // voxel map and the mesh cache away, and only then let the entry ask `needsWarmUp` — which now answers "yes,
-  // there is work" (the wanted set was dropped), so the loading screen comes up and the whole window is rebuilt
-  // for the new world. Entering a world of the SAME size does none of this (`setWorldChunks` answers whether
-  // anything moved), which is what keeps a re-entry free.
-  {
-    const wanted = deps.world.resource(WORLD_SIZE);
-    const handles = deps.world.resource(RENDER_HANDLES).chunkStream;
-    if (setWorldChunks(wanted.chunksX, wanted.chunksZ)) {
-      deps.world.resource(VOXEL).reset();
-      handles.resetForNewWorld();
-      deps.log(
-        `WORLD size ${wanted.chunksX}x${wanted.chunksZ} chunks (${worldPeriodBlocks()} blocks around) ` +
-          "— the voxel map and every mesh were reset for the new lap",
-      );
-    }
-    // THE LADDER IS CAPPED BY THE LAP (P2.03): a rung at radius R repeats itself once R >= lap/2, so a small
-    // world builds FEWER rungs than the policy asks for. Saying so here is the difference between "6 is set and
-    // it looks like 2" being a mystery and being a read number — but it is reported AFTER the warm-up below
-    // (M1b), because the ladder does not exist yet at this point: `resetForNewWorld` just cleared it and it is
-    // `needsWarmUp`/`step` that builds it for the spawn column. The line used to be printed HERE, so every entry
-    // after a world-size change claimed `0 rung(s)` — a number that reads as "LOD is off" while the far ring is
-    // in fact being built.
-  }
   // The entry watches the window for fiddling of its own (P1.62e): a drag during the loading is remembered
   // and makes this entry start on the pause menu instead of capturing behind the user's back.
   deps.loop.geometryDuringLoad = false;
@@ -154,15 +123,6 @@ const enterWorld = async (mode: string): Promise<void> => {
     deps.world.renderUi(); // the barrier applies the Teleport before the first game frame reads it
     deps.log("WORLD already warm, entering without a screen");
   }
-  // …and NOW the ladder exists (both branches above asked `needsWarmUp`, which builds it for the spawn column, and
-  // the warm-up's own `step()` keeps it current), so the report is a real number instead of the `0 rung(s)` the
-  // pre-warm-up position used to print.
-  deps.log(
-    `WORLD LOD ladder: ${deps.world.resource(RENDER_HANDLES).chunkStream.lodTiers} rung(s) for this ` +
-      `${deps.world.resource(WORLD_SIZE).chunksX}-chunk lap ` +
-      `(the policy asks for up to ${deps.lod.tiers}; a bigger world in the world-type panel fits more)`,
-  );
-
   // Hand the display over in ONE ui lane: the screen comes down and the world is drawn by the very
   // next frame (a game frame draws the scene BEFORE its ui lane runs, so there is no empty frame).
   deps.world.commands.send(SetLoadingStage, { active: false });

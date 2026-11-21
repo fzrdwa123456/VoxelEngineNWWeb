@@ -226,7 +226,7 @@ export class DiagnosticsSystem {
       // THE DRAW SIDE (M1b): what one frame costs the renderer, from the FRAME probe's own accounts (the root
       // samples three's counters every drawn frame and rebases them — see the FRAME line) plus the LIVE attribute
       // count, which moves with the scene's geometry count (~3 per chunk geometry). `calls` is the number that
-      // says whether the far LOD ring's chunk meshes are what the frame is paying for.
+      // says whether the chunk meshes are what the frame is paying for.
       `${t("f3.draw")}: calls=${this.frameProbe.callsPerFrame.toFixed(0)} ` +
       `max=${this.frameProbe.drawCallMax} ` +
       `tris=${(this.frameProbe.trisPerFrame / 1000).toFixed(0)}k ` +

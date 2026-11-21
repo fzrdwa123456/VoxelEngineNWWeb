@@ -93,10 +93,9 @@ export interface SettingsCallbacks {
    *  and is on by default. */
   isDiagLogEnabled: () => boolean;
   onToggleDiagLog: (on: boolean) => boolean;
-  /** THE APPEARANCE FADES, per ring (P2.01): `lod` is the far ring (a chunk appearing at the far boundary has
-   *  nothing behind it, so its fade covers a real pop — ON by default) and `chunks` is the fine ring (the
-   *  P2.00 reserve means it is always replaced by geometry that is already there — OFF by default). READ from
-   *  the world's resource (the render lane reads the same object every step) and SET through a command. */
+  /** THE APPEARANCE FADE (P2.01 → P2.05): whether every chunk fades in when it appears and out when it leaves.
+   *  READ from the world's resource (the render lane reads the same object every step) and SET through a command.
+   *  `chunks` is the retired second switch, kept only so an older settings file still loads. */
   isFadeOn: (which: "lod" | "chunks") => boolean;
   onSetFade: (which: "lod" | "chunks", on: boolean) => void;
   getWindowMode: () => WindowMode;
@@ -351,11 +350,8 @@ export function buildSettingsPanel(
     }
   });
 
-  // --- THE APPEARANCE FADE (P2.01/P2.05), ONE row now: every chunk mesh — real chunks AND every LOD rung —
-  //     fades in when it appears and out when it leaves. The two rows this replaces asked "the far ring" and
-  //     "the real chunks" separately, which stopped meaning anything the moment the rule became uniform: a
-  //     chunk either appeared (fade in) or left (fade out), and WHICH rung it belongs to is not the player's
-  //     question. Same shape as the rows above: the name on the left, a two-state button on the right, and the
+  // --- THE APPEARANCE FADE (P2.01/P2.05), ONE row: every chunk fades in when it appears and out when it
+  //     leaves. Same shape as the rows above: the name on the left, a two-state button on the right, and the
   //     SWITCH's own state in a local `let` that only moves when the change was accepted (so the label can
   //     never disagree with the world). ---
   {

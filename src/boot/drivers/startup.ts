@@ -3,13 +3,15 @@
 // file, init the GPU, then hand over to the MENU with the screen coming down through the barrier. The
 // root supplies the pieces it owns (the loop's kick-off, the reveal, the renderer, the viewport sizing,
 // the main menu and the pointer lock); the stage list and the settings check live here.
-import { diffSettings, readSettingsChecked, backupSettingsFile, writeSettings, applyWindowModeAtStart, isDiagLogEnabled, getWindowMode, showWindow } from "../../host/desktop/shell";
+import { diffSettings, readSettingsChecked, backupSettingsFile, writeSettings, applyWindowModeAtStart, isDiagLogEnabled, getWindowMode, bootReport } from "../../host/desktop/shell";
+import { removeBootSplash } from "../../host/browser/presentation";
+import { probeWebviewFlags } from "../../host/browser/webview-probe";
 import { getLang } from "../../data/assets/i18n";
 import { getUIScaleMode } from "../../data/globals/uiscale";
 import { getFontId } from "../../data/globals/fonts";
 import { getBindsAll } from "../../plugins/input/keybinds";
 import { getEnabledPacks } from "../../data/assets/textures";
-import { FADE_OPTIONS, FPS_CAP, WORLD_SIZE, type LoopState } from "../../data/globals/resources";
+import { FADE_OPTIONS, FPS_CAP, type LoopState } from "../../data/globals/resources";
 import { CANVAS_HOST } from "../../data/globals/gfx";
 import { BOOT_FLOW } from "../../data/globals/boot";
 import { SetLoadingStage } from "../../data/globals/commands";
@@ -113,8 +115,6 @@ export function createStartupDriver(deps: StartupDeps): () => Promise<void> {
     // knows, or the next launch would report the engine's own setting as "unknown".
     fadeLod: deps.world.resource(FADE_OPTIONS).lod,
     fadeChunks: deps.world.resource(FADE_OPTIONS).chunks,
-    // …and the world size (P2.02): one number, in chunks per side.
-    worldXZ: deps.world.resource(WORLD_SIZE).chunksX,
     enabledPacks: getEnabledPacks(),
   };
   const checked = readSettingsChecked();
@@ -152,15 +152,20 @@ const BOOT_STAGES: readonly BootStage[] = [
     progress: 0,
     key: "loading.settings",
     run: () => {
+      // FIRST, before anything else: what the page can actually observe about the WebView2 launch
+      // arguments (`BOOT webview args:` proves they were PASSED; this proves which ones took effect).
+      for (const line of probeWebviewFlags()) {
+        deps.log(line);
+        bootReport(line);
+      }
+      // The WASM collision kernel is loaded by the composition root (it needs the voxel world's `is_solid`)
+      // and reports itself there; nothing about it blocks the boot.
       // The screen is spawned (hidden) during wiring; this frame is what shows it, and it is also the ONLY
       // place the chain is kicked off. Calling `frame()` directly — instead of scheduling it — keeps this
       // the single place a frame starts from; the call at the END of frame() re-arms it.
       deps.frame();
-      // The window is revealed only now, with the loading screen already in the DOM: the manifest hides it
-      // at creation ("show": false) precisely so nothing white can flash, and revealing it before the first
-      // paint would trade that for a black rectangle.
-      showWindow();
-      deps.suppressGeometryPause(); // the reveal itself resizes/moves the window
+      bootReport(`boot first frame @${Math.round(performance.now())}ms`);
+      deps.suppressGeometryPause(); // a window-mode change below may resize/move the window
       applyWindowModeAtStart();
       // The settings check's OUTCOME is data (bootFlow.note*), because the stage after this one reports it.
       const settings = checkSettingsAtBoot();
@@ -190,6 +195,7 @@ const BOOT_STAGES: readonly BootStage[] = [
       // The canvas host is read back from the world: "where the game's canvas goes" is world state too.
       deps.world.resource(CANVAS_HOST).appendChild(deps.renderer.domElement);
       deps.log(`BOOT graphics ready at ${(performance.now() - bootFlow.startedAt).toFixed(0)}ms`);
+      bootReport(`gpu ready @${Math.round(performance.now())}ms`);
     },
   },
   {
@@ -201,6 +207,10 @@ const BOOT_STAGES: readonly BootStage[] = [
     run: () => {
       deps.renderer.setClearColor(0x000000);
       deps.renderer.clear();
+      // The static HTML splash stays up for the WHOLE boot (the GPU handshake included) and is dropped here,
+      // in the same stage that brings the menu up — it covers exactly the stretch that used to be black.
+      removeBootSplash();
+      bootReport(`splash removed @${Math.round(performance.now())}ms`);
       deps.showMainMenu();
       deps.applyCursor();
       deps.setLoopMode("menu");

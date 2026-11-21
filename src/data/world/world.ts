@@ -1,7 +1,7 @@
 // ===== VoxelWorld: the block grid — chunk storage, toroidal wrapping, bounded Y =====
 //
 // TOPOLOGY (deliberate — read before changing anything here)
-//   X/Z : a TORUS. Chunk coordinates wrap modulo WORLD_CHUNKS_X/Z, so travelling far in one
+//   X/Z : a TORUS. Chunk coordinates wrap modulo WORLD_CHUNKS, so travelling far in one
 //         direction brings you back to where you started. Seamlessness is achieved in the
 //         renderer, not by teleporting the player: rendering/chunkstream.ts draws each chunk
 //         at the representation NEAREST the player (see nearestWrap). The player's own
@@ -24,13 +24,23 @@
 import { AIR, CHUNK_SIZE, Chunk, SOLID, voxelIndex } from "./chunk";
 import { FALLBACK_PALETTE, idIn, valueIn } from "./palette";
 import { TERRAIN_BASE_Y, TERRAIN_MAX_Y, TERRAIN_MIN_Y, terrainHeight } from "./terrain";
-import { worldChunksX, worldChunksZ } from "./size";
 
-/** THE TORUS PERIOD IS A CHOICE NOW (P2.02) and lives in `data/world/size.ts`: 32 chunks = 1024 blocks by
- *  default, and the world-entry driver sets it from the world-size setting before it builds a world. Everything
- *  here reads it through `worldChunksX/Z()` — a hard-coded 32 would silently disagree with the noise's period
- *  the moment the setting moved (the terrain field MUST repeat exactly on the lap, see terrain.ts). */
-export { DEFAULT_WORLD_CHUNKS, WORLD_CHUNKS_MAX, WORLD_CHUNKS_MIN, setWorldChunks, worldChunksX, worldChunksZ } from "./size";
+/** The torus period: 32 chunks = 1024 blocks. The renderer draws every chunk at its NEAREST representation
+ *  (see `nearestWrap`), and the terrain noise repeats on exactly this lap, so the horizon has no seam. */
+export const WORLD_CHUNKS = 32;
+
+/** The period along X, in chunks */
+export function worldChunksX(): number {
+  return WORLD_CHUNKS;
+}
+/** The period along Z, in chunks */
+export function worldChunksZ(): number {
+  return WORLD_CHUNKS;
+}
+/** The lap in BLOCKS (what the terrain noise repeats on, and what the player's coordinates run to) */
+export function worldPeriodBlocks(): number {
+  return WORLD_CHUNKS * CHUNK_SIZE;
+}
 /** Bounded vertical extent: chunk Y in [MIN_CHUNK_Y, MIN_CHUNK_Y + CHUNK_Y_COUNT).
  *  8 chunks = 256 blocks: 128 of ground plus 128 of build space above it. Air chunks are
  *  uniformly filled and therefore allocation-free (see chunk.ts), so the extra height is cheap. */
@@ -48,13 +58,11 @@ export const TERRAIN_TOP_Y = TERRAIN_BASE_Y;
  *  read from the generated column (`topSolidY`) — see boot/drivers/world-entry.ts. */
 export const WORLD_SURFACE_Y = TERRAIN_BASE_Y;
 
-/** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. Exported because the LOD
- *  sampler (`data/world/lod.ts`) needs the same band when it decides a coarse chunk is uniformly stone. */
+/** How many layers the surface band covers: 1 grass + (this - 1) dirt, stone below. */
 export const SURFACE_LAYERS = 4;
 
 /** THE LAYER RULE, in ONE place: `h` is a column's FIRST AIR LAYER and `y` a block in it — grass on the
- *  surface block, dirt under it, stone below. The generator and the LOD sampler (`data/world/lod.ts`) both
- *  ask this, so a coarse chunk and the fine chunks it covers cannot disagree about what a layer is. */
+ *  surface block, dirt under it, stone below. */
 export function terrainLayerValue(
   h: number,
   y: number,
@@ -72,7 +80,7 @@ function localOf(block: number): number {
 }
 
 /** Chunk coordinate -> chunk coordinate on the torus (negative-safe). The period is the one in force
- *  (data/world/size.ts), so a bigger world simply wraps later. */
+ *  (data/world/world.ts's torus), so a bigger world simply wraps later. */
 export function wrapChunkX(cx: number): number {
   const n = worldChunksX();
   return ((cx % n) + n) % n;
@@ -193,19 +201,6 @@ export class VoxelWorld {
    *  drawable. Until that call (a gate test, a world without the content plugin) it is FALLBACK_PALETTE. */
   private palette: readonly string[] = FALLBACK_PALETTE;
 
-  /** THE WORLD SIZE CHANGED (P2.02): throw away every chunk and both stale queues.
-   *
-   *  A chunk key is a WRAPPED identity, so the moment the period moves, every stored chunk means something else
-   *  ("column 5" is a different place in a 64-chunk lap than in a 32-chunk one) — keeping them would leave the
-   *  new world peppered with the old one's blocks. The render side has to drop its meshes in the same breath
-   *  (`chunk-stream.resetForNewWorld`), and the caller is the world-entry driver, BEFORE anything is generated
-   *  or streamed for the new world. */
-  reset(): void {
-    this.chunks.clear();
-    this.dirty.clear();
-    this.stale.clear();
-  }
-
   /** Install the palette in force, REPLACING it. Boot-only now: the pack reload uses `mergePalette`, because
    *  a replacement is exactly what re-points every existing voxel at another block. */
   setPalette(ids: readonly string[]): void {
@@ -314,6 +309,30 @@ export class VoxelWorld {
 
   isSolid(x: number, y: number, z: number): boolean {
     return this.getBlock(x, y, z) !== AIR;
+  }
+
+  /** Copy a block region into `out` as 0/1 SOLID flags — the DATA the collision kernel takes in, so it can run
+   *  without calling back per voxel. Layout is x fastest, then y, then z (the kernel's ABI), and the region
+   *  origin is a WORLD block coordinate: wrapping and the vertical bounds answer exactly what `getBlock` says,
+   *  so this copy and `isSolid()` can never disagree. Reads do not generate — an unloaded chunk is AIR, exactly
+   *  as it is for `getBlock`. */
+  fillSolidRegion(
+    ox: number,
+    oy: number,
+    oz: number,
+    nx: number,
+    ny: number,
+    nz: number,
+    out: Uint8Array,
+  ): void {
+    let i = 0;
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++) {
+          out[i++] = this.getBlock(ox + x, oy + y, oz + z) !== AIR ? 1 : 0;
+        }
+      }
+    }
   }
 
   /** Write one block. Returns false when the coordinate is outside the generated volume

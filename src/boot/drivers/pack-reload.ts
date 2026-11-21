@@ -170,8 +170,7 @@ const dropPackDerivedCaches = (): void => {
  *  whatever is left over is drained by ordinary game frames and a huge world cannot wedge this screen. */
 const restyleBehindScreen = async (): Promise<number> => {
   const stream = deps.world.resource(RENDER_HANDLES).chunkStream;
-  // BOTH QUEUES (P1.97): the world's stale chunks and the far ring's own look queue. The bar counts the work
-  // that is actually left, so it has to see both (see `restylePending`).
+  // The world's stale chunks: the bar counts the work that is actually left.
   const total = stream.restylePending;
   if (total === 0) return 0;
   await stream.restyleStale(deps.stage.paint, (done, all) => {
@@ -183,12 +182,8 @@ const restyleBehindScreen = async (): Promise<number> => {
 };
 
 /** EVERY mesh a chain change invalidated, marked in ONE place. The reload's invariant is "everything in
- *  CHUNK_MESHES gets its looks re-resolved", and there are TWO sources of meshes in there: the world's chunks
- *  and the FAR RING, which the world knows nothing about (P1.93: it is procedural and holds no chunk). Marking
- *  only the world left every already-loaded far chunk showing the previous chain's textures — it only picked
- *  the new ones up when a far chunk happened to be built or rebuilt (P1.97). */
-const markChainStale = (): number =>
-  deps.voxel.markAllStale() + deps.world.resource(RENDER_HANDLES).chunkStream.markFarStale();
+ *  CHUNK_MESHES gets its looks re-resolved". */
+const markChainStale = (): number => deps.voxel.markAllStale();
 
 /** ONE reload, start to finish. Returns the summary line; throws when the reload AND its rollback failed. */
 const reloadPacksNow = async (): Promise<string> => {

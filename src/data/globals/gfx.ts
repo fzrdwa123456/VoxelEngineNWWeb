@@ -58,11 +58,6 @@ export interface ChunkMeshEntry {
   readonly cx: number;
   readonly cy: number;
   readonly cz: number;
-  /** Fine chunks per horizontal axis for this entry (P1.93): 1 = a real 32³ chunk, 2 = a FAR-RING chunk whose
-   *  voxels are 2×2×1 super voxels. The mesh is scaled by `(step, 1, step)` on placement, which is what makes
-   *  one super-voxel face cover `step × step` blocks — and it is what tells a far entry's `cx`/`cz` apart from
-   *  a fine one's, since the two are in different units. */
-  readonly step: number;
 }
 
 /** The chunk-mesh CACHE: one mesh per visible chunk, keyed by wrapped chunk identity. It used to be
@@ -84,9 +79,6 @@ export interface ChunkMeshCache {
   /** The window's WANTED key set, rebuilt only when the player crosses a chunk boundary (null until the
    *  first build): "which chunks does this window want" is state of the cache, so it is readable here. */
   wantedKeys: Set<string> | null;
-  /** The FAR RING's wanted key set (P1.93), in COARSE chunk units, keyed `"<step>:cx,cy,cz"` so a coarse key
-   *  can never collide with a fine one. null when LOD is off (and before the first build). */
-  farKeys: Set<string> | null;
   /** The player column the wanted set was built for (NaN = never built) */
   lastPcx: number;
   lastPcz: number;
@@ -154,13 +146,11 @@ export interface ChunkMaterialState {
   /** One material per LOOK (P1.46), keyed by `ChunkFaceSpec.key`: a chunk that holds grass, dirt and stone
    *  draws three groups, and every chunk showing grass shares one material. */
   readonly materials: Map<string, THREE.Material>;
-  /** One TEXTURE per resolved URL, shared by every material that shows that look — including the LOD view's
-   *  tinted variants. It exists because the alternative is not merely wasteful but VISIBLE: a `Texture` with no
-   *  image yet is uploaded by three as a 1×1 UNINITIALISED (black) texture, so a material built from a fresh
-   *  `TextureLoader().load(url)` draws pure black until its data arrives. Building one per (look, tier) meant
-   *  pressing `G` — which resolves every look for every rung at once — painted whole rungs black for as long as
-   *  their images took to decode, which is the reported «按 G 之后部分区域变成黑色，有时又被刷掉». Sharing the
-   *  loaded texture removes the window entirely AND keeps one GPU copy of a PNG instead of one per tier. */
+  /** One TEXTURE per resolved URL, shared by every material that shows that look. It exists because the
+   *  alternative is not merely wasteful but VISIBLE: a `Texture` with no image yet is uploaded by three as a
+   *  1×1 UNINITIALISED (black) texture, so a material built from a fresh `TextureLoader().load(url)` draws pure
+   *  black until its data arrives. Sharing the loaded texture removes the window entirely AND keeps one GPU copy
+   *  of a PNG instead of one per look. */
   readonly textures: Map<string, THREE.Texture>;
 }
 

@@ -10,8 +10,9 @@
 //   * **Logs**: batch (64 lines or 200ms) and send one `append_log`. The original did one synchronous
 //     appendFile per line; carried over to Tauri that becomes one IPC per frame — a necessary behaviour
 //     change, written down in the README.
-//   * **Window**: everything goes through custom commands (src-tauri/src/win.rs), so the window plugin's
-//     permissions are not needed.
+//   * **Window**: capture, cursor and window-mode go through custom commands (src-tauri/src/win.rs). The
+//     window itself is created and shown by Tauri from `tauri.conf.json` (`"visible": true`), so the
+//     frontend needs no window API and no window permissions.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { shellState, FLUSH_LINES, FLUSH_MS, type ShellSnapshot } from "../../data/globals/shell";
@@ -234,12 +235,6 @@ export type { SettingsDiff } from "../../core/services/settings-diff";
 
 // ===== Cursor / window =====
 
-// Show window: "visible": false in the config -> only show it after the first frame is rendered (avoids a
-// white startup screen)
-export function showWindow(): void {
-  void invoke("show_window").catch(() => {});
-}
-
 // ===== Native window focus =====
 // Focus events are forwarded by Rust's WindowEvent::Focused as win-focus / win-blur
 const focusListeners = new Set<() => void>();
@@ -343,7 +338,7 @@ function notifyWindowMode(): void {
   modeListeners.forEach((cb) => cb());
 }
 
-/** Enter fullscreen per the setting at startup (the original called this after showWindow).
+/** Enter fullscreen per the setting at startup (applied once the first frame is up).
  *  The original used NW.js's kiosk fullscreen (entering and leaving it both keep the maximised state);
  *  Tauri goes through its own set_fullscreen, which has none of kiosk's HWND_TOPMOST side effects, so the
  *  original's unTopmost() patch is not needed here. */
