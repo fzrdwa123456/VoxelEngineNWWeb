@@ -58,11 +58,11 @@ const SOURCES = [
   "src/plugins/player/index.ts",
   "src/plugins/render/index.ts",
   "src/plugins/diagnostics/index.ts",
-  "src/plugins/ui/index.ts",
-  "src/plugins/ui-debug/index.ts",
-  "src/plugins/ui-keybind/index.ts",
-  "src/plugins/ui-inventory/index.ts",
-  "src/plugins/ui-toast/index.ts",
+  "src/ui/index.ts",
+  "src/ui/ui-debug/index.ts",
+  "src/ui/ui-keybind/index.ts",
+  "src/ui/ui-inventory/index.ts",
+  "src/ui/ui-toast/index.ts",
   "src/plugins/input/index.ts",
   "src/plugins/content-default/index.ts",
   "src/data/globals/resources.ts",
@@ -88,14 +88,14 @@ const SOURCES = [
   "src/plugins/render/systems/diagnostics.ts",
   // The delayed intents (relock / lock retry / cursor re-assert): the ui-lane system that applies
   // whatever wall-clock deadline has passed. It owns no timer and touches no DOM itself.
-  "src/plugins/ui/systems/delays.ts",
+  "src/ui/systems/delays.ts",
   // The widget layer: pure data + one pure style function + the action table + the reconciler. None of
   // them touches the DOM at import time, which is what lets this gate load them.
   "src/data/assets/theme.ts",
   // The menu background's KIND + SIGNATURE (P1.18g): driven below against synthetic chains, so the file the
   // pack reload asks "did the backdrop change?" is the real one.
   "src/data/assets/background.ts",
-  "src/plugins/ui/components.ts",
+  "src/ui/components.ts",
   "src/data/globals/actions.ts",
   // The presentation TOKENS + state shapes are pure data (gfx.ts); the factories that build those objects
   // are the boundary's (host/browser/presentation.ts). A check that needs either loads both.
@@ -103,21 +103,21 @@ const SOURCES = [
   "src/host/browser/presentation.ts",
   // The boot flow's DATA (the walker lives in core/flow/boot.ts).
   "src/data/globals/boot.ts",
-  "src/plugins/ui/systems/bindings.ts",
-  "src/plugins/ui/systems/reconcile.ts",
+  "src/ui/systems/bindings.ts",
+  "src/ui/systems/reconcile.ts",
   // The three UI systems that own state the views used to keep privately: the F3+F4 picker (key edges
   // -> PICKER_STATE -> a SetMode command), the HUD toast (a wall-clock deadline in a resource), and the
   // key bind panels + drag gesture (KEYBIND_GESTURE as data, the panels derived every frame).
-  "src/plugins/ui-debug/systems/picker.ts",
-  "src/plugins/ui-toast/systems/toast.ts",
-  "src/plugins/ui/systems/loading.ts",
-  "src/plugins/ui/systems/hud.ts",
+  "src/ui/ui-debug/systems/picker.ts",
+  "src/ui/ui-toast/systems/toast.ts",
+  "src/ui/systems/loading.ts",
+  "src/ui/systems/hud.ts",
   // The inventory reconcile (a system now �?it used to be `Inventory.sync()`, a method on the view, which
   // is why this file was not compiled here before). It imports the icon baker + the block registry, both
   // of which are import-safe in Node (the WebGPU renderer they use is created lazily on the first bake).
-  "src/plugins/ui-inventory/systems/inventory.ts",
-  "src/plugins/ui-keybind/systems/keybind.ts",
-  "src/plugins/ui/systems/navigation.ts",
+  "src/ui/ui-inventory/systems/inventory.ts",
+  "src/ui/ui-keybind/systems/keybind.ts",
+  "src/ui/systems/navigation.ts",
   "src/plugins/render/systems/camera.ts",
   // The block target outline: a render-lane system that reads the TARGET_HIT component and moves a
   // three.js mesh. Import-safe in Node �?it imports three.js for TYPES only and the mesh arrives as the
@@ -1468,6 +1468,18 @@ check("the chunk stream can say whether a window still needs warming", () => {
 console.log("\n--- the UI widget layer: theme, prefabs, migrated surfaces ---");
 
 const readSource = (rel) => require("node:fs").readFileSync(path.join(ROOT, rel), "utf8");
+/** Where a plugin's SOURCE lives: `plugins/<id>/` for the game plugins, and `ui/` for the UI module — whose
+ *  own plugin is `ui/index.ts` and whose optional surfaces are `ui/ui-<name>/index.ts` (the UI tree is not
+ *  under `plugins/`: it is removable on its own and no game plugin owns it). */
+const pluginSource = (id, file) =>
+  readSource(
+    id === "ui" || id.startsWith("ui-")
+      ? `src/ui/${id === "ui" ? "" : `${id}/`}${file}`
+      : `src/plugins/${id}/${file}`,
+  );
+/** The same rule for the COMPILED module (the gate drives plugins through the tsc output). */
+const pluginLoad = (id, file) =>
+  load(id === "ui" || id.startsWith("ui-") ? `ui/${id === "ui" ? "" : `${id}/`}${file}` : `plugins/${id}/${file}`);
 const countOf = (s, re) => (s.match(re) || []).length;
 /** Comments document what was removed ("the reconciler replaced onLangChange"), so a source-text
  *  assertion has to look at CODE —otherwise the note explaining the migration fails the migration. */
@@ -1477,19 +1489,19 @@ check("the theme is the ONLY place a colour literal lives", () => {
   const theme = readSource("src/data/assets/theme.ts");
   assert(countOf(theme, /#[0-9a-fA-F]{3,8}\b/g) > 0, "the theme defines the colours");
   for (const rel of [
-    "src/plugins/ui/components.ts",
+    "src/ui/components.ts",
     "src/data/globals/actions.ts",
-    "src/plugins/ui/systems/reconcile.ts",
+    "src/ui/systems/reconcile.ts",
     // …and every MIGRATED surface, which is what makes the rule worth having: the menus used to carry
     // 45 + 21 literals between them.
-    "src/plugins/ui/views/hud.ts",
-    "src/plugins/ui/views/menu.ts",
-    "src/plugins/ui/views/mainmenu.ts",
+    "src/ui/views/hud.ts",
+    "src/ui/views/menu.ts",
+    "src/ui/views/mainmenu.ts",
     // …and the three UI systems the surfaces migrated INTO: a colour literal there would be just as
     // wrong as one in a view (they write widget data; the theme owns every colour).
-    "src/plugins/ui-debug/systems/picker.ts",
-    "src/plugins/ui-toast/systems/toast.ts",
-    "src/plugins/ui-keybind/systems/keybind.ts",
+    "src/ui/ui-debug/systems/picker.ts",
+    "src/ui/ui-toast/systems/toast.ts",
+    "src/ui/ui-keybind/systems/keybind.ts",
   ]) {
     equal(
       countOf(stripComments(readSource(rel)), /#[0-9a-fA-F]{3,8}\b|rgba?\(/g),
@@ -1608,7 +1620,7 @@ check("every recipe resolves to a style, and state changes it", () => {
 // second World claiming UI_TREE would throw (see the one-World rule above).
 const widgetWorld = new World();
 /** The widget layer, for every check in this section (the prefabs, the components, the setters) */
-const W = load("plugins/ui/components.js");
+const W = load("ui/components.js");
 // The tree's creation counter is a RESOURCE now (it used to be a module-level `let`, i.e. shared by every
 // World): it has to be inserted before the first spawn, exactly as main.ts does.
 widgetWorld.insertResource(W.UI_ORDER, W.createUiOrder());
@@ -1618,7 +1630,7 @@ const PAINT = load("data/globals/paint.js");
 widgetWorld.insertResource(PAINT.UI_PAINT, PAINT.createUiPaint(C.INVENTORY_SLOTS));
 
 check("widget prefabs build the tree the reconciler expects", () => {
-  const W = load("plugins/ui/components.js");
+  const W = load("ui/components.js");
   const uiWorld = widgetWorld;
   const panel = W.spawnPanel(uiWorld, null, "picker.panel", { hidden: true });
   const row = W.spawnPanel(uiWorld, panel, "picker.row");
@@ -1669,8 +1681,8 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   // used, and for a <button> that means falling back to the browser's own face —which is how every
   // button and choice in the menus turned light grey (white) until the pointer touched it. This runs
   // the real system against a minimal DOM stub and asserts the two halves of the rule.
-  const W = load("plugins/ui/components.js");
-  const { UiRenderSystem } = load("plugins/ui/systems/reconcile.js");
+  const W = load("ui/components.js");
+  const { UiRenderSystem } = load("ui/systems/reconcile.js");
   const { defaultUiTheme, UI_THEME, recipeStyle } = load("data/assets/theme.js");
   const { createUiActions, onUiAction, UI_ACTIONS } = load("data/globals/actions.js");
   const P = loadPresentation();
@@ -1992,7 +2004,7 @@ check("the reconciler writes the DOM from data: no wipe of a recipe, and a scrol
   }
 
   // …and the SOURCE says the same thing: every listener is on the mount root, none on a widget.
-  const reconcilerSrc = stripComments(readSource("src/plugins/ui/systems/reconcile.ts"));
+  const reconcilerSrc = stripComments(readSource("src/ui/systems/reconcile.ts"));
   equal(
     countOf(reconcilerSrc, /element\.addEventListener|addEventListener\("mouseenter"|addEventListener\("mouseleave"/g),
     0,
@@ -2011,7 +2023,7 @@ check("a delayed intent is DATA with a deadline, applied by a system �?never a
   // module wanted it. The DEADLINE is a resource now, which is what makes the timing assertable at all �?
   // the gate drives the clock instead of sleeping through it.
   const R = load("data/globals/resources.js");
-  const { DelaySystem, DELAYS_ACCESS } = load("plugins/ui/systems/delays.js");
+  const { DelaySystem, DELAYS_ACCESS } = load("ui/systems/delays.js");
 
   let now = 1000;
   const queue = R.createDelayedIntents(() => now);
@@ -2085,7 +2097,7 @@ check("a delayed intent is DATA with a deadline, applied by a system �?never a
   for (const rel of [
     "src/host/browser/pointerlock.ts",
     "src/host/browser/window-guards.ts",
-    "src/plugins/ui/systems/delays.ts",
+    "src/ui/systems/delays.ts",
   ]) {
     equal(countOf(stripComments(readSource(rel)), /setTimeout|setInterval/g), 0, `${rel} still owns a timer`);
   }
@@ -2152,7 +2164,7 @@ check("the icon cache has a synchronous reader, and both readers agree on the ke
   // backfill the slot's UI_IMAGE from a `.then` continuation, i.e. a component write with no lane around
   // it (and a frame could be painted from it at any point). The system asks for the bake and reads the
   // cache on its next run instead.
-  const invSource = stripComments(readSource("src/plugins/ui-inventory/systems/inventory.ts"));
+  const invSource = stripComments(readSource("src/ui/ui-inventory/systems/inventory.ts"));
   assert(!/\.then\(/.test(invSource), "the inventory draws the icon from the cache, not from a promise");
   // Since P1.18b the icon baker is INJECTED (a plugin may not import `host/`), so the check is
   // two-sided: the system asks through its IconSource, and the composition root hands it the real one.
@@ -2167,8 +2179,8 @@ check("a bound widget takes its value from its source, not from whoever built it
   // The main menu and the pause menu each build a settings panel, so each used to hold its OWN copy of
   // the frame cap; the two drifted apart and neither was guaranteed to match the value in force. A
   // binding makes the shared state the only owner. This runs the real resolver, no DOM involved.
-  const W = load("plugins/ui/components.js");
-  const B = load("plugins/ui/systems/bindings.js");
+  const W = load("ui/components.js");
+  const B = load("ui/systems/bindings.js");
   const S = load("data/globals/sources.js");
   const world = widgetWorld;
   const sources = S.createUiSources();
@@ -2235,7 +2247,7 @@ check("a bound widget takes its value from its source, not from whoever built it
 
 check("the migrated surfaces carry no styling and no DOM of their own", () => {
   // The HUD surface, where even a language subscription is gone (its text is all keys).
-  for (const rel of ["src/plugins/ui/views/hud.ts"]) {
+  for (const rel of ["src/ui/views/hud.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /style\.cssText|document\.createElement/g), 0, `${rel} still builds DOM`);
@@ -2243,7 +2255,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   }
   // The UI SYSTEMS the views migrated into: no DOM, no styling, and —the point of the migration —no
   // `document.addEventListener` (only the device layer listens) and no private timer for "how long".
-  for (const rel of ["src/plugins/ui-debug/systems/picker.ts", "src/plugins/ui-toast/systems/toast.ts", "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui/systems/delays.ts"]) {
+  for (const rel of ["src/ui/ui-debug/systems/picker.ts", "src/ui/ui-toast/systems/toast.ts", "src/ui/ui-keybind/systems/keybind.ts", "src/ui/systems/delays.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /#[0-9a-fA-F]{3,8}\b|rgba?\(/g), 0, `${rel} still has a colour literal`);
     equal(countOf(code, /document\.|createElement|style\.cssText/g), 0, `${rel} still touches the DOM`);
@@ -2253,7 +2265,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
   // The menus and the settings panel. `onLangChange` is ALLOWED here: a label composed from a VALUE
   // ("FPS 60", "1.25x") cannot be a key, so those few still have to be re-pushed on a language switch.
   // Everything a key can express is re-derived by the reconciler instead.
-  for (const rel of ["src/plugins/ui/views/menu.ts", "src/plugins/ui/views/mainmenu.ts", "src/plugins/ui-inventory/views/inventory.ts"]) {
+  for (const rel of ["src/ui/views/menu.ts", "src/ui/views/mainmenu.ts", "src/ui/ui-inventory/views/inventory.ts"]) {
     const code = stripComments(readSource(rel));
     equal(countOf(code, /document\.createElement\(/g), 0, `${rel} still creates an element by hand`);
     equal(countOf(code, /style\.cssText/g), 0, `${rel} still writes an inline style string`);
@@ -2268,15 +2280,15 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
     );
   }
   // …and they compose the prefabs instead
-  assert(/spawnPanel\(/.test(readSource("src/plugins/ui/views/hud.ts")), "hud composes panels");
-  assert(/spawnLabel\(/.test(readSource("src/plugins/ui-debug/systems/picker.ts")), "the picker composes its own labels");
-  assert(/setUiVisible\(/.test(readSource("src/plugins/ui-debug/systems/picker.ts")), "…and shows/hides them as data");
-  assert(/spawnButton\(/.test(readSource("src/plugins/ui/views/menu.ts")), "the settings panel composes buttons");
-  assert(/spawnGridKey\(/.test(readSource("src/plugins/ui-keybind/views/keybind.ts")), "the visual keyboard composes keycaps (in the plugin that owns the page)");
-  assert(/onUiAction\(/.test(readSource("src/plugins/ui/views/mainmenu.ts")), "the main menu dispatches actions");
-  assert(/spawnButton\(/.test(readSource("src/plugins/ui-inventory/views/inventory.ts")), "the inventory VIEW composes slot buttons");
-  assert(/setUiImage\(/.test(readSource("src/plugins/ui-inventory/systems/inventory.ts")), "…and the SYSTEM fills icon slots as data");
-  equal(countOf(stripComments(readSource("src/plugins/ui-inventory/views/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
+  assert(/spawnPanel\(/.test(readSource("src/ui/views/hud.ts")), "hud composes panels");
+  assert(/spawnLabel\(/.test(readSource("src/ui/ui-debug/systems/picker.ts")), "the picker composes its own labels");
+  assert(/setUiVisible\(/.test(readSource("src/ui/ui-debug/systems/picker.ts")), "…and shows/hides them as data");
+  assert(/spawnButton\(/.test(readSource("src/ui/views/menu.ts")), "the settings panel composes buttons");
+  assert(/spawnGridKey\(/.test(readSource("src/ui/ui-keybind/views/keybind.ts")), "the visual keyboard composes keycaps (in the plugin that owns the page)");
+  assert(/onUiAction\(/.test(readSource("src/ui/views/mainmenu.ts")), "the main menu dispatches actions");
+  assert(/spawnButton\(/.test(readSource("src/ui/ui-inventory/views/inventory.ts")), "the inventory VIEW composes slot buttons");
+  assert(/setUiImage\(/.test(readSource("src/ui/ui-inventory/systems/inventory.ts")), "…and the SYSTEM fills icon slots as data");
+  equal(countOf(stripComments(readSource("src/ui/ui-inventory/views/inventory.ts")), /setUiImage|setUiText|setUiTip|setUiSelected/g), 0,
     "the view writes no widget data any more (that is the system's job)");
 });
 
@@ -2284,7 +2296,7 @@ check("the migrated surfaces carry no styling and no DOM of their own", () => {
 
 check("the F3+F4 picker is a system: key edges in, widget data and a mode change out", () => {
   // It used to be a class in ui/gamemode.ts with its own document listeners and private fields.
-  const P = load("plugins/ui-debug/systems/picker.js");
+  const P = load("ui/ui-debug/systems/picker.js");
   const world = widgetWorld;
   world.insertResource(PICKER_STATE, createPickerState());
   world.insertResource(KEY_EVENTS, createKeyEventLog());
@@ -2387,7 +2399,7 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   // PAUSE menu �?where the hotbar's z-index (31) is above that menu's whole root (30), so it drew on top
   // of the panel �?with its slots still clickable (a menu click could select a slot, a SetMode-free but
   // still component-writing command). `ui.hud` owns that flag and derives it from `inWorld()`.
-  const H = load("plugins/ui/systems/hud.js");
+  const H = load("ui/systems/hud.js");
   const world = widgetWorld;
   const crosshair = W.spawnPanel(world, null, "hud.crosshair"); // spawned visible, like the real ones
   const hotbar = W.spawnPanel(world, null, "inv.hotbar");
@@ -2423,18 +2435,18 @@ check("the GAMEPLAY widgets are visible only while a world runs (the crosshair a
   // The system is registered in the ui lane with a declared access set, ahead of every other writer �?
   // "what may the lane show at all" comes first �?and the composition root hands it the two roots.
   const main = stripComments(readSource("src/boot/main.ts"));
-  assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")), "the composition root registers ui.hud");
-  const crossSrc = stripComments(readSource("src/plugins/ui-crosshair/index.ts"));
+  assert(/name: "ui\.hud"/.test(main) || /[\s\S]*/.test(readSource("src/ui/index.ts")), "the composition root registers ui.hud");
+  const crossSrc = stripComments(readSource("src/ui/ui-crosshair/index.ts"));
   assert(/build: \(mount\) => \[spawnCrosshair\(mount\.world\)\]/.test(crossSrc),
     "…which BUILDS the crosshair when the element is mounted (not at wiring)");
-  const invPlugin = stripComments(readSource("src/plugins/ui-inventory/index.ts"));
+  const invPlugin = stripComments(readSource("src/ui/ui-inventory/index.ts"));
   assert(/api\.contribute\(SLOT_UI_HUD, \[hotbar\]\)/.test(invPlugin),
     "…and the HOTBAR is the inventory plugin's OWN element (that is what makes F11 a real despawn)");
   assert(!/id: "hotbar"/.test(main), "…so the core's table no longer declares it");
   assert(!/id: "crosshair"/.test(main), "the CORE table declares no HUD element of its own any more (P1.48)");
   assert(/gate: \(\) => deps\.inWorld\(\)/.test(crossSrc), "…each gated on the one definition of \"a world is running\"");
   // The toast is deliberately NOT part of this: a main-menu message is a documented case.
-  assert(!/toast/.test(stripComments(readSource("src/plugins/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");
+  assert(!/toast/.test(stripComments(readSource("src/ui/systems/hud.ts"))), "ui.hud leaves the toast alone");
 });
 
 check("an ORDER GAP is a place, not a system (P1.42)", () => {
@@ -2479,7 +2491,7 @@ check("the HUD host MOUNTS and TAKES DOWN its elements at a BARRIER (P1.34)", ()
   // uninstalled one left its widgets on screen with nobody to write them. The host owns the lifetime now:
   // `build` runs inside a barrier, `dispose` runs there too, and the widgets are DESPAWNED — the whole
   // subtree, because a despawn does not cascade.
-  const H = load("plugins/ui/systems/hud.js");
+  const H = load("ui/systems/hud.js");
   const world = widgetWorld;
   // The SHARED paint resource (the check above inserted it): cleared, because its entries are that check's
   // mounts and this host would otherwise adopt them as already mounted.
@@ -2562,7 +2574,7 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   // The reported bug: on the settings LIST, ESC wrote "settings" over "settings" (a no-op), and from a
   // sub-page it wrote null (skipping the list). The ladder is ONE function now (stepBackSettings), shared
   // by ESC, both menus' goBack() and the settings Back buttons.
-  const N = load("plugins/ui/systems/navigation.js");
+  const N = load("ui/systems/navigation.js");
   const world = widgetWorld;
   world.insertResource(UI_MODAL, createUiModalState());
   // The hotbar keys select a slot on the LOCAL player (ui.navigation owns them now, not the inventory
@@ -2697,19 +2709,19 @@ check("ESC CLOSES the settings box in one step, and its root rung is not a no-op
   // check follows it. (It used to grep the ROOT for `inWorld,` and passed on the picker's leftover line after
   // ui.navigation had already moved into its plugin — a check that proves nothing about the system it names.)
   assert(
-    /inWorld: host\.inWorld/.test(stripComments(readSource("src/plugins/ui/plugin.ts"))),
-    "plugins/ui/plugin.ts injects \"is a world running\" into ui.navigation",
+    /inWorld: host\.inWorld/.test(stripComments(readSource("src/ui/plugin.ts"))),
+    "ui/plugin.ts injects \"is a world running\" into ui.navigation",
   );
   assert(
-    /inWorld: host\.inWorld/.test(stripComments(readSource("src/plugins/ui-debug/plugin.ts"))),
-    "…and plugins/ui-debug/plugin.ts injects it into the picker",
+    /inWorld: host\.inWorld/.test(stripComments(readSource("src/ui/ui-debug/plugin.ts"))),
+    "…and ui/ui-debug/plugin.ts injects it into the picker",
   );
 });
 
 check("the toast is a system: a command arms a wall-clock deadline, the ui lane applies it", () => {
   // `showToast()` used to write two widgets and arm a setTimeout inside the view; the message now
   // outlives its caller, which is what lets the MAIN MENU show one (nothing there reconciles a DOM write).
-  const T = load("plugins/ui-toast/systems/toast.js");
+  const T = load("ui/ui-toast/systems/toast.js");
   const world = widgetWorld;
   world.insertResource(TOAST, createToastState());
   const panel = W.spawnPanel(world, null, "hud.toast", { hidden: true });
@@ -2747,7 +2759,7 @@ check("the key bind panels are derived data, and the drag gesture drives them", 
   // The panels used to own copies of the bind table and an imperative renderAllPanels() fan-out —which
   // is exactly how one instance ended up stuck while the other refreshed. Now the DATA is derived every
   // frame from one source, and the drag only publishes what it is doing.
-  const K = load("plugins/ui-keybind/systems/keybind.js");
+  const K = load("ui/ui-keybind/systems/keybind.js");
   const G = load("data/globals/keybind-gesture.js");
   const world = widgetWorld;
   const gesture = G.createKeybindGesture();
@@ -2844,9 +2856,9 @@ function registrations() {
   // A registration lives either in the root (the ones not yet moved) or in the plugin that owns it, so the
   //  parser reads both. Same object shape in both places, which is why one regex covers them.
   const source = ["src/boot/main.ts", "src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts",
-    "src/plugins/render/index.ts", "src/plugins/ui/index.ts", "src/plugins/ui-debug/index.ts",
-    "src/plugins/ui-keybind/index.ts", "src/plugins/ui-toast/index.ts",
-    "src/plugins/ui-inventory/index.ts"]
+    "src/plugins/render/index.ts", "src/ui/index.ts", "src/ui/ui-debug/index.ts",
+    "src/ui/ui-keybind/index.ts", "src/ui/ui-toast/index.ts",
+    "src/ui/ui-inventory/index.ts"]
     .map((f) => require("node:fs").readFileSync(path.join(ROOT, f), "utf8"))
     .join("\n");
   // Since P1.18 a registration goes through the plugin registry �?`contributeSystem("<plugin id>", {...})` �?
@@ -2876,17 +2888,17 @@ function registrations() {
     // The inventory reconcile is a SYSTEM now (ecs/ui/inventory.ts), so its declared access is loaded like
     // every other one. It used to be a method on the VIEW, which the gate could only read as source text
     // (the view imports the renderer and is not compiled here).
-    INVENTORY_VIEW_ACCESS: load("plugins/ui-inventory/systems/inventory.js").INVENTORY_VIEW_ACCESS,
-    UI_RENDER_ACCESS: load("plugins/ui/systems/reconcile.js").UI_RENDER_ACCESS,
-    UI_BINDING_ACCESS: load("plugins/ui/systems/bindings.js").UI_BINDING_ACCESS,
-    UI_PAGES_ACCESS: load("plugins/ui/systems/ui-pages.js").UI_PAGES_ACCESS,
-    UI_LOADING_ACCESS: load("plugins/ui/systems/loading.js").UI_LOADING_ACCESS,
-    UI_HUD_ACCESS: load("plugins/ui/systems/hud.js").UI_HUD_ACCESS,
-    UI_PICKER_ACCESS: load("plugins/ui-debug/systems/picker.js").UI_PICKER_ACCESS,
-    UI_TOAST_ACCESS: load("plugins/ui-toast/systems/toast.js").UI_TOAST_ACCESS,
-    UI_KEYBIND_ACCESS: load("plugins/ui-keybind/systems/keybind.js").UI_KEYBIND_ACCESS,
-    UI_NAVIGATION_ACCESS: load("plugins/ui/systems/navigation.js").UI_NAVIGATION_ACCESS,
-    DELAYS_ACCESS: load("plugins/ui/systems/delays.js").DELAYS_ACCESS,
+    INVENTORY_VIEW_ACCESS: load("ui/ui-inventory/systems/inventory.js").INVENTORY_VIEW_ACCESS,
+    UI_RENDER_ACCESS: load("ui/systems/reconcile.js").UI_RENDER_ACCESS,
+    UI_BINDING_ACCESS: load("ui/systems/bindings.js").UI_BINDING_ACCESS,
+    UI_PAGES_ACCESS: load("ui/systems/ui-pages.js").UI_PAGES_ACCESS,
+    UI_LOADING_ACCESS: load("ui/systems/loading.js").UI_LOADING_ACCESS,
+    UI_HUD_ACCESS: load("ui/systems/hud.js").UI_HUD_ACCESS,
+    UI_PICKER_ACCESS: load("ui/ui-debug/systems/picker.js").UI_PICKER_ACCESS,
+    UI_TOAST_ACCESS: load("ui/ui-toast/systems/toast.js").UI_TOAST_ACCESS,
+    UI_KEYBIND_ACCESS: load("ui/ui-keybind/systems/keybind.js").UI_KEYBIND_ACCESS,
+    UI_NAVIGATION_ACCESS: load("ui/systems/navigation.js").UI_NAVIGATION_ACCESS,
+    DELAYS_ACCESS: load("ui/systems/delays.js").DELAYS_ACCESS,
   };
   return blocks.map(({ owner, body: block }) => {
     const accessName = /\.\.\.([A-Z_]+_ACCESS)/.exec(block)?.[1];
@@ -3073,7 +3085,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // THE INVARIANT the label and the slider rely on: whatever goes in, what comes out is exactly what
   // the slider shows for it �?`snapToRange` with the slider's own domain must be a NO-OP.
   const range = { min: R.CAP_MIN, max: R.CAP_MAX, step: R.CAP_STEP };
-  const { snapToRange } = load("plugins/ui/components.js");
+  const { snapToRange } = load("ui/components.js");
   for (const input of [-10, 0, 0.4, 1, 29, 30, 31, 32, 58, 59, 60, 61, 119, 120, 238, 239, 240, 241, 300, 1e6,
     Number.NaN, Number.POSITIVE_INFINITY, -Number.POSITIVE_INFINITY]) {
     const cap = R.sanitizeFrameCap(input);
@@ -3082,7 +3094,7 @@ check("the frame cap is world state AND a persisted setting", () => {
     assert(cap === 0 || (cap >= R.CAP_MIN && cap < R.CAP_MAX), `a stored cap is in the domain or unlimited (${input} -> ${cap})`);
   }
   // …and the DOMAIN is declared ONCE: the settings panel IMPORTS it instead of restating the numbers.
-  const menuCapSrc = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  const menuCapSrc = stripComments(readSource("src/ui/views/menu.ts"));
   equal(countOf(menuCapSrc, /const CAP_MIN\s*=|const CAP_MAX\s*=/g), 0, "the panel does not restate the cap domain");
   assert(/min:\s*CAP_MIN[\s\S]{0,120}max:\s*CAP_MAX[\s\S]{0,120}step:\s*CAP_STEP/.test(menuCapSrc),
     "…it uses the resource's constants for the slider's whole domain");
@@ -3116,7 +3128,7 @@ check("the frame cap is world state AND a persisted setting", () => {
   // barrier: the drag handler must hand it the value it just sent. Re-reading the resource printed the
   // PREVIOUS drag step, and nothing else refreshes the label �?the reported "the FPS number is not
   // accurate while sliding".
-  const menuSrc = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  const menuSrc = stripComments(readSource("src/ui/views/menu.ts"));
   assert(/renderCap\(cap\)/.test(menuSrc), "the cap label is handed the value the drag just sent");
   assert(/const renderCap = \(justSet\?: number\)/.test(menuSrc), "…and reads the resource only when it has none");
   equal(countOf(main, /\blet fpsCap\b|\bfpsCap = cap\b/g), 0, "no closure variable left behind");
@@ -3198,10 +3210,10 @@ check("the frame cap is world state AND a persisted setting", () => {
     "the settings check knows the key (so a hand-edited value is repaired, not silently kept)");
   // NO RESTART ANYWHERE: the hint is gone from the surface, and the launch arguments no longer depend on a
   // file — they lift the display-rate limit for good.
-  const menuNow = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  const menuNow = stripComments(readSource("src/ui/views/menu.ts"));
   assert(!/restartHint/.test(menuNow) && /settings\.vsyncHint/.test(menuNow),
     "the row explains what sync MEANS instead of asking for a restart");
-  assert(/isVsyncOn: cb\.isVsyncOn/.test(stripComments(readSource("src/plugins/ui/views/mainmenu.ts"))) &&
+  assert(/isVsyncOn: cb\.isVsyncOn/.test(stripComments(readSource("src/ui/views/mainmenu.ts"))) &&
     /isVsyncOn: cb\.isVsyncOn/.test(menuNow), "both settings panels drive the runtime switch");
   const gameRs = readSource("src-tauri/src/game.rs");
   // **NO EXTRA LAUNCH FLAGS (P1.90, by request: «把那个解锁flag的弄掉…就用浏览器那个默认的垂直同步»).** Both
@@ -3304,8 +3316,8 @@ check("the startup screen is DATA: a command moves LOADING_STATE, `ui.loading` p
   // the reconciler paints it. main.ts therefore publishes the stage into a resource (through a
   // command, like every other outside write) and `ui.loading` turns it into widget data, which is also
   // what keeps the loading text translatable and the bar free of per-frame style strings.
-  const B = load("plugins/ui/systems/loading.js");
-  const { LoadingScreen } = load("plugins/ui/views/loading.js");
+  const B = load("ui/systems/loading.js");
+  const { LoadingScreen } = load("ui/views/loading.js");
   const { LOADING_SEGMENTS } = load("data/globals/resources.js");
   const world = widgetWorld;
   world.insertResource(LOADING_STATE, createLoadingState());
@@ -3561,7 +3573,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
     // The key bind gestures fire on ordinary clicks, so they are probes too (a click must not write a
     // line into a log whose switch is off).
     ["src/plugins/input/bind-gesture.ts", /`KBCAP mousedown/, "KBCAP "],
-    ["src/plugins/ui-keybind/views/keybind.ts", /`KBCAP click interactive button/, "KBCAP "],
+    ["src/ui/ui-keybind/views/keybind.ts", /`KBCAP click interactive button/, "KBCAP "],
     ["src/plugins/player/systems/input.ts", /"RAWINPUT takeover \(movementX suspended\)"/, "RAWINPUT takeover"],
     ["src/plugins/player/systems/input.ts", /"RAWINPUT hands back to movementX"/, "RAWINPUT hands back"],
   ]) {
@@ -3584,7 +3596,7 @@ check("the diagnostic probes have ONE switch, and it filters at the log sink", (
   // probes never registered" look exactly the same to whoever reads it.
   assert(/`DIAGLOG probes [^`]*at boot/.test(main), "the composition root records the switch's boot state");
   assert(!probes.includes('"DIAGLOG '), "…as an event line: its prefix is not in the probe table");
-  const menu = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  const menu = stripComments(readSource("src/ui/views/menu.ts"));
   // P1.49m: the toggle is a ROW now - the NAME on the left (`settings.diagLog`, `settings.vsync`) and the
   // STATE on the right (`settings.on` / `settings.off`), so THOSE are the keys that must be translated.
   assert(/settings\.diagLog/.test(menu) && /settings\.on/.test(menu) && /settings\.off/.test(menu),
@@ -3734,14 +3746,14 @@ check("configuration is a RESOURCE, and the input state caches no copy of it", (
   // …and the readers DECLARE it, or the schedule's model of them is a lie.
   assert(/readsExternal: \["keybinds"\]/.test(stripComments(readSource("src/plugins/player/systems/movement.ts"))),
     "movement declares the bind-table read");
-  assert(/"locale"/.test(stripComments(readSource("src/plugins/ui/systems/reconcile.ts"))),
+  assert(/"locale"/.test(stripComments(readSource("src/ui/systems/reconcile.ts"))),
     "the reconciler declares the language read");
 
   // The GLOBAL STYLE (the font pair + the root font size) is the reconciler's to apply, not the config
   // modules'. They used to fire `applyFont()` / `applyUIScale()` themselves: a DOM write from outside
   // any system, past no barrier, and �?for the root font size �?repeated unconditionally on every resize.
   // The values live with the resources; the write is HERE, diffed against what was last applied.
-  const renderSrc = stripComments(readSource("src/plugins/ui/systems/reconcile.ts"));
+  const renderSrc = stripComments(readSource("src/ui/systems/reconcile.ts"));
   const fontsSrc = stripComments(readSource("src/data/globals/fonts.ts"));
   const scaleSrc = stripComments(readSource("src/data/globals/uiscale.ts"));
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
@@ -3812,7 +3824,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     ["src/plugins/render/systems/diagnostics.ts", "PERF_SAMPLER"],
     ["src/plugins/render/systems/diagnostics.ts", "RENDERER3D"],
     ["src/plugins/player/systems/input.ts", "RENDERER3D"],
-    ["src/plugins/ui/systems/reconcile.ts", "UI_MOUNT"],
+    ["src/ui/systems/reconcile.ts", "UI_MOUNT"],
   ]) {
     assert(
       new RegExp(`resource\\(${token}\\)`).test(stripComments(readSource(file))),
@@ -3826,7 +3838,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     stripComments(readSource("src/plugins/player/index.ts")),
     stripComments(readSource("src/plugins/render/index.ts")),
     stripComments(readSource("src/plugins/diagnostics/index.ts")),
-    stripComments(readSource("src/plugins/ui/index.ts")),
+    stripComments(readSource("src/ui/index.ts")),
   ].join("\n");
   for (const [what, needle] of [
     ["the camera view", /new CameraViewSystem\(w\.world\)/],
@@ -4095,7 +4107,7 @@ check("the presentation objects are RESOURCES, not constructor dependencies", ()
     "src/host/browser/pointerlock.ts",
     "src/host/browser/window-guards.ts",
     "src/host/browser/rawinput.ts",
-    "src/plugins/ui/systems/navigation.ts",
+    "src/ui/systems/navigation.ts",
     "src/boot/main.ts",
   ];
   for (const f of MECHANISM_FILES) {
@@ -4150,7 +4162,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   equal(countOf(stripComments(readSource("src/host/browser/blockicons.ts")),
     /^(?:let|var) (?:renderer|rendererReady|cache|pending)\b/gm), 0,
     "the baker keeps no module-level renderer or cache");
-  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/plugins/ui-inventory/systems/inventory.ts"))),
+  assert(/resource\(ICON_BAKE\)/.test(stripComments(readSource("src/ui/ui-inventory/systems/inventory.ts"))),
     "the inventory system resolves it");
 
   // 2. The ONE chunk material (a GPU object created on first use, because the pack chain must be
@@ -4207,7 +4219,7 @@ check("the LAST module-level state is a resource too (icons, material, counters,
   //    world used to continue the first one's numbering).
   assert(typeof W.UI_ORDER?.name === "string" && typeof W.createUiOrder === "function",
     "UI_ORDER is a resource with a factory");
-  const widgetsSrc = stripComments(readSource("src/plugins/ui/components.ts"));
+  const widgetsSrc = stripComments(readSource("src/ui/components.ts"));
   equal(countOf(widgetsSrc, /^let nextOrder\b/gm), 0, "the order counter is not module state");
   assert(/world\.resource\(UI_ORDER\)\.next\+\+/.test(widgetsSrc), "spawnUiNode draws the order from it");
   assert(/insertResource\(UI_ORDER, createUiOrder\(\)\)/.test(main), "the composition root inserts it");
@@ -4280,7 +4292,7 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
     "the composition root inserts it");
 });
 
-check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "plugins", "ui-inventory", "systems", "inventory.ts"), "utf8");
+check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ui", "ui-inventory", "systems", "inventory.ts"), "utf8");
   const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
   assert(/reads:\s*\[INVENTORY\]/.test(block), "reads INVENTORY");
   // It writes WIDGET DATA now, not DOM: that is what makes it conflict with the reconciler and what
@@ -4292,7 +4304,7 @@ check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {
   // …and main.ts must declare the order the conflict demands, or the schedule throws at boot.
   const main = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
   assert(
-    /name:\s*"ui\.widgets"[\s\S]{0,300}after:\s*\["ui\.inventory"/.test(main) || /[\s\S]*/.test(readSource("src/plugins/ui/index.ts")),
+    /name:\s*"ui\.widgets"[\s\S]{0,300}after:\s*\["ui\.inventory"/.test(main) || /[\s\S]*/.test(readSource("src/ui/index.ts")),
     "main.ts orders ui.widgets after ui.inventory",
   );
 });
@@ -4935,9 +4947,9 @@ check("the view paint state, the host state and the loop's own state are RESOURC
   const movedFields =
     /^\s+private (?:readonly )?(?:shown|shownKey|shownRaw|shownPercent|filled|shownNote|shownNoteKey|shownNoteVisible|hovered|lineShown|drawnSelected|outsideWorld|inventoryOpen|menuOpen|lastCursor|rawFrameDx|rawFrameDy|wanted|lastPcx|lastPcz|applied|appliedAspect|stylesheetInjected|appliedFontUi|appliedFontMono|appliedRootFontPx|reported|flushTimer|diagLogEnabled|windowFocused|installed|scheduled|cached|loaded|snapshot)\s*[:=]/gm;
   for (const rel of [
-    "src/plugins/ui/systems/reconcile.ts", "src/plugins/ui/systems/loading.ts", "src/plugins/ui-toast/systems/toast.ts", "src/plugins/ui/systems/hud.ts",
-    "src/plugins/ui-keybind/systems/keybind.ts", "src/plugins/ui-inventory/systems/inventory.ts", "src/plugins/ui/systems/navigation.ts", "src/plugins/ui/systems/bindings.ts",
-    "src/plugins/player/systems/input.ts", "src/plugins/render/systems/chunk-stream.ts", "src/plugins/ui/systems/delays.ts",
+    "src/ui/systems/reconcile.ts", "src/ui/systems/loading.ts", "src/ui/ui-toast/systems/toast.ts", "src/ui/systems/hud.ts",
+    "src/ui/ui-keybind/systems/keybind.ts", "src/ui/ui-inventory/systems/inventory.ts", "src/ui/systems/navigation.ts", "src/ui/systems/bindings.ts",
+    "src/plugins/player/systems/input.ts", "src/plugins/render/systems/chunk-stream.ts", "src/ui/systems/delays.ts",
     "src/plugins/render/systems/camera.ts", "src/host/browser/pointerlock.ts", "src/plugins/input/keybinds.ts",
     "src/host/desktop/shell.ts", "src/host/browser/viewport.ts", "src/data/assets/blockregistry.ts", "src/data/assets/i18n.ts",
     "src/data/assets/background.ts",
@@ -4947,7 +4959,7 @@ check("the view paint state, the host state and the loop's own state are RESOURC
   // The rebind capture is DATA (the gesture resource, data/globals/keybind-gesture.ts) and its decisions
   // are a QUEUE the ui lane applies, so the device listeners no longer write the bind table and the
   // platform module holds no capture state.
-  const kb = stripComments(readSource("src/plugins/ui-keybind/systems/keybind.ts"));
+  const kb = stripComments(readSource("src/ui/ui-keybind/systems/keybind.ts"));
   const gestureData = stripComments(readSource("src/data/globals/keybind-gesture.ts"));
   assert(/capturing: BindAction \| null/.test(gestureData), "the rebind capture is gesture data");
   assert(/rebinds: RebindIntent\[\]/.test(gestureData), "…and the device decisions are a queue");
@@ -5069,7 +5081,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   equal(playerReg.list(S.SLOT_RESOURCES).length, 6, "…its 6 resources");
   equal(playerReg.list(S.SLOT_COMMANDS).map((c) => c.name).join(","), "teleport,selectSlot,swapSlots",
     "…and the commands that may move it");
-  const uiReg = contribute(load("plugins/ui/index.js").uiPlugin);
+  const uiReg = contribute(load("ui/index.js").uiPlugin);
   equal(uiReg.list(S.SLOT_COMPONENTS).length, 10, "the ui plugin owns the widget components");
   assert(uiReg.list(S.SLOT_RESOURCES).some((r) => r.name === "uiMount"), "…and the UI mount root it draws into");
   equal(contribute(load("plugins/world/index.js").worldPlugin).list(S.SLOT_RESOURCES)[0].name, "voxel",
@@ -5088,7 +5100,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   // diagnostics is skipped here: its setup lives in a factory that needs a real world (it CONSTRUCTS its
   // system), so its ownership is asserted above instead.
   for (const id of ["world", "ui", "input"]) {
-    load(`plugins/${id}/index.js`)[`${id}Plugin`].setup({
+    pluginLoad(id, "index.js")[`${id}Plugin`].setup({
       id,
       world: {},
       registry: together,
@@ -5105,20 +5117,20 @@ check("the plugin system: extension points, the registry, the install and the ma
   // The key bind page moved the same way (P1.25): its SYSTEM is the ui-keybind plugin's, and the way IN
   // to the page is spawned hidden by the view and shown by that system — so "plugin off" means the tab is
   // not reachable, in either menu, instead of opening a panel nothing fills.
-  assert(/name: "ui\.toast"/.test(readSource("src/plugins/ui-toast/index.ts")),
+  assert(/name: "ui\.toast"/.test(readSource("src/ui/ui-toast/index.ts")),
     "the ui-toast plugin declares ui.toast");
-  assert(!/name: "ui\.toast"/.test(readSource("src/plugins/ui/index.ts")), "…and the ui plugin does not");
-  assert(/name: "ui\.keybind"/.test(readSource("src/plugins/ui-keybind/index.ts")),
+  assert(!/name: "ui\.toast"/.test(readSource("src/ui/index.ts")), "…and the ui plugin does not");
+  assert(/name: "ui\.keybind"/.test(readSource("src/ui/ui-keybind/index.ts")),
     "the ui-keybind plugin declares ui.keybind");
-  assert(!/name: "ui\.keybind"/.test(readSource("src/plugins/ui/index.ts")),
+  assert(!/name: "ui\.keybind"/.test(readSource("src/ui/index.ts")),
     "…and the ui plugin does not");
   // P1.26: the tab's WIDGETS are the plugin's too — the settings panel only ASKS for them (through the
   // KEYBIND_TAB token) and keeps the entry entity it gets back, so `ui` knows nothing about keycaps.
   // P1.29: the layout is DATA now — the settings panel registers a HOST (where a page may be mounted) and
   // `ui.pages` materializes whatever page a plugin contributes, at any time after boot.
-  assert(/UI_PAGE_HOSTS/.test(readSource("src/plugins/ui/views/menu.ts")),
+  assert(/UI_PAGE_HOSTS/.test(readSource("src/ui/views/menu.ts")),
     "the settings panel registers a page host");
-  assert(/SLOT_UI_PAGES/.test(readSource("src/plugins/ui-keybind/index.ts")),
+  assert(/SLOT_UI_PAGES/.test(readSource("src/ui/ui-keybind/index.ts")),
     "…and the key bind page is contributed as PAGE DATA (so it can appear after boot)");
   assert(/SLOT_UI_PAGES/.test(readSource("src/core/extension/slots.ts")),
     "…through the ui-pages extension point");
@@ -5128,7 +5140,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   //   2. a mount that is not recorded before it can throw is retried every frame (and leaked a hidden row);
   //   3. unmount looked the page up in the CURRENT contributions, where it is already gone → `dispose` was
   //      skipped and the page's global specs leaked.
-  const pagesSys = stripComments(readSource("src/plugins/ui/systems/ui-pages.ts"));
+  const pagesSys = stripComments(readSource("src/ui/systems/ui-pages.ts"));
   assert(/if \(!actions\.has\(action\)\) onUiAction\(/.test(pagesSys),
     "the page action is registered ONCE per host+page (a duplicate id throws)");
   assert(/UI_PAGES_MOUNTED\)\.set\(key, \{ host, pageId: page\.id, page, panel, entry \}\)/.test(pagesSys),
@@ -5137,15 +5149,15 @@ check("the plugin system: extension points, the registry, the install and the ma
     "…and unmount disposes the page it MOUNTED, not a lookup in the withdrawn contributions");
   assert(!/setUiVisible\(this\.world, m\.panel/.test(pagesSys),
     "the page host does NOT paint the panel (it runs early in the lane, so it would read the PREVIOUS frame's UI_MODAL)");
-  assert(/UI_PAGES_MOUNTED/.test(readSource("src/plugins/ui/systems/navigation.ts")),
+  assert(/UI_PAGES_MOUNTED/.test(readSource("src/ui/systems/navigation.ts")),
     "…ui.navigation does: it is the ONE painter of modal visibility, and a page panel is part of that tree");
-  assert(/rowContainer/.test(readSource("src/plugins/ui/views/menu.ts")),
+  assert(/rowContainer/.test(readSource("src/ui/views/menu.ts")),
     "the view owns WHERE page rows go (a container, not the end of the settings list)");
   // A PAGE IS BUILT ON EVERY MOUNT, so every action a page view registers must sit behind a `has` guard
   // (the table refuses a duplicate id, and the throw lands MID-BUILD: the second mount of the key bind page
   // died on `pause.keybindBack`, after its widgets existed and before its spec was registered, which is why
   // the page opened with an unwritten keyboard).
-  const kbViewSrc = stripComments(readSource("src/plugins/ui-keybind/views/keybind.ts"));
+  const kbViewSrc = stripComments(readSource("src/ui/ui-keybind/views/keybind.ts"));
   assert(/if \(!actions\.has\(open\)\) onUiAction\(/.test(kbViewSrc),
     "the page's ENTRY action is registered once (the table refuses a duplicate id)");
   assert(/if \(!actions\.has\(back\)\)/.test(kbViewSrc),
@@ -5157,7 +5169,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   // TWO OPTIONAL PLUGINS MAY NOT NAME EACH OTHER (P1.27): the order between them is the CORE's slot anchors,
   // because a name is a dangling reference as soon as the plugin that owns it is disabled.
   const OPTIONAL_SYSTEMS = ["ui.picker", "ui.toast", "ui.keybind"];
-  for (const file of ["src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts", "src/plugins/ui-toast/index.ts", "src/plugins/ui-inventory/index.ts"]) {
+  for (const file of ["src/ui/ui-debug/index.ts", "src/ui/ui-keybind/index.ts", "src/ui/ui-toast/index.ts", "src/ui/ui-inventory/index.ts"]) {
     const src = stripComments(readSource(file));
     for (const m of src.matchAll(/(?:after|before):\s*\[([^\]]*)\]/g)) {
       for (const named of OPTIONAL_SYSTEMS) {
@@ -5166,14 +5178,14 @@ check("the plugin system: extension points, the registry, the install and the ma
       }
     }
   }
-  assert(/spawnKeybindPanel/.test(readSource("src/plugins/ui-keybind/views/keybind.ts")),
+  assert(/spawnKeybindPanel/.test(readSource("src/ui/ui-keybind/views/keybind.ts")),
     "…and the plugin's own view builds the chips, the keycaps and the entry button");
-  assert(!/keycap|spawnGridKey/.test(stripComments(readSource("src/plugins/ui/views/menu.ts"))),
+  assert(!/keycap|spawnGridKey/.test(stripComments(readSource("src/ui/views/menu.ts"))),
     "…so the ui plugin no longer mentions a keycap at all");
   // THE TRAP THIS SHIPPED WITH ONCE, pinned so it cannot come back: showing the entries from the
   // CONSTRUCTOR is a no-op — the root fills `deps.entries` only after BOTH menus exist, which is later —
   // and the binding page then had no way in at all. The call belongs in step(), i.e. once per ui frame.
-  const kbSys = stripComments(readSource("src/plugins/ui-keybind/systems/keybind.ts"));
+  const kbSys = stripComments(readSource("src/ui/ui-keybind/systems/keybind.ts"));
   const kbCtor = kbSys.slice(kbSys.indexOf("constructor("), kbSys.indexOf("constructor(") + 400);
   assert(!kbCtor.includes("this.showEntries()"), "the entry buttons are NOT shown from the constructor");
   assert(/step\(\): void \{[\s\S]{0,400}this\.showEntries\(\)/.test(kbSys),
@@ -5191,14 +5203,14 @@ check("the plugin system: extension points, the registry, the install and the ma
   // still synthesizes a click on whatever is under the pointer when it comes up. The shield is what swallows
   // it, and ESC's cancel path was the one arm path that did not arm it — releasing over an action chip ran the
   // chip's own handler and re-armed a capture.
-  const kbView = stripComments(readSource("src/plugins/ui-keybind/views/keybind.ts"));
+  const kbView = stripComments(readSource("src/ui/ui-keybind/views/keybind.ts"));
   const cancelFn = kbView.slice(kbView.indexOf("export function cancelKeybindDrag"),
     kbView.indexOf("export function cancelKeybindDrag") + 700);
   assert(/armSuppressNextClick\(false\)/.test(cancelFn),
     "ESC's cancel arms the click shield (without the self-timeout: the release may be seconds away)");
   assert(/g\.drag = null/.test(cancelFn) && /endCapture\(\)/.test(cancelFn),
     "…and still clears the drag and the capture");
-  assert(contribute(load("plugins/ui-debug/index.js")
+  assert(contribute(load("ui/ui-debug/index.js")
     .createUiDebugPlugin({ uiPicker: { step: () => {}, close: () => {} } }))
     .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
     "…the ui-debug plugin owns it (its setup inserts it itself when the world has not)");
@@ -5215,17 +5227,17 @@ check("the plugin system: extension points, the registry, the install and the ma
   for (const id of new Set(known)) {
     assert(M.DEFAULT_PLUGINS.includes(id), `the manifest knows the plugin "${id}" a system is contributed under`);
   }
-  equal(countOf(stripComments(readSource("src/plugins/ui/index.ts")), /api\.system\(/g), 11,
+  equal(countOf(stripComments(readSource("src/ui/index.ts")), /api\.system\(/g), 11,
     "…the ui plugin declares its seven core systems + the FOUR slot anchors + the page host");
-  equal(countOf(stripComments(readSource("src/plugins/ui-inventory/index.ts")), /api\.system\(/g), 1,
+  equal(countOf(stripComments(readSource("src/ui/ui-inventory/index.ts")), /api\.system\(/g), 1,
     "…and the ui-inventory plugin declares the inventory system itself");
-  equal(countOf(stripComments(readSource("src/plugins/ui-toast/index.ts")), /api\.system\(/g), 1,
+  equal(countOf(stripComments(readSource("src/ui/ui-toast/index.ts")), /api\.system\(/g), 1,
     "…and the ui-toast plugin declares the HUD message system itself");
-  equal(countOf(stripComments(readSource("src/plugins/ui-keybind/index.ts")), /api\.system\(/g), 1,
+  equal(countOf(stripComments(readSource("src/ui/ui-keybind/index.ts")), /api\.system\(/g), 1,
     "…and the ui-keybind plugin declares the bind-page system itself");
   // The DEBUG surface is a plugin of its own now (F3 panel + the F3+F4 chord): ONE system, contributed
   // under its own id, so a manifest line that disables it removes exactly that system.
-  equal(countOf(stripComments(readSource("src/plugins/ui-debug/index.ts")), /api\.system\(/g), 1,
+  equal(countOf(stripComments(readSource("src/ui/ui-debug/index.ts")), /api\.system\(/g), 1,
     "…and the ui-debug plugin declares the F3/picker system itself");
   equal(countOf(stripComments(readSource("src/plugins/render/index.ts")), /api\.system\(/g), 4,
     "…the render plugin declares its four systems (the camera, the stream, the outline and the draw)");
@@ -5331,9 +5343,9 @@ check("the plugin system: extension points, the registry, the install and the ma
   assert(firstRegistration === 0 && declareLine === 0,
     `the root declares NO system by hand any more (P1.18b): the ui plugin calls declareUiSystems from its own\n` +
       ` setup (firstRegistration=${firstRegistration}, declare in the root=${declareLine})`);
-  const uiPluginSrc = stripComments(readSource("src/plugins/ui/plugin.ts"));
+  const uiPluginSrc = stripComments(readSource("src/ui/plugin.ts"));
   assert(/declareUiSystems\(api, s\)/.test(uiPluginSrc),
-    "…and plugins/ui/plugin.ts is what declares them, from the systems IT constructed");
+    "…and ui/plugin.ts is what declares them, from the systems IT constructed");
 
   // 6. THE LAYER RULES (P1.18b): a plugin may import a SIBLING only if it declared it in `deps`, and the
   //    declared graph must be acyclic �?otherwise the install order it implies does not exist. Reading
@@ -5352,7 +5364,7 @@ check("the plugin system: extension points, the registry, the install and the ma
   const pluginOf = (p) => (/\/src\/plugins\/([^/]+)\//.exec(p.replace(/\\/g, "/")) ?? [])[1];
   /** What a plugin DECLARED it depends on, read from its own descriptor. */
   const depsOf = (id) => {
-    const src = stripComments(readSource(`src/plugins/${id}/index.ts`));
+    const src = stripComments(pluginSource(id, "index.ts"));
     const m = /deps:\s*\[([^\]]*)\]/.exec(src);
     return m ? m[1].split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean) : [];
   };
@@ -5554,14 +5566,14 @@ check("hot-plug: a plugin joins and leaves the SCHEDULE at runtime, or leaves no
   const bootSrc = stripComments(readSource("src/boot/main.ts"));
   assert(/discoverPlugins\(pluginHost\)/.test(bootSrc),
     "the root gets every optional surface from the DISCOVERED catalogue (P1.40), not from a factory call here");
-  assert(/createUiDebugPlugin\(\{ uiPicker \}\)/.test(stripComments(readSource("src/plugins/ui-debug/plugin.ts"))),
+  assert(/createUiDebugPlugin\(\{ uiPicker \}\)/.test(stripComments(readSource("src/ui/ui-debug/plugin.ts"))),
     "…and the debug surface's own plugin.ts is what builds it from the factory the catalogue lists");
   assert(!/removeResource/.test(readSource("src/core/plugin/hotplug.ts")),
     "the uninstall path does not remove resources (P1.28: it broke core commands that read them)");
   assert(/const hotCatalog: readonly Plugin\[\] = discoveredPlugins\.filter\(\(p\) => p\.hot\)/.test(bootSrc),
     "…and the hot catalogue IS that discovered set, so a surface cannot exist without its F8-F11 key");
   assert(!/declareUiDebugSystems\(/.test(bootSrc), "…so the root declares NO system for it any more");
-  const dbgSrc = stripComments(readSource("src/plugins/ui-debug/index.ts"));
+  const dbgSrc = stripComments(readSource("src/ui/ui-debug/index.ts"));
   assert(/api\.insertResource\(PICKER_STATE, createPickerState\(\)\)/.test(dbgSrc),
     "the plugin inserts its own resource through api.insertResource (once-semantics: a runtime install AND a re-install both work)");
   assert(/api\.onStop\(\(\) => s\.uiPicker\.close\(\)\)/.test(dbgSrc),
@@ -5590,8 +5602,8 @@ check("every `api.system(` declaration is one the gate actually PARSED", () => {
   // fails to match simply is not there — the schedule then looks healthy while the real boot explodes. Counting
   // declarations in the same files and comparing with what was parsed turns that into a loud failure.
   const files = ["src/plugins/diagnostics/index.ts", "src/plugins/player/index.ts", "src/plugins/render/index.ts",
-    "src/plugins/ui/index.ts", "src/plugins/ui-debug/index.ts", "src/plugins/ui-keybind/index.ts",
-    "src/plugins/ui-toast/index.ts", "src/plugins/ui-inventory/index.ts"];
+    "src/ui/index.ts", "src/ui/ui-debug/index.ts", "src/ui/ui-keybind/index.ts",
+    "src/ui/ui-toast/index.ts", "src/ui/ui-inventory/index.ts"];
   const declared = files.reduce((n, f) => n + countOf(stripComments(readSource(f)), /api\.system\(\{/g), 0);
   const parsed = registrations().length;
   equal(parsed, declared, `the gate parsed ${parsed} of ${declared} system declarations`);
@@ -5603,7 +5615,7 @@ check("the HUD is an element TABLE: each element carries its OWN gate", () => {
     "the HUD has an extension point of its own (a plugin can add a HUD element)");
   assert(/gate: \(\) => boolean/.test(readSource("src/data/globals/ui-hud.ts")),
     "…an element carries its own gate");
-  const hudSys = stripComments(readSource("src/plugins/ui/systems/hud.ts"));
+  const hudSys = stripComments(readSource("src/ui/systems/hud.ts"));
   assert(/this\.painted\.delete\(id\)/.test(hudSys),
     "…and the host TAKES AN ELEMENT DOWN when its contribution disappears (no frozen widget)");
   assert(!/inventoryOn/.test(hudSys),
@@ -5678,7 +5690,7 @@ check("a plugin folder JOINS the catalogue by existing - and the two cannot drif
   // RAW source (not stripped): the glob pattern itself contains `/*/`, which a comment stripper reads as the
   // start of a block comment and then eats the rest of the file.
   const catalog = readSource("src/boot/plugin-catalog.ts");
-  assert(/import\.meta\.glob\("\.\.\/plugins\/\*\/plugin\.ts", \{ eager: true \}\)/.test(catalog),
+  assert(/import\.meta\.glob\(\s*\["\.\.\/plugins\/\*\/plugin\.ts", "\.\.\/ui\/plugin\.ts", "\.\.\/ui\/ui-\*\/plugin\.ts"\]/.test(catalog),
     "the catalogue is a BUILD-TIME glob over the folder tree (no hand-written list, no runtime disk lookup)");
   const boot = stripComments(readSource("src/boot/main.ts"));
   assert(/discoverPlugins\(pluginHost\)/.test(boot), "the root asks the catalogue for the plugins");
@@ -5758,7 +5770,7 @@ check("a plugin's REGISTERED teardowns run once, in reverse, on BOTH leave paths
   assert(/plugin\.stop\?\.\(api\)/.test(lc),
     "…and a plugin with NO `stop` hook is no longer skipped by stopPlugins");
   for (const id of ["ui-inventory", "ui-debug", "ui-toast", "ui-keybind"]) {
-    const src = stripComments(readSource(`src/plugins/${id}/index.ts`));
+    const src = stripComments(pluginSource(id, "index.ts"));
     assert(/api\.onStop\(/.test(src), `${id}: files its surface teardown through api.onStop (P1.39)`);
     assert(!/\bstop\((?:api)?\)\s*\{/.test(src), `${id}: …and no longer hand-writes a \`stop\` hook for it`);
   }
@@ -5779,15 +5791,15 @@ check("a hot RE-INSTALL may call `setup` again: the second run changes nothing",
   const toastStub = { step: () => {}, close: () => {} };
   const cases = [
     ["ui-debug", () => ({
-      plugin: load("plugins/ui-debug/index.js").createUiDebugPlugin({ uiPicker: pickerStub }),
+      plugin: load("ui/ui-debug/index.js").createUiDebugPlugin({ uiPicker: pickerStub }),
       resource: R.PICKER_STATE,
     })],
     ["ui-toast", () => ({
-      plugin: load("plugins/ui-toast/index.js").createUiToastPlugin({ uiToast: toastStub }),
+      plugin: load("ui/ui-toast/index.js").createUiToastPlugin({ uiToast: toastStub }),
       resource: R.TOAST,
     })],
     ["ui-inventory", () => ({
-      plugin: load("plugins/ui-inventory/index.js").createUiInventoryPlugin({
+      plugin: load("ui/ui-inventory/index.js").createUiInventoryPlugin({
         uiInventory: { step: () => {} },
         inv: { buildHotbar: () => 0 },
         inWorld: () => true,
@@ -5840,7 +5852,7 @@ check("a hot RE-INSTALL may call `setup` again: the second run changes nothing",
     "the re-install contract (setup -> WITHDRAW -> setup) is documented on Plugin.setup");
   for (const id of ["ui-debug", "ui-toast", "ui-inventory", "ui-keybind", "content-default",
     "world", "input", "player", "render", "ui", "diagnostics"]) {
-    const src = stripComments(readSource(`src/plugins/${id}/index.ts`));
+    const src = stripComments(pluginSource(id, "index.ts"));
     assert(countOf(src, /world\.insertResource/g) <= countOf(src, /hasResource/g),
       `${id}: every resource it inserts is guarded (or uses api.insertResource, which is once-semantics)`);
     equal(countOf(src, /world\.spawn\(|spawnPanel\(|spawnButton\(|spawnLabel\(/g), 0,
@@ -6052,7 +6064,7 @@ check("a PACK can add a language: the discovered set drives the dictionaries (P1
   assert(/listPackPaths/.test(stripComments(readSource("src/data/assets/languages.ts"))),
     "the set is discovered from the pack chain, not listed");
   assert(/const renderLangs = \(\): void => \{[\s\S]*?declaredLanguages\(\)/.test(
-    stripComments(readSource("src/plugins/ui/views/menu.ts")),
+    stripComments(readSource("src/ui/views/menu.ts")),
   ),
     "…and the settings PICKER is built from that same set (a pack's language is selectable, not just loadable)");
   assert(!/"zh", "en", "ja"\]/.test(stripComments(readSource("src/data/assets/i18n.ts"))),
@@ -6202,7 +6214,7 @@ check("a PACK can add a language at RUNTIME: the picker's rows follow the chain 
   // "publishable but unselectable" drift P1.36 was about, in the one surface that offers the choice. The rows
   // are a fixed-capacity POOL filled from the declared set now, exactly like the pack columns, and the two
   // events that can change that set re-fill it: the pack-APPLY notification, and the moment the section opens.
-  const menu = stripComments(readSource("src/plugins/ui/views/menu.ts"));
+  const menu = stripComments(readSource("src/ui/views/menu.ts"));
   assert(!/langChoices/.test(menu), "the picker no longer spawns one row per language while the layout is built");
   assert(/const langCells = Array\.from\(\{ length: LANG_LIST_CAPACITY \}/.test(menu),
     "…it is a fixed-capacity POOL of rows, the shape the pack columns already use");

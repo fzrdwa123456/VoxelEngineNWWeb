@@ -4,7 +4,7 @@
 // way. The ui plugin constructs its seven lane systems now, and exactly ONE of them is driven from outside:
 //
 //   * `ui.widgets` (the reconciler) — it OWNS every widget's DOM element, so the key bind DRAG asks it what is
-//     under the cursor (`hitTest`). The drag's event-time half lives in `plugins/ui-keybind/views/keybind.ts`
+//     under the cursor (`hitTest`). The drag's event-time half lives in `ui/ui-keybind/views/keybind.ts`
 //     and is wired by the root, which is why the root needs this handle.
 //
 // Everything else the root needs from the widget layer (the F3 panel's entities, the modal trees) it already

@@ -13,8 +13,13 @@ import type { DiscoveredPlugin, PluginHost } from "../core/plugin/host";
 
 type PluginModule = { createPlugin?: (host: PluginHost) => DiscoveredPlugin };
 
-/** Every `plugins/<id>/plugin.ts` in the build, keyed by its path. */
-const modules = import.meta.glob("../plugins/*/plugin.ts", { eager: true }) as Record<string, PluginModule>;
+/** Every `plugin.ts` in the build, keyed by its path: one folder per plugin under `plugins/`, plus the UI
+ *  module — which lives OUTSIDE `plugins/` (it is removable on its own and no game plugin knows it) and whose
+ *  optional surfaces are the `ui-*` folders inside it. */
+const modules = import.meta.glob(
+  ["../plugins/*/plugin.ts", "../ui/plugin.ts", "../ui/ui-*/plugin.ts"],
+  { eager: true },
+) as Record<string, PluginModule>;
 
 /** The paths the glob found (sorted). `check:ecs` walks the same folder tree and asserts the two agree: a
  *  `plugin.ts` this list is missing, or a folder with no `plugin.ts` at all, is drift the build must not

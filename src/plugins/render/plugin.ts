@@ -1,5 +1,5 @@
 // ===== render, as a DISCOVERED plugin (P1.45) =====
-// See `plugins/ui-debug/plugin.ts` for the shape (a folder opts in with this file; the adapter narrows the host
+// See `ui/ui-debug/plugin.ts` for the shape (a folder opts in with this file; the adapter narrows the host
 // instances it needs). Two things are specific to this one:
 //
 //   * the platform MESHER is a host object (a plugin may not import `host/`), so the root hands it in as a host

@@ -29,15 +29,16 @@ src/
 │   ├── plugin/   ★ 插件机制的实现：descriptor / api / lifecycle / hotplug / teardown / ui-tables
 │   ├── extension/★ 扩展点：point(类型令牌) / slots(11 个内置插槽) / registry(谁贡献了什么)
 │   └── world.ts  门面：spawn / insert / query / resource / addSystem / stepFixed / render / renderUi
-├── plugins/    功能：每个插件自带它拥有的数据，并且**自己构造自己的系统**
+├── plugins/    游戏功能：每个插件自带它拥有的数据，并且**自己构造自己的系统**
 │   ├── <id>/plugin.ts   ★ 发现适配器：文件夹存在即被收录；把宿主实例收窄成自己的工厂参数
 │   ├── <id>/index.ts    ★ 插件本体：definePlugin({ id, deps, setup }) + api.system(...) 声明
 │   ├── player/   components.ts + commands.ts + systems/(input, snapshot, controller, movement, collision, interaction)
 │   ├── render/   systems/(camera, chunk-stream, outline, menu-background, diagnostics)
-│   ├── ui/       components.ts + systems/(reconcile 是唯一 DOM 写者，另有 hud/loading/bindings/
-│   │             navigation/delays/ui-pages)+ views/（建树与注册动作 id 的接线）
-│   ├── ui-debug / ui-toast / ui-inventory / ui-keybind / ui-crosshair   四个可选面 + 准星（可热插拔）
 │   ├── diagnostics / content-default / world / input                    核心四件
+├── ui/         UI 模块（独立树，不在 plugins/ 下，游戏插件不拥有它）
+│   ├── components.ts + systems/(reconcile 是唯一 DOM 写者，另有 hud/loading/bindings/
+│   │             navigation/delays/ui-pages) + views/（建树与注册动作 id 的接线）
+│   └── ui-crosshair / ui-debug / ui-toast / ui-inventory / ui-keybind   可选面（各自 plugin.ts，可热插拔）
 ├── host/       唯一有副作用的地方
 │   ├── desktop/  shell(Tauri：设置/日志/窗口/vsync) / packs(资源包预载) / debuglog(诊断队列转发)
 │   └── browser/  viewport / rawinput / pointerlock / mousecapture / window-guards /
@@ -53,7 +54,7 @@ src/
 **放置规则**（新文件该去哪）：
 碰 OS/浏览器/Tauri → `host/`；每 tick 改实体数据 → 所属插件的 `systems/`；实体状态本身 →
 所属插件的 `components.ts`；只是被"存着"的值（表、常量、资源形状）→ `data/`；无状态纯函数 →
-`shared/`；写 DOM → 只有 `plugins/ui/systems/reconcile.ts` 一个地方。
+`shared/`；写 DOM → 只有 `ui/systems/reconcile.ts` 一个地方。
 
 ---
 

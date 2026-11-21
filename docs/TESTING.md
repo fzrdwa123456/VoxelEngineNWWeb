@@ -676,7 +676,7 @@ means the resource was not published, a panel that never hides means the picker 
 AFTER the view/listener sweep and the input-side fixes (P1.9/P1.11 — the inventory reconcile became a system,
 the window-level listeners moved into `host/browser/window-guards.ts`, the key bind gesture's device half moved
 into `plugins/input/bind-gesture.ts`, and the input intent queue became a resource). Six things to walk:
-(1) **backpack / hotbar** (`plugins/ui/systems/inventory.ts` is the system now, `plugins/ui/views/inventory.ts` only spawns):
+(1) **backpack / hotbar** (`ui/ui-inventory/systems/inventory.ts` is the system now, `ui/ui-inventory/views/inventory.ts` only spawns):
 icons, counts, tooltips, the selected highlight, clicking a bag slot to swap, and a first-ever block icon
 showing the checker before it bakes — an EMPTY hotbar means `INVENTORY_WIDGETS` was not published, a hotbar
 that never updates means the reconcile did not move with the view;
@@ -698,7 +698,7 @@ the main menu, and if a frame ever survives, tighten the re-assert burst in `win
 non-zero `seen` would mean the low-level keyboard hook finally started working (see AGENTS.md's known gaps)
 and the cursor race could be reconsidered.
 
-AFTER the DELEGATED UI events (P1.11 follow-up — `plugins/ui/systems/reconcile.ts` used to attach SIX listeners to every
+AFTER the DELEGATED UI events (P1.11 follow-up — `ui/systems/reconcile.ts` used to attach SIX listeners to every
 widget at mount time; it now attaches ONE per event type to the UI MOUNT ROOT and finds the widget by walking
 up from `ev.target`; hover is an ancestor-chain diff over the bubbling `mouseover`). Nothing should look
 different — that is the point — so walk the paths where the resolution could differ:

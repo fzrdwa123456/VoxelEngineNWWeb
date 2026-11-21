@@ -35,7 +35,7 @@ import { entityIndex, type SystemAccess, type World } from "../../../core/world"
  *  exceeded" warning was about — one drain a second keeps it empty and the number current. */
 const GPU_SAMPLE_MS = 250;
 const GPU_IDLE_SAMPLE_MS = 1000;
-import { setUiText, UI_STATE, UI_TEXT } from "../../ui/components";
+import { setUiText, UI_STATE, UI_TEXT } from "../../../ui/components";
 import type { VoxelWorld } from "../../../data/world/world";
 
 /** Declared access. Display only: it reads component data and writes the F3 panel's TEXT WIDGET —

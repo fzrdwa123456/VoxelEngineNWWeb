@@ -16,7 +16,7 @@ import { LOADING_STATE, FADE_OPTIONS, FPS_CAP, PACK_RELOAD, sanitizeFrameCap, TO
 import { hotPlugLabel } from "./hotplug";
 import { HOT_PLUG, hotInstall, hotUninstall } from "../../core/plugin/hotplug";
 /** Show a toast: `key` is an i18n key unless `raw` is set ("cap set to 60" cannot be a key — see
- *  plugins/ui-toast/systems/toast.ts). The message is world state with a wall-clock deadline, so this command
+ *  ui/ui-toast/systems/toast.ts). The message is world state with a wall-clock deadline, so this command
  *  only arms it; the `ui-toast` plugin's system puts it on screen and takes it down again. It is reachable
  *  whatever plugins are installed, which is why it cannot live in that (optional) plugin — see P1.28. */
 export const ShowToast = defineCommand<{ key: string; raw?: boolean }>(

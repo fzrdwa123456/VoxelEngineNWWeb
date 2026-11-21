@@ -8,7 +8,7 @@
 //
 // A plugin whose systems the composition root declares for it (the `declare*Systems(api, instances)` shape)
 // can be installed at boot, but not at runtime: nothing would re-run the root's wiring. A plugin that files
-// its own systems from `setup` — the shape `plugins/ui-debug` uses — is a value in a catalogue, and plugging
+// its own systems from `setup` — the shape `ui/ui-debug` uses — is a value in a catalogue, and plugging
 // it in is one call.
 //
 // WHERE THIS MAY RUN: at a BARRIER, and nowhere else. Installing a plugin means adding systems to the

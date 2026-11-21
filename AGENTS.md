@@ -3,7 +3,7 @@
 > **THIS FILE DESCRIBES THE ORIGINAL NW.js ENGINE, NOT THIS TAURI PORT.** The port's layout, conventions,
 > history and open work are in `ROADMAP.md` (plus `docs/TESTING.md` for the manual checklist), and its code
 > lives under `src/core`, `src/data`, `src/plugins`, `src/boot` — not under `ecs/`, `ui/` or `logic/`.
-> Paths and numbers quoted below (the `SCHEDULE` lines, `plugins/ui/systems/*`, `plugins/ui/views/menu.ts`,
+> Paths and numbers quoted below (the `SCHEDULE` lines, `ui/systems/*`, `ui/views/menu.ts`,
  the assertion-group counts)
 > are the ORIGINAL's and are stale here: treat them as historical context, never as a description of the code
 > in this checkout.
@@ -71,19 +71,19 @@ src/
 │   │                        isolation), errors.ts (one log line per thrown plugin)
 │   └── world.ts             the façade and the ONE import path: spawn/insert/query/resource/addSystem/
 │                            stepFixed/render/renderUi
-├── plugins/               everything that is a FEATURE (each one owns its data)
+├── plugins/               the GAME's features (each one owns its data)
 │   ├── player/              components.ts (POSITION…TARGET_HIT + the spawn helpers)
 │   │   └── systems/         input, snapshot, controller, movement, collision, interaction (fixed lane)
 │   ├── render/              systems/: camera, chunk-stream, outline, menu-background, diagnostics
-│   ├── ui/                  components.ts (the widget components + prefabs)
-│   │   ├── systems/         reconcile (the ONE DOM writer), hud, loading, inventory, bindings,
-│   │   │                    toast, keybind, navigation, delays
-│   │   └── views/           the wiring that spawns the trees and registers action ids (menu, mainmenu,
-│   │                        inventory, hud, loading)
-│   ├── ui-debug/            the F3 debug panel + the F3+F4 game-mode chord, split out of `ui` so the
-│   │   └── systems/         DEBUG surface is one manifest line away from being off: picker.ts
 │   └── input/               keybinds.ts (the bind table, its validation and the settings file) +
 │                            bind-gesture.ts (the rebind gesture's EVENT-TIME half)
+├── ui/                    THE UI MODULE — its own tree, NOT under `plugins/` (no game plugin owns it)
+│   ├── components.ts        the widget components + prefabs
+│   ├── plugin.ts, index.ts  the ui plugin itself (declares the systems from the instances it constructs)
+│   ├── systems/             reconcile (the ONE DOM writer), hud, loading, bindings, navigation, delays, ui-pages
+│   ├── views/               the wiring that spawns the trees and registers action ids (menu, mainmenu, hud, loading)
+│   └── ui-crosshair/ ui-debug/ ui-toast/ ui-inventory/ ui-keybind/   the five OPTIONAL surfaces; each has its
+│                            own plugin.ts and is hot-pluggable (F5/F8/F9/F10/F11)
 ├── host/                  the boundary: the only place with side effects
 │   ├── desktop/             shell.ts (Tauri: settings/logs/window/display refresh), packs.ts (the pack-chain
 │   │                        preload), debuglog.ts (the diagnostic-queue forwarder)
@@ -145,7 +145,7 @@ Placement rule of thumb: touches the OS/browser/Tauri → `host/` (Tauri/files/l
 DOM/GPU/device events → `host/browser/`); mutates entity data per tick → the owning plugin's `systems/`;
 entity state itself → the owning plugin's `components.ts`; a value that is merely STORED (a table, a
 constant, a resource's shape) → `data/`; a pure helper with no state → `shared/`; visible DOM → only
-`plugins/ui/systems/reconcile.ts` touches the document (a view spawns widget trees and registers action
+`ui/systems/reconcile.ts` touches the document (a view spawns widget trees and registers action
 ids, it does not write styles).
 
 ## Architecture — DOD + strict layers
@@ -204,7 +204,7 @@ was one plugin whose removal left a blank window because every surface lived in 
 per OPTIONAL surface (`ui-debug` is the first, P1.23). The rule that falls out of it: **an order edge may
 never name a system that another plugin decides whether to install.** An `after: ["ui.picker"]` inside
 `ui` would be a dangling name the moment `ui-debug` is disabled, so the two edges that position the picker
-are declared ON the picker (`before: ["ui.toast", "ui.widgets"]` in `plugins/ui-debug/index.ts`) and the ui
+are declared ON the picker (`before: ["ui.toast", "ui.widgets"]` in `ui/ui-debug/index.ts`) and the ui
 plugin's own chain stays complete without them (`ui.toast` follows `ui.inventory`, and the picker slips in
 between when it is installed). A system's STATE moves with its surface: `PICKER_STATE` is contributed by
 `ui-debug` now, not by `ui`.
@@ -216,7 +216,7 @@ them (its systems leave the schedule; the resources it CLAIMED stay — P1.28). 
 door is the `HotPlugPlugin` COMMAND — installing a plugin re-resolves the schedule, so it may not happen
 under a running system. The rule that decides what can be plugged in: **a plugin is hot-pluggable exactly
 when its `setup` alone is enough to install it** (so it declares its own systems and inserts its own resource;
-`plugins/ui-debug`'s factory is the worked example, and the root's `declare*Systems(api, instances)` shape —
+`ui/ui-debug`'s factory is the worked example, and the root's `declare*Systems(api, instances)` shape —
 still how `ui` works — cannot be installed at runtime). Refused with a reason, never half-done: an id outside
 the catalogue, uninstalled `deps`, a double install, and an uninstall another INSTALLED plugin depends on.
 **F5/F8/F9/F10/F11 toggle the five optional surfaces live** — crosshair, debug, keybind, toast, inventory
@@ -1363,7 +1363,7 @@ where it is:
 - **The UI is DATA, and `ui.navigation` is the one place that turns it into visibility.** A surface
   does not own its own visibility any more: `Menu.show/hide`, `MainMenu.show/hide` and the inventory
   toggle write the `UI_MODAL` resource (a `world.resource(UI_MODAL)` write, so a *view* never touches
-  the DOM to hide itself), and `plugins/ui/systems/navigation.ts` is the ONE painter — it maps that state onto the
+  the DOM to hide itself), and `ui/systems/navigation.ts` is the ONE painter — it maps that state onto the
   modal widget trees' `UI_STATE` every frame. Which settings sub-page is up is data too
   (`UI_MODAL.settings`), and one shared mapping (`stepBackSettings`) answers "what is one level back"
   for ESC, both menus' `goBack()` and every Back button; it used to exist twice and the copies
@@ -1394,7 +1394,7 @@ where it is:
   neither an entity nor a system owns may stay in a view (the reconciler's hover/press bits, the
   DOM elements themselves); a VISIBILITY flag may not — "is the backpack open" is
   `UI_MODAL.inventory`, painted by `ui.navigation` — and neither may a scroll position
-  (see `plugins/ui/systems/reconcile.ts`).
+  (see `ui/systems/reconcile.ts`).
 - Flat files until a module needs a second file; then a folder + a `create()` factory, and
   registration stays explicit.
 - A DOM writer belongs in the `ui` STAGE, never in `render` — that lane stops with the game loop,
@@ -1698,7 +1698,7 @@ When work lands, move the entry here and delete it there.
   system in data/world/ is unrelated). The hand-built loading overlay that used to sit here is GONE: it was
   replaced by the loading screen (`ui/loading.ts` + `LOADING_STATE`), and a world-entry preload belongs in
   that resource, not in an element built by the composition root.
-- `plugins/ui/views/menu.ts` was rewritten around an explicit binding-interaction state machine (click
+- `ui/views/menu.ts` was rewritten around an explicit binding-interaction state machine (click
   shield + capture-free drag + physical capture, all documented at the top of the file).
   Still the densest file — the two shield-arm paths and the Esc-during-drag branch are
   load-bearing click-synthesis handling. Do not merge the arm paths. The GESTURE'S STATE is
