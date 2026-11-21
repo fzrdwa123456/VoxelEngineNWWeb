@@ -17,18 +17,30 @@ import {
   createInventorySystem,
   createInventoryView,
   createUiInventoryPlugin,
+  makeInventoryViewAccess,
   type IconSource,
 } from "./index";
+import type { UiGamePort } from "../ports";
 
 export function createPlugin(host: PluginHost): DiscoveredPlugin {
   const world = host.world;
   // The entity, not a handle the root passes: the LOCAL_PLAYER resource exists before the catalogue runs.
   const player = world.resource(LOCAL_PLAYER);
-  const inv = createInventoryView(world, player);
+  // THE GAME PORT: the inventory component, the slot counts and the swap command, injected by the root.
+  const game = host.instances.uiGame as UiGamePort;
+  const inv = createInventoryView(world, player, game);
   // The handles the reconciler writes into (the view only spawns them).
   world.insertResource(INVENTORY_WIDGETS, inv.widgets);
-  const uiInventory = createInventorySystem(world, host.instances.iconSource as IconSource);
+  const uiInventory = createInventorySystem(world, host.instances.iconSource as IconSource, game);
   // What the ROOT paints with: the bag's panel entity (see INVENTORY_HANDLES).
   world.insertResource(INVENTORY_HANDLES, { panel: inv.panelEntity });
-  return { hot: true, plugin: createUiInventoryPlugin({ uiInventory, inv, inWorld: host.inWorld }) };
+  return {
+    hot: true,
+    plugin: createUiInventoryPlugin({
+      uiInventory,
+      inv,
+      inWorld: host.inWorld,
+      access: makeInventoryViewAccess(game.inventory),
+    }),
+  };
 }

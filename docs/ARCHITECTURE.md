@@ -39,6 +39,9 @@ src/
 │   ├── components.ts + systems/(reconcile 是唯一 DOM 写者，另有 hud/loading/bindings/
 │   │             navigation/delays/ui-pages) + views/（建树与注册动作 id 的接线）
 │   └── ui-crosshair / ui-debug / ui-toast / ui-inventory / ui-keybind   可选面（各自 plugin.ts，可热插拔）
+├── adapters/   UI 边界（ports & adapters）：唯一同时认识两边的层
+│   ├── game.ts   用 player/input 实现 `ui/ports.ts` 里 UI 自己声明的端口
+│   └── ui.ts     游戏使用 UI 的唯一入口（视图/工厂/F3 面板数据）
 ├── host/       唯一有副作用的地方
 │   ├── desktop/  shell(Tauri：设置/日志/窗口/vsync) / packs(资源包预载) / debuglog(诊断队列转发)
 │   └── browser/  viewport / rawinput / pointerlock / mousecapture / window-guards /
@@ -63,7 +66,9 @@ src/
 | 层 | 拥有 | 可以 import | 绝对不 |
 |---|---|---|---|
 | `core/` | 机制 | `core/` `shared/` `data/`(**仅类型**) | 游戏词汇、`plugins/`、`host/`、`boot/` |
-| `plugins/*` | 一个功能**以及它拥有的数据** | `core/` `shared/` `data/` 自己目录 + **已声明 deps 的兄弟插件** | 别的插件的内部、直接 `host/` |
+| `ui/` | widget 层 + 菜单 + 5 个可选面 | `core/` `shared/` `data/` 自己目录 | `plugins/`、`adapters/`（端口写在 `ui/ports.ts`，由适配器实现） |
+| `adapters/` | **唯一同时认识 UI 与游戏的层** | 两侧 + `core/` | 业务规则；它只做翻译 |
+| `plugins/*` | 一个功能**以及它拥有的数据** | `core/` `shared/` `data/` 自己目录 + **已声明 deps 的兄弟插件** | 别的插件的内部、直接 `host/`、直接 `ui/`（走 `adapters/ui.ts`） |
 | `host/` | 外部世界 | `core/` `shared/` | `plugins/`（宿主不认识插件） |
 | `data/` | 只有值（以及写这些值的命令） | `core/`(声明机制 `defineResource`/`defineCommand` + 令牌类型) `shared/` | 运行期 import `plugins/`/`host/`、副作用、监听器、模块级可变状态 |
 | `shared/` | 类型与纯函数 | 无 | 其它一切 |

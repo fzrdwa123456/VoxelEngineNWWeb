@@ -84,6 +84,9 @@ src/
 │   ├── views/               the wiring that spawns the trees and registers action ids (menu, mainmenu, hud, loading)
 │   └── ui-crosshair/ ui-debug/ ui-toast/ ui-inventory/ ui-keybind/   the five OPTIONAL surfaces; each has its
 │                            own plugin.ts and is hot-pluggable (F5/F8/F9/F10/F11)
+├── adapters/              THE UI BOUNDARY (ports & adapters): the ONLY layer that knows both sides
+│                            game.ts  implements the UI's ports (ui/ports.ts) over player + input
+│                            ui.ts    the game's door to the widget layer (views, factories, the F3 seam)
 ├── host/                  the boundary: the only place with side effects
 │   ├── desktop/             shell.ts (Tauri: settings/logs/window/display refresh), packs.ts (the pack-chain
 │   │                        preload), debuglog.ts (the diagnostic-queue forwarder)
@@ -159,6 +162,12 @@ composition root names NO plugin by hand (P1.18 built the registry; P1.18b moved
 construction into the plugins).
 
 **The three layers, and who may see whom.**
+
+> **THE UI BOUNDARY (ports & adapters).** `src/ui/` is removable on its own: it imports NO plugin, and its
+> game-facing needs are the interfaces IT declares in `src/ui/ports.ts` (`UiGamePort`). `src/adapters/game.ts`
+> implements them over player + input, and `src/adapters/ui.ts` is the game's only door back into the widget
+> layer. `check:ecs` fails on any `src/ui -> src/plugins` or `src/plugins -> src/ui` import; `src/adapters/`
+> is the one place allowed to touch both.
 
 | Layer | Owns | May import | Must never |
 |---|---|---|---|

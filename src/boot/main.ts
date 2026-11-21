@@ -21,7 +21,7 @@ import { MenuBackgroundSystem } from "../plugins/render/systems/menu-background"
 import { defaultUiTheme, UI_THEME } from "../data/assets/theme";
 // (every import of "../ui/systems/reconcile" was dead after P1.18b: the plugin owns it now)
 import { createUiActions, UI_ACTIONS } from "../data/globals/actions";
-import { createUiOrder, UI_ORDER } from "../ui/components";
+import { createUiOrder, UI_ORDER } from "../adapters/ui";
 import { createUiPaint, UI_PAINT } from "../data/globals/paint";
 import { createUiSources, UI_SOURCES } from "../data/globals/sources";
 // (every import of "../ui/systems/bindings" was dead after P1.18b: the plugin owns it now)
@@ -48,15 +48,15 @@ import type { Entity } from "../core/world";
 // (the ui-toast plugin owns its panel and its system now: see ui/ui-toast/plugin.ts)
 // (every import of "../ui/systems/loading" was dead after P1.18b: the plugin owns it now)
 // (every import of "../ui/systems/hud" was dead after P1.18b: the plugin owns it now)
-import { type NavigationTrees } from "../ui/systems/navigation";
+import { type NavigationTrees } from "../adapters/ui";
 // (every import of "../ui/views/loading" was dead after P1.18b: the plugin owns it now)
 // The INVENTORY layer is its own plugin (P1.31): the bag, the hotbar they share data with, and their system.
 // (the ui-inventory plugin builds its own view, widget handles and system: see ui/ui-inventory/plugin.ts)
-import { Menu, spawnMenuBackdrop } from "../ui/views/menu";
+import { Menu, spawnMenuBackdrop } from "../adapters/ui";
 // The bind page's widgets and its drag gesture belong to the ui-keybind plugin (P1.26), so the root wires
 // them from THERE: the ui plugin exports none of it any more.
-import { cancelKeybindDrag } from "../ui/ui-keybind/views/keybind";
-import { MainMenu } from "../ui/views/mainmenu";
+import { cancelKeybindDrag } from "../adapters/ui";
+import { MainMenu } from "../adapters/ui";
 // (every import of "../ui/views/hud" was dead after P1.18b: the plugin owns it now)
 import { PointerLock } from "../host/browser/pointerlock";
 import { t, loadLang, getLang, i18nStringsState, I18N_STRINGS } from "../data/assets/i18n";
@@ -127,7 +127,8 @@ import { loadWasmKernel } from "../host/browser/wasm-kernel";
 import type { CollisionKernelHolder } from "../plugins/player/systems/collision";
 // (the diagnostics, world, player, input and content-default plugins are DISCOVERED now: each folder owns a
 //  `plugin.ts` that builds it from the host's instances — see `boot/plugin-catalog.ts` and P1.18b.)
-import { createMainMenu, createPauseMenu, createUiViews } from "../ui";
+import { createMainMenu, createPauseMenu, createUiViews } from "../adapters/ui";
+import { createUiGamePort } from "../adapters/game";
 // (every import of "../plugins/input" was dead after P1.18b: the plugin owns it now)
 // (every import of "../plugins/content-default" was dead after P1.18b: the plugin owns it now)
 
@@ -682,12 +683,18 @@ const registry = new ExtensionRegistry();
 // THE PLAYER PLUGIN IS DISCOVERED TOO (P1.18b): it constructs its six fixed-lane systems itself and publishes
 // the ONE the root drives (PLAYER_HANDLES) — the platform halves it may not import (the native mouse capture)
 // arrive here as a host instance.
+// ===== THE GAME PORT THE UI IS DRIVEN THROUGH (src/adapters/game.ts) =====
+// One object, built from the player/input plugins, handed to every UI plugin as `host.instances.uiGame`.
+// It is lazy (it reads LOCAL_PLAYER per call), so it can be created here — before the plugins install.
+const uiGame = createUiGamePort(world);
 const pluginHost: PluginHost = {
   world,
   log: logDebug,
   inWorld: () => inWorld(),
   instances: {
     keybindEntries,
+    // THE UI's PORTS (see src/ui/ports.ts + src/adapters/game.ts): the only game data the widget layer sees.
+    uiGame,
     chunkMeshFactory,
     meshPool,
     wasmCollision,

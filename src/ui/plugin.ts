@@ -37,7 +37,7 @@ import { KEYBIND_GESTURE } from "../data/globals/keybind-gesture";
 import { t } from "../data/assets/i18n";
 import { currentFontCss } from "../data/globals/fonts";
 import { currentRootFontPx } from "../data/globals/uiscale";
-import { getBind, isCapturing } from "../plugins/input/keybinds";
+import type { UiGamePort } from "./ports";
 import {
   createBindingSystem,
   createDelaySystem,
@@ -56,6 +56,9 @@ import type { LoadingScreen } from "./views/loading";
 /** The instances the root publishes for this plugin, narrowed HERE (the host itself models none of them). */
 interface UiHostInstances {
   registry: ExtensionRegistry;
+  /** THE GAME PORT (see `ui/ports.ts`): the slots, the inventory component, the mode and the bind table.
+   *  Injected by the composition root through `adapters/game.ts` — this plugin imports no game plugin. */
+  uiGame: UiGamePort;
   loadingScreen: LoadingScreen;
   /** The native capture, as `ui.navigation` and `ui.delays` drive it (a `host/` object). */
   lock: {
@@ -101,9 +104,10 @@ export function createPlugin(host: PluginHost): DiscoveredPlugin {
         if (!i.uiTrees.trees) throw new Error("ui: the modal trees were never wired (boot order)");
         return i.uiTrees.trees;
       },
-      inventoryCode: () => getBind("inventory"),
+      game: i.uiGame,
+      inventoryCode: () => i.uiGame.keybinds.get("inventory"),
       inventoryOn: i.inventoryOn,
-      capturing: isCapturing,
+      capturing: () => i.uiGame.keybinds.isCapturing(),
       inWorld: host.inWorld,
       prepareUnlock: () => playerInput().prepareUnlock(),
       dragging: () => world.resource(KEYBIND_GESTURE).drag !== null,

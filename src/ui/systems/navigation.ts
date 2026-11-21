@@ -14,12 +14,11 @@
 // What stays outside, deliberately: the Space/contextmenu/resize listeners in main.ts
 // (`preventDefault` can only happen in the event that must be cancelled) and the arm paths of the key
 // bind gesture (click-synthesis timing, see ui/menu.ts).
-import { HOTBAR_SLOTS } from "../../plugins/player/components";
-import { SelectSlot } from "../../plugins/player/commands";
+import type { UiGamePort } from "../ports";
 import { ReloadPacks } from "../../data/globals/commands";
 import { HotPlugPlugin } from "../../data/globals/commands";
 import { hotPlugSurfaceForKey } from "../../data/globals/hotplug";
-import { isModalUi, LOCAL_PLAYER, UI_MODAL, type UiModalState } from "../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../data/globals/resources";
+import { isModalUi, UI_MODAL, type UiModalState } from "../../data/globals/resources";import { KeyEdgeReader, type KeyEventLog } from "../../data/globals/resources";
 import { KEY_EVENTS } from "../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../core/world";
 import { UI_PAINT, type UiNavigationPaint } from "../../data/globals/paint";
@@ -59,6 +58,8 @@ export interface NavigationTrees {
 
 export interface NavigationDeps {
   readonly trees: NavigationTrees;
+  /** THE PORT: slot count and the slot-select command, injected (the UI knows no player plugin). */
+  readonly game: UiGamePort;
   /** The key that toggles the inventory (a BIND CODE, so a mouse button bound to "inventory" works too) */
   readonly inventoryCode: () => string;
   /** Is the INVENTORY layer installed? Its panel belongs to this painter (see the ui conventions), so this
@@ -114,8 +115,6 @@ export class UiNavigationSystem {
   /** The mounted pages (each carries the panel this painter shows) — world data, filled by the page host. */
   /** null when the world has no page host at all — a legitimate world (and what the gate's stub builds). */
   private readonly pages: Map<string, MountedPage> | null;
-  /** The player whose INVENTORY the hotbar keys select on (LOCAL_PLAYER, resolved once) */
-  private readonly player: Entity;
   /** What the last frame saw, so the pointer-lock effects fire on an EDGE and not every frame. The DATA
    *  is UI_PAINT.navigation (ecs/ui/paint.ts) — a paint cache is world state like everything else. */
   private readonly paintCache: UiNavigationPaint;
@@ -139,7 +138,6 @@ export class UiNavigationSystem {
     this.ui = world.resource(UI_MODAL);
     this.reader = new KeyEdgeReader(world.resource(KEY_EVENTS) as KeyEventLog);
     this.pages = world.hasResource(UI_PAGES_MOUNTED) ? world.resource(UI_PAGES_MOUNTED) : null;
-    this.player = world.resource(LOCAL_PLAYER);
     this.paintCache = world.resource(UI_PAINT).navigation;
   }
 
@@ -201,9 +199,9 @@ export class UiNavigationSystem {
       // hotbar highlight is the feedback.
       if (edge.code.startsWith("Digit")) {
         const slot = Number(edge.code.slice(5)) - 1;
-        if (slot >= 0 && slot < HOTBAR_SLOTS && !this.deps.capturing() && !ui.mainMenu && !ui.menu &&
+        if (slot >= 0 && slot < this.deps.game.hotbarSlots && !this.deps.capturing() && !ui.mainMenu && !ui.menu &&
             this.deps.inWorld()) {
-          this.world.commands.send(SelectSlot, { entity: this.player, slot });
+          this.deps.game.selectSlot(slot);
         }
       }
     });

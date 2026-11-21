@@ -23,9 +23,12 @@ import { definePlugin } from "../../core/plugin/descriptor";
 import type { Plugin } from "../../core/plugin/descriptor";
 import type { PluginApi } from "../../core/plugin/api";
 import type { Entity, World } from "../../core/world";
+import type { SystemAccess } from "../../core/world";
+import type { UiGamePort } from "../ports";
 import { UI_MODAL, INVENTORY_WIDGETS } from "../../data/globals/resources";
 import type { UiHudElement } from "../../data/globals/ui-hud";
-import { INVENTORY_VIEW_ACCESS, UiInventorySystem } from "./systems/inventory";
+import { UiInventorySystem } from "./systems/inventory";
+export { makeInventoryViewAccess } from "./systems/inventory";
 // The icon baker's SHAPE, re-exported so this plugin's own `plugin.ts` can name the host instance it narrows
 // without reaching into `./systems/...` (which is this plugin's own business).
 export type { IconSource } from "./systems/inventory";
@@ -33,8 +36,8 @@ import { Inventory } from "./views/inventory";
 
 /** The backpack/bag widgets, built during wiring (spawning is a structural change). The HOTBAR's widgets are
  *  NOT built here: they are the HUD element's `build` (see below), because their lifetime is the host's. */
-export function createInventoryView(world: World, player: Entity): Inventory {
-  return new Inventory(world, player);
+export function createInventoryView(world: World, player: Entity, game: UiGamePort): Inventory {
+  return new Inventory(world, player, game);
 }
 
 export function createInventorySystem(
@@ -45,6 +48,9 @@ export function createInventorySystem(
 
 export interface UiInventorySystems {
   readonly uiInventory: { step(): void };
+  /** The access declaration the plugin spreads into `api.system`: built from the INJECTED component, because
+   *  it must carry the identity the schedule compares (see `makeInventoryViewAccess`). */
+  readonly access: SystemAccess;
   /** The VIEW, for the HUD element's `build`: the strip's widgets are this plugin's to create, at a barrier
    *  the host picks (it knows when a mount is legal, the plugin knows WHAT to mount). */
   readonly inv: Inventory;
@@ -61,7 +67,7 @@ export function declareUiInventorySystems(api: PluginApi, s: UiInventorySystems)
     stage: "ui",
     after: ["ui.slot.bag"],
     before: ["ui.slot.debug"],
-    ...INVENTORY_VIEW_ACCESS,
+    ...s.access,
     run: () => s.uiInventory.step(),
   });
 }

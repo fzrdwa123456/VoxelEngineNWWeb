@@ -14,8 +14,7 @@
 // this file nor its types, which is why the mount shape it is handed comes from a data module
 // (`data/globals/keybind-tab.ts`) instead of from either plugin.
 import { t } from "../../../data/assets/i18n";
-import { installBindGestureHandlers } from "../../../plugins/input/bind-gesture";
-import { getBind, beginCapture, endCapture, getCapturing, codeDisplayName, buttonToCode, setBind } from "../../../plugins/input/keybinds";
+import type { UiKeybindPort } from "../../ports";
 import { KB_ACTIONS, type BindAction } from "../../../data/globals/binds";
 import { KB_ROWS, TOWER_GRID, NUM_GRID, MOUSE_GRID } from "../../../data/globals/keylayout";
 import { ACTION_KEYBIND_CHIP, ACTION_KEYBIND_KEY, onUiAction, UI_ACTIONS, type UiActionHandler } from "../../../data/globals/actions";
@@ -49,15 +48,24 @@ import { setUiVisible, spawnButton, spawnGridKey, spawnLabel, spawnLayoutBox, sp
 export interface KeybindDragDeps {
   /** The platform's log sink, INJECTED (a plugin may not import `host/`). */
   log: (line: string) => void;
+  /** THE GAME PORT's bind half: the table, the capture state and the gesture's device listeners. */
+  readonly keybinds: UiKeybindPort;
   readonly world: World;
   readonly hitTest: (x: number, y: number) => UiHit | null;
   readonly gesture: KeybindGesture;
 }
 let dragDeps: KeybindDragDeps | null = null;
+/** The bind port in force (set by `bindKeybindDrag`): the module's action handlers and legends read it. */
+let keybindPort: UiKeybindPort | null = null;
+function kb(): UiKeybindPort {
+  if (!keybindPort) throw new Error("ui-keybind: the bind port was never wired (boot order)");
+  return keybindPort;
+}
 /** The disposer of the device listeners below — see the bind/unbind pair. */
 let unbindHandlers: (() => void) | null = null;
 export function bindKeybindDrag(deps: KeybindDragDeps): void {
   dragDeps = deps;
+  keybindPort = deps.keybinds;
   // Install the gesture's DEVICE listeners (plugins/input/bind-gesture.ts) — the click shield, the drag's
   // start/end, the wheel block and the key capture. They live in the device layer because every one of them
   // decides something inside the event itself; what is injected here is the state they read and the two
@@ -65,16 +73,16 @@ export function bindKeybindDrag(deps: KeybindDragDeps): void {
   // A BIND is not written here: the listener queues the decision (KEYBIND_GESTURE.rebinds) and `ui.keybind`
   // applies it in the ui lane.
   unbindHandlers?.();
-  unbindHandlers = installBindGestureHandlers({
+  unbindHandlers = deps.keybinds.installGesture({
     gesture: gestureState,
-    capturing: getCapturing,
-    endCapture,
+    capturing: deps.keybinds.capturing,
+    endCapture: deps.keybinds.end,
     queueRebind: (intent) => deps.gesture.rebinds.push(intent),
     chipAction: ACTION_KEYBIND_CHIP,
     keycapCodeAt: (x, y) => keycapAt(x, y)?.code ?? null,
     hitTest: (x, y) => deps.hitTest(x, y),
     armShield: armSuppressNextClick,
-    buttonToCode: (button) => buttonToCode(button),
+    buttonToCode: (button) => deps.keybinds.buttonToCode(button),
     log: deps.log,
   });
 }
@@ -99,10 +107,10 @@ function gestureState(): KeybindGesture | null {
 
 /** The codes bound to an action right now — the keycap "blue face" state. Injected into `ui.keybind`,
  *  because the bind table is input state this file happens to know the layout of. */
-export function boundCodes(): Set<string> {
+export function boundCodes(keybinds: UiKeybindPort): Set<string> {
   const bound = new Set<string>();
   for (const { action } of KB_ACTIONS) {
-    const code = getBind(action);
+    const code = keybinds.get(action);
     if (code) bound.add(code);
   }
   return bound;
@@ -151,7 +159,7 @@ export function cancelKeybindDrag(reason: string, log: (line: string) => void): 
   if (!g?.drag) return;
   g.drag = null;
   g.hover = null;
-  endCapture();
+  kb().end();
   // THE CANCELLED PRESS MUST NOT BECOME A CLICK. ESC ends the drag, but the button is usually STILL DOWN:
   // Chromium synthesizes a `click` on whatever is under the pointer when it finally comes up, and the click
   // shield is the only thing that swallows it. The shield was armed by a COMPLETED drag release
@@ -183,15 +191,17 @@ function registerKeybindActions(actions: Map<string, UiActionHandler>, log: (lin
   keybindActionsReady = true;
   onUiAction(actions, ACTION_KEYBIND_CHIP, (value) => {
     const action = value as BindAction; // the chip's value IS a BindAction (see the spawn loop)
-    log(`KBCAP click interactive button action=${action} capturing=${getCapturing() ?? "null"}`);
-    if (getCapturing() === action) endCapture();
-    else beginCapture(action);
+    const port = kb();
+    log(`KBCAP click interactive button action=${action} capturing=${port.capturing() ?? "null"}`);
+    if (port.capturing() === action) port.end();
+    else port.begin(action);
   });
   onUiAction(actions, ACTION_KEYBIND_KEY, (code) => {
-    const selected = getCapturing();
+    const port = kb();
+    const selected = port.capturing();
     if (!selected) return; // Clicking the keyboard with no action selected is a no-op
-    setBind(selected, code);
-    endCapture();
+    port.set(selected, code);
+    port.end();
     log(`KBCAP keycap bind done (${code})`);
   });
 }
@@ -234,7 +244,7 @@ export function spawnKeybindPanel(mount: KeybindPanelMount): { panel: Entity; en
   const legendFor = (code: string): string => {
     const real = layoutLegends?.get(code);
     if (real) return real.length === 1 ? real.toUpperCase() : real;
-    return codeDisplayName(code);
+    return kb().codeName(code);
   };
 
   // What `ui.keybind` re-derives every frame from the bind table: one spec per panel INSTANCE, so the
@@ -250,7 +260,7 @@ export function spawnKeybindPanel(mount: KeybindPanelMount): { panel: Entity; en
       labelKey,
       // Selected: the bare name (a KEY the reconciler re-resolves). Otherwise the name plus the current
       // key — a literal, because it carries a value.
-      format: (code) => `${t(labelKey)} · ${code ? codeDisplayName(code) : t("bind.unbound")}`,
+      format: (code) => `${t(labelKey)} · ${code ? kb().codeName(code) : t("bind.unbound")}`,
     });
   }
 
@@ -302,7 +312,7 @@ export function spawnKeybindPanel(mount: KeybindPanelMount): { panel: Entity; en
   const back = `${id}.keybindBack`;
   if (!actions.has(back)) {
     onUiAction(actions, back, () => {
-      endCapture(); // Leaving the panel cancels an unfinished selection
+      kb().end(); // Leaving the panel cancels an unfinished selection
       mount.show("settings");
     });
   }

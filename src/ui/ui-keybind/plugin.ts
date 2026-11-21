@@ -13,7 +13,8 @@
 import type { DiscoveredPlugin, PluginHost } from "../../core/plugin/host";
 import { KEYBIND_GESTURE } from "../../data/globals/keybind-gesture";
 import { UI_HANDLES } from "../../data/globals/ui-handles";
-import { endCapture, getBind, getCapturing, setBind } from "../../plugins/input/keybinds";
+import type { UiGamePort } from "../ports";
+import type { BindAction } from "../../data/globals/binds";
 import { createKeybindSystem, createUiKeybindPlugin } from "./index";
 import { bindKeybindDrag, boundCodes, keycapAtPoint, spawnKeybindLine } from "./views/keybind";
 
@@ -22,16 +23,18 @@ type Entries = Parameters<typeof createUiKeybindPlugin>[1];
 export function createPlugin(host: PluginHost): DiscoveredPlugin {
   const world = host.world;
   const entries = host.instances.keybindEntries as Entries;
+  // THE GAME PORT's bind half: the table, the capture state and the gesture's device listeners.
+  const keybinds = (host.instances.uiGame as UiGamePort).keybinds;
   // The rubber band the drag draws: the VIEW spawns it, the system writes its geometry every frame.
   const line = spawnKeybindLine(world);
   const uiKeybind = createKeybindSystem(world, {
-    boundCodes,
-    capturing: getCapturing,
-    bindOf: getBind,
+    boundCodes: () => boundCodes(keybinds),
+    capturing: () => keybinds.capturing() as BindAction | null,
+    bindOf: (action) => keybinds.get(action),
     // The bind itself is applied by THIS system (it drains the queued device decisions), so the writes are
     // injected like the reads: the event listener only reports what happened.
-    setBind,
-    endCapture,
+    setBind: (action, code) => keybinds.set(action, code),
+    endCapture: () => keybinds.end(),
     log: host.log,
     line,
     entries,
@@ -42,6 +45,7 @@ export function createPlugin(host: PluginHost): DiscoveredPlugin {
   bindKeybindDrag({
     log: host.log,
     world,
+    keybinds,
     hitTest: (x, y) => world.resource(UI_HANDLES).uiRender.hitTest(x, y),
     gesture: world.resource(KEYBIND_GESTURE),
   });

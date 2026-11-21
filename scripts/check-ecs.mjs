@@ -118,6 +118,11 @@ const SOURCES = [
   "src/ui/ui-inventory/systems/inventory.ts",
   "src/ui/ui-keybind/systems/keybind.ts",
   "src/ui/systems/navigation.ts",
+  // THE UI BOUNDARY (ports & adapters): the ports the widget layer owns, and the two adapters that are the
+  // ONLY crossing between the UI and the game plugins.
+  "src/ui/ports.ts",
+  "src/adapters/game.ts",
+  "src/adapters/ui.ts",
   "src/plugins/render/systems/camera.ts",
   // The block target outline: a render-lane system that reads the TARGET_HIT component and moves a
   // three.js mesh. Import-safe in Node �?it imports three.js for TYPES only and the mesh arrives as the
@@ -2315,6 +2320,7 @@ check("the F3+F4 picker is a system: key edges in, widget data and a mode change
       applied.push(m);
       mode = m;
     },
+    modeNames: { walk: "Walking", fly: "Flying", spectator: "Spectator" },
     inWorld: () => inWorld,
     inventoryOn: () => true,
     log: () => {},
@@ -2888,7 +2894,9 @@ function registrations() {
     // The inventory reconcile is a SYSTEM now (ecs/ui/inventory.ts), so its declared access is loaded like
     // every other one. It used to be a method on the VIEW, which the gate could only read as source text
     // (the view imports the renderer and is not compiled here).
-    INVENTORY_VIEW_ACCESS: load("ui/ui-inventory/systems/inventory.js").INVENTORY_VIEW_ACCESS,
+    INVENTORY_VIEW_ACCESS: load("ui/ui-inventory/systems/inventory.js").makeInventoryViewAccess(
+      load("plugins/player/components.js").INVENTORY,
+    ),
     UI_RENDER_ACCESS: load("ui/systems/reconcile.js").UI_RENDER_ACCESS,
     UI_BINDING_ACCESS: load("ui/systems/bindings.js").UI_BINDING_ACCESS,
     UI_PAGES_ACCESS: load("ui/systems/ui-pages.js").UI_PAGES_ACCESS,
@@ -4293,14 +4301,23 @@ check("the input race guards' state is a RESOURCE (and the logic did not move)",
 });
 
 check("ecs/ui/inventory.ts declares what the schedule was given for it", () => {  const source = require("node:fs").readFileSync(path.join(ROOT, "src", "ui", "ui-inventory", "systems", "inventory.ts"), "utf8");
-  const block = /INVENTORY_VIEW_ACCESS[^=]*=\s*\{([\s\S]*?)\};/.exec(source)[1];
-  assert(/reads:\s*\[INVENTORY\]/.test(block), "reads INVENTORY");
+  // THE ACCESS IS A FACTORY OVER THE INJECTED COMPONENT (ports & adapters): the UI imports no player plugin,
+  // so the identity the schedule compares arrives at wiring time. Both halves are checked: the source says how
+  // it is built, and the compiled factory proves what it returns.
+  assert(/export function makeInventoryViewAccess\(/.test(source),
+    "the inventory access is a factory over the INJECTED component");
+  assert(!/export const INVENTORY_VIEW_ACCESS\s*[:=]/.test(source),
+    "…and the old module-level constant is gone (it needed a player import)");
+  const injected = { name: "inventory" };
+  const block = load("ui/ui-inventory/systems/inventory.js").makeInventoryViewAccess(injected);
+  assert(block.reads?.[0] === injected, "…reads the component it was HANDED, by identity");
   // It writes WIDGET DATA now, not DOM: that is what makes it conflict with the reconciler and what
   // forces the declared order in the ui lane.
+  const widgets = load("ui/components.js");
   for (const component of ["UI_IMAGE", "UI_STATE", "UI_TEXT", "UI_TIP"]) {
-    assert(new RegExp(`writes:[\\s\\S]*\\b${component}\\b`).test(block), `writes ${component}`);
+    assert(block.writes.includes(widgets[component]), `writes ${component}`);
   }
-  assert(!/dom\./.test(block), "writes no DOM target of its own any more");
+  assert((block.writesExternal ?? []).join(",") === "iconBake", "…and declares the icon bake it drives");
   // …and main.ts must declare the order the conflict demands, or the schedule throws at boot.
   const main = require("node:fs").readFileSync(path.join(ROOT, "src", "boot", "main.ts"), "utf8");
   assert(
@@ -5208,8 +5225,8 @@ check("the plugin system: extension points, the registry, the install and the ma
     kbView.indexOf("export function cancelKeybindDrag") + 700);
   assert(/armSuppressNextClick\(false\)/.test(cancelFn),
     "ESC's cancel arms the click shield (without the self-timeout: the release may be seconds away)");
-  assert(/g\.drag = null/.test(cancelFn) && /endCapture\(\)/.test(cancelFn),
-    "…and still clears the drag and the capture");
+  assert(/g\.drag = null/.test(cancelFn) && /kb\(\)\.end\(\)/.test(cancelFn),
+    "…and still clears the drag and the capture (through the injected keybind port)");
   assert(contribute(load("ui/ui-debug/index.js")
     .createUiDebugPlugin({ uiPicker: { step: () => {}, close: () => {} } }))
     .list(S.SLOT_RESOURCES).some((r) => r.name === "pickerState"),
@@ -5735,6 +5752,49 @@ check("a plugin folder JOINS the catalogue by existing - and the two cannot drif
     assert(new RegExp(`plugins/${name}"`).test(boot),
       `${name}: not discovered, so the root must still name it (the remaining migration step)`);
   }
+});
+
+// ===== THE UI BOUNDARY: ports & adapters =====
+// The widget layer under `src/ui/` must be usable WITHOUT the game: it imports no plugin. The game must be
+// usable without knowing where the UI lives: no plugin imports `src/ui/`. Everything that has to cross does it
+// in `src/adapters/` — the ports are declared BY THE UI (`ui/ports.ts`) and implemented by the game
+// (`adapters/game.ts`), and the game's door to the widget layer is `adapters/ui.ts`.
+check("the UI is reached through src/adapters only", () => {
+  const fs = require("node:fs");
+  const walk = (dir) => {
+    const out = [];
+    const visit = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) visit(p);
+        else if (e.name.endsWith(".ts")) out.push(path.relative(ROOT, p).replace(/\\/g, "/"));
+      }
+    };
+    visit(path.join(ROOT, dir));
+    return out;
+  };
+  const crossings = [];
+  for (const rel of [...walk("src/ui"), ...walk("src/plugins")]) {
+    for (const line of readSource(rel).split("\n")) {
+      if (!/^\s*(?:import|export)\b/.test(line)) continue;
+      const spec = /from "(\.[^"]*)"/.exec(line);
+      if (!spec) continue;
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(rel), spec[1]));
+      if (rel.startsWith("src/ui/") && target.startsWith("src/plugins/")) crossings.push(`${rel} -> ${target}`);
+      if (rel.startsWith("src/ui/") && target.startsWith("src/adapters/")) crossings.push(`${rel} -> ${target}`);
+      if (rel.startsWith("src/plugins/") && target.startsWith("src/ui/")) crossings.push(`${rel} -> ${target}`);
+    }
+  }
+  equal(crossings.join(" | "), "",
+    "the widget layer imports no game plugin, and no plugin imports the widget layer directly");
+  const game = readSource("src/adapters/game.ts");
+  const ui = readSource("src/adapters/ui.ts");
+  assert(/from "\.\.\/plugins\//.test(game) && /from "\.\.\/ui\/ports"/.test(game),
+    "adapters/game.ts implements the UI's ports over the player/input plugins");
+  assert(/from "\.\.\/ui\//.test(ui), "adapters/ui.ts is the game's only door to the widget layer");
+  const ports = readSource("src/ui/ports.ts");
+  assert(/export interface UiGamePort/.test(ports) && /export interface UiKeybindPort/.test(ports),
+    "the ports are declared by the UI itself (dependency inversion)");
 });
 
 // ===== WHAT A PLUGIN LEAVES BEHIND (P1.39) =====

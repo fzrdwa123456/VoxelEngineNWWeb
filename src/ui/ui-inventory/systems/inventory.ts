@@ -33,7 +33,7 @@ export interface IconSource {
 const NO_ICONS: IconSource = { key: (t, s) => `${t}@${s}`, peek: () => null, request: () => {} };
 import { CHECKER_TEXTURE_URL } from "../../../data/assets/textures";
 import { getBlockDef } from "../../../data/assets/blockregistry";
-import { INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../../../plugins/player/components";
+import type { UiGamePort, UiInventory } from "../../ports";
 import { ICON_BAKE, type IconBakeState } from "../../../data/globals/gfx";
 import { INVENTORY_WIDGETS, LOCAL_PLAYER, type InventoryWidgets } from "../../../data/globals/resources";
 import type { SystemAccess, World } from "../../../core/world";
@@ -49,15 +49,20 @@ import {
   UI_TIP,
 } from "../../components";
 
-/** Declared access: a view of the player's INVENTORY component that WRITES WIDGET DATA and nothing
- *  else. No DOM target: the only code that touches an element is the reconciler. It also READS the item
- *  icon cache and starts a bake when a miss is found (ICON_BAKE, ecs/presentation.ts), so that state is
- *  declared as an external target — it is a GPU object the ECS does not model. */
-export const INVENTORY_VIEW_ACCESS: SystemAccess = {
-  reads: [INVENTORY],
-  writes: [UI_IMAGE, UI_STATE, UI_TEXT, UI_TIP],
-  writesExternal: ["iconBake"],
-};
+/** Declared access: a view of the player's INVENTORY component that WRITES WIDGET DATA and nothing else.
+ *  No DOM target: the only code that touches an element is the reconciler. It also READS the item icon cache
+ *  and starts a bake when a miss is found (ICON_BAKE), so that state is declared as an external target — it is
+ *  a GPU object the ECS does not model.
+ *
+ *  A FACTORY, because the component is now INJECTED (the UI imports no player plugin): the schedule needs the
+ *  COMPONENT'S IDENTITY, and that arrives through the game port at wiring time. */
+export function makeInventoryViewAccess(inventory: UiGamePort["inventory"]): SystemAccess {
+  return {
+    reads: [inventory],
+    writes: [UI_IMAGE, UI_STATE, UI_TEXT, UI_TIP],
+    writesExternal: ["iconBake"],
+  };
+}
 
 /** Baked icon size, in px (the hand-written view had an unused `iconSize` field and a dead re-bake path). */
 const ICON_SIZE = 40;
@@ -67,7 +72,7 @@ type CellWidgets = { readonly slot: number; readonly icon: number; readonly coun
 
 export class UiInventorySystem {
   /** The component this system renders. A record, so the reference is stable (iron rule 2). */
-  private readonly inv: InventoryC;
+  private readonly inv: UiInventory;
   private readonly widgets: InventoryWidgets;
   /** The icon bake's cache/pending maps (a RESOURCE — see ecs/presentation.ts::ICON_BAKE) */
   private readonly bake: IconBakeState;
@@ -92,8 +97,10 @@ export class UiInventorySystem {
     private readonly world: World,
     /** The icon source (see IconSource): the platform hands its baker in. */
     private readonly icons: IconSource = NO_ICONS,
+    /** THE GAME PORT: the inventory component's identity and the slot count (see ui/ports.ts). */
+    private readonly game: UiGamePort,
   ) {
-    this.inv = world.get(world.resource(LOCAL_PLAYER), INVENTORY)!;
+    this.inv = world.get(world.resource(LOCAL_PLAYER), game.inventory)!;
     this.widgets = world.resource(INVENTORY_WIDGETS);
     this.bake = world.resource(ICON_BAKE);
     this.paint = world.resource(UI_PAINT).inventory;
@@ -103,7 +110,7 @@ export class UiInventorySystem {
   step(): void {
     const inventory = this.inv;
     this.collectFinishedBakes();
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < this.game.inventorySlots; i++) {
       const cell = this.cell(i);
       if (!cell) continue; // that group is not mounted: nothing to draw into (and nothing to remember)
       const item = inventory.slots[i];
@@ -114,7 +121,7 @@ export class UiInventorySystem {
     }
     if (inventory.selected !== this.drawnSelected) {
       this.drawnSelected = inventory.selected;
-      for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      for (let i = 0; i < this.game.inventorySlots; i++) {
         const cell = this.cell(i);
         if (!cell) continue;
         setUiSelected(this.world, cell.slot, i === inventory.selected);
@@ -172,7 +179,7 @@ export class UiInventorySystem {
    *  waiting slot per frame, and the write itself happens inside a lane. */
   private collectFinishedBakes(): void {
     const bake = this.bake;
-    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+    for (let i = 0; i < this.game.inventorySlots; i++) {
       if (!this.waiting[i]) continue;
       const item = this.inv.slots[i];
       if (!item) {

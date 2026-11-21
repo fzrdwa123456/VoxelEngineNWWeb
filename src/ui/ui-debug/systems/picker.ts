@@ -17,9 +17,9 @@
 // a world. They are gated on `inWorld()` now (see step()), so outside a world this system consumes the
 // edges and does nothing; the debug panel's TEXT comes from the render lane, which does not run in the
 // menu either, so an F3 panel opened there would have shown stale numbers anyway.
-import { MODE_NAMES, type MoveMode } from "../../../plugins/player/components";
 import { KEY_EVENTS, KeyEdgeReader, PICKER_STATE, type PickerState } from "../../../data/globals/resources";
 import type { Entity, SystemAccess, World } from "../../../core/world";
+import type { UiMoveMode } from "../../ports";
 import { UI_STATE, spawnLabel, spawnPanel, setUiSelected, setUiVisible } from "../../components";
 
 /** Declared access: it writes the picker panel's own widget data and the F3 debug panel's visibility,
@@ -34,7 +34,7 @@ export const UI_PICKER_ACCESS: SystemAccess = {
 };
 
 /** The modes the picker cycles through, in order. */
-export const PICKER_MODES = ["walk", "fly", "spectator"] as const;
+export const PICKER_MODES: readonly UiMoveMode[] = ["walk", "fly", "spectator"];
 
 /** The picker panel + its rows: a WIRING helper (spawn is a structural change — never inside a
  *  system). Called from main.ts, exactly like the Hud's own widget tree. */
@@ -54,10 +54,12 @@ export interface PickerDeps {
   readonly items: readonly Entity[];
   /** The F3 debug panel, so F3 alone still toggles it (see step()) */
   readonly debugPanel: Entity;
-  /** The mode in force, and how to change it. Injected: reading CONTROL and sending the SetMode command
-   *  is the composition root's job, and it keeps this system to widget data. */
-  readonly readMode: () => MoveMode;
-  readonly applyMode: (mode: MoveMode) => void;
+  /** The mode in force, and how to change it. Injected: the game port owns the CONTROL read and the SetMode
+   *  command, which keeps this system to widget data. */
+  readonly readMode: () => UiMoveMode;
+  readonly applyMode: (mode: UiMoveMode) => void;
+  /** The display names, injected with the port (the log line names the mode it switched to). */
+  readonly modeNames: Readonly<Record<UiMoveMode, string>>;
   /** Is a world RUNNING? The F3 panel and the mode chord are GAMEPLAY UI: outside a world (`inWorld()`
    *  false — the main menu, and the loading screen while a world is built) neither may fire, and the
    *  panels come down. Injected, so this system keeps the one definition the composition root owns. */
@@ -162,7 +164,7 @@ export class UiPickerSystem {
 
   private open(): void {
     const mode = this.deps.readMode();
-    this.state.sel = Math.max(0, PICKER_MODES.indexOf(mode as (typeof PICKER_MODES)[number]));
+    this.state.sel = Math.max(0, PICKER_MODES.indexOf(mode));
     this.state.open = true;
     setUiVisible(this.world, this.panel, true);
     this.render();
@@ -185,6 +187,6 @@ export class UiPickerSystem {
     const mode = PICKER_MODES[this.state.sel];
     if (mode === this.deps.readMode()) return;
     this.deps.applyMode(mode); // a COMMAND in main.ts: the mode is component data (see ecs/commands.ts)
-    this.deps.log(`MODE switch -> ${mode} (${MODE_NAMES[mode]})`);
+    this.deps.log(`MODE switch -> ${mode} (${this.deps.modeNames[mode]})`);
   }
 }

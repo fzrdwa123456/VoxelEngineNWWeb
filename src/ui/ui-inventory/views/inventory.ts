@@ -25,8 +25,7 @@
 //
 // Open/closed is not component data either: the state is `UI_MODAL.inventory` (flipped by ui.navigation,
 // which also paints it), so there is no second copy of "the backpack is open" to drift.
-import { HOTBAR_SLOTS, INVENTORY, INVENTORY_SLOTS, type InventoryC } from "../../../plugins/player/components";
-import { SwapSlots } from "../../../plugins/player/commands";
+import type { UiGamePort, UiInventory } from "../../ports";
 import { UI_MODAL } from "../../../data/globals/resources";
 import { UI_PAINT } from "../../../data/globals/paint";
 import { onUiAction, UI_ACTIONS, ACTION_BAG_CLICK } from "../../../data/globals/actions";
@@ -65,23 +64,21 @@ export class Inventory {
   constructor(
     private readonly world: World,
     private readonly entity: Entity,
+    /** THE GAME PORT: slot counts, the inventory component and the swap command (the UI knows no player). */
+    private readonly game: UiGamePort,
   ) {
     // THE BAG (a modal surface: built once, hidden until UI_MODAL.inventory says otherwise).
     this.panel = spawnPanel(world, null, "inv.panel", { hidden: true });
     const inner = spawnPanel(world, this.panel, "inv.inner");
     spawnLabel(world, inner, "inv.title", "inv.title");
     const grid = spawnPanel(world, inner, "inv.grid");
-    for (let i = HOTBAR_SLOTS; i < INVENTORY_SLOTS; i++) this.addSlot(world, grid, i, true);
+    for (let i = this.game.hotbarSlots; i < this.game.inventorySlots; i++) this.addSlot(world, grid, i, true);
 
     // A bag slot click swaps it with the selected hotbar slot: ONE action id instead of 27 listeners. It
     // sends a COMMAND (the only way non-system code may change state) and reads the selection from the
     // component the gameplay systems read, so the two cannot disagree.
     onUiAction(world.resource(UI_ACTIONS), ACTION_BAG_CLICK, (value) => {
-      this.world.commands.send(SwapSlots, {
-        entity: this.entity,
-        a: Number(value),
-        b: this.inventory().selected,
-      });
+      this.game.swapSlots(Number(value), this.inventory().selected);
     });
 
     // The HOTBAR digit keys (1..9) are NOT handled here: this view used to `document
@@ -103,9 +100,9 @@ export class Inventory {
    *  would skip every hotbar cell and the strip would come back BLANK after a hot re-install. */
   buildHotbar(world: World): Entity {
     const hotbar = spawnPanel(world, null, "inv.hotbar", { hidden: true });
-    for (let i = 0; i < HOTBAR_SLOTS; i++) this.addSlot(world, hotbar, i, false);
+    for (let i = 0; i < this.game.hotbarSlots; i++) this.addSlot(world, hotbar, i, false);
     const paint = world.resource(UI_PAINT).inventory;
-    for (let i = 0; i < HOTBAR_SLOTS; i++) {
+    for (let i = 0; i < this.game.hotbarSlots; i++) {
       paint.drawn[i] = "\u0000"; // no real signature equals this: the diff below redraws the cell
       paint.waiting[i] = 0;
     }
@@ -113,8 +110,8 @@ export class Inventory {
   }
 
   /** The component this view's widgets mirror. A record, so the reference is stable (iron rule 2). */
-  private inventory(): InventoryC {
-    return this.world.get(this.entity, INVENTORY)!;
+  private inventory(): UiInventory {
+    return this.world.get(this.entity, this.game.inventory)!;
   }
 
   /** One cell: a slot widget holding an icon face and a count. Bag cells are clickable, hotbar cells are

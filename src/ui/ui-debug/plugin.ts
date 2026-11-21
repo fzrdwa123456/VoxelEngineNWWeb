@@ -16,23 +16,22 @@
 // reachable from here, because `player` is a DECLARED dep of this plugin (it reads CONTROL and sends SetMode).
 import type { DiscoveredPlugin, PluginHost } from "../../core/plugin/host";
 import type { Entity } from "../../core/world";
-import { LOCAL_PLAYER } from "../../data/globals/resources";
-import { CONTROL } from "../../plugins/player/components";
-import { SetMode } from "../../plugins/player/commands";
+import type { UiGamePort } from "../ports";
 import { createPickerSystem, createUiDebugPlugin, spawnPickerPanel } from "./index";
 
 export function createPlugin(host: PluginHost): DiscoveredPlugin {
   const world = host.world;
-  const player = world.resource(LOCAL_PLAYER);
+  const game = host.instances.uiGame as UiGamePort;
   const picker = spawnPickerPanel(world);
   const uiPicker = createPickerSystem(world, {
     panel: picker.panel,
     items: picker.items,
     debugPanel: host.instances.f3Panel as Entity,
-    // The player's mode and how to change it: a component read and the SetMode COMMAND, injected so the picker
-    // system itself only ever writes widget data.
-    readMode: () => world.get(player, CONTROL)?.mode ?? "walk",
-    applyMode: (mode) => world.commands.send(SetMode, { entity: player, mode }),
+    // The player's mode and how to change it: the GAME PORT owns the CONTROL read and the SetMode command,
+    // so the picker system itself only ever writes widget data and knows no player plugin.
+    readMode: () => game.readMode(),
+    applyMode: (mode) => game.setMode(mode),
+    modeNames: game.modeNames,
     inWorld: host.inWorld,
     log: host.log,
   });
