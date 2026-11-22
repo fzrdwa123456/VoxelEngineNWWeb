@@ -75,17 +75,15 @@ src/
 │   ├── player/              components.ts (POSITION…TARGET_HIT + the spawn helpers)
 │   │   └── systems/         input, snapshot, controller, movement, collision, interaction (fixed lane)
 │   ├── render/              systems/: camera, chunk-stream, outline, menu-background, diagnostics
-│   └── input/               keybinds.ts (the bind table, its validation and the settings file) +
-│                            bind-gesture.ts (the rebind gesture's EVENT-TIME half)
-├── ui/                    THE UI MODULE — its own tree, NOT under `plugins/` (no game plugin owns it)
-│   ├── components.ts        the widget components + prefabs
-│   ├── plugin.ts, index.ts  the ui plugin itself (declares the systems from the instances it constructs)
-│   ├── systems/             reconcile (the ONE DOM writer), hud, loading, bindings, navigation, delays, ui-pages
-│   ├── views/               the wiring that spawns the trees and registers action ids (menu, mainmenu, hud, loading)
-│   └── ui-crosshair/ ui-debug/ ui-toast/ ui-inventory/ ui-keybind/   the five OPTIONAL surfaces; each has its
-│                            own plugin.ts and is hot-pluggable (F5/F8/F9/F10/F11)
+│   ├── input/               keybinds.ts (the bind table, its validation and the settings file) +
+│   │                        bind-gesture.ts (the rebind gesture's EVENT-TIME half)
+│   ├── ui/                  THE UI: components.ts + plugin/index + systems/ (reconcile — the ONE DOM writer —
+│   │                        hud, loading, bindings, navigation, delays, ui-pages) + views/ (menu, mainmenu, hud,
+│   │                        loading) + ports.ts (what the UI needs from the game, declared by the UI)
+│   └── ui-crosshair/ ui-debug/ ui-toast/ ui-inventory/ ui-keybind/   the five OPTIONAL UI surfaces (own
+│                            plugin.ts each, hot-pluggable F5/F8/F9/F10/F11)
 ├── adapters/              THE UI BOUNDARY (ports & adapters): the ONLY layer that knows both sides
-│                            game.ts  implements the UI's ports (ui/ports.ts) over player + input
+│                            game.ts  implements the UI's ports (plugins/ui/ports.ts) over player + input
 │                            ui.ts    the game's door to the widget layer (views, factories, the F3 seam)
 ├── host/                  the boundary: the only place with side effects
 │   ├── desktop/             shell.ts (Tauri: settings/logs/window/display refresh), packs.ts (the pack-chain
@@ -163,11 +161,12 @@ construction into the plugins).
 
 **The three layers, and who may see whom.**
 
-> **THE UI BOUNDARY (ports & adapters).** `src/ui/` is removable on its own: it imports NO plugin, and its
-> game-facing needs are the interfaces IT declares in `src/ui/ports.ts` (`UiGamePort`). `src/adapters/game.ts`
-> implements them over player + input, and `src/adapters/ui.ts` is the game's only door back into the widget
-> layer. `check:ecs` fails on any `src/ui -> src/plugins` or `src/plugins -> src/ui` import; `src/adapters/`
-> is the one place allowed to touch both.
+> **THE UI BOUNDARY (ports & adapters).** The UI family (`plugins/ui` + the five `plugins/ui-*` surfaces) is a
+> plugin like the others, but its dependencies are INVERTED: it imports no GAME plugin, and its game-facing needs
+> are the interfaces IT declares in `plugins/ui/ports.ts` (`UiGamePort`). `src/adapters/game.ts` implements them
+> over player + input, and `src/adapters/ui.ts` is the game's only door back into the widget layer.
+> `check:ecs` fails on any `plugins/ui* -> plugins/<game>` or `plugins/<game> -> plugins/ui*` import;
+> `src/adapters/` is the one place allowed to touch both.
 
 | Layer | Owns | May import | Must never |
 |---|---|---|---|

@@ -35,12 +35,11 @@ src/
 │   ├── player/   components.ts + commands.ts + systems/(input, snapshot, controller, movement, collision, interaction)
 │   ├── render/   systems/(camera, chunk-stream, outline, menu-background, diagnostics)
 │   ├── diagnostics / content-default / world / input                    核心四件
-├── ui/         UI 模块（独立树，不在 plugins/ 下，游戏插件不拥有它）
-│   ├── components.ts + systems/(reconcile 是唯一 DOM 写者，另有 hud/loading/bindings/
-│   │             navigation/delays/ui-pages) + views/（建树与注册动作 id 的接线）
+│   ├── ui/       UI（components + systems/(reconcile 是唯一 DOM 写者，另有 hud/loading/bindings/
+│   │             navigation/delays/ui-pages) + views/ + ports.ts：UI 自己声明需要游戏提供什么）
 │   └── ui-crosshair / ui-debug / ui-toast / ui-inventory / ui-keybind   可选面（各自 plugin.ts，可热插拔）
 ├── adapters/   UI 边界（ports & adapters）：唯一同时认识两边的层
-│   ├── game.ts   用 player/input 实现 `ui/ports.ts` 里 UI 自己声明的端口
+│   ├── game.ts   用 player/input 实现 `plugins/ui/ports.ts` 里 UI 自己声明的端口
 │   └── ui.ts     游戏使用 UI 的唯一入口（视图/工厂/F3 面板数据）
 ├── host/       唯一有副作用的地方
 │   ├── desktop/  shell(Tauri：设置/日志/窗口/vsync) / packs(资源包预载) / debuglog(诊断队列转发)
@@ -66,7 +65,7 @@ src/
 | 层 | 拥有 | 可以 import | 绝对不 |
 |---|---|---|---|
 | `core/` | 机制 | `core/` `shared/` `data/`(**仅类型**) | 游戏词汇、`plugins/`、`host/`、`boot/` |
-| `ui/` | widget 层 + 菜单 + 5 个可选面 | `core/` `shared/` `data/` 自己目录 | `plugins/`、`adapters/`（端口写在 `ui/ports.ts`，由适配器实现） |
+| `plugins/ui*` | widget 层 + 菜单 + 5 个可选面（依赖倒置的插件） | `core/` `shared/` `data/` `plugins/ui/ports.ts` 自己声明 | 任何游戏插件（player/input/render…）、`adapters/`；游戏侧也不得直接 import 它 |
 | `adapters/` | **唯一同时认识 UI 与游戏的层** | 两侧 + `core/` | 业务规则；它只做翻译 |
 | `plugins/*` | 一个功能**以及它拥有的数据** | `core/` `shared/` `data/` 自己目录 + **已声明 deps 的兄弟插件** | 别的插件的内部、直接 `host/`、直接 `ui/`（走 `adapters/ui.ts`） |
 | `host/` | 外部世界 | `core/` `shared/` | `plugins/`（宿主不认识插件） |

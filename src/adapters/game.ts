@@ -30,7 +30,7 @@ import {
   setBind,
 } from "../plugins/input/keybinds";
 import type { BindAction } from "../data/globals/binds";
-import type { UiGamePort, UiKeybindPort } from "../ui/ports";
+import type { UiGamePort, UiKeybindPort } from "../plugins/ui/ports";
 
 /** The bind table, narrowed to the UI's contract. The casts are the seam: the UI speaks plain action ids,
  *  the input plugin's table is typed by its own `BindAction` union. */
